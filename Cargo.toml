@@ -16,8 +16,8 @@ datafusion = { version = "55", default-features = false, features = ["parquet", 
 futures = "0.3"
 # Keep in sync with datafusion's; two copies are two distinct `ObjectStore` traits.
 # No `aws`: S3 goes through opendal, and a second S3 client is attack surface.
-object_store = "0.13"
-object_store_opendal = "0.58"
+object_store = "0.14"
+object_store_opendal = "0.59"
 # Default features pull in every layer and a ctor; `storage` installs the transport.
 opendal = { version = "0.58", default-features = false, features = ["services-s3", "http-transport-reqwest", "executors-tokio"] }
 serde = { version = "1", features = ["derive"] }
