@@ -17,10 +17,16 @@ mod common;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use common::{SECRET_ACCESS_KEY, TestS3, lookup, permissive_policy};
+use common::{SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy};
 use hats_api::logging::CREDENTIAL_UNSAFE_TARGETS;
+use hats_api::storage::{self, StorageOptions};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
+
+/// Credentials for the backends with no test server, one per signer, each distinct so a
+/// leak says which one it was. Azure's is base64 because its signer requires that.
+const AZURE_KEY: &str = "Y2FuYXJ5QXp1cmVBY2NvdW50S2V5Rm9yTG9nZ2luZw==";
+const GCS_TOKEN: &str = "ya29.canary-gcs-access-token";
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -42,6 +48,26 @@ impl<'a> MakeWriter<'a> for CapturedLogs {
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
     }
+}
+
+/// One credentialed `GET` against a one-shot loopback server, for its side effect on
+/// the logs. Whether it succeeds is beside the point — the signer has run either way,
+/// which is what this file is watching.
+async fn signing_request(raw: &str, options: impl FnOnce(String) -> StorageOptions) {
+    let (port, _receiver) = capture_one_request();
+    let url = storage::parse_url(raw).expect("a valid url");
+    let file = storage::open(
+        &url,
+        &options(format!("http://127.0.0.1:{port}")),
+        &permissive_policy(),
+    )
+    .expect("the policy allows loopback");
+
+    use object_store::ObjectStoreExt;
+    let _ = file
+        .store
+        .get(&object_store::path::Path::from("key.parquet"))
+        .await;
 }
 
 #[tokio::test]
@@ -68,10 +94,33 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     )
     .await;
 
+    // GCS and Azure have no test server here, and do not need one: what is being
+    // watched is the signer, which runs before anything goes on the wire. A one-shot
+    // server on loopback is enough to make the store actually sign and send.
+    signing_request("gs://bucket/key.parquet", |endpoint| StorageOptions {
+        endpoint: Some(endpoint),
+        access_token: Some(GCS_TOKEN.to_owned().into()),
+        allow_http: true,
+        ..Default::default()
+    })
+    .await;
+    signing_request("az://container/key.parquet", |endpoint| StorageOptions {
+        endpoint: Some(endpoint),
+        account: Some("hatsdata".to_owned()),
+        access_key: Some(AZURE_KEY.to_owned().into()),
+        allow_http: true,
+        ..Default::default()
+    })
+    .await;
+
     let logs = String::from_utf8_lossy(&captured.0.lock().expect("log buffer")).into_owned();
     let leaking: Vec<&str> = logs
         .lines()
-        .filter(|line| line.contains(SECRET_ACCESS_KEY))
+        .filter(|line| {
+            [SECRET_ACCESS_KEY, AZURE_KEY, GCS_TOKEN]
+                .iter()
+                .any(|secret| line.contains(secret))
+        })
         .collect();
 
     let unknown: Vec<&&str> = leaking
@@ -107,4 +156,12 @@ async fn every_target_that_logs_a_credential_is_already_known() {
         !logs.is_empty(),
         "nothing was logged, so nothing was checked"
     );
+    // A backend whose signer never ran is a backend this file is not watching, and the
+    // silence would read exactly like a pass.
+    for service in ["s3", "gcs", "azblob"] {
+        assert!(
+            logs.contains(service),
+            "{service} logged nothing at all, so it was not checked:\n{logs}"
+        );
+    }
 }

@@ -5,10 +5,14 @@
 //! network, every file on disk, and whatever is listening on localhost. [`AccessPolicy`]
 //! is what it may read instead, built once at startup from `[access]` in the config.
 //!
-//! For s3 the thing worth deciding is **which endpoint** may be contacted, not which
-//! bucket may be read: the bucket name says nothing about the host, since a request
-//! carries its own `endpoint` option and can point the service anywhere. So the rules
-//! are endpoints, and any bucket at an allowed endpoint is readable.
+//! For an object store the thing worth deciding is **which endpoint** may be contacted,
+//! not which bucket may be read: the bucket name says nothing about the host, since a
+//! request carries its own `endpoint` option and can point the service anywhere. So the
+//! rules are endpoints, and any bucket at an allowed endpoint is readable.
+//!
+//! Every remote backend has the same three-state list, under its own section, with its
+//! own name for "the provider's own service" — which is what a url carrying no
+//! `endpoint` option means.
 //!
 //! ```toml
 //! [access]
@@ -17,6 +21,12 @@
 //! [access.s3]
 //! # "aws" is AWS S3 itself: a url with no `endpoint` option of its own.
 //! endpoints = ["aws", "https://minio.example.com"]
+//!
+//! [access.gcs]
+//! endpoints = ["gcp"]
+//!
+//! [access.azure]
+//! endpoints = ["azure"]
 //!
 //! [access.local]
 //! paths = ["/srv/hats"]
@@ -38,18 +48,70 @@ use crate::error::ApiError;
 /// What a URL turned out to be, once it was allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Read it through the object store for its scheme. For s3 this is not the whole
-    /// answer: the endpoint is only known once the url's options are parsed, so
-    /// [`AccessPolicy::authorize_s3_endpoint`] is the second half of the decision.
+    /// Read it through the object store for its scheme. For a remote backend this is
+    /// not the whole answer: the endpoint is only known once the url's options are
+    /// parsed, so [`AccessPolicy::authorize_endpoint`] is the second half.
     Remote,
     /// Read this local file. Absolute, with every symlink already resolved and the
     /// result checked against the policy.
     Local(PathBuf),
 }
 
+/// A remote backend, which is to say a scheme with an endpoint behind it. `file` is not
+/// one: it has no host to decide about, and the directory rules are its whole policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    S3,
+    Gcs,
+    Azure,
+}
+
+/// Every remote backend, so that a caller listing or looping over them cannot miss one
+/// a later phase adds.
+pub const BACKENDS: &[Backend] = &[Backend::S3, Backend::Gcs, Backend::Azure];
+
+impl Backend {
+    /// The url scheme that names this backend.
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Self::S3 => "s3",
+            Self::Gcs => "gs",
+            Self::Azure => "az",
+        }
+    }
+
+    pub fn from_scheme(scheme: &str) -> Option<Self> {
+        BACKENDS
+            .iter()
+            .copied()
+            .find(|backend| backend.scheme() == scheme)
+    }
+
+    /// What an endpoint entry says to mean the provider's own service, which is the
+    /// endpoint a url with no `endpoint` option is asking for.
+    fn provider(self) -> &'static str {
+        match self {
+            Self::S3 => "aws",
+            Self::Gcs => "gcp",
+            Self::Azure => "azure",
+        }
+    }
+
+    /// The config section its rules live in, for saying where to change them.
+    fn section(self) -> &'static str {
+        match self {
+            Self::S3 => "access.s3",
+            Self::Gcs => "access.gcs",
+            Self::Azure => "access.azure",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct AccessPolicy {
-    s3: S3Rules,
+    s3: EndpointRules,
+    gcs: EndpointRules,
+    azure: EndpointRules,
     /// Allowed directories, canonical, so that a resolved request path can simply be
     /// tested for being under one of them.
     local: Vec<PathBuf>,
@@ -58,19 +120,20 @@ pub struct AccessPolicy {
 }
 
 #[derive(Debug)]
-enum S3Rules {
+enum EndpointRules {
     /// No list was configured: any endpoint, subject to `allow_loopback`.
     Any,
-    /// Exactly these, and an empty list is no s3 at all. An entry here is the
+    /// Exactly these, and an empty list turns the backend off. An entry here is the
     /// operator naming a host, so `allow_loopback` has nothing left to decide.
     Only(Vec<Endpoint>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Endpoint {
-    /// AWS S3 itself, which is what a url with no `endpoint` option means.
-    Aws,
-    /// One S3-compatible server. The port is kept resolved so that
+    /// The provider's own service, which is what a url with no `endpoint` option
+    /// means. Held as the name it is written under so that a refusal can say it back.
+    Provider(&'static str),
+    /// One server speaking the backend's protocol. The port is kept resolved so that
     /// `https://host` and `https://host:443` are the one endpoint they are.
     Url {
         scheme: String,
@@ -92,15 +155,9 @@ impl Default for AccessPolicy {
 
 impl AccessPolicy {
     pub fn new(config: &AccessConfig) -> Result<Self, ConfigError> {
-        let s3 = match &config.s3.endpoints {
-            None => S3Rules::Any,
-            Some(entries) => S3Rules::Only(
-                entries
-                    .iter()
-                    .map(|entry| parse_endpoint(entry))
-                    .collect::<Result<_, _>>()?,
-            ),
-        };
+        let s3 = EndpointRules::new(&config.s3, Backend::S3)?;
+        let gcs = EndpointRules::new(&config.gcs, Backend::Gcs)?;
+        let azure = EndpointRules::new(&config.azure, Backend::Azure)?;
         let local = config
             .local
             .paths
@@ -111,6 +168,8 @@ impl AccessPolicy {
             .collect::<Result<_, _>>()?;
         Ok(Self {
             s3,
+            gcs,
+            azure,
             local,
             allow_loopback: config.allow_loopback,
             follow_symlinks: config.local.follow_symlinks,
@@ -119,39 +178,53 @@ impl AccessPolicy {
 
     /// Every scheme this policy can serve, for logs and error messages.
     pub fn allowed_schemes(&self) -> Vec<&'static str> {
-        let mut schemes = Vec::new();
-        if self.s3_enabled() {
-            schemes.push("s3");
-        }
+        let mut schemes: Vec<&'static str> = BACKENDS
+            .iter()
+            .copied()
+            .filter(|backend| self.rules(*backend).enabled())
+            .map(Backend::scheme)
+            .collect();
         if !self.local.is_empty() {
             schemes.push("file");
         }
         schemes
     }
 
-    fn s3_enabled(&self) -> bool {
-        !matches!(&self.s3, S3Rules::Only(endpoints) if endpoints.is_empty())
+    fn rules(&self, backend: Backend) -> &EndpointRules {
+        match backend {
+            Backend::S3 => &self.s3,
+            Backend::Gcs => &self.gcs,
+            Backend::Azure => &self.azure,
+        }
     }
 
     /// The first gate: is this the *kind* of thing the service reads at all? For a
-    /// local file that settles it. For s3 the endpoint is still to come, because it
-    /// lives in the url's options and only `storage` knows how to read those.
+    /// local file that settles it. For a remote backend the endpoint is still to come,
+    /// because it lives in the url's options and only `storage` knows how to read those.
     pub fn authorize(&self, url: &Url) -> Result<Target, ApiError> {
-        match url.scheme() {
-            "file" => self.authorize_local(url).map(Target::Local),
-            "s3" if self.s3_enabled() => Ok(Target::Remote),
-            scheme => Err(ApiError::forbidden(format!(
+        let scheme = url.scheme();
+        if scheme == "file" {
+            return self.authorize_local(url).map(Target::Local);
+        }
+        match Backend::from_scheme(scheme) {
+            Some(backend) if self.rules(backend).enabled() => Ok(Target::Remote),
+            _ => Err(ApiError::forbidden(format!(
                 "this server does not read {scheme}:// urls; it reads {}",
                 self.describe_schemes()
             ))),
         }
     }
 
-    /// The second gate for s3: which server the request would have us talk to. `None`
-    /// is a request with no `endpoint` option, which means AWS.
-    pub fn authorize_s3_endpoint(&self, endpoint: Option<&Url>) -> Result<(), ApiError> {
-        match &self.s3 {
-            S3Rules::Any => match endpoint {
+    /// The second gate for a remote backend: which server the request would have us
+    /// talk to. `None` is a request with no `endpoint` option, which means the
+    /// provider's own service.
+    pub fn authorize_endpoint(
+        &self,
+        backend: Backend,
+        endpoint: Option<&Url>,
+    ) -> Result<(), ApiError> {
+        match self.rules(backend) {
+            EndpointRules::Any => match endpoint {
                 // The one thing an unrestricted policy still refuses: the service can
                 // reach things on its own machine that its callers cannot.
                 Some(url)
@@ -165,16 +238,17 @@ impl AccessPolicy {
                 }
                 _ => Ok(()),
             },
-            S3Rules::Only(allowed) => {
+            EndpointRules::Only(allowed) => {
                 let wanted = match endpoint {
                     Some(url) => Endpoint::from_url(url)?,
-                    None => Endpoint::Aws,
+                    None => Endpoint::Provider(backend.provider()),
                 };
                 match allowed.contains(&wanted) {
                     true => Ok(()),
                     false => Err(ApiError::forbidden(format!(
-                        "{wanted} is not an endpoint this server will contact; it \
+                        "{wanted} is not an endpoint this server will contact; {} \
                          contacts {}",
+                        backend.section(),
                         describe(allowed)
                     ))),
                 }
@@ -252,6 +326,25 @@ impl AccessPolicy {
     }
 }
 
+impl EndpointRules {
+    fn new(config: &crate::config::EndpointConfig, backend: Backend) -> Result<Self, ConfigError> {
+        match &config.endpoints {
+            None => Ok(Self::Any),
+            Some(entries) => entries
+                .iter()
+                .map(|entry| parse_endpoint(entry, backend))
+                .collect::<Result<_, _>>()
+                .map(Self::Only),
+        }
+    }
+
+    /// An empty list is the operator turning the backend off, which is not the same as
+    /// no list at all.
+    fn enabled(&self) -> bool {
+        !matches!(self, Self::Only(endpoints) if endpoints.is_empty())
+    }
+}
+
 impl Endpoint {
     fn from_url(url: &Url) -> Result<Self, ApiError> {
         let host = url
@@ -269,7 +362,7 @@ impl Endpoint {
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Aws => f.write_str("aws"),
+            Self::Provider(name) => f.write_str(name),
             Self::Url { scheme, host, port } => {
                 write!(f, "{scheme}://{host}")?;
                 match port {
@@ -296,15 +389,16 @@ fn describe(items: &[impl std::fmt::Display]) -> String {
 /// storage behind it is.
 const ENDPOINT_SCHEMES: &[&str] = &["http", "https"];
 
-fn parse_endpoint(entry: &str) -> Result<Endpoint, ConfigError> {
+fn parse_endpoint(entry: &str, backend: Backend) -> Result<Endpoint, ConfigError> {
     let invalid = |reason: String| ConfigError::Rule(entry.to_owned(), reason);
 
-    if entry.eq_ignore_ascii_case("aws") {
-        return Ok(Endpoint::Aws);
+    let provider = backend.provider();
+    if entry.eq_ignore_ascii_case(provider) {
+        return Ok(Endpoint::Provider(provider));
     }
     let url = Url::parse(entry).map_err(|error| {
         invalid(format!(
-            "{error}; expected \"aws\" or a url like https://minio.example.com"
+            "{error}; expected {provider:?} or a url like https://minio.example.com"
         ))
     })?;
     if !ENDPOINT_SCHEMES.contains(&url.scheme()) {
@@ -397,7 +491,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::config::{LocalConfig, S3Config};
+    use crate::config::{EndpointConfig, LocalConfig};
 
     use super::*;
 
@@ -405,12 +499,47 @@ mod tests {
         AccessPolicy::new(config).unwrap()
     }
 
-    fn with_endpoints(entries: &[&str]) -> AccessPolicy {
+    fn entries(entries: &[&str]) -> EndpointConfig {
+        EndpointConfig {
+            endpoints: Some(entries.iter().map(|e| (*e).to_owned()).collect()),
+        }
+    }
+
+    fn with_endpoints(list: &[&str]) -> AccessPolicy {
         policy(&AccessConfig {
-            s3: S3Config {
-                endpoints: Some(entries.iter().map(|e| (*e).to_owned()).collect()),
-            },
+            s3: entries(list),
             ..Default::default()
+        })
+    }
+
+    /// The same list under every backend's own section, for the tests that are about
+    /// the rules rather than about one backend. Only for entries every section accepts:
+    /// a provider's name is not one, since each section knows only its own.
+    fn everywhere(list: &[&str]) -> AccessPolicy {
+        policy(&AccessConfig {
+            s3: entries(list),
+            gcs: entries(list),
+            azure: entries(list),
+            ..Default::default()
+        })
+    }
+
+    /// A list under one backend's section, the others left unrestricted.
+    fn under(backend: Backend, list: &[&str]) -> AccessPolicy {
+        let list = entries(list);
+        policy(&match backend {
+            Backend::S3 => AccessConfig {
+                s3: list,
+                ..Default::default()
+            },
+            Backend::Gcs => AccessConfig {
+                gcs: list,
+                ..Default::default()
+            },
+            Backend::Azure => AccessConfig {
+                azure: list,
+                ..Default::default()
+            },
         })
     }
 
@@ -453,10 +582,13 @@ mod tests {
                 .authorize(&url("s3://any-bucket/key.parquet"))
                 .is_ok()
         );
-        assert!(policy.authorize_s3_endpoint(None).is_ok());
+        assert!(policy.authorize_endpoint(Backend::S3, None).is_ok());
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("https://minio.example.com")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://minio.example.com")).as_ref()
+                )
                 .is_ok()
         );
 
@@ -483,13 +615,19 @@ mod tests {
         let policy = with_endpoints(&["https://minio.example.com"]);
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("https://minio.example.com")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://minio.example.com")).as_ref()
+                )
                 .is_ok()
         );
         // A default port is the same endpoint spelled out.
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("https://minio.example.com:443")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://minio.example.com:443")).as_ref()
+                )
                 .is_ok()
         );
         for refused in [
@@ -499,7 +637,7 @@ mod tests {
             "https://minio.example.com.evil.net",
         ] {
             let error = policy
-                .authorize_s3_endpoint(endpoint(Some(refused)).as_ref())
+                .authorize_endpoint(Backend::S3, endpoint(Some(refused)).as_ref())
                 .unwrap_err();
             assert!(matches!(error, ApiError::Forbidden(_)), "{refused}");
         }
@@ -510,24 +648,89 @@ mod tests {
     #[test]
     fn aws_is_an_endpoint_like_any_other() {
         let only_minio = with_endpoints(&["https://minio.example.com"]);
-        let error = only_minio.authorize_s3_endpoint(None).unwrap_err();
+        let error = only_minio
+            .authorize_endpoint(Backend::S3, None)
+            .unwrap_err();
         assert!(error.to_string().contains("aws"), "{error}");
 
         let only_aws = with_endpoints(&["aws"]);
-        assert!(only_aws.authorize_s3_endpoint(None).is_ok());
+        assert!(only_aws.authorize_endpoint(Backend::S3, None).is_ok());
         assert!(
             only_aws
-                .authorize_s3_endpoint(endpoint(Some("https://minio.example.com")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://minio.example.com")).as_ref()
+                )
                 .is_err()
         );
     }
 
+    /// An empty list is the operator turning a backend off, and it turns off only that
+    /// backend: the sections are separate rules, not one rule written three times.
     #[test]
-    fn an_empty_endpoint_list_turns_s3_off() {
-        let policy = with_endpoints(&[]);
-        let error = policy.authorize(&url("s3://bucket/k.parquet")).unwrap_err();
+    fn an_empty_endpoint_list_turns_one_backend_off() {
+        let no_s3 = with_endpoints(&[]);
+        let error = no_s3.authorize(&url("s3://bucket/k.parquet")).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-        assert!(policy.allowed_schemes().is_empty());
+        assert_eq!(no_s3.allowed_schemes(), ["gs", "az"]);
+
+        assert!(everywhere(&[]).allowed_schemes().is_empty());
+    }
+
+    /// Each backend reads its own section, so a rule written under one does not admit
+    /// or refuse a url addressed to another.
+    #[test]
+    fn the_sections_do_not_reach_into_each_other() {
+        let policy = policy(&AccessConfig {
+            s3: entries(&["aws"]),
+            gcs: entries(&[]),
+            azure: entries(&["https://azurite.example.com"]),
+            ..Default::default()
+        });
+        assert_eq!(policy.allowed_schemes(), ["s3", "az"]);
+
+        assert!(policy.authorize(&url("s3://b/k.parquet")).is_ok());
+        assert!(policy.authorize(&url("gs://b/k.parquet")).is_err());
+        assert!(policy.authorize(&url("az://c/k.parquet")).is_ok());
+
+        // s3 names the provider and azure names a server, so each refuses what the
+        // other allows.
+        assert!(policy.authorize_endpoint(Backend::S3, None).is_ok());
+        assert!(policy.authorize_endpoint(Backend::Azure, None).is_err());
+        let azurite = endpoint(Some("https://azurite.example.com"));
+        assert!(
+            policy
+                .authorize_endpoint(Backend::Azure, azurite.as_ref())
+                .is_ok()
+        );
+        assert!(
+            policy
+                .authorize_endpoint(Backend::S3, azurite.as_ref())
+                .is_err()
+        );
+    }
+
+    /// Each backend spells "the provider's own service" its own way, and a refusal says
+    /// which section to change.
+    #[test]
+    fn each_backend_has_its_own_name_for_its_provider() {
+        for (backend, provider, section) in [
+            (Backend::S3, "aws", "access.s3"),
+            (Backend::Gcs, "gcp", "access.gcs"),
+            (Backend::Azure, "azure", "access.azure"),
+        ] {
+            let policy = under(backend, &[provider]);
+            assert!(
+                policy.authorize_endpoint(backend, None).is_ok(),
+                "{provider}"
+            );
+
+            // A list that names a server does not thereby allow the provider.
+            let refuses = under(backend, &["https://elsewhere.example.com"]);
+            let error = refuses.authorize_endpoint(backend, None).unwrap_err();
+            assert!(error.to_string().contains(provider), "{error}");
+            assert!(error.to_string().contains(section), "{error}");
+        }
     }
 
     #[test]
@@ -542,7 +745,7 @@ mod tests {
             "http://127.13.14.15",
         ] {
             let error = policy
-                .authorize_s3_endpoint(endpoint(Some(raw)).as_ref())
+                .authorize_endpoint(Backend::S3, endpoint(Some(raw)).as_ref())
                 .unwrap_err();
             assert!(matches!(error, ApiError::Forbidden(_)), "{raw}");
             assert!(error.to_string().contains("loopback"), "{raw}: {error}");
@@ -550,7 +753,10 @@ mod tests {
         // Not loopback, whatever the name suggests.
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("https://localhost.example.com")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://localhost.example.com")).as_ref()
+                )
                 .is_ok()
         );
     }
@@ -563,7 +769,10 @@ mod tests {
         });
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("http://127.0.0.1:9000")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("http://127.0.0.1:9000")).as_ref()
+                )
                 .is_ok()
         );
     }
@@ -576,12 +785,18 @@ mod tests {
         assert!(!policy.allow_loopback);
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("http://127.0.0.1:9000")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("http://127.0.0.1:9000")).as_ref()
+                )
                 .is_ok()
         );
         assert!(
             policy
-                .authorize_s3_endpoint(endpoint(Some("http://127.0.0.1:9001")).as_ref())
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("http://127.0.0.1:9001")).as_ref()
+                )
                 .is_err()
         );
     }
@@ -736,18 +951,38 @@ mod tests {
             "s3://bucket",
             "minio.example.com",
             "aws-ish",
+            // Another backend's name for its provider, which this one has no use for.
+            "gcp",
+            "azure",
         ] {
             let config = AccessConfig {
-                s3: S3Config {
-                    endpoints: Some(vec![entry.to_owned()]),
-                },
+                s3: entries(&[entry]),
                 ..Default::default()
             };
             assert!(
                 AccessPolicy::new(&config).is_err(),
-                "{entry} was accepted as an endpoint"
+                "{entry} was accepted as an s3 endpoint"
             );
         }
+
+        // And the same the other way round, so that no section quietly accepts a name
+        // that means a different provider.
+        assert!(
+            AccessPolicy::new(&AccessConfig {
+                gcs: entries(&["aws"]),
+                ..Default::default()
+            })
+            .is_err(),
+            "the gcs section accepted \"aws\""
+        );
+        assert!(
+            AccessPolicy::new(&AccessConfig {
+                azure: entries(&["gcp"]),
+                ..Default::default()
+            })
+            .is_err(),
+            "the azure section accepted \"gcp\""
+        );
 
         for entry in [
             "relative/path",
@@ -770,14 +1005,51 @@ mod tests {
         }
     }
 
+    /// Every backend, against the narrowest config that should allow it and against the
+    /// one that should refuse it. One table rather than a test per backend, so a
+    /// backend added without a rule of its own fails here rather than passing quietly.
+    #[test]
+    fn every_backend_is_allowed_only_by_a_config_that_names_it() {
+        for &backend in BACKENDS {
+            let scheme = backend.scheme();
+            let object = url(&format!("{scheme}://container/key.parquet"));
+
+            // The narrowest thing that should allow it: its provider, and nothing else.
+            let narrowest = under(backend, &[backend.provider()]);
+            assert!(narrowest.authorize(&object).is_ok(), "{scheme}");
+            assert!(
+                narrowest.authorize_endpoint(backend, None).is_ok(),
+                "{scheme}"
+            );
+            assert!(
+                narrowest
+                    .authorize_endpoint(
+                        backend,
+                        endpoint(Some("https://other.example.com")).as_ref()
+                    )
+                    .is_err(),
+                "{scheme}: a provider entry allowed a server it does not name"
+            );
+
+            // And the config that turns it off refuses it outright, at the first gate.
+            let off = under(backend, &[]);
+            let error = off.authorize(&object).unwrap_err();
+            assert!(matches!(error, ApiError::Forbidden(_)), "{scheme}: {error}");
+            assert!(!off.allowed_schemes().contains(&scheme), "{scheme}");
+        }
+    }
+
     #[test]
     fn the_schemes_a_policy_serves_are_the_ones_it_was_given() {
         let (_dir, root) = temp_dir();
-        assert_eq!(AccessPolicy::default().allowed_schemes(), ["s3"]);
+        assert_eq!(
+            AccessPolicy::default().allowed_schemes(),
+            ["s3", "gs", "az"]
+        );
         assert_eq!(
             with_paths(&[&root], false).allowed_schemes(),
-            ["s3", "file"]
+            ["s3", "gs", "az", "file"]
         );
-        assert_eq!(with_endpoints(&[]).allowed_schemes(), Vec::<&str>::new());
+        assert_eq!(everywhere(&[]).allowed_schemes(), Vec::<&str>::new());
     }
 }

@@ -34,7 +34,7 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 | § | step | status | notes |
 |---|---|---|---|
 | 2.1 | OpenDAL backend layer, s3 migrated first | done | `object_store_opendal` 0.58.0 → `object_store ^0.13.1`, matching DataFusion 55's 0.13.2, one copy in the lock file. The §2.1 gate is met; the phase is not blocked. See the notes below. |
-| 2.2 | GCS and Azure | todo | |
+| 2.2 | GCS and Azure | done | `gs://` and `az://`. `abfss://` dropped — see below; the deliverable's scheme list loses it. See also the constraints §2.2 added. |
 | 8.3 | network policy | todo | prerequisite for §2.3, per §8.3 |
 | 2.3 | HTTP/HTTPS, range probe, materialization | todo | needs §8.3 |
 | 2.4 | WebDAV | todo | needs §8.3 |
@@ -80,6 +80,32 @@ Constraints §2.1 discovered that bind every backend after it:
   into `bucket.<host>`, which does not resolve. Each new backend's equivalent guard
   inherits the same blind spot.
 
+Constraints §2.2 added, which bind every backend after it:
+
+- **A backend with no `skip_signature` cannot be served at all.** It is what makes an
+  anonymous request anonymous, and without it OpenDAL walks its ambient chain and
+  answers with the deployment's identity — §8.1's central rule, with no way to satisfy
+  it from this side. Check for it before committing to a service, alongside the
+  ambient-discovery switches: it is the reason `abfss://` is not here.
+- **Any option that ends up inside a hostname is checked before it gets there.** A `/`
+  in what was meant to be a subdomain moves the host to whatever preceded it, so
+  `region` and `account` are restricted to characters that cannot mean anything else.
+  This is a way past the endpoint policy, not a tidiness rule, and every backend that
+  interpolates a caller's string into a url inherits it.
+- **No credential option is a path.** GCS's `credential_path` and Azure's connection
+  string would have the service read a credential off its own disk at a caller's
+  direction, which is §8.1's "the request body is the only source" and §8.2's local
+  filesystem rules at once. A credential arrives as a value or not at all — so §2.5's
+  `token` is a value, and a future backend's file-shaped option is refused rather than
+  wired up.
+- **`cargo deny` now carries one ignored advisory**, RUSTSEC-2023-0071 in `rsa`, which
+  `gs://` pulls in unconditionally through `reqsign-google`. The reasoning is in
+  `deny.toml` and turns on the key being the caller's own; an operator-configured
+  credential source (§9) would invalidate it.
+- **A signer that logs credentials is found by running it, not by reading it.** The
+  canary asserts each backend actually logged something, because a backend whose signer
+  never ran reads exactly like a backend that leaked nothing.
+
 Written against `781ceac`: a stateless service with one endpoint, `GET /api/v1/select`,
 doing point lookups in a single parquet file over `s3://` or `file://`, under an access
 policy in a TOML config file.
@@ -91,8 +117,8 @@ keep, §9 what is deferred.
 
 | piece | state |
 |---|---|
-| `src/access.rs` | endpoint- and directory-level policy; s3 + local |
-| `src/storage.rs` | url → `ObjectStore`; `s3`, `file`; options passed beside the url |
+| `src/access.rs` | endpoint- and directory-level policy; one section per remote backend, plus local |
+| `src/storage.rs` | url → `ObjectStore`; `s3`, `gs`, `az`, `file`; options passed beside the url |
 | `src/query.rs` | DataFusion session per request, `column == value`, projection pushdown |
 | `src/parquet_out.rs` | writes the answer with the source file's own layout |
 | `src/app.rs` | axum router, `/api/v1/health`, `/api/v1/select` |
@@ -100,7 +126,7 @@ keep, §9 what is deferred.
 | `src/error.rs` | `ApiError` → status + message; credentials never reach it |
 | `src/main.rs` | `--config` / `HATS_API_CONFIG`, logging setup, graceful shutdown |
 
-Baseline to hold: 63 tests, `cargo clippy --all-targets` clean, `cargo fmt` clean.
+Baseline to hold: 129 tests, `cargo clippy --all-targets` clean, `cargo fmt` clean.
 
 Three invariants for every phase below:
 
@@ -192,12 +218,24 @@ types that do not print.
 
 | scheme | options |
 |---|---|
-| `gs://bucket/key` | `service_account_key`, `service_account_path`, `application_credentials`, `endpoint` |
-| `az://container/key`, `abfss://` | `account`, `access_key`, `sas_token`, `bearer_token`, `endpoint`, `use_emulator` |
+| `gs://bucket/key` | `service_account_key` (base64), `access_token`, `endpoint`, `allow_http` |
+| `az://container/key` | `account` (required), `access_key`, `sas_token`, `endpoint`, `allow_http` |
 
-Policy: `[api.access.gcs]` and `[api.access.azure]`, with the same three-state `endpoints`
-key as s3 — absent means any, `[]` means off, a list means exactly those. The provider's
-own endpoint is the `"gcp"` / `"azure"` sentinel, as `"aws"` is for s3.
+**`abfss://` is dropped.** ADLS Gen2 is its own OpenDAL service, `azdls`, and it has
+neither a `skip_signature` nor any way to disable ambient discovery: every request is
+signed, through a credential provider that reads `AZURE_*` and the managed-identity
+endpoint. So a caller sending no credentials would be answered with the deployment's
+own identity, and there is no hook to prevent it — §8.1 cannot be met. Revisit only if
+OpenDAL adds the switches `azblob` and `gcs` already have.
+
+`account` is required for `az://` rather than optional: Azure has no single host to
+default to, and it is also what stops a shared key from being silently ignored and the
+environment consulted in its place.
+
+Policy: `[access.gcs]` and `[access.azure]`, with the same three-state `endpoints` key as
+s3 — absent means any, `[]` means off, a list means exactly those. The provider's own
+endpoint is the `"gcp"` / `"azure"` sentinel, as `"aws"` is for s3. The sections are named
+for the services, not for the schemes.
 
 **Anonymous access is the primary case.** Most data served here is public. `storage.rs`
 already does this for s3: no credentials means `with_skip_signature(true)`, an unsigned
@@ -300,10 +338,14 @@ handled as §8.1 requires.
 **Drop this backend** if §2.1's version constraint cannot be met: it has the least
 astronomy data behind it and its absence costs nothing structural.
 
-**Deliverable.** `SUPPORTED_SCHEMES = ["s3", "gs", "az", "abfss", "http", "https", "webdav", "hf", "file"]`,
-one policy section per backend, a matrix test that every scheme is refused by the default
-config and allowed by the narrowest config that should allow it, and `storage::tests`
-passing unchanged across the migration.
+**Deliverable.** `SUPPORTED_SCHEMES = ["s3", "gs", "az", "http", "https", "webdav", "hf", "file"]`,
+one policy section per backend, a matrix test that every scheme is allowed by the
+narrowest config that should allow it and refused by the config that turns it off, and
+`storage::tests` passing unchanged across the migration.
+
+The matrix cannot yet say "refused by the default config": the default for a remote
+backend is any endpoint, not none, which is the gap §8.3 exists to close. When §8.3
+lands, that half of the matrix becomes writable and this line goes.
 
 ## 3. Phase 2 — two modes of operation
 

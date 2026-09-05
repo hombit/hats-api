@@ -16,7 +16,7 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, 
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use hats_api::access::AccessPolicy;
-use hats_api::config::{AccessConfig, S3Config};
+use hats_api::config::{AccessConfig, EndpointConfig};
 use hats_api::error::ApiError;
 use hats_api::query::{QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
@@ -192,7 +192,7 @@ pub fn permissive_policy() -> AccessPolicy {
 pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
     AccessPolicy::new(&AccessConfig {
         allow_loopback: true,
-        s3: S3Config {
+        s3: EndpointConfig {
             endpoints: Some(endpoints.iter().map(|e| (*e).to_owned()).collect()),
         },
         ..Default::default()

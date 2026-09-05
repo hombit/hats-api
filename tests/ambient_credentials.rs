@@ -6,9 +6,10 @@
 //! `s3://someone-elses-private-bucket/x.parquet` would be served with whatever the
 //! deployment happens to be entitled to.
 //!
-//! Its own test binary because it sets `AWS_*` in the environment, which is
-//! process-wide: run alongside other tests, it would change what they are testing. One
-//! test here, and the variables are set before anything builds a store.
+//! Its own test binary because it sets `AWS_*`, `GOOGLE_*` and `AZURE_*` in the
+//! environment, which is process-wide: run alongside other tests, it would change what
+//! they are testing. One test here, and the variables are set before anything builds a
+//! store.
 //!
 //! The check has to be on the wire. Whether a store would sign is not visible on the
 //! builder, and both a signed and an unsigned request to a nonexistent object fail —
@@ -28,6 +29,55 @@ use hats_api::storage::{self, StorageOptions};
 /// successfully rather than erroring for an unrelated reason.
 const AMBIENT_ACCESS_KEY_ID: &str = "AKIAAMBIENTNOTVALID1";
 const AMBIENT_SECRET: &str = "ambientSecretThatMustNeverBeUsed12345678";
+/// Azure signs with an HMAC of this, so it has to be real base64 or the signer would
+/// fail for a reason that has nothing to do with what is being tested.
+const AMBIENT_AZURE_KEY: &str = "YW1iaWVudEF6dXJlS2V5VGhhdE11c3ROZXZlckJlVXNlZA==";
+
+/// One `GET` through a store built from `options`, and the request head it put on the
+/// wire. The endpoint is this test's own one-shot server, so the request is observable
+/// without anything being reachable.
+async fn request_head(raw: &str, endpoint_to: impl FnOnce(String) -> StorageOptions) -> String {
+    let (port, receiver) = capture_one_request();
+    let url = storage::parse_url(raw).expect("a valid url");
+    let options = endpoint_to(format!("http://127.0.0.1:{port}"));
+    let file =
+        storage::open(&url, &options, &permissive_policy()).expect("the policy allows loopback");
+
+    use object_store::ObjectStoreExt;
+    let _ = file
+        .store
+        .get(&object_store::path::Path::from("key.parquet"))
+        .await;
+
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the store made no request")
+}
+
+/// No identity of any kind on the request, in any of the spellings the three backends
+/// use to carry one.
+fn assert_unsigned(head: &str, backend: &str) {
+    let lowered = head.to_ascii_lowercase();
+    assert!(
+        !lowered.contains("authorization:"),
+        "{backend}: the request was signed with an ambient credential:\n{head}"
+    );
+    assert!(
+        !lowered.contains("x-amz-security-token:"),
+        "{backend}: the request carried an ambient session token:\n{head}"
+    );
+    for ambient in [
+        AMBIENT_ACCESS_KEY_ID,
+        AMBIENT_SECRET,
+        AMBIENT_AZURE_KEY,
+        "ambient-sas-token",
+    ] {
+        assert!(
+            !head.contains(ambient),
+            "{backend}: an environment credential reached the wire:\n{head}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn a_request_with_no_credentials_ignores_the_environment() {
@@ -50,49 +100,59 @@ async fn a_request_with_no_credentials_ignores_the_environment() {
             "http://169.254.170.2/creds",
         );
         std::env::set_var("AWS_PROFILE", "ambient-profile");
+
+        // GCS: the application-default chain, and the GCE metadata server behind it.
+        std::env::set_var(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "/nonexistent/ambient-service-account.json",
+        );
+        std::env::set_var(
+            "GOOGLE_SERVICE_ACCOUNT",
+            "ambient@example.iam.gserviceaccount.com",
+        );
+        std::env::set_var("GCE_METADATA_HOST", "169.254.169.254");
+
+        // Azure: a shared key is an HMAC computed locally, so an ambient one would sign
+        // successfully and silently. This is the half of the test with real teeth.
+        std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "ambientaccount");
+        std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", AMBIENT_AZURE_KEY);
+        std::env::set_var("AZURE_STORAGE_SAS_TOKEN", "ambient-sas-token");
     }
 
-    let (port, receiver) = capture_one_request();
-    let url = storage::parse_url("s3://bucket/key.parquet").expect("a valid url");
     // The request carries no credentials at all, which is the whole point: whatever
     // the environment holds, an unsigned request is what must go out.
-    let options = StorageOptions {
-        endpoint: Some(format!("http://127.0.0.1:{port}")),
+    let head = request_head("s3://bucket/key.parquet", |endpoint| StorageOptions {
+        endpoint: Some(endpoint),
         ..Default::default()
-    };
-    let file =
-        storage::open(&url, &options, &permissive_policy()).expect("the policy allows loopback");
-
-    use object_store::ObjectStoreExt;
-    let _ = file
-        .store
-        .get(&object_store::path::Path::from("key.parquet"))
-        .await;
-
-    let head = receiver
-        .recv_timeout(std::time::Duration::from_secs(10))
-        .expect("the store made no request");
-
+    })
+    .await;
     // The request went where the url said, not where the environment said.
     assert!(
         head.to_ascii_lowercase()
             .contains("get /bucket/key.parquet"),
         "the request did not go to the url's endpoint:\n{head}"
     );
-    // And it carried no identity at all.
-    let lowered = head.to_ascii_lowercase();
+    assert_unsigned(&head, "s3");
+
+    let head = request_head("gs://bucket/key.parquet", |endpoint| StorageOptions {
+        endpoint: Some(endpoint),
+        ..Default::default()
+    })
+    .await;
+    assert_unsigned(&head, "gcs");
+
+    let head = request_head("az://container/key.parquet", |endpoint| StorageOptions {
+        endpoint: Some(endpoint),
+        account: Some("hatsdata".to_owned()),
+        ..Default::default()
+    })
+    .await;
+    // The account the request named, never the one the environment holds.
     assert!(
-        !lowered.contains("authorization:"),
-        "the request was signed with an ambient credential:\n{head}"
+        !head.contains("ambientaccount"),
+        "the ambient account name reached the wire:\n{head}"
     );
-    assert!(
-        !lowered.contains("x-amz-security-token:"),
-        "the request carried an ambient session token:\n{head}"
-    );
-    assert!(
-        !head.contains(AMBIENT_ACCESS_KEY_ID) && !head.contains(AMBIENT_SECRET),
-        "an environment credential reached the wire:\n{head}"
-    );
+    assert_unsigned(&head, "azure");
 }
 
 // What this test does and does not pin, so the next person does not assume more:

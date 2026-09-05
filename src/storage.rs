@@ -2,8 +2,8 @@
 //!
 //! Everything storage-specific lives here. The rest of the service only ever sees a
 //! [`RemoteFile`]; it does not know that S3 exists, that S3 needs a region, or that a
-//! region has to be asked for. Adding HTTPS, GCS or Azure later means adding a match
-//! arm to [`open`] and a name to [`SUPPORTED_SCHEMES`].
+//! region has to be asked for. Adding a backend means adding a match arm to [`open`], a
+//! name to [`SUPPORTED_SCHEMES`], an option list, and a [`Backend`] variant.
 //!
 //! Storage options arrive beside the URL as [`StorageOptions`], never inside it. A
 //! URL's query string is the origin's — a presigned signature, a CDN token, part of
@@ -23,12 +23,12 @@ use opendal::{Operator, services};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
-use crate::access::{AccessPolicy, Target};
+use crate::access::{AccessPolicy, Backend, Target};
 use crate::error::ApiError;
 
 /// Schemes [`open`] can serve today. Whether a given URL in one of them may actually be
 /// read is the [`AccessPolicy`]'s business, not this list's.
-pub const SUPPORTED_SCHEMES: &[&str] = &["s3", "file"];
+pub const SUPPORTED_SCHEMES: &[&str] = &["s3", "gs", "az", "file"];
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
@@ -42,54 +42,125 @@ pub const DEFAULT_S3_REGION: &str = "us-east-1";
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageOptions {
-    pub region: Option<String>,
-    /// Base URL of a non-AWS S3 implementation (MinIO, Ceph, R2, ...).
+    /// Base URL of a server other than the provider's own: MinIO, Ceph, R2, Azurite.
     pub endpoint: Option<String>,
     /// Permission to send credentials to a cleartext `endpoint`.
     #[serde(default)]
     pub allow_http: bool,
+
+    pub region: Option<String>,
     pub access_key_id: Option<SecretString>,
     pub secret_access_key: Option<SecretString>,
     pub session_token: Option<SecretString>,
+
+    /// A GCS service account key: the JSON Google issues, base64-encoded.
+    pub service_account_key: Option<SecretString>,
+    /// A GCS OAuth2 access token, for a caller who mints short-lived credentials of
+    /// their own rather than handing over a service account key.
+    pub access_token: Option<SecretString>,
+
+    /// The Azure storage account the container is in. Required for `az://`: it is the
+    /// host half of the address, which the url only carries the container half of.
+    pub account: Option<String>,
+    /// An Azure storage account key, base64 as Azure issues it.
+    pub access_key: Option<SecretString>,
+    pub sas_token: Option<SecretString>,
 }
 
-/// The option names, for saying which are accepted in an error.
+/// Options every remote backend takes, since every one of them has a host to name and a
+/// cleartext decision to make about it.
+const SHARED_OPTIONS: &[&str] = &["endpoint", "allow_http"];
 const S3_OPTIONS: &[&str] = &[
     "region",
-    "endpoint",
-    "allow_http",
     "access_key_id",
     "secret_access_key",
     "session_token",
 ];
+const GCS_OPTIONS: &[&str] = &["service_account_key", "access_token"];
+const AZURE_OPTIONS: &[&str] = &["account", "access_key", "sas_token"];
 
 impl StorageOptions {
-    /// Nothing set at all, which is what a public object needs.
-    pub fn is_empty(&self) -> bool {
-        self.region.is_none()
-            && self.endpoint.is_none()
-            && !self.allow_http
-            && self.access_key_id.is_none()
-            && self.secret_access_key.is_none()
-            && self.session_token.is_none()
+    /// Every option, under the name a request spells it, and whether it is set.
+    ///
+    /// The per-scheme check is driven off this one list rather than a match per scheme,
+    /// so a field added without a scheme to belong to is refused everywhere instead of
+    /// being quietly accepted everywhere.
+    fn named(&self) -> [(&'static str, bool); 11] {
+        [
+            ("endpoint", self.endpoint.is_some()),
+            ("allow_http", self.allow_http),
+            ("region", self.region.is_some()),
+            ("access_key_id", self.access_key_id.is_some()),
+            ("secret_access_key", self.secret_access_key.is_some()),
+            ("session_token", self.session_token.is_some()),
+            ("service_account_key", self.service_account_key.is_some()),
+            ("access_token", self.access_token.is_some()),
+            ("account", self.account.is_some()),
+            ("access_key", self.access_key.is_some()),
+            ("sas_token", self.sas_token.is_some()),
+        ]
     }
 
-    /// A `file://` url with a `secret_access_key` is a caller who has the wrong url or
-    /// the wrong options; either reading is worth saying rather than guessing at.
+    /// Nothing set at all, which is what a public object needs.
+    pub fn is_empty(&self) -> bool {
+        self.named().iter().all(|(_, set)| !set)
+    }
+
+    /// A `file://` url with a `secret_access_key`, or an `s3://` one with a `sas_token`,
+    /// is a caller who has the wrong url or the wrong options; either reading is worth
+    /// saying rather than guessing at, and one of them misdirects a credential.
     fn for_scheme(&self, scheme: &str) -> Result<(), ApiError> {
-        match scheme {
-            "s3" => Ok(()),
-            _ if self.is_empty() => Ok(()),
-            other => Err(ApiError::bad_request(format!(
-                "storage options are not accepted for {other:?} urls, which have none"
+        let Some(accepted) = accepted_options(scheme) else {
+            return match self.is_empty() {
+                true => Ok(()),
+                false => Err(ApiError::bad_request(format!(
+                    "storage options are not accepted for {scheme:?} urls, which have none"
+                ))),
+            };
+        };
+        match self
+            .named()
+            .into_iter()
+            .find(|(name, set)| *set && !accepted.contains(name))
+        {
+            None => Ok(()),
+            Some((name, _)) => Err(ApiError::bad_request(format!(
+                "option {name:?} is not one {scheme:?} urls take; they take {}",
+                accepted.join(", ")
             ))),
         }
     }
 
+    /// Whether anything here would be sent to the store as proof of identity — which is
+    /// the whole of what [`allow_http_endpoint`] is protecting.
     fn has_credentials(&self) -> bool {
         self.access_key_id.is_some()
             || self.secret_access_key.is_some()
             || self.session_token.is_some()
+            || self.service_account_key.is_some()
+            || self.access_token.is_some()
+            || self.access_key.is_some()
+            || self.sas_token.is_some()
+    }
+}
+
+/// The options a scheme takes, or `None` for a scheme that takes none at all.
+fn accepted_options(scheme: &str) -> Option<Vec<&'static str>> {
+    let backend = Backend::from_scheme(scheme)?;
+    let specific = match backend {
+        Backend::S3 => S3_OPTIONS,
+        Backend::Gcs => GCS_OPTIONS,
+        Backend::Azure => AZURE_OPTIONS,
+    };
+    Some([SHARED_OPTIONS, specific].concat())
+}
+
+/// The options this url's scheme takes, for an error message that has to name them
+/// before the scheme is known to be one we serve.
+fn options_for(url: &Url) -> String {
+    match accepted_options(url.scheme()) {
+        Some(options) => options.join(", "),
+        None => SHARED_OPTIONS.join(", "),
     }
 }
 
@@ -132,11 +203,14 @@ pub fn open(
     match policy.authorize(url)? {
         Target::Local(path) => local_file(&path),
         Target::Remote => {
-            let store: Arc<dyn ObjectStore> = match url.scheme() {
-                "s3" => Arc::new(s3_store(url, options, policy)?),
+            let store: Arc<dyn ObjectStore> = match Backend::from_scheme(url.scheme()) {
+                Some(Backend::S3) => Arc::new(s3_store(url, options, policy)?),
+                Some(Backend::Gcs) => Arc::new(gcs_store(url, options, policy)?),
+                Some(Backend::Azure) => Arc::new(azblob_store(url, options, policy)?),
                 // Every supported remote scheme has an arm above, and `file` went to
                 // the local branch.
-                scheme => {
+                None => {
+                    let scheme = url.scheme();
                     return Err(ApiError::bad_request(format!(
                         "unsupported URL scheme {scheme:?}: supported schemes are {}",
                         SUPPORTED_SCHEMES.join(", ")
@@ -209,21 +283,21 @@ fn refuse_userinfo(url: &Url) -> Result<(), ApiError> {
             url.scheme(),
             // Not `file_url`: that keeps the userinfo, which is the thing to not echo.
             url.host_str().unwrap_or_default(),
-            S3_OPTIONS.join(", ")
+            options_for(url)
         )));
     }
     Ok(())
 }
 
-/// An `s3://` key has no query string. Dropping one silently would turn a credentialed
-/// read into an anonymous one that fails later and elsewhere. A scheme whose objects do
-/// have query strings makes this a per-scheme decision.
+/// An object key has no query string in any scheme served here. Dropping one silently
+/// would turn a credentialed read into an anonymous one that fails later and elsewhere.
+/// A scheme whose objects do have query strings makes this a per-scheme decision.
 fn refuse_query_string(url: &Url) -> Result<(), ApiError> {
     if url.query().is_some() {
         return Err(ApiError::bad_request(format!(
             "url {} has a query string; storage options go in \"storage\", which takes {}",
             file_url(url),
-            S3_OPTIONS.join(", ")
+            options_for(url)
         )));
     }
     Ok(())
@@ -242,6 +316,60 @@ fn require_object_key(url: &Url) -> Result<(), ApiError> {
 fn parse_endpoint(endpoint: &str) -> Result<Url, ApiError> {
     Url::parse(endpoint)
         .map_err(|error| ApiError::bad_request(format!("invalid endpoint {endpoint:?}: {error}")))
+}
+
+/// Which server this request would have us talk to, decided before anything is built.
+/// `None` is a request with no `endpoint` option, which means the provider's own
+/// service — and naming no endpoint is a choice the policy gets to refuse too.
+fn resolve_endpoint(
+    backend: Backend,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<Option<Url>, ApiError> {
+    let endpoint = options
+        .endpoint
+        .as_deref()
+        .map(parse_endpoint)
+        .transpose()?;
+    policy.authorize_endpoint(backend, endpoint.as_ref())?;
+    match &endpoint {
+        Some(endpoint) => {
+            allow_http_endpoint(endpoint, options.allow_http, options.has_credentials())?;
+        }
+        // A provider's own service is https, so there is nothing here for `allow_http`
+        // to permit, and a caller who set it has misunderstood what it does.
+        None if options.allow_http => {
+            return Err(ApiError::bad_request(
+                "allow_http only applies together with endpoint",
+            ));
+        }
+        None => {}
+    }
+    Ok(endpoint)
+}
+
+/// Anything that ends up inside a hostname the service then connects to has to be
+/// checked before it gets there. `format!` does not care that a `/` in the middle of
+/// what was meant to be a subdomain moves the host to whatever came before it, so a
+/// region or an account name is a way past the endpoint policy unless it is restricted
+/// to characters that cannot mean anything else.
+fn require_label(name: &str, value: &str, extra: &str) -> Result<(), ApiError> {
+    let ok = !value.is_empty()
+        && value.len() <= 63
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(c));
+    match ok {
+        true => Ok(()),
+        false => Err(ApiError::bad_request(format!(
+            "{name} {value:?} is not a name this backend has: it becomes part of a \
+             hostname, so it may only hold lowercase letters, digits{}",
+            match extra.is_empty() {
+                true => String::new(),
+                false => format!(" and {extra:?}"),
+            }
+        ))),
+    }
 }
 
 /// Decide whether this endpoint may be spoken to over cleartext. The backend would not
@@ -301,10 +429,14 @@ fn s3_store(
 ) -> Result<OpendalStore, ApiError> {
     install_http_transport();
     let bucket = authority(url)?;
+    let region = options.region.as_deref().unwrap_or(DEFAULT_S3_REGION);
+    // Virtual-host addressing puts the region in the hostname, so a region is one of
+    // the strings `require_label` exists for.
+    require_label("region", region, "-")?;
 
     let mut builder = services::S3::default()
         .bucket(bucket)
-        .region(options.region.as_deref().unwrap_or(DEFAULT_S3_REGION))
+        .region(region)
         // The request is the only source of credentials. Without these two, OpenDAL
         // reads `AWS_*` from the environment, `~/.aws/{config,credentials}`, and the
         // EC2 metadata service — so a caller who sent none would be answered with the
@@ -314,35 +446,15 @@ fn s3_store(
         .disable_config_load()
         .disable_ec2_metadata();
 
-    // Which server this request would have us talk to is the policy's decision, and
-    // naming no endpoint is a choice too: it means AWS.
-    let endpoint = options
-        .endpoint
-        .as_deref()
-        .map(parse_endpoint)
-        .transpose()?;
-    policy.authorize_s3_endpoint(endpoint.as_ref())?;
-
-    builder = match &endpoint {
+    builder = match resolve_endpoint(Backend::S3, options, policy)? {
         // OpendDAL addresses path-style unless told otherwise, which is what an
         // S3-compatible server on a named endpoint wants: MinIO, Ceph and the rest
         // serve `endpoint/bucket/key`, and virtual-host style would need a wildcard
-        // DNS entry per bucket. Cleartext is decided here rather than by OpenDAL,
-        // which would simply follow the endpoint's own scheme.
-        Some(endpoint) => {
-            allow_http_endpoint(endpoint, options.allow_http, options.has_credentials())?;
-            builder.endpoint(endpoint.as_str())
-        }
+        // DNS entry per bucket.
+        Some(endpoint) => builder.endpoint(endpoint.as_str()),
         // AWS itself is the other way round: path-style addressing is deprecated
         // there, so a bucket is a subdomain.
-        None => {
-            if options.allow_http {
-                return Err(ApiError::bad_request(
-                    "allow_http only applies together with endpoint",
-                ));
-            }
-            builder.enable_virtual_host_style()
-        }
+        None => builder.enable_virtual_host_style(),
     };
 
     builder = match (&options.access_key_id, &options.secret_access_key) {
@@ -371,6 +483,113 @@ fn s3_store(
         }
     };
     Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+}
+
+fn gcs_store(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<OpendalStore, ApiError> {
+    install_http_transport();
+
+    let mut builder = services::Gcs::default()
+        .bucket(authority(url)?)
+        // The request is the only source of credentials. Without these two, OpenDAL
+        // reads `GOOGLE_APPLICATION_CREDENTIALS`, `~/.config/gcloud` and the GCE
+        // metadata server — so a caller who sent none would be answered with the
+        // service's own identity and every bucket this deployment can reach.
+        .disable_config_load()
+        .disable_vm_metadata();
+
+    if let Some(endpoint) = resolve_endpoint(Backend::Gcs, options, policy)? {
+        builder = builder.endpoint(endpoint.as_str());
+    }
+
+    builder = match (&options.service_account_key, &options.access_token) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "service_account_key and access_token are two ways to say who is asking; \
+                 give one",
+            ));
+        }
+        (Some(key), None) => {
+            // OpenDAL wants the key base64-encoded, and silently ignores it when it is
+            // not — which, with ambient discovery off, turns a mistyped credential into
+            // an unexplained 403 from Google rather than a 400 from here.
+            let key = key.expose_secret();
+            if !is_base64(key) {
+                return Err(ApiError::bad_request(
+                    "service_account_key is not base64; it is the service account JSON \
+                     Google issues, base64-encoded",
+                ));
+            }
+            builder.credential(key)
+        }
+        (None, Some(token)) => builder.token(token.expose_secret().to_owned()),
+        // No credentials given: ask anonymously rather than signing with nothing.
+        (None, None) => builder.skip_signature(),
+    };
+    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+}
+
+fn azblob_store(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<OpendalStore, ApiError> {
+    install_http_transport();
+
+    // Azure has no one host to default to: every account is its own. The url carries
+    // the container, so the account has to come from the options — and naming it is
+    // also what keeps a credential from being ignored, since OpenDAL only installs a
+    // shared key when it has an account name to pair it with, and falls back to the
+    // environment when it does not.
+    let account = options.account.as_deref().ok_or_else(|| {
+        ApiError::bad_request(
+            "az:// urls need an account option: the storage account the container is in",
+        )
+    })?;
+    require_label("account", account, "")?;
+
+    let mut builder = services::Azblob::default()
+        .container(authority(url)?)
+        .account_name(account);
+
+    builder = match resolve_endpoint(Backend::Azure, options, policy)? {
+        // Azurite and the rest are addressed as they are written; the account is still
+        // sent, because it is half of the shared-key signature.
+        Some(endpoint) => builder.endpoint(endpoint.as_str()),
+        None => builder.endpoint(&format!("https://{account}.blob.core.windows.net")),
+    };
+
+    builder = match (&options.access_key, &options.sas_token) {
+        (Some(_), Some(_)) => {
+            return Err(ApiError::bad_request(
+                "access_key and sas_token are two ways to say who is asking; give one",
+            ));
+        }
+        (Some(key), None) => builder.account_key(key.expose_secret()),
+        (None, Some(token)) => builder.sas_token(token.expose_secret()),
+        // No credentials given: ask anonymously. Azure's own signer would otherwise
+        // reach for `AZURE_*` and the managed-identity endpoint, which is the service's
+        // identity rather than the caller's.
+        (None, None) => builder.skip_signature(),
+    };
+    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+}
+
+/// Whether a string is base64. Not a decode: what the caller needs to know is that
+/// OpenDAL will not discard the credential, and the bytes behind it are none of this
+/// module's business. Both alphabets, since which one an encoder used is not something
+/// to make a caller find out by trial.
+fn is_base64(value: &str) -> bool {
+    let body = value.trim_end_matches('=');
+    value.len() - body.len() <= 2
+        && !body.is_empty()
+        && body.len() % 4 != 1
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"+/-_".contains(&b))
 }
 
 /// A url as the caller wrote it — the raw string, before [`parse_url`], so it may not
@@ -431,6 +650,9 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
+    /// Azure account keys are base64, and OpenDAL rejects one that is not at build
+    /// time — so a test about anything else needs a well-formed one.
+    const AZURE_KEY: &str = "c2VjcmV0LWF6dXJlLWFjY291bnQta2V5";
 
     /// A derive on a struct holding a credential prints the rest of it and not that.
     #[test]
@@ -506,6 +728,155 @@ mod tests {
         let file = open(&url, &no_options()).unwrap();
         assert_eq!(file.base.as_str(), "s3://bucket");
         assert_eq!(file.url.as_str(), "s3://bucket/some/key.parquet");
+    }
+
+    #[test]
+    fn opens_a_gcs_url() {
+        let url = parse_url("gs://bucket/some/key.parquet").unwrap();
+        let file = open(&url, &no_options()).unwrap();
+        assert_eq!(file.base.as_str(), "gs://bucket");
+        assert_eq!(file.url.as_str(), "gs://bucket/some/key.parquet");
+    }
+
+    /// The url carries the container; the account is an option, because Azure has no
+    /// one host to default to and the url has nowhere to put the other half.
+    #[test]
+    fn opens_an_azure_url() {
+        let url = parse_url("az://container/some/key.parquet").unwrap();
+        let file = open(&url, &options(serde_json::json!({"account": "hatsdata"}))).unwrap();
+        assert_eq!(file.base.as_str(), "az://container");
+        assert_eq!(file.url.as_str(), "az://container/some/key.parquet");
+    }
+
+    #[test]
+    fn an_azure_url_without_an_account_says_so() {
+        let url = parse_url("az://container/key.parquet").unwrap();
+        let error = open(&url, &no_options()).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+        assert!(error.to_string().contains("account"), "{error}");
+    }
+
+    /// Each scheme takes its own options and refuses the rest. An option in the wrong
+    /// place is a caller who has confused two backends, and where it is a credential
+    /// that means a credential sent to the wrong service.
+    #[test]
+    fn an_option_belonging_to_another_backend_is_refused() {
+        for (raw, option, expected) in [
+            (
+                "gs://b/k.parquet",
+                serde_json::json!({"region": "us-west-2"}),
+                "region",
+            ),
+            (
+                "gs://b/k.parquet",
+                serde_json::json!({"secret_access_key": SECRET}),
+                "secret_access_key",
+            ),
+            (
+                "s3://b/k.parquet",
+                serde_json::json!({"sas_token": "sv=2021"}),
+                "sas_token",
+            ),
+            (
+                "s3://b/k.parquet",
+                serde_json::json!({"service_account_key": SECRET}),
+                "service_account_key",
+            ),
+            (
+                "az://c/k.parquet",
+                serde_json::json!({"account": "hatsdata", "access_key_id": "AKIA123"}),
+                "access_key_id",
+            ),
+        ] {
+            let url = parse_url(raw).unwrap();
+            let error = open(&url, &options(option.clone())).unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)), "{raw}: {error}");
+            assert!(error.to_string().contains(expected), "{raw}: {error}");
+            // The message names what the scheme does take, and never the value.
+            assert!(error.to_string().contains("they take"), "{raw}: {error}");
+            assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+        }
+    }
+
+    /// Options that end up inside a hostname are the way past the endpoint policy: with
+    /// a `/` in it, `{region}.amazonaws.com` stops being under `amazonaws.com` at all
+    /// and the request goes wherever the caller wrote.
+    #[test]
+    fn an_option_that_becomes_a_hostname_may_not_carry_a_path() {
+        for (raw, option) in [
+            (
+                "s3://bucket/k.parquet",
+                serde_json::json!({"region": "us-east-1.evil.example.com/"}),
+            ),
+            (
+                "s3://bucket/k.parquet",
+                serde_json::json!({"region": "US-EAST-1"}),
+            ),
+            (
+                "az://container/k.parquet",
+                serde_json::json!({"account": "hatsdata/evil.example.com/"}),
+            ),
+            (
+                "az://container/k.parquet",
+                serde_json::json!({"account": "hats data"}),
+            ),
+            (
+                "az://container/k.parquet",
+                serde_json::json!({"account": ""}),
+            ),
+        ] {
+            let url = parse_url(raw).unwrap();
+            let error = open(&url, &options(option.clone())).unwrap_err();
+            assert!(
+                matches!(error, ApiError::BadRequest(_)),
+                "{option}: {error}"
+            );
+            assert!(error.to_string().contains("hostname"), "{option}: {error}");
+        }
+    }
+
+    /// OpenDAL discards a `credential` it cannot base64-decode, and with ambient
+    /// discovery off that turns a mistyped key into an unexplained refusal from Google
+    /// rather than a 400 from here.
+    #[test]
+    fn a_service_account_key_that_is_not_base64_is_refused() {
+        let url = parse_url("gs://bucket/k.parquet").unwrap();
+        let raw_json =
+            serde_json::json!({"service_account_key": "{\"type\": \"service_account\"}"});
+        let error = open(&url, &options(raw_json)).unwrap_err();
+        assert!(error.to_string().contains("base64"), "{error}");
+        assert!(!error.to_string().contains("service_account\""), "{error}");
+
+        let encoded =
+            serde_json::json!({"service_account_key": "eyJ0eXBlIjogInNlcnZpY2VfYWNjb3VudCJ9"});
+        assert!(open(&url, &options(encoded)).is_ok());
+    }
+
+    /// Two credentials are two answers to one question, and picking one for the caller
+    /// would mean the other was silently ignored.
+    #[test]
+    fn two_credentials_for_one_backend_are_refused() {
+        for (raw, option) in [
+            (
+                "gs://b/k.parquet",
+                serde_json::json!({
+                    "service_account_key": "eyJhIjogMX0=",
+                    "access_token": "ya29.token",
+                }),
+            ),
+            (
+                "az://c/k.parquet",
+                serde_json::json!({
+                    "account": "hatsdata",
+                    "access_key": AZURE_KEY,
+                    "sas_token": "sv=2021",
+                }),
+            ),
+        ] {
+            let url = parse_url(raw).unwrap();
+            let error = open(&url, &options(option)).unwrap_err();
+            assert!(error.to_string().contains("give one"), "{raw}: {error}");
+        }
     }
 
     /// Options are the request's, the url is the object's, and neither reaches the
@@ -735,10 +1106,12 @@ mod tests {
 
     /// The request head one `GET` through the store puts on the wire, lowercased —
     /// header names are case-insensitive and the comparisons below do not care.
-    async fn request_head(mut option: serde_json::Value) -> String {
+    ///
+    /// The endpoint is filled in here, because it is the port the capturing server got.
+    async fn request_head(raw: &str, mut option: serde_json::Value) -> String {
         let (port, receiver) = capture_one_request();
         option["endpoint"] = serde_json::json!(format!("http://127.0.0.1:{port}"));
-        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let url = parse_url(raw).unwrap();
         let file = open_loopback(&url, &options(option)).unwrap();
         // The 404 is the point: the request reached the server, which is all the test
         // needs to see.
@@ -758,7 +1131,7 @@ mod tests {
     /// would otherwise consult; this checks the result of that.
     #[tokio::test]
     async fn a_request_without_credentials_is_unsigned() {
-        let head = request_head(serde_json::json!({})).await;
+        let head = request_head("s3://bucket/key.parquet", serde_json::json!({})).await;
         assert!(head.contains("get /bucket/key.parquet"), "{head}");
         assert!(!head.contains("authorization:"), "signed anyway: {head}");
         assert!(!head.contains("x-amz-security-token:"), "{head}");
@@ -769,11 +1142,14 @@ mod tests {
     /// id.
     #[tokio::test]
     async fn credentials_from_the_request_are_the_ones_that_sign() {
-        let head = request_head(serde_json::json!({
-            "access_key_id": "AKIA123",
-            "secret_access_key": SECRET,
-            "allow_http": true,
-        }))
+        let head = request_head(
+            "s3://bucket/key.parquet",
+            serde_json::json!({
+                "access_key_id": "AKIA123",
+                "secret_access_key": SECRET,
+                "allow_http": true,
+            }),
+        )
         .await;
         assert!(head.contains("authorization:"), "unsigned: {head}");
         assert!(head.contains("akia123"), "{head}");
@@ -781,6 +1157,84 @@ mod tests {
             !head.contains(&SECRET.to_ascii_lowercase()),
             "leaked: {head}"
         );
+    }
+
+    /// The same guarantee for GCS: no credentials in the request means an unsigned
+    /// request, never the service's own identity from the environment or the metadata
+    /// server.
+    #[tokio::test]
+    async fn a_gcs_request_without_credentials_is_unsigned() {
+        let head = request_head("gs://bucket/key.parquet", serde_json::json!({})).await;
+        assert!(head.contains("key.parquet"), "{head}");
+        assert!(!head.contains("authorization:"), "signed anyway: {head}");
+    }
+
+    /// And the credential the caller sent is the one that signs. An access token is the
+    /// one GCS credential that signs without asking Google for anything first, which is
+    /// why it is the one on the wire here.
+    #[tokio::test]
+    async fn a_gcs_access_token_is_the_one_that_signs() {
+        let head = request_head(
+            "gs://bucket/key.parquet",
+            serde_json::json!({"access_token": "ya29.token-value", "allow_http": true}),
+        )
+        .await;
+        assert!(
+            head.contains("authorization: bearer ya29.token-value"),
+            "{head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_azure_request_without_credentials_is_unsigned() {
+        let head = request_head(
+            "az://container/key.parquet",
+            serde_json::json!({"account": "hatsdata"}),
+        )
+        .await;
+        assert!(head.contains("container/key.parquet"), "{head}");
+        assert!(!head.contains("authorization:"), "signed anyway: {head}");
+    }
+
+    /// Azure's shared key is an HMAC computed here, so the key itself never goes on the
+    /// wire — the account name and the signature do.
+    #[tokio::test]
+    async fn azure_credentials_from_the_request_are_the_ones_that_sign() {
+        let head = request_head(
+            "az://container/key.parquet",
+            serde_json::json!({
+                "account": "hatsdata",
+                // Azure account keys are base64, and OpenDAL refuses one that is not.
+                "access_key": AZURE_KEY,
+                "allow_http": true,
+            }),
+        )
+        .await;
+        assert!(
+            head.contains("authorization: sharedkey hatsdata:"),
+            "{head}"
+        );
+        assert!(
+            !head.contains(&AZURE_KEY.to_ascii_lowercase()),
+            "leaked: {head}"
+        );
+    }
+
+    /// A SAS token authenticates by riding in the query string, which is the one place
+    /// a credential is meant to be on the wire.
+    #[tokio::test]
+    async fn an_azure_sas_token_is_sent_as_the_query_string() {
+        let head = request_head(
+            "az://container/key.parquet",
+            serde_json::json!({
+                "account": "hatsdata",
+                "sas_token": "sv=2021-06-08&sig=abc",
+                "allow_http": true,
+            }),
+        )
+        .await;
+        assert!(head.contains("sig=abc"), "the token was not sent: {head}");
+        assert!(!head.contains("authorization:"), "{head}");
     }
 
     /// Printing the options, and printing the opened file. Both are `Debug` and both

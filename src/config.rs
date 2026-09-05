@@ -79,26 +79,32 @@ impl Default for LogConfig {
 
 /// What the service may read. See [`crate::access`] for what the entries mean.
 ///
-/// The default is every s3 endpoint but the loopback interface, and no local files.
+/// The default is every remote endpoint but the loopback interface, and no local files.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AccessConfig {
     /// Whether a request may reach the loopback interface. Consulted only where the
     /// configuration did not name a host itself.
     pub allow_loopback: bool,
-    pub s3: S3Config,
+    pub s3: EndpointConfig,
+    pub gcs: EndpointConfig,
+    pub azure: EndpointConfig,
     pub local: LocalConfig,
 }
 
+/// One remote backend's endpoint rules. Every backend has the same shape, under its own
+/// section: `[access.s3]`, `[access.gcs]`, `[access.azure]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct S3Config {
-    /// Endpoints a request may point the service at. `"aws"` is AWS S3 itself, which
-    /// is what a url with no `endpoint` option means; anything else is a URL, e.g.
+pub struct EndpointConfig {
+    /// Endpoints a request may point the service at. The provider's own name —
+    /// `"aws"`, `"gcp"`, `"azure"` — is that provider's own service, which is what a
+    /// url with no `endpoint` option means; anything else is a URL, e.g.
     /// `"https://minio.example.com"`.
     ///
     /// Three states, and the difference between the first two matters: absent is any
-    /// endpoint, an empty list is no s3 at all, and a list is exactly those endpoints.
+    /// endpoint, an empty list turns the backend off, and a list is exactly those
+    /// endpoints.
     pub endpoints: Option<Vec<String>>,
 }
 
@@ -154,6 +160,8 @@ mod tests {
         assert_eq!(config.server.listen_addr().to_string(), "0.0.0.0:80");
         // Absent, not empty: any endpoint rather than none.
         assert_eq!(config.access.s3.endpoints, None);
+        assert_eq!(config.access.gcs.endpoints, None);
+        assert_eq!(config.access.azure.endpoints, None);
         assert!(config.access.local.paths.is_empty());
         assert!(!config.access.allow_loopback);
         assert!(!config.access.local.follow_symlinks);
@@ -187,18 +195,33 @@ mod tests {
     }
 
     /// The one distinction in this file that a reader could get wrong, so it is
-    /// pinned: no key at all is every endpoint, an empty list is none.
+    /// pinned: no key at all is every endpoint, an empty list is none. Every backend's
+    /// section, since they share the type and could stop sharing the behaviour.
     #[test]
     fn an_absent_endpoint_list_is_not_an_empty_one() {
-        assert_eq!(parse("[access.s3]").unwrap().access.s3.endpoints, None);
+        for section in ["s3", "gcs", "azure"] {
+            let config = parse(&format!("[access.{section}]")).unwrap();
+            let empty = parse(&format!("[access.{section}]\nendpoints = []")).unwrap();
+            let (present, absent) = match section {
+                "s3" => (empty.access.s3.endpoints, config.access.s3.endpoints),
+                "gcs" => (empty.access.gcs.endpoints, config.access.gcs.endpoints),
+                _ => (empty.access.azure.endpoints, config.access.azure.endpoints),
+            };
+            assert_eq!(absent, None, "{section}");
+            assert_eq!(present, Some(Vec::new()), "{section}");
+        }
+    }
+
+    /// A backend's section is set on its own, without disturbing the others.
+    #[test]
+    fn each_backend_has_its_own_section() {
+        let config = parse("[access.gcs]\nendpoints = [\"gcp\"]").unwrap();
         assert_eq!(
-            parse("[access.s3]\nendpoints = []")
-                .unwrap()
-                .access
-                .s3
-                .endpoints,
-            Some(Vec::new())
+            config.access.gcs.endpoints.as_deref(),
+            Some(["gcp".to_owned()].as_slice())
         );
+        assert_eq!(config.access.s3.endpoints, None);
+        assert_eq!(config.access.azure.endpoints, None);
     }
 
     #[test]
@@ -207,7 +230,13 @@ mod tests {
             "[server]\nadress = \"127.0.0.1\"",
             "[access.local]\nallow_symlinks = true",
             "[access.s3]\nendpoint = \"aws\"",
+            "[access.gcs]\nendpoint = \"gcp\"",
+            "[access.azure]\nendpoitns = []",
             "[acess]\nallow_loopback = true",
+            // Not sections this file has: the schemes are `gs` and `az`, but the
+            // sections are named for the services.
+            "[access.gs]\nendpoints = []",
+            "[access.az]\nendpoints = []",
             // The keys these replaced, so an old config fails loudly.
             "[access]\nallow = []",
             "[access]\nfollow_symlinks = true",

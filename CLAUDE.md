@@ -20,6 +20,12 @@ at hand.
   rule.
 - `url::Url`'s own `Debug` prints its `password` field, so a struct holding one needs a
   hand-written `Debug` rather than a derive.
+- A credential option is a value, never a path or a filename. Reading a credential off
+  local disk at a caller's direction is both "the request is the only source" and the
+  local-path rules, broken at once.
+- A caller's string that ends up inside a hostname — a region, an account — goes through
+  `storage::require_label` first. A `/` in it moves the host to whatever came before,
+  which is a way past the endpoint policy rather than a cosmetic problem.
 - Nothing downstream of `storage::open` sees a url with options on it.
 - A dependency that logs credentials goes in `logging::CREDENTIAL_UNSAFE_TARGETS`, with
   a reason. `tests/credential_logging.rs` is what catches the next one.

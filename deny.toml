@@ -7,7 +7,23 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    # RUSTSEC-2023-0071, the Marvin attack: RSA private-key operations in `rsa` leak
+    # timing, and enough measurements recover the key. There is no fixed release to
+    # move to.
+    #
+    # It arrives with `gs://`: `reqsign-google` depends on `rsa` unconditionally, and
+    # `opendal-service-gcs` on `reqsign-google`, so the only way out of the tree is to
+    # drop GCS. The one code path that reaches it is signing a JWT with a
+    # `service_account_key` — a key the caller sent in the request, being used on that
+    # caller's behalf and nowhere else. Whoever is placed to measure the timing is the
+    # party who supplied the key, so recovering it wins them nothing; and this service
+    # holds no RSA key of its own for anyone else to recover.
+    #
+    # Revisit when `rsa` releases a fix, or if an operator-configured credential source
+    # ever lands — a key the *deployment* owns would change this reading entirely.
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 version = 2

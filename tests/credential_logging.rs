@@ -15,7 +15,9 @@ mod common;
 use std::io;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use common::{ACCESS_KEY_ID, SECRET_ACCESS_KEY, TestS3, lookup, permissive_policy};
+use common::{
+    ACCESS_KEY_ID, SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy,
+};
 use hats_api::access::AccessPolicy;
 use hats_api::app;
 use hats_api::logging;
@@ -97,6 +99,85 @@ fn assert_no_secret(logs: &str, context: &str) {
     assert!(
         !logs.contains("session-token-value"),
         "{context}: the session token reached the logs\n--- logs ---\n{logs}"
+    );
+}
+
+/// The other backends' credentials, which take different paths through different
+/// signers than s3's do.
+const AZURE_KEY: &str = "YXp1cmVBY2NvdW50S2V5VGhhdE11c3ROb3RCZUxvZ2dlZA==";
+const GCS_TOKEN: &str = "ya29.gcs-access-token-that-must-not-be-logged";
+const SAS_TOKEN: &str = "sv=2021-06-08&sig=sas-signature-that-must-not-be-logged";
+
+fn assert_no_other_secret(logs: &str, context: &str) {
+    for secret in [AZURE_KEY, GCS_TOKEN, SAS_TOKEN] {
+        assert!(
+            !logs.contains(secret),
+            "{context}: a credential reached the logs as {secret:?}\n--- logs ---\n{logs}"
+        );
+    }
+}
+
+/// GCS and Azure, through the same filter, with the credential each of their signers
+/// actually uses. There is no test server for either, and none is needed: the signer
+/// runs before anything reaches the wire, and it is the signer that logs.
+#[tokio::test]
+async fn the_other_backends_credentials_never_reach_the_logs() {
+    use hats_api::storage::{self, StorageOptions};
+
+    let captured = logs();
+    // One case per signer, since each takes its own path to the wire.
+    for credential in ["gcs access token", "azure shared key", "azure sas token"] {
+        let (port, _receiver) = capture_one_request();
+        let endpoint = Some(format!("http://127.0.0.1:{port}"));
+        let azure = || StorageOptions {
+            endpoint: endpoint.clone(),
+            account: Some("hatsdata".to_owned()),
+            allow_http: true,
+            ..Default::default()
+        };
+        let (raw, options) = match credential {
+            "gcs access token" => (
+                "gs://bucket/key.parquet",
+                StorageOptions {
+                    endpoint: endpoint.clone(),
+                    access_token: Some(GCS_TOKEN.to_owned().into()),
+                    allow_http: true,
+                    ..Default::default()
+                },
+            ),
+            "azure shared key" => (
+                "az://container/key.parquet",
+                StorageOptions {
+                    access_key: Some(AZURE_KEY.to_owned().into()),
+                    ..azure()
+                },
+            ),
+            _ => (
+                "az://container/key.parquet",
+                StorageOptions {
+                    sas_token: Some(SAS_TOKEN.to_owned().into()),
+                    ..azure()
+                },
+            ),
+        };
+
+        let url = storage::parse_url(raw).expect("a valid url");
+        let file = storage::open(&url, &options, &permissive_policy()).expect("it should open");
+
+        // Both `Debug`s, which is what a handler holds and one `?value` from a log.
+        tracing::debug!(?options, ?file, store = ?file.store, "the state a handler holds");
+
+        use object_store::ObjectStoreExt;
+        let _ = file
+            .store
+            .get(&object_store::path::Path::from("key.parquet"))
+            .await;
+    }
+
+    assert_no_other_secret(&captured.contents(), "gcs and azure");
+    assert!(
+        captured.contents().contains("azblob"),
+        "the azure store logged nothing, so nothing was checked"
     );
 }
 
@@ -271,7 +352,7 @@ async fn a_policy_refusal_logs_no_secret() {
     // A policy that will not talk to this endpoint at all.
     let policy = AccessPolicy::new(&hats_api::config::AccessConfig {
         allow_loopback: true,
-        s3: hats_api::config::S3Config {
+        s3: hats_api::config::EndpointConfig {
             endpoints: Some(vec!["https://minio.example.com".to_owned()]),
         },
         ..Default::default()
