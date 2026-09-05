@@ -1,5 +1,84 @@
 # Development plan
 
+## Progress tracker
+
+**This tracker is part of the plan. Whoever implements a step updates it in the same
+commit as the code.** A step is `done` only when its tests pass, `cargo clippy
+--all-targets` and `cargo fmt --check` are clean, and the invariants in §0 still hold.
+
+**This document is a plan, not a log of the work.** It says what is still to be done and
+what constrains it. Nothing here describes what was implemented, in what order, or by
+whom — the code, the tests and `git log` already say that, and better. So when a step is
+finished, do not write down what you built; change only what a later step now has to do
+differently:
+
+- a question the step settled, where the answer decides something later — a version, a
+  limit, a measured number, a constraint every following backend inherits;
+- a decision that turned out differently from what this document assumed, with the
+  assumption corrected rather than annotated;
+- work the step revealed but did not do, entered as its own row rather than a note.
+
+If a step changed nothing about what comes next, its row moving to `done` is the whole
+update. A note that could begin "we added" belongs in the commit message.
+
+**Nothing outside this file may refer to it.** No section number, no filename, no "see
+the development plan" — not in comments, doc comments, test names, config files or
+workflows. This document is scaffolding and will be deleted once the work in it is
+done; a reference to `§8.1` in a comment becomes a dangling pointer the moment that
+happens, and the reader has no way to recover what it meant. When code needs a reason,
+the comment states the reason. If that makes a comment longer, the comment was
+depending on this file to finish its sentence.
+
+Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
+
+| § | step | status | notes |
+|---|---|---|---|
+| 2.1 | OpenDAL backend layer, s3 migrated first | done | `object_store_opendal` 0.58.0 → `object_store ^0.13.1`, matching DataFusion 55's 0.13.2, one copy in the lock file. The §2.1 gate is met; the phase is not blocked. See the notes below. |
+| 2.2 | GCS and Azure | todo | |
+| 8.3 | network policy | todo | prerequisite for §2.3, per §8.3 |
+| 2.3 | HTTP/HTTPS, range probe, materialization | todo | needs §8.3 |
+| 2.4 | WebDAV | todo | needs §8.3 |
+| 2.5 | Hugging Face | todo | droppable; §2.1's gate was met, so no reason to drop it yet |
+| 3.1 | two-mode configuration | todo | |
+| 3.2 | routing | todo | |
+| 3.3 | API request shape (`POST`, `select`/`where`/`region`) | todo | needs DataFusion's `sql` feature |
+| 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
+| 4 | file-server interface | todo | |
+| 5.1 | HATS catalog metadata | todo | |
+| 5.2 | spatial predicate | todo | order policy and range budget to be settled by measurement first |
+| 5.3 | sync / plan / auto | todo | |
+| 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
+| 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
+| 7 | operational surface | todo | |
+
+Constraints §2.1 discovered that bind every backend after it:
+
+- **Every remote backend must call `storage::install_http_transport` before building.**
+  OpenDAL 0.58 has no HTTP client until one is installed process-wide, and a store
+  built without it builds fine and fails on its first request — a failure no test that
+  stops short of the wire will catch.
+- **Ambient credential discovery is disabled per store, not globally.** s3 uses
+  `disable_config_load` and `disable_ec2_metadata`; §2.2's GCS and Azure builders need
+  their own equivalents, and §8.1 is not satisfied until each has one.
+- **Addressing is per backend, not global**: path-style for a named S3-compatible
+  endpoint, virtual-host for AWS itself.
+- **`allow_http` stays ours.** OpenDAL follows the endpoint's own scheme without
+  asking, so the cleartext decision has no backend half to defer to.
+- **`file` stays on `object_store`'s `LocalFileSystem`.** It has no options and no
+  credentials, so it is not the second option-and-credential surface §2.1 was avoiding.
+  Revisit if §3.1's mounts want OpenDAL's listing.
+- **OpenDAL's retry, timeout and concurrent-limit layers are available but unapplied** —
+  enabling a Cargo feature only makes a layer constructible. §7.1 and §8.4 wire them.
+- **`object_store` is now trait-only**: no `aws` feature, so it supplies the
+  `ObjectStore` trait DataFusion consumes and `LocalFileSystem`, nothing else. Adding a
+  backend means adding it to OpenDAL's side, never re-enabling one here.
+- **`disable_config_load` is untested.** `skip_signature` is what makes an anonymous
+  request unsigned, and that is covered; the config guard's other job — stopping
+  `AWS_ENDPOINT_URL` from redirecting a request — is not observable through a url with
+  no `endpoint` option, because virtual-host addressing turns a redirected endpoint
+  into `bucket.<host>`, which does not resolve. Each new backend's equivalent guard
+  inherits the same blind spot.
+
 Written against `781ceac`: a stateless service with one endpoint, `GET /api/v1/select`,
 doing point lookups in a single parquet file over `s3://` or `file://`, under an access
 policy in a TOML config file.
@@ -807,7 +886,14 @@ backend in §2 is a chance to break it.
 - Credentials are **stripped at the boundary**: everything downstream of `storage::open` —
   logs, spans, errors, DataFusion, metrics — sees only `scheme://host/key`. New backends
   add option names to that stripping.
-- **No credential in a log line**, including at `debug` and `trace`.
+- **No credential in a log line**, including at `debug` and `trace`. This is not only
+  about the code here. A dependency may derive `Debug` on a struct holding a secret and
+  log it, and the SigV4 signer under OpenDAL does exactly that at `DEBUG`, so
+  `RUST_LOG=debug` would otherwise write every caller's secret to the log. The filter is
+  therefore **not purely the operator's to choose**: `logging::CREDENTIAL_UNSAFE_TARGETS`
+  is silenced after `RUST_LOG` is applied, where a more specific directive wins, so
+  raising the log level cannot re-enable it. Silencing a target loses its diagnostics,
+  which is why it is a list with a reason per entry rather than a wildcard.
 - **No credential in an error message**, including errors raised inside `object_store` or
   DataFusion, which must only ever be handed the stripped url.
 - **No credential in a response**, including §5.3's plan bodies.
@@ -892,8 +978,12 @@ with or before the HTTP backend**.
    scope.
 5. There is a test that the default config refuses it, and one that the narrowest config
    that should allow it does.
+6. **Its SDK is checked for logging credentials**, at `trace`, with a request that
+   carries them — a new backend brings a new signer and a new chance at §8.1's
+   dependency problem. Anything found goes in `CREDENTIAL_UNSAFE_TARGETS` with its
+   reason, which the canary test then holds to being the complete list.
 
-Run `cargo deny` (advisories + licences) in CI once CI exists.
+Run `cargo deny` (advisories + licences) in CI.
 
 ## 9. Future development
 
