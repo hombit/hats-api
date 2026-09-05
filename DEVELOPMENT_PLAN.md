@@ -41,7 +41,7 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 | 2.5 | Hugging Face | todo | droppable; §2.1's gate was met, so no reason to drop it yet |
 | 3.1 | two-mode configuration | todo | |
 | 3.2 | routing | todo | |
-| 3.3 | API request shape (`POST`, `select`/`where`/`region`) | todo | needs DataFusion's `sql` feature |
+| 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
 | 4 | file-server interface | todo | |
 | 5.1 | HATS catalog metadata | todo | |
@@ -91,7 +91,7 @@ keep, §9 what is deferred.
 | piece | state |
 |---|---|
 | `src/access.rs` | endpoint- and directory-level policy; s3 + local |
-| `src/storage.rs` | url → `ObjectStore`; `s3`, `file`; options in the url's query string |
+| `src/storage.rs` | url → `ObjectStore`; `s3`, `file`; options passed beside the url |
 | `src/query.rs` | DataFusion session per request, `column == value`, projection pushdown |
 | `src/parquet_out.rs` | writes the answer with the source file's own layout |
 | `src/app.rs` | axum router, `/api/v1/health`, `/api/v1/select` |
@@ -186,8 +186,8 @@ If the versions cannot be matched, or a service cannot express what is needed, k
 ### 2.2 GCS and Azure
 
 `opendal`'s `services-gcs` and `services-azblob`, following the s3 precedent: credentials
-and endpoint travel in the url's query string, stripped before anything downstream sees
-the url.
+and endpoint arrive beside the url as `StorageOptions`, never inside it, and are held in
+types that do not print.
 
 | scheme | options |
 |---|---|
@@ -372,12 +372,10 @@ mount, a pure file server.
 
 ### 3.3 The API request shape
 
-**The API is `POST` only**; `GET` belongs to the file-server mode (§3.4).
+**The API is `POST` only**; `GET` belongs to the file-server mode (§3.4). What this step
+still has to settle is the query language, not the transport.
 
-1. **Credentials.** A `url` query string carrying `secret_access_key` reaches the access
-   log of every proxy in the path and shell history; a body does not. Credentials are
-   accepted only in a `POST` body, and a credential-bearing query string is refused.
-2. **Length.** A long `IN` list, a wide `select` and later a full ADQL statement run into
+1. **Length.** A long `IN` list, a wide `select` and later a full ADQL statement run into
    URL length limits — nginx's default header buffer is 8 KB.
 
 `POST` responses are uncacheable by intermediaries, which costs nothing here: §6.5 does

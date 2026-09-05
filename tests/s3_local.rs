@@ -7,8 +7,9 @@
 
 mod common;
 
-use common::{ACCESS_KEY_ID, FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
+use common::{FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
 use hats_api::error::ApiError;
+use hats_api::storage::StorageOptions;
 
 /// The baseline: a file put in a bucket comes back through the whole path, and the
 /// lookup finds the one row it should.
@@ -18,7 +19,8 @@ async fn reads_a_parquet_file_over_s3() {
     server.put_parquet("catalog/part0.parquet");
 
     let result = lookup(
-        &server.url("catalog/part0.parquet", ""),
+        &server.url("catalog/part0.parquet"),
+        &server.options(),
         &permissive_policy(),
         "objectid",
         "42",
@@ -41,7 +43,8 @@ async fn a_point_lookup_finds_one_row_among_fifty_thousand() {
 
     let last = FIXTURE_ROWS - 1;
     let result = lookup(
-        &server.url("catalog/part0.parquet", ""),
+        &server.url("catalog/part0.parquet"),
+        &server.options(),
         &permissive_policy(),
         "objectid",
         &last.to_string(),
@@ -66,7 +69,8 @@ async fn reads_a_hats_partition_key() {
     server.put_parquet(key);
 
     let result = lookup(
-        &server.url(key, ""),
+        &server.url(key),
+        &server.options(),
         &permissive_policy(),
         "objectid",
         "7",
@@ -86,7 +90,8 @@ async fn reads_a_hats_partition_key_with_credentials() {
     server.put_parquet(key);
 
     let result = lookup(
-        &server.url(key, &server.credentialed_options()),
+        &server.url(key),
+        &server.credentialed_options(),
         &permissive_policy(),
         "objectid",
         "7",
@@ -104,7 +109,8 @@ async fn credentials_from_the_url_open_a_private_bucket() {
     server.put_parquet("private/part0.parquet");
 
     let result = lookup(
-        &server.url("private/part0.parquet", &server.credentialed_options()),
+        &server.url("private/part0.parquet"),
+        &server.credentialed_options(),
         &permissive_policy(),
         "objectid",
         "1",
@@ -123,12 +129,14 @@ async fn the_wrong_credentials_are_refused() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
-    let options = format!(
-        "access_key_id={ACCESS_KEY_ID}&secret_access_key=not-the-right-secret&allow_http=true"
-    );
+    let options = StorageOptions {
+        secret_access_key: Some("not-the-right-secret".to_owned().into()),
+        ..server.credentialed_options()
+    };
     let error = common::expect_error(
         lookup(
-            &server.url("private/part0.parquet", &options),
+            &server.url("private/part0.parquet"),
+            &options,
             &permissive_policy(),
             "objectid",
             "1",
@@ -153,7 +161,8 @@ async fn an_anonymous_request_cannot_read_a_private_bucket() {
 
     let error = common::expect_error(
         lookup(
-            &server.url("private/part0.parquet", ""),
+            &server.url("private/part0.parquet"),
+            &server.options(),
             &permissive_policy(),
             "objectid",
             "1",
@@ -174,7 +183,8 @@ async fn a_missing_object_is_not_found() {
 
     let error = common::expect_error(
         lookup(
-            &server.url("catalog/absent.parquet", ""),
+            &server.url("catalog/absent.parquet"),
+            &server.options(),
             &permissive_policy(),
             "objectid",
             "1",
@@ -194,7 +204,8 @@ async fn an_object_that_is_not_parquet_is_rejected() {
 
     let error = common::expect_error(
         lookup(
-            &server.url("catalog/not-parquet.parquet", ""),
+            &server.url("catalog/not-parquet.parquet"),
+            &server.options(),
             &permissive_policy(),
             "objectid",
             "1",
@@ -217,7 +228,8 @@ async fn an_endpoint_off_the_policy_is_refused_though_it_would_answer() {
     let allowed = common::policy_for_endpoints(&[&server.endpoint]);
     assert!(
         lookup(
-            &server.url("catalog/part0.parquet", ""),
+            &server.url("catalog/part0.parquet"),
+            &server.options(),
             &allowed,
             "objectid",
             "1",
@@ -231,7 +243,8 @@ async fn an_endpoint_off_the_policy_is_refused_though_it_would_answer() {
     let elsewhere = common::policy_for_endpoints(&["https://minio.example.com"]);
     let error = common::expect_error(
         lookup(
-            &server.url("catalog/part0.parquet", ""),
+            &server.url("catalog/part0.parquet"),
+            &server.options(),
             &elsewhere,
             "objectid",
             "1",
@@ -250,13 +263,14 @@ async fn credentials_over_cleartext_need_allow_http() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
-    let without_flag = format!(
-        "access_key_id={ACCESS_KEY_ID}&secret_access_key={}",
-        common::SECRET_ACCESS_KEY
-    );
+    let without_flag = StorageOptions {
+        allow_http: false,
+        ..server.credentialed_options()
+    };
     let error = common::expect_error(
         lookup(
-            &server.url("private/part0.parquet", &without_flag),
+            &server.url("private/part0.parquet"),
+            &without_flag,
             &permissive_policy(),
             "objectid",
             "1",
@@ -287,7 +301,8 @@ async fn two_servers_do_not_share_credentials() {
     // Read the private one first, so any leak would be there to find.
     assert!(
         lookup(
-            &private.url("catalog/part0.parquet", &private.credentialed_options()),
+            &private.url("catalog/part0.parquet"),
+            &private.credentialed_options(),
             &policy,
             "objectid",
             "1",
@@ -299,7 +314,8 @@ async fn two_servers_do_not_share_credentials() {
     // The public one, anonymously, still works.
     assert!(
         lookup(
-            &public.url("catalog/part0.parquet", ""),
+            &public.url("catalog/part0.parquet"),
+            &public.options(),
             &policy,
             "objectid",
             "1",
@@ -311,7 +327,8 @@ async fn two_servers_do_not_share_credentials() {
     // And the private one anonymously still does not.
     assert!(
         lookup(
-            &private.url("catalog/part0.parquet", ""),
+            &private.url("catalog/part0.parquet"),
+            &private.options(),
             &policy,
             "objectid",
             "1",

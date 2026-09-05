@@ -19,7 +19,7 @@ use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, S3Config};
 use hats_api::error::ApiError;
 use hats_api::query::{QueryResult, Selection};
-use hats_api::storage;
+use hats_api::storage::{self, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use s3s::auth::SimpleAuth;
@@ -120,20 +120,29 @@ impl TestS3 {
         format!("s3://{}/{key}", self.bucket)
     }
 
-    /// The url with the storage options a caller would have to send to reach this
-    /// server: its endpoint, and whatever else the test needs.
-    pub fn url(&self, key: &str, extra_options: &str) -> String {
-        let base = format!("s3://{}/{key}?endpoint={}", self.bucket, self.endpoint);
-        match extra_options.is_empty() {
-            true => base,
-            false => format!("{base}&{extra_options}"),
+    /// The url naming an object here. Just the object: how to reach the server is
+    /// [`Self::options`], sent beside it.
+    pub fn url(&self, key: &str) -> String {
+        format!("s3://{}/{key}", self.bucket)
+    }
+
+    /// Enough to find this server, and nothing that would sign a request.
+    pub fn options(&self) -> StorageOptions {
+        StorageOptions {
+            endpoint: Some(self.endpoint.clone()),
+            ..Default::default()
         }
     }
 
-    pub fn credentialed_options(&self) -> String {
-        format!(
-            "access_key_id={ACCESS_KEY_ID}&secret_access_key={SECRET_ACCESS_KEY}&allow_http=true"
-        )
+    /// The same, with the credentials [`Self::authenticated`] expects. `allow_http`
+    /// because the test server has no certificate.
+    pub fn credentialed_options(&self) -> StorageOptions {
+        StorageOptions {
+            access_key_id: Some(ACCESS_KEY_ID.to_owned().into()),
+            secret_access_key: Some(SECRET_ACCESS_KEY.to_owned().into()),
+            allow_http: true,
+            ..self.options()
+        }
     }
 }
 
@@ -194,13 +203,14 @@ pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
 /// Open a url and run one point lookup through it: the whole path a request takes.
 pub async fn lookup(
     raw_url: &str,
+    options: &StorageOptions,
     policy: &AccessPolicy,
     filter_column: &str,
     filter_value: &str,
     columns: Option<&[String]>,
 ) -> Result<QueryResult, ApiError> {
     let url = storage::parse_url(raw_url)?;
-    let file = storage::open(&url, policy)?;
+    let file = storage::open(&url, options, policy)?;
     hats_api::query::run(
         &file,
         &Selection {
@@ -229,12 +239,13 @@ pub fn expect_error(result: Result<QueryResult, ApiError>, context: &str) -> Api
 /// else with the same shape. Configured from the environment, so the same tests serve
 /// all of them and CI holds the credentials.
 ///
-/// Everything storage-specific — endpoint, region, credentials — rides in `url`'s own
-/// query string, exactly as a caller would send it. That keeps the test from having a
-/// second credential path of its own.
+/// The url names the object and nothing else; everything storage-specific — endpoint,
+/// region, credentials — is in `options`, exactly as a caller would send it. That keeps
+/// the test from having a credential path of its own.
 pub struct RemoteTarget {
     pub name: &'static str,
     pub url: String,
+    pub options: StorageOptions,
     /// A lookup known to match in this file, and how many rows it should return.
     pub column: String,
     pub value: String,
@@ -245,6 +256,8 @@ pub struct RemoteTarget {
 #[derive(Clone, Copy)]
 pub struct Defaults {
     pub url: &'static str,
+    /// `None` is AWS itself.
+    pub endpoint: Option<&'static str>,
     pub column: &'static str,
     pub value: &'static str,
     pub expected_rows: Option<usize>,
@@ -272,6 +285,7 @@ impl RemoteTarget {
         };
         let defaults = defaults.unwrap_or(Defaults {
             url: "",
+            endpoint: None,
             column: "",
             value: "",
             expected_rows: None,
@@ -291,27 +305,30 @@ impl RemoteTarget {
             None => defaults.expected_rows,
         };
 
+        let options = StorageOptions {
+            endpoint: var("ENDPOINT").or_else(|| defaults.endpoint.map(ToOwned::to_owned)),
+            region: var("REGION"),
+            access_key_id: var("ACCESS_KEY_ID").map(Into::into),
+            secret_access_key: var("SECRET_ACCESS_KEY").map(Into::into),
+            ..Default::default()
+        };
+
         Some(Self {
             name: prefix,
             url,
+            options,
             column,
             value,
             expected_rows,
         })
     }
 
-    /// The url with its object key replaced, for the tests about absence. Keeps the
-    /// endpoint and credentials, so the answer is about the object and not the server.
+    /// The url with its object key replaced, for the tests about absence. The options
+    /// are unchanged, so the answer is about the object and not the server.
     pub fn sibling_url(&self, name: &str) -> String {
-        let (base, options) = match self.url.split_once('?') {
-            Some((base, options)) => (base, Some(options)),
-            None => (self.url.as_str(), None),
-        };
-        let parent = base.rsplit_once('/').map_or(base, |(parent, _)| parent);
-        match options {
-            Some(options) => format!("{parent}/{name}?{options}"),
-            None => format!("{parent}/{name}"),
-        }
+        let url = self.url.as_str();
+        let parent = url.rsplit_once('/').map_or(url, |(parent, _)| parent);
+        format!("{parent}/{name}")
     }
 }
 

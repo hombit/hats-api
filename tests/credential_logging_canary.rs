@@ -59,7 +59,8 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
     let _ = lookup(
-        &server.url("private/part0.parquet", &server.credentialed_options()),
+        &server.url("private/part0.parquet"),
+        &server.credentialed_options(),
         &permissive_policy(),
         "objectid",
         "1",

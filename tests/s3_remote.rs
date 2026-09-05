@@ -13,7 +13,8 @@
 //! HATS_API_TEST_AWS=1 cargo test --test s3_remote
 //!
 //! # any other deployment, named in full
-//! HATS_API_TEST_SNAD_URL='s3://bucket/key.parquet?endpoint=https://example.com' \
+//! HATS_API_TEST_SNAD_URL=s3://bucket/key.parquet \
+//! HATS_API_TEST_SNAD_ENDPOINT=https://example.com \
 //! HATS_API_TEST_SNAD_COLUMN=objectid HATS_API_TEST_SNAD_VALUE=1 \
 //!   cargo test --test s3_remote
 //! ```
@@ -34,6 +35,7 @@ fn aws_defaults() -> Defaults {
               Norder=5/Dir=10000/Npix=12240/part0.snappy.parquet",
         column: "_healpix_29",
         value: "3445524782181585918",
+        endpoint: None,
         expected_rows: Some(1),
     }
 }
@@ -51,7 +53,8 @@ fn aws() -> Option<RemoteTarget> {
 /// AWS, and path-style rather than virtual-host.
 fn snad_defaults() -> Defaults {
     Defaults {
-        url: "s3://tests/pageidx_64k.parquet?endpoint=https://s3.lpc.snad.space",
+        url: "s3://tests/pageidx_64k.parquet",
+        endpoint: Some("https://s3.lpc.snad.space"),
         column: "objectid",
         value: "390204400004344",
         expected_rows: Some(1),
@@ -67,6 +70,7 @@ fn snad() -> Option<RemoteTarget> {
 async fn reads_the_documented_row(target: &RemoteTarget) {
     let result = lookup(
         &target.url,
+        &target.options,
         &permissive_policy(),
         &target.column,
         &target.value,
@@ -94,6 +98,7 @@ async fn honours_a_projection(target: &RemoteTarget) {
     let columns = vec![target.column.clone()];
     let result = lookup(
         &target.url,
+        &target.options,
         &permissive_policy(),
         &target.column,
         &target.value,
@@ -123,6 +128,7 @@ async fn a_missing_object_fails_cleanly(target: &RemoteTarget) {
     let error = common::expect_error(
         lookup(
             &target.sibling_url("definitely-not-here-9f3a1c.parquet"),
+            &target.options,
             &permissive_policy(),
             &target.column,
             &target.value,

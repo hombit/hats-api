@@ -5,11 +5,10 @@
 //! region has to be asked for. Adding HTTPS, GCS or Azure later means adding a match
 //! arm to [`open`] and a name to [`SUPPORTED_SCHEMES`].
 //!
-//! Storage-specific options travel in the URL's own query string, where storage
-//! details belong, e.g. `s3://bucket/key.parquet?region=us-west-2`. Credentials are
-//! such options. They never leave this module: the URL the rest of the service sees
-//! and logs has the query string stripped, and error messages are built from that
-//! stripped URL so a secret cannot escape in a 400.
+//! Storage options arrive beside the URL as [`StorageOptions`], never inside it. A
+//! URL's query string is the origin's — a presigned signature, a CDN token, part of
+//! what identifies the bytes — and nothing could tell one of those from one of ours.
+//! Options never leave this module, and a credential never reaches an error message.
 //!
 //! Which URLs may be opened at all is not decided here: [`open`] asks the
 //! [`AccessPolicy`] first, and every path into a store goes through that one call.
@@ -24,6 +23,7 @@ use url::Url;
 
 use crate::access::{AccessPolicy, Target};
 use crate::error::ApiError;
+use crate::redact::{ExposeSecret, Secret, redact};
 
 /// Schemes [`open`] can serve today. Whether a given URL in one of them may actually be
 /// read is the [`AccessPolicy`]'s business, not this list's.
@@ -32,6 +32,28 @@ pub const SUPPORTED_SCHEMES: &[&str] = &["s3", "file"];
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
 
+/// How to reach the store the object lives in. Not what the object is — that is the
+/// URL, which this service treats as opaque.
+///
+/// One flat set rather than one per scheme: the URL already says which backend it is,
+/// and [`StorageOptions::for_scheme`] refuses an option the scheme has no use for
+/// instead of ignoring it. A misspelled option is a 400 rather than a silently
+/// anonymous request.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageOptions {
+    pub region: Option<String>,
+    /// Base URL of a non-AWS S3 implementation (MinIO, Ceph, R2, ...).
+    pub endpoint: Option<String>,
+    /// Permission to send credentials to a cleartext `endpoint`.
+    #[serde(default)]
+    pub allow_http: bool,
+    pub access_key_id: Option<Secret>,
+    pub secret_access_key: Option<Secret>,
+    pub session_token: Option<Secret>,
+}
+
+/// The option names, for saying which are accepted in an error.
 const S3_OPTIONS: &[&str] = &[
     "region",
     "endpoint",
@@ -41,17 +63,63 @@ const S3_OPTIONS: &[&str] = &[
     "session_token",
 ];
 
+impl StorageOptions {
+    /// Nothing set at all, which is what a public object needs.
+    pub fn is_empty(&self) -> bool {
+        self.region.is_none()
+            && self.endpoint.is_none()
+            && !self.allow_http
+            && self.access_key_id.is_none()
+            && self.secret_access_key.is_none()
+            && self.session_token.is_none()
+    }
+
+    /// A `file://` url with a `secret_access_key` is a caller who has the wrong url or
+    /// the wrong options; either reading is worth saying rather than guessing at.
+    fn for_scheme(&self, scheme: &str) -> Result<(), ApiError> {
+        match scheme {
+            "s3" => Ok(()),
+            _ if self.is_empty() => Ok(()),
+            other => Err(ApiError::bad_request(format!(
+                "storage options are not accepted for {other:?} urls, which have none"
+            ))),
+        }
+    }
+
+    fn has_credentials(&self) -> bool {
+        self.access_key_id.is_some()
+            || self.secret_access_key.is_some()
+            || self.session_token.is_some()
+    }
+}
+
 /// An opened remote file: the store it lives in, the key DataFusion registers that
-/// store under, and the file's own URL stripped of any storage options.
-#[derive(Debug)]
+/// store under, and the object's own URL.
 pub struct RemoteFile {
     pub store: Arc<dyn ObjectStore>,
     pub base: Url,
     pub url: Url,
 }
 
-pub fn open(url: &Url, policy: &AccessPolicy) -> Result<RemoteFile, ApiError> {
+/// `Url`'s own `Debug` prints its parsed fields, `password` among them.
+impl std::fmt::Debug for RemoteFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteFile")
+            .field("store", &self.store)
+            .field("base", &self.base.as_str())
+            .field("url", &self.url.as_str())
+            .finish()
+    }
+}
+
+pub fn open(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<RemoteFile, ApiError> {
     require_object_key(url)?;
+    refuse_userinfo(url)?;
+    refuse_query_string(url)?;
     if !SUPPORTED_SCHEMES.contains(&url.scheme()) {
         return Err(ApiError::bad_request(format!(
             "unsupported URL scheme {:?}: supported schemes are {}",
@@ -59,12 +127,13 @@ pub fn open(url: &Url, policy: &AccessPolicy) -> Result<RemoteFile, ApiError> {
             SUPPORTED_SCHEMES.join(", ")
         )));
     }
+    options.for_scheme(url.scheme())?;
     // Before anything is built, and before the filesystem is touched.
     match policy.authorize(url)? {
         Target::Local(path) => local_file(&path),
         Target::Remote => {
             let store: Arc<dyn ObjectStore> = match url.scheme() {
-                "s3" => Arc::new(s3_store(url, policy)?),
+                "s3" => Arc::new(s3_store(url, options, policy)?),
                 // Every supported remote scheme has an arm above, and `file` went to
                 // the local branch.
                 scheme => {
@@ -113,11 +182,14 @@ fn base_url(url: &Url) -> Result<Url, ApiError> {
     })
 }
 
-/// The URL without its storage options, which are ours and not part of the object key.
+/// The URL as far as it is safe to print. [`refuse_userinfo`] means an opened file never
+/// has any, but this also builds the error messages — one of which is that refusal.
 fn file_url(url: &Url) -> Url {
     let mut file = url.clone();
     file.set_query(None);
     file.set_fragment(None);
+    let _ = file.set_username("");
+    let _ = file.set_password(None);
     file
 }
 
@@ -125,6 +197,36 @@ fn authority(url: &Url) -> Result<&str, ApiError> {
     url.host_str()
         .filter(|host| !host.is_empty())
         .ok_or_else(|| ApiError::bad_request(format!("url {} has no host", file_url(url))))
+}
+
+/// `s3://key:secret@bucket/object` would survive into `RemoteFile::url`, the url every
+/// layer downstream logs. Refused rather than stripped, so a caller who meant it is
+/// told where credentials go instead of getting an unexplained 403.
+fn refuse_userinfo(url: &Url) -> Result<(), ApiError> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ApiError::bad_request(format!(
+            "url {}://{} carries credentials in its authority; pass them as {} instead",
+            url.scheme(),
+            // Not `file_url`: that keeps the userinfo, which is the thing to not echo.
+            url.host_str().unwrap_or_default(),
+            S3_OPTIONS.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// An `s3://` key has no query string. Dropping one silently would turn a credentialed
+/// read into an anonymous one that fails later and elsewhere. A scheme whose objects do
+/// have query strings makes this a per-scheme decision.
+fn refuse_query_string(url: &Url) -> Result<(), ApiError> {
+    if url.query().is_some() {
+        return Err(ApiError::bad_request(format!(
+            "url {} has a query string; storage options go in \"storage\", which takes {}",
+            file_url(url),
+            S3_OPTIONS.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 fn require_object_key(url: &Url) -> Result<(), ApiError> {
@@ -135,46 +237,6 @@ fn require_object_key(url: &Url) -> Result<(), ApiError> {
         )));
     }
     Ok(())
-}
-
-#[derive(Default)]
-struct S3Options {
-    region: Option<String>,
-    /// Base URL of a non-AWS S3 implementation (MinIO, Ceph, R2, ...).
-    endpoint: Option<String>,
-    allow_http: bool,
-    access_key_id: Option<String>,
-    secret_access_key: Option<String>,
-    session_token: Option<String>,
-}
-
-fn s3_options(url: &Url) -> Result<S3Options, ApiError> {
-    let mut options = S3Options::default();
-    for (key, value) in url.query_pairs() {
-        let value = value.into_owned();
-        match key.as_ref() {
-            "region" => options.region = Some(value),
-            "endpoint" => options.endpoint = Some(value),
-            "allow_http" => options.allow_http = parse_bool("allow_http", &value)?,
-            "access_key_id" => options.access_key_id = Some(value),
-            "secret_access_key" => options.secret_access_key = Some(value),
-            "session_token" => options.session_token = Some(value),
-            // The name is safe to echo; a value never is.
-            other => {
-                return Err(ApiError::bad_request(format!(
-                    "unknown s3 option {other:?} in url; supported options are {}",
-                    S3_OPTIONS.join(", ")
-                )));
-            }
-        }
-    }
-    Ok(options)
-}
-
-fn parse_bool(name: &str, value: &str) -> Result<bool, ApiError> {
-    value
-        .parse()
-        .map_err(|_| ApiError::bad_request(format!("{name} must be true or false, got {value:?}")))
 }
 
 fn parse_endpoint(endpoint: &str) -> Result<Url, ApiError> {
@@ -215,10 +277,13 @@ fn install_http_transport() {
     INSTALLED.call_once(opendal::install_default);
 }
 
-fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<OpendalStore, ApiError> {
+fn s3_store(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<OpendalStore, ApiError> {
     install_http_transport();
     let bucket = authority(url)?;
-    let options = s3_options(url)?;
 
     let mut builder = services::S3::default()
         .bucket(bucket)
@@ -231,10 +296,6 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<OpendalStore, ApiError> 
         // request the policy already decided was going to AWS.
         .disable_config_load()
         .disable_ec2_metadata();
-
-    let has_credentials = options.access_key_id.is_some()
-        || options.secret_access_key.is_some()
-        || options.session_token.is_some();
 
     // Which server this request would have us talk to is the policy's decision, and
     // naming no endpoint is a choice too: it means AWS.
@@ -252,7 +313,7 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<OpendalStore, ApiError> 
         // DNS entry per bucket. Cleartext is decided here rather than by OpenDAL,
         // which would simply follow the endpoint's own scheme.
         Some(endpoint) => {
-            allow_http_endpoint(endpoint, options.allow_http, has_credentials)?;
+            allow_http_endpoint(endpoint, options.allow_http, options.has_credentials())?;
             builder.endpoint(endpoint.as_str())
         }
         // AWS itself is the other way round: path-style addressing is deprecated
@@ -267,13 +328,13 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<OpendalStore, ApiError> 
         }
     };
 
-    builder = match (options.access_key_id, options.secret_access_key) {
+    builder = match (&options.access_key_id, &options.secret_access_key) {
         (Some(access_key_id), Some(secret_access_key)) => {
             let builder = builder
-                .access_key_id(&access_key_id)
-                .secret_access_key(&secret_access_key);
-            match options.session_token {
-                Some(token) => builder.session_token(&token),
+                .access_key_id(access_key_id.expose_secret())
+                .secret_access_key(secret_access_key.expose_secret());
+            match &options.session_token {
+                Some(token) => builder.session_token(token.expose_secret()),
                 None => builder,
             }
         }
@@ -303,10 +364,8 @@ pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
             .map_err(|()| ApiError::bad_request(format!("invalid local path {raw:?}")));
     }
     Url::parse(raw).map_err(|error| {
-        // Unparseable, so there is no query string to strip properly; cut at the first
-        // `?` so a secret cannot ride out in the error.
-        let shown = raw.split('?').next().unwrap_or_default();
-        ApiError::bad_request(format!("invalid url {shown:?}: {error}"))
+        // Unparseable, so there is no query string to strip properly.
+        ApiError::bad_request(format!("invalid url {:?}: {error}", redact(raw)))
     })
 }
 
@@ -314,152 +373,224 @@ pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
 mod tests {
     use super::*;
 
+    const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
+
+    /// Storage options built the way a request body spells them, so these tests also
+    /// cover the deserialization rather than only the struct behind it.
+    fn options(json: serde_json::Value) -> StorageOptions {
+        serde_json::from_value(json).expect("the options should deserialize")
+    }
+
+    fn no_options() -> StorageOptions {
+        StorageOptions::default()
+    }
+
     /// These tests are about reading the URL, not about the policy, so they all run
     /// under one that allows every bucket. What the policy itself allows is
     /// [`crate::access`]'s own business, and tested there.
-    fn open(url: &Url) -> Result<RemoteFile, ApiError> {
-        super::open(url, &AccessPolicy::default())
+    fn open(url: &Url, options: &StorageOptions) -> Result<RemoteFile, ApiError> {
+        super::open(url, options, &AccessPolicy::default())
     }
 
     /// The same, for a server configured to let requests reach the loopback interface
     /// — which is what running against a local MinIO means.
-    fn open_loopback(url: &Url) -> Result<RemoteFile, ApiError> {
+    fn open_loopback(url: &Url, options: &StorageOptions) -> Result<RemoteFile, ApiError> {
         let config = crate::config::AccessConfig {
             allow_loopback: true,
             ..Default::default()
         };
-        super::open(url, &AccessPolicy::new(&config).unwrap())
+        super::open(url, options, &AccessPolicy::new(&config).unwrap())
     }
 
     #[test]
     fn opens_an_s3_url() {
         let url = parse_url("s3://bucket/some/key.parquet").unwrap();
-        let file = open(&url).unwrap();
+        let file = open(&url, &no_options()).unwrap();
         assert_eq!(file.base.as_str(), "s3://bucket");
         assert_eq!(file.url.as_str(), "s3://bucket/some/key.parquet");
     }
 
+    /// Options are the request's, the url is the object's, and neither reaches the
+    /// other: the key registered with DataFusion is what the caller named.
     #[test]
     fn storage_options_stay_out_of_the_object_key() {
-        let url = parse_url("s3://bucket/key.parquet?region=us-west-2").unwrap();
-        let file = open(&url).unwrap();
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let file = open(&url, &options(serde_json::json!({"region": "us-west-2"}))).unwrap();
         assert_eq!(file.url.as_str(), "s3://bucket/key.parquet");
     }
 
-    const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
-
     #[test]
     fn accepts_credentials_as_storage_options() {
-        let url = parse_url(&format!(
-            "s3://bucket/key.parquet?access_key_id=AKIA123&secret_access_key={SECRET}\
-             &session_token=tok&region=us-west-2"
-        ))
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let file = open(
+            &url,
+            &options(serde_json::json!({
+                "access_key_id": "AKIA123",
+                "secret_access_key": SECRET,
+                "session_token": "tok",
+                "region": "us-west-2",
+            })),
+        )
         .unwrap();
-        let file = open(&url).unwrap();
         assert_eq!(file.url.as_str(), "s3://bucket/key.parquet");
     }
 
     #[test]
     fn accepts_a_custom_endpoint() {
-        let url = parse_url("s3://data/key.parquet?endpoint=https://minio.example.com").unwrap();
-        let file = open(&url).unwrap();
+        let url = parse_url("s3://data/key.parquet").unwrap();
+        let endpoint = options(serde_json::json!({"endpoint": "https://minio.example.com"}));
+        let file = open(&url, &endpoint).unwrap();
         assert_eq!(file.url.as_str(), "s3://data/key.parquet");
         assert_eq!(file.base.as_str(), "s3://data");
     }
 
     #[test]
     fn anonymous_requests_may_use_a_plain_http_endpoint() {
-        let url = parse_url("s3://data/key.parquet?endpoint=http://minio.example.com").unwrap();
-        assert!(open(&url).is_ok());
+        let url = parse_url("s3://data/key.parquet").unwrap();
+        let endpoint = options(serde_json::json!({"endpoint": "http://minio.example.com"}));
+        assert!(open(&url, &endpoint).is_ok());
     }
 
     /// The usual local-MinIO endpoint is on the loopback interface, which the caller
     /// does not get to reach unless the server was configured for it.
     #[test]
     fn a_loopback_endpoint_needs_the_server_to_allow_it() {
-        let url = parse_url("s3://data/key.parquet?endpoint=http://127.0.0.1:9000").unwrap();
-        let error = open(&url).unwrap_err();
+        let url = parse_url("s3://data/key.parquet").unwrap();
+        let endpoint = options(serde_json::json!({"endpoint": "http://127.0.0.1:9000"}));
+        let error = open(&url, &endpoint).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
         assert!(error.to_string().contains("loopback"), "{error}");
-        assert!(open_loopback(&url).is_ok());
+        assert!(open_loopback(&url, &endpoint).is_ok());
     }
 
     #[test]
     fn credentials_over_a_plain_http_endpoint_need_saying_so() {
-        let with_creds = format!(
-            "endpoint=http://127.0.0.1:9000&access_key_id=AKIA123&secret_access_key={SECRET}"
-        );
-        let url = parse_url(&format!("s3://data/key.parquet?{with_creds}")).unwrap();
-        let error = open_loopback(&url).unwrap_err();
+        let url = parse_url("s3://data/key.parquet").unwrap();
+        let credentialed = serde_json::json!({
+            "endpoint": "http://127.0.0.1:9000",
+            "access_key_id": "AKIA123",
+            "secret_access_key": SECRET,
+        });
+
+        let error = open_loopback(&url, &options(credentialed.clone())).unwrap_err();
         assert!(error.to_string().contains("cleartext"), "{error}");
-        assert!(error.to_string().contains("allow_http=true"), "{error}");
+        assert!(error.to_string().contains("allow_http"), "{error}");
         assert!(!error.to_string().contains(SECRET), "leaked: {error}");
 
-        let url = parse_url(&format!(
-            "s3://data/key.parquet?{with_creds}&allow_http=true"
-        ))
-        .unwrap();
-        assert!(open_loopback(&url).is_ok());
+        let mut allowed = credentialed;
+        allowed["allow_http"] = serde_json::json!(true);
+        assert!(open_loopback(&url, &options(allowed)).is_ok());
     }
 
     #[test]
     fn rejects_nonsense_endpoints_and_flags() {
-        for (query, expected) in [
-            ("endpoint=ftp://host", "expected http or https"),
-            ("endpoint=not a url", "invalid endpoint"),
-            ("allow_http=yes&endpoint=https://h", "must be true or false"),
-            ("allow_http=true", "only applies together with endpoint"),
+        for (option, expected) in [
+            (
+                serde_json::json!({"endpoint": "ftp://host"}),
+                "expected http or https",
+            ),
+            (
+                serde_json::json!({"endpoint": "not a url"}),
+                "invalid endpoint",
+            ),
+            (
+                serde_json::json!({"allow_http": true}),
+                "only applies together with endpoint",
+            ),
         ] {
-            let url = parse_url(&format!("s3://data/key.parquet?{query}")).unwrap();
-            let error = open(&url).unwrap_err();
-            assert!(error.to_string().contains(expected), "{query}: {error}");
+            let url = parse_url("s3://data/key.parquet").unwrap();
+            let error = open(&url, &options(option.clone())).unwrap_err();
+            assert!(error.to_string().contains(expected), "{option}: {error}");
         }
+    }
+
+    /// `allow_http` is a bool in the body, so a string is a deserialization failure
+    /// rather than something this module has to parse.
+    #[test]
+    fn allow_http_must_be_a_boolean() {
+        let error =
+            serde_json::from_value::<StorageOptions>(serde_json::json!({"allow_http": "yes"}))
+                .unwrap_err();
+        assert!(error.to_string().contains("boolean"), "{error}");
     }
 
     #[test]
     fn credentials_must_come_in_pairs() {
-        for query in [
-            "access_key_id=AKIA123",
-            "secret_access_key=abc",
-            "session_token=tok",
+        for option in [
+            serde_json::json!({"access_key_id": "AKIA123"}),
+            serde_json::json!({"secret_access_key": SECRET}),
+            serde_json::json!({"session_token": "tok"}),
         ] {
-            let url = parse_url(&format!("s3://bucket/key.parquet?{query}")).unwrap();
-            let error = open(&url).unwrap_err();
+            let url = parse_url("s3://bucket/key.parquet").unwrap();
+            let error = open(&url, &options(option.clone())).unwrap_err();
             assert!(
                 error
                     .to_string()
                     .contains("access_key_id and secret_access_key")
                     || error.to_string().contains("session_token needs"),
-                "{query}: {error}"
+                "{option}: {error}"
             );
+            assert!(!error.to_string().contains(SECRET), "leaked: {error}");
         }
     }
 
     #[test]
     fn errors_never_carry_the_credentials() {
-        // Every failure path that formats a url: no key, no host, unknown option.
-        for raw in [
-            &format!("s3://bucket?access_key_id=AKIA123&secret_access_key={SECRET}"),
-            &format!("s3://bucket/key.parquet?nope=1&secret_access_key={SECRET}"),
-            &format!("ftp://bucket/key.parquet?secret_access_key={SECRET}"),
-        ] {
+        let credentials = options(serde_json::json!({
+            "access_key_id": "AKIA123",
+            "secret_access_key": SECRET,
+        }));
+        // Every failure path that formats a url: no key, no host, an unusable scheme.
+        for raw in ["s3://bucket", "ftp://bucket/key.parquet", "s3://bucket/"] {
             let url = parse_url(raw).unwrap();
-            let error = open(&url).unwrap_err().to_string();
+            let error = open(&url, &credentials).unwrap_err().to_string();
             assert!(!error.contains(SECRET), "leaked in: {error}");
         }
     }
 
+    /// A misspelled option is a 400 rather than a silently anonymous request. Held by
+    /// `deny_unknown_fields`, and the point is that it holds at all.
     #[test]
     fn rejects_unknown_storage_options_instead_of_ignoring_them() {
-        let url = parse_url("s3://bucket/key.parquet?regoin=us-west-2").unwrap();
-        let error = open(&url).unwrap_err();
-        assert!(error.to_string().contains("unknown s3 option"), "{error}");
+        let error =
+            serde_json::from_value::<StorageOptions>(serde_json::json!({"regoin": "us-west-2"}))
+                .unwrap_err();
+        assert!(error.to_string().contains("unknown field"), "{error}");
+        assert!(error.to_string().contains("regoin"), "{error}");
+    }
+
+    /// A local file has no store to reach, so options with it mean the caller has the
+    /// wrong url or the wrong options — and either way the credential is misdirected.
+    #[test]
+    fn refuses_storage_options_for_a_scheme_that_has_none() {
+        let path = std::env::temp_dir().join("hats-api-nonexistent.parquet");
+        let url = Url::from_file_path(&path).unwrap();
+        let credentials = options(serde_json::json!({"secret_access_key": SECRET}));
+        let error = open(&url, &credentials).unwrap_err();
+        assert!(error.to_string().contains("not accepted"), "{error}");
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+    }
+
+    /// The url is the object's alone, and options in its query string are refused
+    /// rather than ignored: ignoring them turns a credentialed read into an anonymous
+    /// one, which fails later and somewhere else.
+    #[test]
+    fn refuses_a_url_that_carries_a_query_string() {
+        let url = parse_url(&format!(
+            "s3://bucket/key.parquet?secret_access_key={SECRET}"
+        ))
+        .unwrap();
+        let error = open(&url, &no_options()).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+        assert!(error.to_string().contains("query string"), "{error}");
+        assert!(error.to_string().contains("storage"), "{error}");
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
     }
 
     #[test]
     fn rejects_schemes_we_cannot_serve_yet() {
         let url = parse_url("https://example.com/a.parquet").unwrap();
-        let error = open(&url).unwrap_err();
+        let error = open(&url, &no_options()).unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
         assert!(
             error.to_string().contains("unsupported URL scheme"),
@@ -471,7 +602,7 @@ mod tests {
     fn rejects_urls_without_an_object_key() {
         for raw in ["s3://bucket", "s3://bucket/"] {
             let url = parse_url(raw).unwrap();
-            let error = open(&url).unwrap_err();
+            let error = open(&url, &no_options()).unwrap_err();
             assert!(error.to_string().contains("no object"), "{raw}: {error}");
         }
     }
@@ -506,13 +637,11 @@ mod tests {
 
     /// The request head one `GET` through the store puts on the wire, lowercased —
     /// header names are case-insensitive and the comparisons below do not care.
-    async fn request_head(options: &str) -> String {
+    async fn request_head(mut option: serde_json::Value) -> String {
         let (port, receiver) = capture_one_request();
-        let url = parse_url(&format!(
-            "s3://bucket/key.parquet?endpoint=http://127.0.0.1:{port}&{options}"
-        ))
-        .unwrap();
-        let file = open_loopback(&url).unwrap();
+        option["endpoint"] = serde_json::json!(format!("http://127.0.0.1:{port}"));
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let file = open_loopback(&url, &options(option)).unwrap();
         // The 404 is the point: the request reached the server, which is all the test
         // needs to see.
         use object_store::ObjectStoreExt;
@@ -531,19 +660,22 @@ mod tests {
     /// would otherwise consult; this checks the result of that.
     #[tokio::test]
     async fn a_request_without_credentials_is_unsigned() {
-        let head = request_head("").await;
+        let head = request_head(serde_json::json!({})).await;
         assert!(head.contains("get /bucket/key.parquet"), "{head}");
         assert!(!head.contains("authorization:"), "signed anyway: {head}");
         assert!(!head.contains("x-amz-security-token:"), "{head}");
     }
 
-    /// And the other half: credentials in the url are the ones that sign. The secret
-    /// itself never goes on the wire — SigV4 sends a signature and the key id.
+    /// And the other half: the credentials the request carried are the ones that sign.
+    /// The secret itself never goes on the wire — SigV4 sends a signature and the key
+    /// id.
     #[tokio::test]
-    async fn credentials_from_the_url_are_the_ones_that_sign() {
-        let head = request_head(&format!(
-            "access_key_id=AKIA123&secret_access_key={SECRET}&allow_http=true"
-        ))
+    async fn credentials_from_the_request_are_the_ones_that_sign() {
+        let head = request_head(serde_json::json!({
+            "access_key_id": "AKIA123",
+            "secret_access_key": SECRET,
+            "allow_http": true,
+        }))
         .await;
         assert!(head.contains("authorization:"), "unsigned: {head}");
         assert!(head.contains("akia123"), "{head}");
@@ -553,10 +685,61 @@ mod tests {
         );
     }
 
+    /// Printing the options, and printing the opened file. Both are `Debug` and both
+    /// are one `tracing` call away from a log; neither may carry a credential.
+    /// `RemoteFile` holds the store, whose own `Debug` is the backend's, so this is
+    /// also what would catch a backend that started printing what it was built with.
+    #[test]
+    fn debug_output_carries_no_credentials() {
+        let credentials = options(serde_json::json!({
+            "access_key_id": "AKIA123",
+            "secret_access_key": SECRET,
+            "session_token": "tok",
+            "endpoint": "https://minio.example.com",
+        }));
+
+        let shown = format!("{credentials:?}");
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        assert!(!shown.contains("AKIA123"), "leaked: {shown}");
+        assert!(!shown.contains("tok\""), "leaked: {shown}");
+        // Still worth printing: the endpoint is how a misrouted request is diagnosed.
+        assert!(shown.contains("minio.example.com"), "{shown}");
+
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let file = format!("{:?}", open(&url, &credentials).unwrap());
+        assert!(!file.contains(SECRET), "leaked: {file}");
+        assert!(!file.contains("AKIA123"), "leaked: {file}");
+        assert!(file.contains("s3://bucket/key.parquet"), "{file}");
+    }
+
+    /// Credentials in the authority are the other way to spell them into the url, and
+    /// the one that would ride along inside the url the whole service logs.
+    #[test]
+    fn refuses_credentials_in_the_url_authority() {
+        for raw in [
+            &format!("s3://AKIA123:{SECRET}@bucket/key.parquet"),
+            &format!("s3://{SECRET}@bucket/key.parquet"),
+        ] {
+            let url = parse_url(raw).unwrap();
+            let error = open(&url, &no_options()).unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+            assert!(error.to_string().contains("in its authority"), "{error}");
+            assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+        }
+    }
+
+    /// The same url with no object key, which fails earlier and on a different message.
+    #[test]
+    fn an_error_before_the_userinfo_check_does_not_echo_it_either() {
+        let url = parse_url(&format!("s3://AKIA123:{SECRET}@bucket")).unwrap();
+        let error = open(&url, &no_options()).unwrap_err().to_string();
+        assert!(!error.contains(SECRET), "leaked: {error}");
+    }
+
     #[test]
     fn keeps_equals_signs_in_hats_paths() {
         let url = parse_url("s3://b/hats/Norder=5/Npix=12240/part0.parquet").unwrap();
-        let file = open(&url).unwrap();
+        let file = open(&url, &no_options()).unwrap();
         assert_eq!(file.url.path(), url.path());
         assert!(file.url.path().contains("Norder=5"), "{}", file.url.path());
     }

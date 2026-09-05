@@ -13,33 +13,56 @@ remote file, reads its metadata, and throws all of it away. Nothing is cached.
 {"status": "ok"}
 ```
 
-### `GET /api/v1/select`
+### `POST /api/v1/select`
 
-Returns every row where `column == value`.
+Returns every row where `column == value`. The request is a JSON body:
 
-| parameter | meaning |
+```json
+{
+  "url": "s3://bucket/key.parquet",
+  "storage": {"region": "us-west-2"},
+  "column": "objectid",
+  "value": "42",
+  "columns": ["objectid", "lightcurve.mag"],
+  "format": "json"
+}
+```
+
+| field | meaning |
 |---|---|
 | `url` | where the data is: `s3://bucket/key.parquet`, or a local path |
+| `storage` | *optional* how to reach the store — see [Storage options](#storage-options) |
 | `column` | column to filter on; must be a top-level, non-nested column |
 | `value` | the value to match, parsed into the column's own type |
-| `columns` | *optional* comma-separated columns to return; omit for all of them |
+| `columns` | *optional* list of columns to return; omit for all of them |
 | `format` | *optional* `json` (default) or `parquet` |
 
-`columns` entries are dotted paths into nested structs, e.g.
-`objectid,lightcurve.mag,objra`. A nested path reads only that leaf of the parquet
-file, not every field of the struct, and the JSON key is the path as written. Naming a
-column or a struct field that does not exist is a 400 that lists what is there.
+**`POST`, because `storage` can carry credentials.** A query string lands in the access
+log of every proxy, load balancer and CDN in front of this service, and in shell history;
+a body does not. A body also has no URL-length limit, and lets `url` be an ordinary
+string rather than a URL nested inside another URL's parameter.
 
-With `format=parquet` the same rows come back as a parquet file laid out like the file
+`columns` entries are dotted paths into nested structs, e.g.
+`["objectid", "lightcurve.mag", "objra"]`. A nested path reads only that leaf of the
+parquet file, not every field of the struct, and the JSON key is the path as written.
+Naming a column or a struct field that does not exist is a 400 that lists what is there.
+
+With `"format": "parquet"` the same rows come back as a parquet file laid out like the file
 they were read from — see [Parquet output](#parquet-output).
 
 **Which URLs are allowed is a matter of configuration**, and by default that is any s3
 endpoint except the loopback interface, and no local files at all. See
 [Configuration](#configuration).
 
-Storage-specific options travel in the `url`'s own query string, not as parameters of
-this endpoint. `s3://` and local files are supported so far; adding a scheme means
-adding a match arm in `src/storage.rs` and a rule kind in `src/access.rs`.
+### Storage options
+
+`storage` says how to reach the store; `url` says which object. They are kept apart
+because a URL's own query string belongs to the origin — a presigned signature, a CDN
+token — and there would be no way to tell one of those from one of ours. A `url` with a
+query string is a 400, not a silent reinterpretation.
+
+`s3://` and local files are supported so far; adding a scheme means adding a match arm
+in `src/storage.rs` and a rule kind in `src/access.rs`.
 
 | s3 option | meaning |
 |---|---|
@@ -49,23 +72,24 @@ adding a match arm in `src/storage.rs` and a rule kind in `src/access.rs`.
 | `access_key_id`, `secret_access_key` | credentials; must be given together |
 | `session_token` | for temporary credentials; needs the pair above |
 
+```json
+{"region": "us-west-2"}
+{"access_key_id": "AKIA...", "secret_access_key": "...", "region": "eu-west-1"}
+{"endpoint": "https://s3.example.com", "access_key_id": "...", "secret_access_key": "..."}
+{"endpoint": "http://127.0.0.1:9000"}
 ```
-s3://bucket/key.parquet?region=us-west-2
-s3://bucket/key.parquet?access_key_id=AKIA...&secret_access_key=...&region=eu-west-1
-s3://bucket/key.parquet?endpoint=https://s3.example.com&access_key_id=...&secret_access_key=...
-s3://bucket/key.parquet?endpoint=http://127.0.0.1:9000                   # local MinIO, anonymous
-```
-
-With no credentials the request is made anonymously, unsigned. An unknown option is a
-400 rather than a silent fallback to anonymous.
 
 That last one — an endpoint on the loopback interface — needs `allow_loopback` in the
 config file, and is a 403 without it. The service can reach things on its own machine
 that its callers are not meant to reach through it.
 
+With no credentials the request is made anonymously, unsigned. An unknown option is a
+400 rather than a silent fallback to anonymous, and so is a `storage` sent with a
+`file://` url, which has no store to reach.
+
 An `http://` endpoint works as-is for anonymous requests — there is no secret to expose,
 and that is the usual local-MinIO case. Sending *credentials* to an `http://` endpoint
-needs `allow_http=true`, so a typo cannot put them in cleartext by accident. Requests to
+needs `"allow_http": true`, so a typo cannot put them in cleartext by accident. Requests to
 a custom endpoint are path-style (`endpoint/bucket/key`), which is what MinIO and Ceph
 expect; virtual-hosted style is not exposed yet.
 
@@ -82,22 +106,22 @@ file:///srv/hats/ztf/Norder=5/Npix=12240/part0.parquet
 403 out of the box. See [Configuration](#configuration) for `access.local.paths` and
 `follow_symlinks`.
 
-**On credentials in URLs.** The service never logs them and never puts them in an error
-message: it strips the query string the moment the store is built, and everything
-downstream — logs, error text, DataFusion — sees only `s3://bucket/key.parquet`. The
-request span logs method and path, not the query string. What the service cannot do is
-protect a secret in transit through someone else's infrastructure: a URL query string
-lands in the access logs of any proxy, load balancer or CDN in front of this service,
-and in shell history. Use TLS, and prefer short-lived credentials.
+**On credentials.** The service never logs them and never puts them in an error message.
+They are held in types that do not print, so everything downstream — logs, spans, error
+text, DataFusion — sees `s3://bucket/key.parquet` and `***`. Credentials go in the
+request body rather than a query string, which keeps them out of intermediaries' access
+logs and shell history. What the service still cannot do is protect a secret in transit:
+use TLS, and prefer short-lived credentials.
 
 Example:
 
 ```bash
-curl -sG http://127.0.0.1:8080/api/v1/select \
-  --data-urlencode 'url=s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats/dataset/Norder=5/Dir=10000/Npix=12240/part0.snappy.parquet' \
-  --data-urlencode 'column=_healpix_29' \
-  --data-urlencode 'value=3445524782181585918' \
-  --data-urlencode 'columns=objectid,lightcurve.mag,objra,objdec'
+curl -s http://127.0.0.1:8080/api/v1/select -H 'content-type: application/json' -d '{
+  "url": "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats/dataset/Norder=5/Dir=10000/Npix=12240/part0.snappy.parquet",
+  "column": "_healpix_29",
+  "value": "3445524782181585918",
+  "columns": ["objectid", "lightcurve.mag", "objra", "objdec"]
+}'
 ```
 
 ```json
@@ -115,15 +139,16 @@ curl -sG http://127.0.0.1:8080/api/v1/select \
 
 ## Parquet output
 
-`format=parquet` returns a parquet file rather than JSON:
+`"format": "parquet"` returns a parquet file rather than JSON:
 
 ```bash
-curl -sG http://127.0.0.1:8080/api/v1/select \
-  --data-urlencode 'url=s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats/dataset/Norder=5/Dir=10000/Npix=12240/part0.snappy.parquet' \
-  --data-urlencode 'column=_healpix_29' \
-  --data-urlencode 'value=3445524782181585918' \
-  --data-urlencode 'columns=objectid,lightcurve.mag,objra,objdec' \
-  --data-urlencode 'format=parquet' -o selection.parquet
+curl -s http://127.0.0.1:8080/api/v1/select -H 'content-type: application/json' -o selection.parquet -d '{
+  "url": "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats/dataset/Norder=5/Dir=10000/Npix=12240/part0.snappy.parquet",
+  "column": "_healpix_29",
+  "value": "3445524782181585918",
+  "columns": ["objectid", "lightcurve.mag", "objra", "objdec"],
+  "format": "parquet"
+}'
 ```
 
 ```
@@ -144,7 +169,7 @@ Nested columns keep their requested names, which is what makes the output a flat
 
 The answer to a point lookup is a few rows out of a file someone else wrote, so it is
 written back with that file's own layout rather than with the writer's defaults. Reading
-the source footer for that costs one extra request, made only when `format=parquet`.
+the source footer for that costs one extra request, made only when `"format": "parquet"`.
 
 Per leaf column, matched by its parquet path:
 
@@ -205,13 +230,13 @@ the service will read, and a typo in it must not quietly widen or narrow that.
 For s3 the thing worth deciding is **which endpoint may be contacted, not which bucket
 may be read**. A bucket name says nothing about the host: the request carries its own
 `endpoint` option and can point the service anywhere, so `s3://allowed-bucket/key`
-with `?endpoint=https://elsewhere.example.com` would sail through a bucket allowlist
+with a `storage.endpoint` of `https://elsewhere.example.com` would sail through a bucket allowlist
 while the service talks to whatever that host is. So the rules are endpoints, and any
 bucket at an allowed endpoint is readable.
 
 | entry | means |
 |---|---|
-| `aws` | AWS S3 itself — a `url` with no `endpoint` option of its own |
+| `aws` | AWS S3 itself — a request with no `endpoint` option |
 | `https://minio.example.com` | one S3-compatible server |
 
 Three states, and the first two differ:

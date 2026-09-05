@@ -19,6 +19,7 @@ use common::{ACCESS_KEY_ID, SECRET_ACCESS_KEY, TestS3, lookup, permissive_policy
 use hats_api::access::AccessPolicy;
 use hats_api::app;
 use hats_api::logging;
+use hats_api::storage::StorageOptions;
 use http_body_util::BodyExt;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
@@ -108,7 +109,8 @@ async fn a_successful_credentialed_read_logs_no_secret() {
     server.put_parquet("private/part0.parquet");
 
     let result = lookup(
-        &server.url("private/part0.parquet", &server.credentialed_options()),
+        &server.url("private/part0.parquet"),
+        &server.credentialed_options(),
         &permissive_policy(),
         "objectid",
         "1",
@@ -134,14 +136,12 @@ async fn a_failed_credentialed_read_logs_no_secret() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
-    let options = format!(
-        "access_key_id={ACCESS_KEY_ID}&secret_access_key={SECRET_ACCESS_KEY}&allow_http=true"
-    );
     // A key that is not there, with credentials that are: the origin answers 404 and
     // the error travels back through every layer.
     let error = common::expect_error(
         lookup(
-            &server.url("private/absent.parquet", &options),
+            &server.url("private/absent.parquet"),
+            &server.credentialed_options(),
             &permissive_policy(),
             "objectid",
             "1",
@@ -165,14 +165,15 @@ async fn a_session_token_never_reaches_the_logs() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
-    let options = format!(
-        "access_key_id={ACCESS_KEY_ID}&secret_access_key={SECRET_ACCESS_KEY}\
-         &session_token=session-token-value&allow_http=true"
-    );
+    let options = StorageOptions {
+        session_token: Some("session-token-value".to_owned().into()),
+        ..server.credentialed_options()
+    };
     // It will not authenticate — the server knows no such token — which is fine: the
     // question is what got logged on the way.
     let _ = lookup(
-        &server.url("private/part0.parquet", &options),
+        &server.url("private/part0.parquet"),
+        &options,
         &permissive_policy(),
         "objectid",
         "1",
@@ -183,29 +184,38 @@ async fn a_session_token_never_reaches_the_logs() {
     assert_no_secret(&captured.contents(), "session token");
 }
 
-/// The whole HTTP path, which is where the credential actually arrives today: in the
-/// query string of a `GET`. `tower_http`'s default span carries the whole URI, so the
-/// router replaces it with method and path — this is the test that keeps it replaced.
+/// The whole HTTP path, with the credential where it actually arrives: in the request
+/// body. A body is not in the URI, so it is not in `tower_http`'s span by default — but
+/// the router still narrows that span to method and path, and nothing between the
+/// extractor and the handler may write the body out.
 #[tokio::test]
-async fn the_request_span_does_not_carry_the_query_string() {
+async fn a_credentialed_request_through_the_router_logs_no_secret() {
     use tower::ServiceExt;
 
     let captured = logs();
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
-    let target = server.url("private/part0.parquet", &server.credentialed_options());
-    let request_uri = format!(
-        "/api/v1/select?url={}&column=objectid&value=1",
-        urlencode(&target)
-    );
+    let body = serde_json::json!({
+        "url": server.url("private/part0.parquet"),
+        "storage": {
+            "endpoint": server.endpoint,
+            "access_key_id": ACCESS_KEY_ID,
+            "secret_access_key": SECRET_ACCESS_KEY,
+            "allow_http": true,
+        },
+        "column": "objectid",
+        "value": "1",
+    });
 
     let router = app::router(Arc::new(permissive_policy()));
     let response = router
         .oneshot(
             axum::http::Request::builder()
-                .uri(&request_uri)
-                .body(axum::body::Body::empty())
+                .method("POST")
+                .uri("/api/v1/select")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
                 .expect("request"),
         )
         .await
@@ -220,9 +230,35 @@ async fn the_request_span_does_not_carry_the_query_string() {
         .to_bytes();
     let body = String::from_utf8_lossy(&body);
 
-    // Whatever the outcome, neither the body nor the logs may carry the secret.
+    // Whatever the outcome, neither the response nor the logs may carry the secret.
     assert_no_secret(&body, &format!("the {status} response body"));
     assert_no_secret(&captured.contents(), "the request span");
+}
+
+/// The `Debug` of everything a handler holds while serving a credentialed request.
+///
+/// Every one of these is one `?value` away from a log line, and the types are built so
+/// that writing it is harmless — this is the test that keeps them that way when a field
+/// is added or a `#[derive(Debug)]` comes back.
+#[tokio::test]
+async fn debug_formatting_the_request_state_logs_no_secret() {
+    let captured = logs();
+    let server = TestS3::authenticated().await;
+    server.put_parquet("private/part0.parquet");
+
+    let raw = server.url("private/part0.parquet");
+    let options = server.credentialed_options();
+    let source = hats_api::redact::SourceUrl::from(raw.clone());
+    let url = hats_api::storage::parse_url(&raw).expect("the url should parse");
+    let file =
+        hats_api::storage::open(&url, &options, &permissive_policy()).expect("it should open");
+
+    tracing::debug!(?source, ?options, ?file, store = ?file.store, "the state a handler holds");
+    assert_no_secret(&captured.contents(), "debug-formatted request state");
+    assert!(
+        captured.contents().contains("the state a handler holds"),
+        "the line was filtered out, so nothing was checked"
+    );
 }
 
 /// A refusal the policy makes, before any store is built. The url is formatted into
@@ -244,7 +280,8 @@ async fn a_policy_refusal_logs_no_secret() {
 
     let error = common::expect_error(
         lookup(
-            &server.url("private/part0.parquet", &server.credentialed_options()),
+            &server.url("private/part0.parquet"),
+            &server.credentialed_options(),
             &policy,
             "objectid",
             "1",
@@ -257,17 +294,4 @@ async fn a_policy_refusal_logs_no_secret() {
 
     tracing::warn!(%error, "logging the refusal");
     assert_no_secret(&captured.contents(), "policy refusal");
-}
-
-/// Percent-encode a url so it survives being one query parameter inside another.
-fn urlencode(value: &str) -> String {
-    value
-        .bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (byte as char).to_string()
-            }
-            other => format!("%{other:02X}"),
-        })
-        .collect()
 }

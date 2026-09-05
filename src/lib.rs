@@ -37,4 +37,5 @@ pub mod error;
 pub mod logging;
 pub mod parquet_out;
 pub mod query;
+pub mod redact;
 pub mod storage;

@@ -3,10 +3,10 @@ use std::time::Instant;
 
 use axum::{
     Router,
-    extract::{Query, Request, State},
+    extract::{Request, State, rejection::JsonRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
@@ -15,15 +15,20 @@ use crate::access::AccessPolicy;
 use crate::error::ApiError;
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
-use crate::storage::{self, RemoteFile, parse_url};
+use crate::redact::SourceUrl;
+use crate::storage::{self, RemoteFile, StorageOptions, parse_url};
 
 pub fn router(policy: Arc<AccessPolicy>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
-        .route("/api/v1/select", get(select))
+        // `POST`, not `GET`: the request carries credentials, and a query string is
+        // written to every proxy's access log and the caller's shell history on the way.
+        // A body also has no url-length limit and needs no url nested inside a url.
+        .route("/api/v1/select", post(select))
         .with_state(policy)
-        // Method and path only. The default span carries the whole URI, and our query
-        // string can hold S3 credentials.
+        // Method and path only. The default span carries the whole URI, including a
+        // query string this service does not read but a caller may still have put
+        // something in.
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request| {
                 tracing::debug_span!(
@@ -45,16 +50,21 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
 }
 
 #[derive(Debug, Deserialize)]
-struct SelectQuery {
-    /// Where the data is. Storage-specific options ride in this URL's own query
-    /// string, e.g. `s3://bucket/key.parquet?region=us-west-2`.
-    url: String,
+#[serde(deny_unknown_fields)]
+struct SelectRequest {
+    /// Where the data is, treated as opaque: whatever query string it has belongs to
+    /// the origin, not to us.
+    url: SourceUrl,
+    /// How to reach the store — a region, an endpoint, credentials. Absent means a
+    /// public object read anonymously, which is the common case.
+    #[serde(default)]
+    storage: StorageOptions,
     /// What to select. These are the only domain parameters.
     column: String,
     value: String,
-    /// Comma-separated columns to return, dotted for nested fields
-    /// (`objectid,lightcurve.mag,objra`). Absent returns every column.
-    columns: Option<String>,
+    /// Columns to return, dotted for nested fields (`lightcurve.mag`). Absent returns
+    /// every column.
+    columns: Option<Vec<String>>,
     /// `json` (the default) or `parquet`.
     format: Option<String>,
 }
@@ -88,19 +98,49 @@ impl Format {
     }
 }
 
-/// Split the `columns` parameter, rejecting anything that would silently return the
-/// wrong thing (an empty list, a stray comma).
-fn parse_columns(raw: Option<&str>) -> Result<Option<Vec<String>>, ApiError> {
-    let Some(raw) = raw else {
-        return Ok(None);
+/// A body we could not read, said without quoting it back.
+///
+/// The body carries the credentials, and serde's type errors quote the offending value
+/// — `invalid type: string "AKIA…"`. So the message is ours, except for the two serde
+/// phrasings that name a key rather than a value. The rest state what was expected,
+/// which is what the caller needed anyway.
+fn body_error(rejection: &JsonRejection) -> ApiError {
+    const SHAPE: &str = "expected a JSON object with url, column and value, and \
+                         optionally storage, columns, format";
+
+    match rejection {
+        // A parse failure quotes the position, not the contents.
+        JsonRejection::JsonSyntaxError(error) => {
+            ApiError::bad_request(format!("the request body is not valid JSON: {error}"))
+        }
+        JsonRejection::JsonDataError(error) => {
+            let message = error.body_text();
+            // `unknown field \`regoin\`` and `missing field \`column\`` name a key. Every
+            // other message may quote a value.
+            let names_a_key = ["unknown field", "missing field"]
+                .iter()
+                .any(|prefix| message.contains(prefix));
+            match names_a_key {
+                true => ApiError::bad_request(message),
+                false => ApiError::bad_request(format!("the request body does not fit: {SHAPE}")),
+            }
+        }
+        _ => ApiError::bad_request(format!("{}; {SHAPE}", rejection.body_text())),
+    }
+}
+
+/// Reject a `columns` list that would silently return the wrong thing: an empty list
+/// reads as "no columns" but would be served as "every column".
+fn check_columns(columns: Option<&Vec<String>>) -> Result<(), ApiError> {
+    let Some(columns) = columns else {
+        return Ok(());
     };
-    let paths: Vec<String> = raw.split(',').map(|p| p.trim().to_owned()).collect();
-    if paths.iter().any(|p| p.is_empty()) {
+    if columns.is_empty() || columns.iter().any(|path| path.trim().is_empty()) {
         return Err(ApiError::bad_request(
-            "columns must be a comma-separated list of non-empty column names",
+            "columns must be a non-empty list of non-empty column names",
         ));
     }
-    Ok(Some(paths))
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -117,18 +157,20 @@ const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
 async fn select(
     State(policy): State<Arc<AccessPolicy>>,
-    Query(params): Query<SelectQuery>,
+    body: Result<Json<SelectRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
+    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
+    // Everything decidable from the request alone, before anything is opened.
     let format = Format::parse(params.format.as_deref())?;
-    let file = storage::open(&parse_url(&params.url)?, &policy)?;
-    let columns = parse_columns(params.columns.as_deref())?;
+    check_columns(params.columns.as_ref())?;
+    let file = storage::open(&parse_url(params.url.as_str())?, &params.storage, &policy)?;
     let result = query::run(
         &file,
         &Selection {
             filter_column: &params.column,
             filter_value: &params.value,
-            columns: columns.as_deref(),
+            columns: params.columns.as_deref(),
         },
     )
     .await?;
@@ -142,7 +184,10 @@ async fn select(
         // file.url, not the parameter: the parameter may carry credentials.
         url = %file.url,
         column = %params.column,
-        columns = params.columns.as_deref().unwrap_or("*"),
+        columns = params
+            .columns
+            .as_ref()
+            .map_or_else(|| "*".to_owned(), |paths| paths.join(",")),
         format = format.name(),
         num_rows,
         elapsed_ms = started.elapsed().as_millis(),
@@ -216,15 +261,30 @@ mod tests {
 
     use super::*;
 
-    /// Returns the status and the body as text; axum's own rejections (a missing
-    /// query parameter) are plain text, ours are JSON.
+    const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
+
     async fn get(uri: &str) -> (StatusCode, String) {
-        get_with(AccessPolicy::default(), uri).await
+        send(Request::builder().uri(uri), Body::empty()).await
     }
 
-    async fn get_with(policy: AccessPolicy, uri: &str) -> (StatusCode, String) {
-        let response = router(Arc::new(policy))
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+    /// A `POST /api/v1/select` with the given body, under a policy that allows
+    /// everything — what the policy allows is `access.rs`'s business.
+    async fn select_with(body: serde_json::Value) -> (StatusCode, String) {
+        send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/select")
+                .header("content-type", "application/json"),
+            Body::from(body.to_string()),
+        )
+        .await
+    }
+
+    /// The status and the body as text; axum's own rejections are plain text, ours are
+    /// JSON.
+    async fn send(request: axum::http::request::Builder, body: Body) -> (StatusCode, String) {
+        let response = router(Arc::new(AccessPolicy::default()))
+            .oneshot(request.body(body).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -242,45 +302,104 @@ mod tests {
         );
     }
 
+    /// The credential-bearing shape is not reachable by a method that puts its
+    /// parameters in a url.
     #[tokio::test]
-    async fn missing_parameters_are_rejected() {
-        let (status, _) = get("/api/v1/select?url=s3://b/k.parquet").await;
+    async fn select_is_not_a_get() {
+        let (status, _) = get("/api/v1/select?url=s3://b/k.parquet&column=x&value=1").await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn a_missing_field_is_named() {
+        let (status, body) = select_with(serde_json::json!({"url": "s3://b/k.parquet"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("column"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_misspelled_field_is_named_rather_than_ignored() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet", "column": "x", "value": "1",
+            "storage": {"regoin": "us-west-2"},
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("regoin"), "{body}");
+    }
+
+    /// A body that does not fit is described, never quoted: a mistyped `storage` is
+    /// exactly where a secret would be sitting.
+    #[tokio::test]
+    async fn a_body_that_does_not_fit_is_not_quoted_back() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet", "column": "x", "value": "1",
+            "storage": SECRET,
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.contains(SECRET), "leaked: {body}");
+        assert!(body.contains("storage"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_body_that_is_not_json_is_rejected() {
+        let (status, body) = send(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/select")
+                .header("content-type", "application/json"),
+            Body::from(format!("{{\"url\": \"{SECRET}\"")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(!body.contains(SECRET), "leaked: {body}");
     }
 
     #[tokio::test]
     async fn unsupported_schemes_are_rejected() {
-        let (status, body) =
-            get("/api/v1/select?url=https://example.com/a.parquet&column=x&value=1").await;
+        let (status, body) = select_with(serde_json::json!({
+            "url": "https://example.com/a.parquet", "column": "x", "value": "1",
+        }))
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unsupported URL scheme"), "{body}");
     }
 
-    #[test]
-    fn parses_the_columns_parameter() {
-        assert_eq!(parse_columns(None).unwrap(), None);
-        assert_eq!(
-            parse_columns(Some("objectid, lightcurve.mag ,objra")).unwrap(),
-            Some(vec![
-                "objectid".to_owned(),
-                "lightcurve.mag".to_owned(),
-                "objra".to_owned()
-            ])
-        );
+    /// The url is the object's, so options in it are a caller using the old shape —
+    /// and dropping them would turn a credentialed read into an anonymous one.
+    #[tokio::test]
+    async fn storage_options_in_the_url_are_refused() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": format!("s3://b/k.parquet?secret_access_key={SECRET}"),
+            "column": "x", "value": "1",
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("query string"), "{body}");
+        assert!(!body.contains(SECRET), "leaked: {body}");
     }
 
     #[test]
     fn rejects_empty_column_lists() {
-        for raw in ["", "objectid,", ",objectid", "objectid,,objra"] {
-            let error = parse_columns(Some(raw)).unwrap_err();
-            assert!(error.to_string().contains("non-empty"), "{raw}: {error}");
+        assert!(check_columns(None).is_ok());
+        assert!(check_columns(Some(&vec!["objectid".to_owned()])).is_ok());
+        for columns in [
+            vec![],
+            vec![String::new()],
+            vec!["a".to_owned(), " ".to_owned()],
+        ] {
+            let error = check_columns(Some(&columns)).unwrap_err();
+            assert!(error.to_string().contains("non-empty"), "{error}");
         }
     }
 
     #[tokio::test]
-    async fn empty_columns_parameter_is_rejected() {
-        let (status, body) =
-            get("/api/v1/select?url=s3://b/k.parquet&column=x&value=1&columns=").await;
+    async fn empty_column_lists_are_rejected_over_http() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "file:///nonexistent.parquet", "column": "x", "value": "1", "columns": [],
+        }))
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("non-empty"), "{body}");
     }
@@ -294,8 +413,10 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_formats_are_rejected() {
-        let (status, body) =
-            get("/api/v1/select?url=s3://b/k.parquet&column=x&value=1&format=csv").await;
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet", "column": "x", "value": "1", "format": "csv",
+        }))
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unknown format"), "{body}");
         assert!(body.contains("json, parquet"), "{body}");
@@ -304,8 +425,10 @@ mod tests {
     #[test]
     fn names_the_download_after_the_source_object() {
         let policy = AccessPolicy::default();
-        let name =
-            |raw: &str| download_name(&storage::open(&parse_url(raw).unwrap(), &policy).unwrap());
+        let name = |raw: &str| {
+            let url = parse_url(raw).unwrap();
+            download_name(&storage::open(&url, &StorageOptions::default(), &policy).unwrap())
+        };
         assert_eq!(
             name("s3://b/dir/part0.snappy.parquet"),
             "part0.snappy.parquet"
@@ -314,9 +437,32 @@ mod tests {
         assert_eq!(name("s3://b/Norder=5/Npix=12240/part0"), "part0.parquet");
     }
 
+    /// The request as a struct, printed. Nothing logs it today, but the derive is what
+    /// makes that a choice rather than a rule to remember.
+    #[test]
+    fn printing_the_request_leaks_nothing() {
+        let params = SelectRequest {
+            url: "s3://b/k.parquet".to_owned().into(),
+            storage: StorageOptions {
+                region: Some("us-west-2".to_owned()),
+                secret_access_key: Some(SECRET.to_owned().into()),
+                ..Default::default()
+            },
+            column: "objectid".to_owned(),
+            value: "1".to_owned(),
+            columns: None,
+            format: None,
+        };
+        let shown = format!("{params:?}");
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        assert!(shown.contains("s3://b/k.parquet"), "{shown}");
+        assert!(shown.contains("us-west-2"), "{shown}");
+    }
+
     #[tokio::test]
     async fn unparseable_urls_are_rejected() {
-        let (status, body) = get("/api/v1/select?url=not-a-url&column=x&value=1").await;
+        let (status, body) =
+            select_with(serde_json::json!({"url": "not-a-url", "column": "x", "value": "1"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("invalid url"), "{body}");
     }

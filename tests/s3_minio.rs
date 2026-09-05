@@ -11,20 +11,14 @@
 //! drift from it. Writing is the test's business only: the service itself never writes,
 //! and this uses its own OpenDAL operator to do it rather than anything under `src/`.
 //!
-//! ```bash
-//! docker run -d -p 9000:9000 -e MINIO_ROOT_USER=minioadmin \
-//!   -e MINIO_ROOT_PASSWORD=minioadmin quay.io/minio/minio server /data
-//! aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://hats-test   # once
-//! HATS_API_TEST_MINIO_ENDPOINT=http://127.0.0.1:9000 \
-//! HATS_API_TEST_MINIO_ACCESS_KEY=minioadmin \
-//! HATS_API_TEST_MINIO_SECRET_KEY=minioadmin \
-//!   cargo test --test s3_minio
-//! ```
+//! CI starts the MinIO and creates the bucket; these run when
+//! `HATS_API_TEST_MINIO_ENDPOINT` names one, and skip otherwise.
 
 mod common;
 
 use common::{expect_error, lookup, parquet_fixture, permissive_policy, row_count, skip_or_fail};
 use hats_api::error::ApiError;
+use hats_api::storage::StorageOptions;
 use opendal::{Operator, services};
 
 /// Where the MinIO under test is, and how to write to it.
@@ -78,19 +72,27 @@ impl Minio {
                     self.bucket
                 )
             });
-        self.url(key, true)
+        self.url(key)
     }
 
-    /// `credentialed` false is the anonymous spelling: the same object, named without
-    /// the keys that open it.
-    fn url(&self, key: &str, credentialed: bool) -> String {
-        let base = format!("s3://{}/{key}?endpoint={}", self.bucket, self.endpoint);
-        match credentialed {
-            false => base,
-            true => format!(
-                "{base}&access_key_id={}&secret_access_key={}&allow_http=true",
-                self.access_key, self.secret_key
-            ),
+    fn url(&self, key: &str) -> String {
+        format!("s3://{}/{key}", self.bucket)
+    }
+
+    /// Enough to find this server, and nothing that would sign a request.
+    fn options(&self) -> StorageOptions {
+        StorageOptions {
+            endpoint: Some(self.endpoint.clone()),
+            ..Default::default()
+        }
+    }
+
+    fn credentialed_options(&self) -> StorageOptions {
+        StorageOptions {
+            access_key_id: Some(self.access_key.clone().into()),
+            secret_access_key: Some(self.secret_key.clone().into()),
+            allow_http: true,
+            ..self.options()
         }
     }
 }
@@ -104,9 +106,16 @@ async fn reads_a_partition_from_minio() {
     };
     let url = minio.put_fixture("catalog/part0.parquet").await;
 
-    let result = lookup(&url, &permissive_policy(), "objectid", "42", None)
-        .await
-        .expect("the lookup should succeed");
+    let result = lookup(
+        &url,
+        &minio.credentialed_options(),
+        &permissive_policy(),
+        "objectid",
+        "42",
+        None,
+    )
+    .await
+    .expect("the lookup should succeed");
     assert_eq!(row_count(&result), 1);
     assert_eq!(result.schema.fields().len(), 4);
 }
@@ -122,9 +131,16 @@ async fn reads_a_hats_partition_key_from_minio() {
         .put_fixture("dataset/Norder=5/Dir=0/Npix=12240/part0.parquet")
         .await;
 
-    let result = lookup(&url, &permissive_policy(), "objectid", "7", None)
-        .await
-        .expect("a signed read of a key with = in it should work");
+    let result = lookup(
+        &url,
+        &minio.credentialed_options(),
+        &permissive_policy(),
+        "objectid",
+        "7",
+        None,
+    )
+    .await
+    .expect("a signed read of a key with = in it should work");
     assert_eq!(row_count(&result), 1);
 }
 
@@ -136,9 +152,16 @@ async fn honours_a_projection_against_minio() {
     let url = minio.put_fixture("catalog/projected.parquet").await;
 
     let columns = ["objectid".to_owned(), "objra".to_owned()];
-    let result = lookup(&url, &permissive_policy(), "objectid", "9", Some(&columns))
-        .await
-        .expect("the projected lookup should succeed");
+    let result = lookup(
+        &url,
+        &minio.credentialed_options(),
+        &permissive_policy(),
+        "objectid",
+        "9",
+        Some(&columns),
+    )
+    .await
+    .expect("the projected lookup should succeed");
     assert_eq!(result.schema.fields().len(), 2);
     assert_eq!(row_count(&result), 1);
 }
@@ -154,7 +177,8 @@ async fn an_anonymous_request_cannot_read_a_private_minio_bucket() {
 
     let error = expect_error(
         lookup(
-            &minio.url("catalog/private.parquet", false),
+            &minio.url("catalog/private.parquet"),
+            &minio.options(),
             &permissive_policy(),
             "objectid",
             "1",
@@ -176,7 +200,8 @@ async fn a_missing_object_in_minio_is_not_a_policy_refusal() {
 
     let error = expect_error(
         lookup(
-            &minio.url("catalog/definitely-absent.parquet", true),
+            &minio.url("catalog/definitely-absent.parquet"),
+            &minio.credentialed_options(),
             &permissive_policy(),
             "objectid",
             "1",

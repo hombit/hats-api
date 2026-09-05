@@ -22,7 +22,7 @@
 mod common;
 
 use common::{capture_one_request, permissive_policy};
-use hats_api::storage;
+use hats_api::storage::{self, StorageOptions};
 
 /// Values that are syntactically valid, so that anything picking them up would sign
 /// successfully rather than erroring for an unrelated reason.
@@ -53,9 +53,15 @@ async fn a_request_with_no_credentials_ignores_the_environment() {
     }
 
     let (port, receiver) = capture_one_request();
-    let raw = format!("s3://bucket/key.parquet?endpoint=http://127.0.0.1:{port}");
-    let url = storage::parse_url(&raw).expect("a valid url");
-    let file = storage::open(&url, &permissive_policy()).expect("the policy allows loopback");
+    let url = storage::parse_url("s3://bucket/key.parquet").expect("a valid url");
+    // The request carries no credentials at all, which is the whole point: whatever
+    // the environment holds, an unsigned request is what must go out.
+    let options = StorageOptions {
+        endpoint: Some(format!("http://127.0.0.1:{port}")),
+        ..Default::default()
+    };
+    let file =
+        storage::open(&url, &options, &permissive_policy()).expect("the policy allows loopback");
 
     use object_store::ObjectStoreExt;
     let _ = file
