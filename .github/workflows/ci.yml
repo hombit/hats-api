@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to a branch makes the first one's run pointless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on a failing test is the difference between one CI round trip and
+  # three.
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Everything here is hermetic: the S3 tests run against an in-process server,
+      # and `tests/s3_remote.rs` skips because no target is configured in this job.
+      # Nothing in this workflow reaches the network or needs a credential, so it
+      # runs on pull requests from forks.
+      - name: cargo test
+        run: cargo test --all-targets
+
+      - name: cargo doc
+        run: cargo doc --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  build:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+
+  # A real MinIO, which is what the deployments this serves actually run. No secret is
+  # involved — the container's credentials are made up here and it is destroyed with
+  # the runner — so this runs on pull requests, forks included.
+  #
+  # `docker run` rather than a service container: the MinIO image needs `server /data`
+  # as its command, and `jobs.<id>.services` has no way to set one.
+  minio:
+    name: real MinIO
+    runs-on: ubuntu-latest
+    env:
+      HATS_API_TEST_MINIO_ENDPOINT: http://127.0.0.1:9000
+      HATS_API_TEST_MINIO_ACCESS_KEY: minioadmin
+      HATS_API_TEST_MINIO_SECRET_KEY: minioadmin
+      HATS_API_TEST_MINIO_BUCKET: hats-test
+      # Without this the tests would skip, and a job that skipped everything would
+      # still be green.
+      HATS_API_TEST_REQUIRE_REMOTE: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER=$HATS_API_TEST_MINIO_ACCESS_KEY \
+            -e MINIO_ROOT_PASSWORD=$HATS_API_TEST_MINIO_SECRET_KEY \
+            quay.io/minio/minio server /data
+
+      # The tests write their own fixtures, but S3 has no way to create a bucket
+      # implicitly, so that one step is here.
+      - name: wait for MinIO and create the bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.HATS_API_TEST_MINIO_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.HATS_API_TEST_MINIO_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -fsS "$HATS_API_TEST_MINIO_ENDPOINT/minio/health/live" >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "$HATS_API_TEST_MINIO_ENDPOINT/minio/health/live" >/dev/null \
+            || { echo "MinIO did not come up"; docker logs minio; exit 1; }
+          aws --endpoint-url "$HATS_API_TEST_MINIO_ENDPOINT" \
+            s3 mb "s3://$HATS_API_TEST_MINIO_BUCKET"
+
+      - name: cargo test --test s3_minio
+        run: cargo test --test s3_minio
+
+      - name: MinIO logs
+        if: failure()
+        run: docker logs minio
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans licenses sources

@@ -1,0 +1,55 @@
+# Run on every commit: `pre-commit install` once, then it is automatic.
+# To run over the whole tree: `pre-commit run --all-files`.
+#
+# The Rust hooks are `language: system`, so they use this checkout's toolchain and
+# whatever `cargo` is on PATH rather than a copy pre-commit manages. They also set
+# `pass_filenames: false`, because cargo works on the crate and not on a file list.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      # This service exists to take credentials from callers. A key committed to the
+      # repository is the one mistake here that cannot be undone by a later commit.
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # `--fix` first so the mechanical ones are applied rather than reported, then a
+      # plain run with `-D warnings` to fail on whatever is left. Without the second
+      # pass a lint clippy cannot fix would pass the hook and fail CI.
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: >-
+          bash -c 'cargo clippy --all-targets --fix --allow-staged --allow-dirty
+          && cargo clippy --all-targets -- -D warnings'
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # Included because it is fast: the whole suite is about two seconds, since the
+      # S3 tests run against an in-process server and the ones that reach the network
+      # skip unless configured. If that stops being true, move this to CI only.
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --all-targets
+        language: system
+        types: [rust]
+        pass_filenames: false

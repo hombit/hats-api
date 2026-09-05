@@ -1,0 +1,54 @@
+# `cargo deny check` — run in CI, and worth running locally before adding a dependency.
+#
+# The service takes urls and credentials from callers and makes requests on their
+# behalf, so an advisory in the HTTP or TLS stack is a problem for this repository even
+# when it is nowhere near our own code.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licences only. Anything copyleft would have to be a deliberate decision
+# with a note here, not something that arrived with a transitive dependency.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # `bzip2-sys`, reached through DataFusion's `compression` feature. BSD-like, and
+    # the same terms bzip2 has shipped under since 1996.
+    "bzip2-1.0.6",
+    # `webpki-roots`: the Mozilla CA bundle, which is data rather than code.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# `object_store_opendal` adapts OpenDAL into the `object_store` trait DataFusion
+# consumes. Two copies of `object_store` in the tree are two distinct `ObjectStore`
+# traits, so the adapter's output could not be registered with DataFusion at all. That
+# fails to compile rather than misbehaving, but it is why those versions must stay
+# matched when either is bumped.
+deny = []
+
+[[bans.skip-tree]]
+# Dev-only: the test S3 server brings its own tree, and duplicate versions inside it
+# do not ship.
+name = "s3s"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
