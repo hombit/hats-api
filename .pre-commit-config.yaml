@@ -1,9 +1,4 @@
-# Run on every commit: `pre-commit install` once, then it is automatic.
-# To run over the whole tree: `pre-commit run --all-files`.
-#
-# The Rust hooks are `language: system`, so they use this checkout's toolchain and
-# whatever `cargo` is on PATH rather than a copy pre-commit manages. They also set
-# `pass_filenames: false`, because cargo works on the crate and not on a file list.
+# `pre-commit install` once; `pre-commit run --all-files` to sweep the tree.
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -16,11 +11,10 @@ repos:
       - id: check-json
       - id: check-merge-conflict
       - id: check-case-conflict
+      - id: check-symlinks
       - id: mixed-line-ending
       - id: check-added-large-files
         args: [--maxkb=512]
-      # This service exists to take credentials from callers. A key committed to the
-      # repository is the one mistake here that cannot be undone by a later commit.
       - id: detect-private-key
 
   - repo: local
@@ -32,9 +26,7 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # `--fix` first so the mechanical ones are applied rather than reported, then a
-      # plain run with `-D warnings` to fail on whatever is left. Without the second
-      # pass a lint clippy cannot fix would pass the hook and fail CI.
+      # --fix applies what it can; the second pass fails on the rest.
       - id: cargo-clippy
         name: cargo clippy
         entry: >-
@@ -44,12 +36,15 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # Included because it is fast: the whole suite is about two seconds, since the
-      # S3 tests run against an in-process server and the ones that reach the network
-      # skip unless configured. If that stops being true, move this to CI only.
+      # Kept here only while the suite stays fast (~2s).
       - id: cargo-test
         name: cargo test
         entry: cargo test --all-targets
         language: system
         types: [rust]
         pass_filenames: false
+
+# pre-commit.ci has no Rust: https://github.com/pre-commit-ci/issues/issues/89
+# The cargo hooks run locally and in the CI workflow instead.
+ci:
+  skip: [cargo-fmt, cargo-clippy, cargo-test]
