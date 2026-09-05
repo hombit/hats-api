@@ -1,0 +1,55 @@
+# Every key here is optional, and every value shown is the default. Run without a
+# config file at all and this is what you get.
+#
+#   hats-api --config hats-api.toml
+#   HATS_API_CONFIG=hats-api.toml hats-api
+#
+# An unknown key is a startup error rather than a silent default: this file decides
+# what the service will read, and a typo in it must not quietly widen or narrow that.
+
+[server]
+# Every interface, which is what a container needs. Use "127.0.0.1" on a laptop.
+address = "0.0.0.0"
+port = 80
+
+[access]
+# Whether a request may reach the loopback interface — an s3 endpoint of
+# http://127.0.0.1:9000, say. Off by default: the service can reach things on its own
+# machine that its callers are not meant to reach through it. Turn it on to work
+# against a local MinIO without naming its endpoint below.
+allow_loopback = false
+
+[access.s3]
+# Which S3 servers a request may point this service at. For s3 the endpoint is the
+# thing worth deciding, not the bucket: a bucket name says nothing about the host,
+# because the request carries its own `endpoint` option and can aim anywhere. Any
+# bucket at an allowed endpoint is readable.
+#
+#   "aws"                        AWS S3 itself: a url with no `endpoint` option
+#   "https://minio.example.com"  one S3-compatible server
+#
+# Three states, and the first two differ: leave the key out for any endpoint (the
+# default, still subject to allow_loopback), give an empty list to turn s3 off
+# entirely, or list endpoints for exactly those. Naming an endpoint here is
+# permission enough on its own — allow_loopback is not consulted for it.
+# endpoints = ["aws"]
+
+[access.local]
+# Directories a request may read parquet files from, written as absolute paths or
+# file:// urls. Empty by default, so the service reads no local files until one is
+# listed. A directory that does not exist is a startup error rather than a rule that
+# silently never matches.
+paths = []
+
+# Whether a local path may go through a symlink. Off by default. Turning it on does
+# not widen which files can be read: a path is resolved before it is matched, so a
+# link inside an allowed directory still cannot lead out of one.
+follow_symlinks = false
+
+[log]
+# RUST_LOG syntax, and RUST_LOG itself overrides this when it is set.
+filter = "hats_api=info,tower_http=info"
+# "text" for one human-readable line per event, "json" for one JSON object per event.
+format = "text"
+# Colour. Off when the output is not a terminal, whatever this says.
+ansi = true

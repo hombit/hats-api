@@ -1,8 +1,9 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
     Router,
-    extract::{Query, Request},
+    extract::{Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Json, Response},
     routing::get,
@@ -10,15 +11,17 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
+use crate::access::AccessPolicy;
 use crate::error::ApiError;
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
 use crate::storage::{self, RemoteFile, parse_url};
 
-pub fn router() -> Router {
+pub fn router(policy: Arc<AccessPolicy>) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/select", get(select))
+        .with_state(policy)
         // Method and path only. The default span carries the whole URI, and our query
         // string can hold S3 credentials.
         .layer(
@@ -66,6 +69,13 @@ enum Format {
 impl Format {
     const NAMES: &'static [&'static str] = &["json", "parquet"];
 
+    fn name(self) -> &'static str {
+        match self {
+            Self::Json => "json",
+            Self::Parquet => "parquet",
+        }
+    }
+
     fn parse(raw: Option<&str>) -> Result<Self, ApiError> {
         match raw {
             None | Some("json") => Ok(Self::Json),
@@ -105,10 +115,13 @@ struct SelectResponse {
 const NUM_ROWS_HEADER: &str = "x-hats-num-rows";
 const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
-async fn select(Query(params): Query<SelectQuery>) -> Result<Response, ApiError> {
+async fn select(
+    State(policy): State<Arc<AccessPolicy>>,
+    Query(params): Query<SelectQuery>,
+) -> Result<Response, ApiError> {
     let started = Instant::now();
     let format = Format::parse(params.format.as_deref())?;
-    let file = storage::open(&parse_url(&params.url)?)?;
+    let file = storage::open(&parse_url(&params.url)?, &policy)?;
     let columns = parse_columns(params.columns.as_deref())?;
     let result = query::run(
         &file,
@@ -130,7 +143,7 @@ async fn select(Query(params): Query<SelectQuery>) -> Result<Response, ApiError>
         url = %file.url,
         column = %params.column,
         columns = params.columns.as_deref().unwrap_or("*"),
-        format = ?format,
+        format = format.name(),
         num_rows,
         elapsed_ms = started.elapsed().as_millis(),
         "select"
@@ -206,7 +219,11 @@ mod tests {
     /// Returns the status and the body as text; axum's own rejections (a missing
     /// query parameter) are plain text, ours are JSON.
     async fn get(uri: &str) -> (StatusCode, String) {
-        let response = router()
+        get_with(AccessPolicy::default(), uri).await
+    }
+
+    async fn get_with(policy: AccessPolicy, uri: &str) -> (StatusCode, String) {
+        let response = router(Arc::new(policy))
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -286,7 +303,9 @@ mod tests {
 
     #[test]
     fn names_the_download_after_the_source_object() {
-        let name = |raw: &str| download_name(&storage::open(&parse_url(raw).unwrap()).unwrap());
+        let policy = AccessPolicy::default();
+        let name =
+            |raw: &str| download_name(&storage::open(&parse_url(raw).unwrap(), &policy).unwrap());
         assert_eq!(
             name("s3://b/dir/part0.snappy.parquet"),
             "part0.snappy.parquet"

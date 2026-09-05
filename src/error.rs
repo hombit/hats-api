@@ -11,6 +11,12 @@ use serde::Serialize;
 pub enum ApiError {
     #[error("{0}")]
     BadRequest(String),
+    /// The policy in the config file says no. Distinct from a store's own 403: this
+    /// one is the server's own rule, and the caller cannot fix it with credentials.
+    #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
+    NotFound(String),
     #[error("object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
     #[error("query failed: {0}")]
@@ -36,9 +42,19 @@ impl ApiError {
         Self::BadRequest(message.into())
     }
 
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::Forbidden(message.into())
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound(message.into())
+    }
+
     fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::ObjectStore(error) => object_store_status(error),
             // The remote file being missing or unreadable reaches us wrapped in a
             // DataFusionError, and is the caller's problem, not ours.

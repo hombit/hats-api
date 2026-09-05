@@ -10,16 +10,22 @@
 //! such options. They never leave this module: the URL the rest of the service sees
 //! and logs has the query string stripped, and error messages are built from that
 //! stripped URL so a secret cannot escape in a 400.
+//!
+//! Which URLs may be opened at all is not decided here: [`open`] asks the
+//! [`AccessPolicy`] first, and every path into a store goes through that one call.
 
+use std::path::Path as FilePath;
 use std::sync::Arc;
 
-use object_store::{ObjectStore, aws::AmazonS3Builder};
+use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem};
 use url::Url;
 
+use crate::access::{AccessPolicy, Target};
 use crate::error::ApiError;
 
-/// Schemes [`open`] can serve today.
-pub const SUPPORTED_SCHEMES: &[&str] = &["s3"];
+/// Schemes [`open`] can serve today. Whether a given URL in one of them may actually be
+/// read is the [`AccessPolicy`]'s business, not this list's.
+pub const SUPPORTED_SCHEMES: &[&str] = &["s3", "file"];
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
@@ -42,21 +48,50 @@ pub struct RemoteFile {
     pub url: Url,
 }
 
-pub fn open(url: &Url) -> Result<RemoteFile, ApiError> {
+pub fn open(url: &Url, policy: &AccessPolicy) -> Result<RemoteFile, ApiError> {
     require_object_key(url)?;
-    let store: Arc<dyn ObjectStore> = match url.scheme() {
-        "s3" => Arc::new(s3_store(url)?),
-        scheme => {
-            return Err(ApiError::bad_request(format!(
-                "unsupported URL scheme {scheme:?}: supported schemes are {}",
-                SUPPORTED_SCHEMES.join(", ")
-            )));
+    if !SUPPORTED_SCHEMES.contains(&url.scheme()) {
+        return Err(ApiError::bad_request(format!(
+            "unsupported URL scheme {:?}: supported schemes are {}",
+            url.scheme(),
+            SUPPORTED_SCHEMES.join(", ")
+        )));
+    }
+    // Before anything is built, and before the filesystem is touched.
+    match policy.authorize(url)? {
+        Target::Local(path) => local_file(&path),
+        Target::Remote => {
+            let store: Arc<dyn ObjectStore> = match url.scheme() {
+                "s3" => Arc::new(s3_store(url, policy)?),
+                // Every supported remote scheme has an arm above, and `file` went to
+                // the local branch.
+                scheme => {
+                    return Err(ApiError::bad_request(format!(
+                        "unsupported URL scheme {scheme:?}: supported schemes are {}",
+                        SUPPORTED_SCHEMES.join(", ")
+                    )));
+                }
+            };
+            Ok(RemoteFile {
+                store,
+                base: base_url(url)?,
+                url: file_url(url),
+            })
         }
-    };
+    }
+}
+
+/// A file on this machine, already resolved and allowed by the policy. The url is
+/// rebuilt from the canonical path, so what the rest of the service reads and logs is
+/// the file that was actually opened, not the way the caller spelled it.
+fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
+    let url = Url::from_file_path(path).map_err(|()| {
+        ApiError::bad_request(format!("{} is not a valid file url", path.display()))
+    })?;
     Ok(RemoteFile {
-        store,
-        base: base_url(url)?,
-        url: file_url(url),
+        store: Arc::new(LocalFileSystem::new()),
+        base: Url::parse("file://").expect("file:// is a valid url"),
+        url,
     })
 }
 
@@ -135,32 +170,36 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, ApiError> {
         .map_err(|_| ApiError::bad_request(format!("{name} must be true or false, got {value:?}")))
 }
 
+fn parse_endpoint(endpoint: &str) -> Result<Url, ApiError> {
+    Url::parse(endpoint)
+        .map_err(|error| ApiError::bad_request(format!("invalid endpoint {endpoint:?}: {error}")))
+}
+
 /// Decide whether this endpoint may be spoken to over cleartext, before object_store
 /// does, so the caller gets a usable message rather than a connection failure.
 fn allow_http_endpoint(
-    endpoint: &str,
+    endpoint: &Url,
     allow_http: bool,
     has_credentials: bool,
 ) -> Result<bool, ApiError> {
-    let parsed = Url::parse(endpoint).map_err(|error| {
-        ApiError::bad_request(format!("invalid endpoint {endpoint:?}: {error}"))
-    })?;
-    match parsed.scheme() {
+    match endpoint.scheme() {
         "https" => Ok(false),
         // Nothing to expose when the request is anonymous, and that is the common case
         // of a local MinIO or a test server.
         "http" if !has_credentials || allow_http => Ok(true),
+        // Display, not Debug: Debug on a Url prints the whole parsed struct. The
+        // endpoint is safe to echo either way — credentials are separate options.
         "http" => Err(ApiError::bad_request(format!(
-            "endpoint {endpoint:?} is not https and credentials were given, which would \
+            "endpoint {endpoint} is not https and credentials were given, which would \
              be sent in cleartext; pass allow_http=true to do it anyway"
         ))),
         scheme => Err(ApiError::bad_request(format!(
-            "endpoint {endpoint:?} has scheme {scheme:?}, expected http or https"
+            "endpoint {endpoint} has scheme {scheme:?}, expected http or https"
         ))),
     }
 }
 
-fn s3_store(url: &Url) -> Result<object_store::aws::AmazonS3, ApiError> {
+fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<object_store::aws::AmazonS3, ApiError> {
     let bucket = authority(url)?;
     let options = s3_options(url)?;
 
@@ -172,10 +211,19 @@ fn s3_store(url: &Url) -> Result<object_store::aws::AmazonS3, ApiError> {
         || options.secret_access_key.is_some()
         || options.session_token.is_some();
 
-    if let Some(endpoint) = &options.endpoint {
-        let use_http = allow_http_endpoint(endpoint, options.allow_http, has_credentials)?;
+    // Which server this request would have us talk to is the policy's decision, and
+    // naming no endpoint is a choice too: it means AWS.
+    let endpoint = options
+        .endpoint
+        .as_deref()
+        .map(parse_endpoint)
+        .transpose()?;
+    policy.authorize_s3_endpoint(endpoint.as_ref())?;
+
+    if let Some(endpoint) = endpoint {
+        let use_http = allow_http_endpoint(&endpoint, options.allow_http, has_credentials)?;
         builder = builder
-            .with_endpoint(endpoint.clone())
+            .with_endpoint(endpoint.to_string())
             .with_allow_http(use_http);
     } else if options.allow_http {
         return Err(ApiError::bad_request(
@@ -212,6 +260,12 @@ fn s3_store(url: &Url) -> Result<object_store::aws::AmazonS3, ApiError> {
 }
 
 pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
+    // An absolute local path is not a URL, but it is what someone with a local file in
+    // front of them will type, and it has exactly one reading.
+    if raw.starts_with('/') {
+        return Url::from_file_path(raw)
+            .map_err(|()| ApiError::bad_request(format!("invalid local path {raw:?}")));
+    }
     Url::parse(raw).map_err(|error| {
         // Unparseable, so there is no query string to strip properly; cut at the first
         // `?` so a secret cannot ride out in the error.
@@ -223,6 +277,23 @@ pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These tests are about reading the URL, not about the policy, so they all run
+    /// under one that allows every bucket. What the policy itself allows is
+    /// [`crate::access`]'s own business, and tested there.
+    fn open(url: &Url) -> Result<RemoteFile, ApiError> {
+        super::open(url, &AccessPolicy::default())
+    }
+
+    /// The same, for a server configured to let requests reach the loopback interface
+    /// — which is what running against a local MinIO means.
+    fn open_loopback(url: &Url) -> Result<RemoteFile, ApiError> {
+        let config = crate::config::AccessConfig {
+            allow_loopback: true,
+            ..Default::default()
+        };
+        super::open(url, &AccessPolicy::new(&config).unwrap())
+    }
 
     #[test]
     fn opens_an_s3_url() {
@@ -262,8 +333,19 @@ mod tests {
 
     #[test]
     fn anonymous_requests_may_use_a_plain_http_endpoint() {
-        let url = parse_url("s3://data/key.parquet?endpoint=http://127.0.0.1:9000").unwrap();
+        let url = parse_url("s3://data/key.parquet?endpoint=http://minio.example.com").unwrap();
         assert!(open(&url).is_ok());
+    }
+
+    /// The usual local-MinIO endpoint is on the loopback interface, which the caller
+    /// does not get to reach unless the server was configured for it.
+    #[test]
+    fn a_loopback_endpoint_needs_the_server_to_allow_it() {
+        let url = parse_url("s3://data/key.parquet?endpoint=http://127.0.0.1:9000").unwrap();
+        let error = open(&url).unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        assert!(error.to_string().contains("loopback"), "{error}");
+        assert!(open_loopback(&url).is_ok());
     }
 
     #[test]
@@ -272,7 +354,7 @@ mod tests {
             "endpoint=http://127.0.0.1:9000&access_key_id=AKIA123&secret_access_key={SECRET}"
         );
         let url = parse_url(&format!("s3://data/key.parquet?{with_creds}")).unwrap();
-        let error = open(&url).unwrap_err();
+        let error = open_loopback(&url).unwrap_err();
         assert!(error.to_string().contains("cleartext"), "{error}");
         assert!(error.to_string().contains("allow_http=true"), "{error}");
         assert!(!error.to_string().contains(SECRET), "leaked: {error}");
@@ -281,7 +363,7 @@ mod tests {
             "s3://data/key.parquet?{with_creds}&allow_http=true"
         ))
         .unwrap();
-        assert!(open(&url).is_ok());
+        assert!(open_loopback(&url).is_ok());
     }
 
     #[test]
