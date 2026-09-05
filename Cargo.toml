@@ -15,11 +15,11 @@ bytes = "1"
 datafusion = { version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection"] }
 futures = "0.3"
 # Keep in sync with datafusion's; two copies are two distinct `ObjectStore` traits.
-# No `aws`: S3 goes through opendal, and a second S3 client is attack surface.
 object_store = "0.13"
 object_store_opendal = "0.58"
-# Default features pull in every layer and a ctor; `storage` installs the transport.
-opendal = { version = "0.58", default-features = false, features = ["services-s3", "http-transport-reqwest", "executors-tokio"] }
+# Default features pull in every layer and a ctor; `storage` installs the transport and
+# the one layer it wants.
+opendal = { version = "0.58", default-features = false, features = ["services-s3", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -35,7 +35,7 @@ url = "2"
 # no `unwrap` in a request path — are crate attributes in `src/lib.rs`.
 [lints.rust]
 missing_debug_implementations = "warn"
-# `deny`, not `forbid`: one test sets `AWS_*` to prove the service ignores it.
+# `deny`, not `forbid`: one test sets `AWS_*` env vars to prove the service ignores it.
 unsafe_code = "deny"
 unused_must_use = "deny"
 unused_qualifications = "warn"

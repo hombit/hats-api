@@ -18,12 +18,13 @@ use std::sync::Arc;
 
 use object_store::{ObjectStore, local::LocalFileSystem};
 use object_store_opendal::OpendalStore;
+use opendal::layers::RetryLayer;
 use opendal::{Operator, services};
+use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::access::{AccessPolicy, Target};
 use crate::error::ApiError;
-use crate::redact::{ExposeSecret, Secret, redact};
 
 /// Schemes [`open`] can serve today. Whether a given URL in one of them may actually be
 /// read is the [`AccessPolicy`]'s business, not this list's.
@@ -36,9 +37,8 @@ pub const DEFAULT_S3_REGION: &str = "us-east-1";
 /// URL, which this service treats as opaque.
 ///
 /// One flat set rather than one per scheme: the URL already says which backend it is,
-/// and [`StorageOptions::for_scheme`] refuses an option the scheme has no use for
-/// instead of ignoring it. A misspelled option is a 400 rather than a silently
-/// anonymous request.
+/// and an option the scheme has no use for is refused rather than ignored. A misspelled
+/// option is a 400 rather than a silently anonymous request.
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageOptions {
@@ -48,9 +48,9 @@ pub struct StorageOptions {
     /// Permission to send credentials to a cleartext `endpoint`.
     #[serde(default)]
     pub allow_http: bool,
-    pub access_key_id: Option<Secret>,
-    pub secret_access_key: Option<Secret>,
-    pub session_token: Option<Secret>,
+    pub access_key_id: Option<SecretString>,
+    pub secret_access_key: Option<SecretString>,
+    pub session_token: Option<SecretString>,
 }
 
 /// The option names, for saying which are accepted in an error.
@@ -277,6 +277,23 @@ fn install_http_transport() {
     INSTALLED.call_once(opendal::install_default);
 }
 
+/// Retry the failures OpenDAL marks temporary: a connection an origin closed between
+/// requests, a 503, a truncated body. Reading one parquet file is a sequence of ranged
+/// requests over a pooled connection, so a single closed socket would otherwise fail the
+/// whole query — and to the caller that looks like the file is unreadable rather than
+/// like a hiccup.
+///
+/// Jitter because those ranged requests are in flight together and would otherwise all
+/// come back at the same instant. The delays are short and few: a request is waiting on
+/// this, and a store that is really down should be a 502 rather than a hang.
+fn retries() -> RetryLayer {
+    RetryLayer::new()
+        .with_jitter()
+        .with_max_times(3)
+        .with_min_delay(std::time::Duration::from_millis(100))
+        .with_max_delay(std::time::Duration::from_secs(2))
+}
+
 fn s3_store(
     url: &Url,
     options: &StorageOptions,
@@ -353,7 +370,47 @@ fn s3_store(
             ));
         }
     };
-    Ok(OpendalStore::new(Operator::new(builder)?))
+    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+}
+
+/// A url as the caller wrote it — the raw string, before [`parse_url`], so it may not
+/// even be a url. `Debug` prints it cut at the first `?`, which is the most that can be
+/// said about a string nothing has parsed.
+#[derive(Clone, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SourceUrl(String);
+
+impl SourceUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The part safe to put in a message: everything before the query string.
+    pub fn redacted(&self) -> &str {
+        redact(&self.0)
+    }
+}
+
+impl From<String> for SourceUrl {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::fmt::Debug for SourceUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.redacted())
+    }
+}
+
+/// Cut a url string at its query string. For a url that parses, [`file_url`] strips the
+/// query properly; this is for the ones that do not, where there is nothing to strip
+/// properly with.
+fn redact(raw: &str) -> &str {
+    // Also the fragment: `#` before `?` means there is no query string at all, and
+    // whatever follows is not something to echo either.
+    let end = raw.find(['?', '#']).unwrap_or(raw.len());
+    raw.get(..end).unwrap_or(raw)
 }
 
 pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
@@ -374,6 +431,47 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
+
+    /// A derive on a struct holding a credential prints the rest of it and not that.
+    #[test]
+    fn a_derived_debug_around_a_secret_does_not_print_it() {
+        #[derive(Debug)]
+        #[expect(dead_code, reason = "the fields exist to be printed by the derive")]
+        struct Holder {
+            name: &'static str,
+            secret: SecretString,
+        }
+        let holder = Holder {
+            name: "key",
+            secret: SecretString::from(SECRET.to_owned()),
+        };
+        let shown = format!("{holder:?}");
+        assert!(shown.contains("key"), "{shown}");
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        assert_eq!(holder.secret.expose_secret(), SECRET);
+    }
+
+    #[test]
+    fn a_source_url_prints_without_its_query_string() {
+        let url = SourceUrl::from(format!(
+            "s3://bucket/key.parquet?access_key_id=AKIA1&secret_access_key={SECRET}"
+        ));
+        let shown = format!("{url:?}");
+        assert!(shown.contains("s3://bucket/key.parquet"), "{shown}");
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        // The value itself is untouched; only the printing is.
+        assert!(url.as_str().contains(SECRET));
+    }
+
+    #[test]
+    fn redacting_leaves_a_url_without_a_query_string_alone() {
+        assert_eq!(redact("s3://bucket/key.parquet"), "s3://bucket/key.parquet");
+        assert_eq!(redact("not-a-url"), "not-a-url");
+        assert_eq!(redact(""), "");
+        // A fragment is not a query string, and is not ours to echo either.
+        assert_eq!(redact("s3://b/k#frag?a=1"), "s3://b/k");
+        assert_eq!(redact("?everything"), "");
+    }
 
     /// Storage options built the way a request body spells them, so these tests also
     /// cover the deserialization rather than only the struct behind it.

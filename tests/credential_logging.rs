@@ -248,7 +248,7 @@ async fn debug_formatting_the_request_state_logs_no_secret() {
 
     let raw = server.url("private/part0.parquet");
     let options = server.credentialed_options();
-    let source = hats_api::redact::SourceUrl::from(raw.clone());
+    let source = hats_api::storage::SourceUrl::from(raw.clone());
     let url = hats_api::storage::parse_url(&raw).expect("the url should parse");
     let file =
         hats_api::storage::open(&url, &options, &permissive_policy()).expect("it should open");

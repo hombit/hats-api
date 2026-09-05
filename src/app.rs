@@ -15,8 +15,7 @@ use crate::access::AccessPolicy;
 use crate::error::ApiError;
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
-use crate::redact::SourceUrl;
-use crate::storage::{self, RemoteFile, StorageOptions, parse_url};
+use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
 pub fn router(policy: Arc<AccessPolicy>) -> Router {
     Router::new()

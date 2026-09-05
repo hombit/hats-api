@@ -14,10 +14,12 @@ at hand.
 
 ## Credentials
 
-- A credential is never a `String`. Use `redact::Secret` (`secrecy::SecretString`), and
-  `redact::SourceUrl` for a caller-supplied url. Neither prints its value, so
+- A credential is never a `String`. Use `secrecy::SecretString`, and
+  `storage::SourceUrl` for a caller-supplied url. Neither prints its value, so
   `#[derive(Debug)]` around them is safe. New backends' option structs follow the same
   rule.
+- `url::Url`'s own `Debug` prints its `password` field, so a struct holding one needs a
+  hand-written `Debug` rather than a derive.
 - Nothing downstream of `storage::open` sees a url with options on it.
 - A dependency that logs credentials goes in `logging::CREDENTIAL_UNSAFE_TARGETS`, with
   a reason. `tests/credential_logging.rs` is what catches the next one.
@@ -51,3 +53,7 @@ Do not run MinIO or any other container locally; the MinIO tests are CI's.
 
 `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test
 --all-targets`. `pre-commit run --all-files` runs all three.
+
+Also `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items`, which
+pre-commit does not run. It is where a doc link to a private item turns up, and clippy
+does not see those.

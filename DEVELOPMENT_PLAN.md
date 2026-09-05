@@ -44,6 +44,7 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 | 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
 | 4 | file-server interface | todo | |
+| 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
@@ -516,6 +517,13 @@ Behaviour, in order of precedence:
 
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does.
+
+### 4.1 Write the README
+
+Both interfaces exist by this point and neither is still moving, so one document can
+describe them together: what the service is for, the two request shapes, the storage
+options, the configuration file, and how to run it. Written earlier it would document a
+shape that then changed, which is worse than the stub that is there now.
 
 ## 5. Phase 4 — the HATS interface
 
