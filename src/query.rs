@@ -17,6 +17,7 @@ use crate::storage::RemoteFile;
 
 /// A single-value lookup: `filter_column = filter_value`, returning `columns`.
 /// Says nothing about where the data lives.
+#[derive(Debug)]
 pub struct Selection<'a> {
     pub filter_column: &'a str,
     pub filter_value: &'a str,
@@ -31,6 +32,26 @@ pub struct Selection<'a> {
 pub struct QueryResult {
     pub schema: SchemaRef,
     pub batches: Vec<RecordBatch>,
+}
+
+/// The shape of the answer, not the answer. A derived `Debug` would print every row,
+/// so a result that turned up in a log line or a panic message would be the query
+/// result itself — which is the caller's data, and can be millions of values.
+impl std::fmt::Debug for QueryResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueryResult")
+            .field("schema", &self.schema)
+            .field("num_batches", &self.batches.len())
+            .field(
+                "num_rows",
+                &self
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+            )
+            .finish()
+    }
 }
 
 /// Everything we know about parquet point lookups, in one place.

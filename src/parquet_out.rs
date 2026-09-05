@@ -138,9 +138,11 @@ impl SourceLayout {
     fn from_metadata(metadata: &ParquetMetaData) -> Self {
         let mut layout = Self::default();
         for row_group in metadata.row_groups() {
+            // A row count that does not fit a `usize` cannot describe a row group we
+            // could hold anyway, so saturating is the honest conversion.
             layout.max_row_group_rows = layout
                 .max_row_group_rows
-                .max(row_group.num_rows().max(0) as usize);
+                .max(usize::try_from(row_group.num_rows()).unwrap_or(usize::MAX));
             for chunk in row_group.columns() {
                 let encodings: Vec<Encoding> = chunk.encodings().collect();
                 if uses_data_page_v2_encoding(&encodings) {
@@ -305,7 +307,7 @@ mod tests {
             ArrowWriter::try_new(&mut buffer, batch.schema(), Some(properties)).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
-        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(buffer))
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(buffer))
             .unwrap()
             .metadata()
             .clone()
@@ -321,7 +323,7 @@ mod tests {
     fn round_trip(source: WriterProperties) -> Arc<ParquetMetaData> {
         let layout = SourceLayout::from_metadata(&write_source(source));
         let bytes = encode(&result(sample_batch()), &layout).unwrap();
-        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
             .unwrap()
             .metadata()
             .clone()
@@ -444,7 +446,7 @@ mod tests {
             &layout,
         )
         .unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
         assert_eq!(reader.schema().fields(), schema.fields());
         assert_eq!(reader.metadata().file_metadata().num_rows(), 0);
     }
@@ -454,7 +456,7 @@ mod tests {
         // Nothing to inherit: the write must still succeed.
         let layout = SourceLayout::default();
         let bytes = encode(&result(sample_batch()), &layout).unwrap();
-        let reader = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes)).unwrap();
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
         assert_eq!(reader.metadata().file_metadata().num_rows(), 3);
     }
 

@@ -80,6 +80,11 @@ enum Endpoint {
 }
 
 impl Default for AccessPolicy {
+    #[expect(
+        clippy::expect_used,
+        reason = "the default config names no endpoint and no directory, so there is \
+                  no rule for `new` to reject; a panic here would be a bug in this file"
+    )]
     fn default() -> Self {
         Self::new(&AccessConfig::default()).expect("the default access config is valid")
     }
@@ -146,14 +151,16 @@ impl AccessPolicy {
     /// is a request with no `endpoint` option, which means AWS.
     pub fn authorize_s3_endpoint(&self, endpoint: Option<&Url>) -> Result<(), ApiError> {
         match &self.s3 {
-            S3Rules::Any => match endpoint.and_then(Url::host) {
+            S3Rules::Any => match endpoint {
                 // The one thing an unrestricted policy still refuses: the service can
                 // reach things on its own machine that its callers cannot.
-                Some(host) if is_loopback(&host) && !self.allow_loopback => {
+                Some(url)
+                    if url.host().is_some_and(|host| is_loopback(&host))
+                        && !self.allow_loopback =>
+                {
                     Err(ApiError::forbidden(format!(
-                        "endpoint {} is on the loopback interface, which this server \
-                         does not allow; set access.allow_loopback to change that",
-                        endpoint.expect("a host implies an endpoint")
+                        "endpoint {url} is on the loopback interface, which this server \
+                         does not allow; set access.allow_loopback to change that"
                     )))
                 }
                 _ => Ok(()),
@@ -394,12 +401,12 @@ mod tests {
 
     use super::*;
 
-    fn policy(config: AccessConfig) -> AccessPolicy {
-        AccessPolicy::new(&config).unwrap()
+    fn policy(config: &AccessConfig) -> AccessPolicy {
+        AccessPolicy::new(config).unwrap()
     }
 
     fn with_endpoints(entries: &[&str]) -> AccessPolicy {
-        policy(AccessConfig {
+        policy(&AccessConfig {
             s3: S3Config {
                 endpoints: Some(entries.iter().map(|e| (*e).to_owned()).collect()),
             },
@@ -408,7 +415,7 @@ mod tests {
     }
 
     fn with_paths(paths: &[&Path], follow_symlinks: bool) -> AccessPolicy {
-        policy(AccessConfig {
+        policy(&AccessConfig {
             local: LocalConfig {
                 paths: paths.iter().map(|p| p.display().to_string()).collect(),
                 follow_symlinks,
@@ -550,7 +557,7 @@ mod tests {
 
     #[test]
     fn the_loopback_interface_can_be_turned_on() {
-        let policy = policy(AccessConfig {
+        let policy = policy(&AccessConfig {
             allow_loopback: true,
             ..Default::default()
         });
@@ -603,7 +610,7 @@ mod tests {
         let (_dir, root) = temp_dir();
         let inside = root.join("part0.parquet");
         fs::write(&inside, b"").unwrap();
-        let policy = policy(AccessConfig {
+        let policy = policy(&AccessConfig {
             local: LocalConfig {
                 paths: vec![file_url(&root).to_string()],
                 follow_symlinks: false,

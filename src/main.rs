@@ -1,17 +1,11 @@
 use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::access::AccessPolicy;
-use crate::config::{CONFIG_ENV_VAR, Config, LogConfig, LogFormat};
-
-mod access;
-mod app;
-mod config;
-mod error;
-mod parquet_out;
-mod query;
-mod storage;
+use hats_api::access::AccessPolicy;
+use hats_api::app;
+use hats_api::config::{self, CONFIG_ENV_VAR, Config, LogConfig, LogFormat};
+use hats_api::logging;
 
 const USAGE: &str = "\
 usage: hats-api [--config <path>]
@@ -26,11 +20,10 @@ environment:
   RUST_LOG               tracing filter, overriding the config file
 ";
 
-/// `RUST_LOG` wins over the config file, the way it does everywhere else.
+/// `RUST_LOG` wins over the config file, the way it does everywhere else — except over
+/// the targets [`hats_api::logging`] silences, which nothing may re-enable.
 fn init_tracing(config: &LogConfig) {
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&config.filter));
-    let registry = tracing_subscriber::registry().with(filter);
+    let registry = tracing_subscriber::registry().with(logging::filter(&config.filter));
     match config.format {
         LogFormat::Text => registry.with(fmt::layer().with_ansi(config.ansi)).init(),
         LogFormat::Json => registry.with(fmt::layer().json()).init(),

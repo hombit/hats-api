@@ -19,6 +19,10 @@ pub enum ApiError {
     NotFound(String),
     #[error("object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
+    /// Raised while building a store, before any request. DataFusion's own reads come
+    /// back as [`Self::ObjectStore`], because the adapter translates them.
+    #[error("cannot open storage: {0}")]
+    Storage(#[from] opendal::Error),
     #[error("query failed: {0}")]
     DataFusion(#[from] DataFusionError),
     #[error("failed to encode result as JSON: {0}")]
@@ -56,6 +60,7 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::ObjectStore(error) => object_store_status(error),
+            Self::Storage(error) => storage_status(error),
             // The remote file being missing or unreadable reaches us wrapped in a
             // DataFusionError, and is the caller's problem, not ours.
             Self::DataFusion(DataFusionError::ObjectStore(error)) => object_store_status(error),
@@ -71,6 +76,18 @@ impl ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
+    }
+}
+
+/// Every storage option a store is built from came out of the caller's url, so a
+/// configuration the backend will not accept is their mistake to fix, not a fault of
+/// the service.
+fn storage_status(error: &opendal::Error) -> StatusCode {
+    match error.kind() {
+        opendal::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+        opendal::ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
+        opendal::ErrorKind::ConfigInvalid => StatusCode::BAD_REQUEST,
+        _ => StatusCode::BAD_GATEWAY,
     }
 }
 

@@ -17,7 +17,9 @@
 use std::path::Path as FilePath;
 use std::sync::Arc;
 
-use object_store::{ObjectStore, aws::AmazonS3Builder, local::LocalFileSystem};
+use object_store::{ObjectStore, local::LocalFileSystem};
+use object_store_opendal::OpendalStore;
+use opendal::{Operator, services};
 use url::Url;
 
 use crate::access::{AccessPolicy, Target};
@@ -84,6 +86,11 @@ pub fn open(url: &Url, policy: &AccessPolicy) -> Result<RemoteFile, ApiError> {
 /// A file on this machine, already resolved and allowed by the policy. The url is
 /// rebuilt from the canonical path, so what the rest of the service reads and logs is
 /// the file that was actually opened, not the way the caller spelled it.
+#[expect(
+    clippy::expect_used,
+    reason = "`file://` is a literal, and its parse is checked by every test that opens \
+              a local file"
+)]
 fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
     let url = Url::from_file_path(path).map_err(|()| {
         ApiError::bad_request(format!("{} is not a valid file url", path.display()))
@@ -175,18 +182,19 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("invalid endpoint {endpoint:?}: {error}")))
 }
 
-/// Decide whether this endpoint may be spoken to over cleartext, before object_store
-/// does, so the caller gets a usable message rather than a connection failure.
+/// Decide whether this endpoint may be spoken to over cleartext. The backend would not
+/// ask — it just follows the endpoint's scheme — so this is the whole of the decision,
+/// and it happens before a connection is opened rather than after one fails.
 fn allow_http_endpoint(
     endpoint: &Url,
     allow_http: bool,
     has_credentials: bool,
-) -> Result<bool, ApiError> {
+) -> Result<(), ApiError> {
     match endpoint.scheme() {
-        "https" => Ok(false),
+        "https" => Ok(()),
         // Nothing to expose when the request is anonymous, and that is the common case
         // of a local MinIO or a test server.
-        "http" if !has_credentials || allow_http => Ok(true),
+        "http" if !has_credentials || allow_http => Ok(()),
         // Display, not Debug: Debug on a Url prints the whole parsed struct. The
         // endpoint is safe to echo either way — credentials are separate options.
         "http" => Err(ApiError::bad_request(format!(
@@ -199,13 +207,30 @@ fn allow_http_endpoint(
     }
 }
 
-fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<object_store::aws::AmazonS3, ApiError> {
+/// OpenDAL has no HTTP client until one is installed process-wide, and a store built
+/// without one fails on its first request rather than at build time. Installing is
+/// idempotent and first-one-wins, so every remote backend calls this before building.
+fn install_http_transport() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(opendal::install_default);
+}
+
+fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<OpendalStore, ApiError> {
+    install_http_transport();
     let bucket = authority(url)?;
     let options = s3_options(url)?;
 
-    let mut builder = AmazonS3Builder::new()
-        .with_bucket_name(bucket)
-        .with_region(options.region.as_deref().unwrap_or(DEFAULT_S3_REGION));
+    let mut builder = services::S3::default()
+        .bucket(bucket)
+        .region(options.region.as_deref().unwrap_or(DEFAULT_S3_REGION))
+        // The request is the only source of credentials. Without these two, OpenDAL
+        // reads `AWS_*` from the environment, `~/.aws/{config,credentials}`, and the
+        // EC2 metadata service — so a caller who sent none would be answered with the
+        // service's own identity and every bucket this deployment can reach.
+        // `disable_config_load` also stops `AWS_ENDPOINT_URL` from redirecting a
+        // request the policy already decided was going to AWS.
+        .disable_config_load()
+        .disable_ec2_metadata();
 
     let has_credentials = options.access_key_id.is_some()
         || options.secret_access_key.is_some()
@@ -220,24 +245,35 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<object_store::aws::Amazo
         .transpose()?;
     policy.authorize_s3_endpoint(endpoint.as_ref())?;
 
-    if let Some(endpoint) = endpoint {
-        let use_http = allow_http_endpoint(&endpoint, options.allow_http, has_credentials)?;
-        builder = builder
-            .with_endpoint(endpoint.to_string())
-            .with_allow_http(use_http);
-    } else if options.allow_http {
-        return Err(ApiError::bad_request(
-            "allow_http only applies together with endpoint",
-        ));
-    }
+    builder = match &endpoint {
+        // OpendDAL addresses path-style unless told otherwise, which is what an
+        // S3-compatible server on a named endpoint wants: MinIO, Ceph and the rest
+        // serve `endpoint/bucket/key`, and virtual-host style would need a wildcard
+        // DNS entry per bucket. Cleartext is decided here rather than by OpenDAL,
+        // which would simply follow the endpoint's own scheme.
+        Some(endpoint) => {
+            allow_http_endpoint(endpoint, options.allow_http, has_credentials)?;
+            builder.endpoint(endpoint.as_str())
+        }
+        // AWS itself is the other way round: path-style addressing is deprecated
+        // there, so a bucket is a subdomain.
+        None => {
+            if options.allow_http {
+                return Err(ApiError::bad_request(
+                    "allow_http only applies together with endpoint",
+                ));
+            }
+            builder.enable_virtual_host_style()
+        }
+    };
 
     builder = match (options.access_key_id, options.secret_access_key) {
         (Some(access_key_id), Some(secret_access_key)) => {
             let builder = builder
-                .with_access_key_id(access_key_id)
-                .with_secret_access_key(secret_access_key);
+                .access_key_id(&access_key_id)
+                .secret_access_key(&secret_access_key);
             match options.session_token {
-                Some(token) => builder.with_token(token),
+                Some(token) => builder.session_token(&token),
                 None => builder,
             }
         }
@@ -248,7 +284,7 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<object_store::aws::Amazo
                 ));
             }
             // No credentials given: ask anonymously rather than signing with nothing.
-            builder.with_skip_signature(true)
+            builder.skip_signature()
         }
         _ => {
             return Err(ApiError::bad_request(
@@ -256,7 +292,7 @@ fn s3_store(url: &Url, policy: &AccessPolicy) -> Result<object_store::aws::Amazo
             ));
         }
     };
-    Ok(builder.build()?)
+    Ok(OpendalStore::new(Operator::new(builder)?))
 }
 
 pub fn parse_url(raw: &str) -> Result<Url, ApiError> {
@@ -438,6 +474,83 @@ mod tests {
             let error = open(&url).unwrap_err();
             assert!(error.to_string().contains("no object"), "{raw}: {error}");
         }
+    }
+
+    /// A one-shot HTTP server on the loopback interface: it takes one request, hands
+    /// the head back to the test and answers 404. Whether a request was signed is not
+    /// visible on the builder, only on the wire, so this is where it gets checked.
+    fn capture_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") {
+                match stream.read(&mut byte) {
+                    Ok(1) => head.push(byte[0]),
+                    _ => break,
+                }
+            }
+            // 404 rather than a hang or a reset: a retry would find nothing listening.
+            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            let _ = sender.send(String::from_utf8_lossy(&head).into_owned());
+        });
+        (port, receiver)
+    }
+
+    /// The request head one `GET` through the store puts on the wire, lowercased —
+    /// header names are case-insensitive and the comparisons below do not care.
+    async fn request_head(options: &str) -> String {
+        let (port, receiver) = capture_one_request();
+        let url = parse_url(&format!(
+            "s3://bucket/key.parquet?endpoint=http://127.0.0.1:{port}&{options}"
+        ))
+        .unwrap();
+        let file = open_loopback(&url).unwrap();
+        // The 404 is the point: the request reached the server, which is all the test
+        // needs to see.
+        use object_store::ObjectStoreExt;
+        let _ = file
+            .store
+            .get(&object_store::path::Path::from("key.parquet"))
+            .await;
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the store made no request")
+            .to_ascii_lowercase()
+    }
+
+    /// A caller who sends no credentials gets an anonymous request, never the
+    /// service's own identity. The builder disables every ambient source OpenDAL
+    /// would otherwise consult; this checks the result of that.
+    #[tokio::test]
+    async fn a_request_without_credentials_is_unsigned() {
+        let head = request_head("").await;
+        assert!(head.contains("get /bucket/key.parquet"), "{head}");
+        assert!(!head.contains("authorization:"), "signed anyway: {head}");
+        assert!(!head.contains("x-amz-security-token:"), "{head}");
+    }
+
+    /// And the other half: credentials in the url are the ones that sign. The secret
+    /// itself never goes on the wire — SigV4 sends a signature and the key id.
+    #[tokio::test]
+    async fn credentials_from_the_url_are_the_ones_that_sign() {
+        let head = request_head(&format!(
+            "access_key_id=AKIA123&secret_access_key={SECRET}&allow_http=true"
+        ))
+        .await;
+        assert!(head.contains("authorization:"), "unsigned: {head}");
+        assert!(head.contains("akia123"), "{head}");
+        assert!(
+            !head.contains(&SECRET.to_ascii_lowercase()),
+            "leaked: {head}"
+        );
     }
 
     #[test]

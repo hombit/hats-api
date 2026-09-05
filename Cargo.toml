@@ -2,6 +2,8 @@
 name = "hats-api"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+authors = ["Konstantin Malanchev"]
 
 [profile.release]
 strip = true
@@ -11,20 +13,43 @@ lto = "thin"
 axum = "0.8"
 bytes = "1"
 datafusion = { version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection"] }
-# version consisten with datafusion
-object_store = { version = "0.13", features = ["aws"] }
 futures = "0.3"
+# Keep in sync with datafusion's; two copies are two distinct `ObjectStore` traits.
+# No `aws`: S3 goes through opendal, and a second S3 client is attack surface.
+object_store = "0.13"
+object_store_opendal = "0.58"
+# Default features pull in every layer and a ctor; `storage` installs the transport.
+opendal = { version = "0.58", default-features = false, features = ["services-s3", "http-transport-reqwest", "executors-tokio"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-toml = "0.9"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal"] }
+toml = "0.9"
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
 
+# Package-wide, so `tests/` gets these too. The lints that only suit the service —
+# no `unwrap` in a request path — are crate attributes in `src/lib.rs`.
+[lints.rust]
+missing_debug_implementations = "warn"
+# `deny`, not `forbid`: one test sets `AWS_*` to prove the service ignores it.
+unsafe_code = "deny"
+unused_must_use = "deny"
+unused_qualifications = "warn"
+
+[lints.clippy]
+dbg_macro = "warn"
+needless_pass_by_value = "warn"
+print_stdout = "warn"
+redundant_clone = "warn"
+todo = "warn"
+
 [dev-dependencies]
 http-body-util = "0.1"
+hyper-util = "0.1"
+s3s = "0.15"
+s3s-fs = "0.15"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
