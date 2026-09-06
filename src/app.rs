@@ -21,6 +21,7 @@ use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
+use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
 /// What every request needs and no request may change: the rules, the shared scratch
@@ -31,6 +32,8 @@ pub struct Service {
     pub policy: Arc<AccessPolicy>,
     pub transfers: Arc<Transfers>,
     pub mounts: Arc<Mounts>,
+    /// How much SQL one request may carry.
+    pub sql_limits: sql::Limits,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     api_prefix: Option<Arc<str>>,
 }
@@ -75,6 +78,7 @@ impl Service {
             policy: Arc::new(policy),
             transfers: Arc::new(Transfers::new(limits)),
             mounts: Arc::new(mounts),
+            sql_limits: limits.into(),
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -338,6 +342,7 @@ async fn query_parquet(
             predicate: params.r#where.as_deref(),
             limit: params.limit,
         },
+        service.sql_limits,
     )
     .await?;
 

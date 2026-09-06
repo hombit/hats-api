@@ -79,7 +79,11 @@ pub(crate) fn session_config() -> SessionConfig {
     config
 }
 
-pub async fn run(file: &RemoteFile, selection: &Selection<'_>) -> Result<QueryResult, ApiError> {
+pub async fn run(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+) -> Result<QueryResult, ApiError> {
     let ctx = SessionContext::new_with_config(session_config());
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
 
@@ -92,14 +96,14 @@ pub async fn run(file: &RemoteFile, selection: &Selection<'_>) -> Result<QueryRe
     // filtering on `filterid` while asking only for `mag` is the ordinary case.
     let df = match selection.predicate {
         Some(sql) => {
-            let expr = sql::predicate(&state, df.schema(), sql)?;
+            let expr = sql::predicate(&state, df.schema(), sql, limits)?;
             df.filter(expr)?
         }
         None => df,
     };
     let df = match selection.select {
         Some(sql) => {
-            let exprs = sql::projection(&state, df.schema(), sql)?;
+            let exprs = sql::projection(&state, df.schema(), sql, limits)?;
             df.select(exprs)?
         }
         None => df,

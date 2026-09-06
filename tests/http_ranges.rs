@@ -255,6 +255,7 @@ async fn read_one_row_with(
             predicate: Some("objectid = 42"),
             ..Default::default()
         },
+        limits.into(),
     )
     .await
 }

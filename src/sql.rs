@@ -24,24 +24,31 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::Token;
 
+use crate::config::LimitsConfig;
 use crate::error::ApiError;
-
-/// How deeply a caller's expression may nest. Enforced by the parser, so a pathological
-/// input is refused while it is still text rather than after it has grown a stack of
-/// planner frames. DataFusion's own default for the same limit.
-const MAX_DEPTH: usize = 50;
-
-/// How many nodes one expression may have.
-///
-/// Depth does not bound this: an `IN` list is one node wide and arbitrarily long, and a
-/// chain of `OR`s is shallow. The cap is generous because a list of ten thousand object
-/// ids is a request this service exists to answer — it is here to refuse the absurd
-/// cheaply, not to be a budget anyone tunes.
-const MAX_NODES: usize = 50_000;
 
 /// One dialect, borrowed for the lifetime of the process so that a parser built from it
 /// is not tied to the stack frame that made it.
 static DIALECT: GenericDialect = GenericDialect;
+
+/// How much SQL one request may contain, as the operator set it.
+///
+/// Both bound the caller's text rather than the answer: how many rows come back is a
+/// different question, and neither of these is an answer to it.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    pub max_depth: usize,
+    pub max_nodes: usize,
+}
+
+impl From<&LimitsConfig> for Limits {
+    fn from(config: &LimitsConfig) -> Self {
+        Self {
+            max_depth: config.max_expression_depth,
+            max_nodes: config.max_expression_nodes,
+        }
+    }
+}
 
 /// The select list, as one expression per output column.
 ///
@@ -53,6 +60,7 @@ pub fn projection(
     state: &SessionState,
     schema: &DFSchema,
     sql: &str,
+    limits: Limits,
 ) -> Result<Vec<Expr>, ApiError> {
     const FIELD: &str = "select";
 
@@ -61,7 +69,7 @@ pub fn projection(
             "omit select rather than writing *: absent means every column",
         ));
     }
-    let items = parse(sql, FIELD, |parser| {
+    let items = parse(sql, FIELD, limits, |parser| {
         parser.parse_comma_separated(Parser::parse_expr_with_alias)
     })?;
     items
@@ -74,7 +82,7 @@ pub fn projection(
                 Some(_) => None,
                 None => dotted_name(&item.expr),
             };
-            let expr = plan(state, schema, item, FIELD)?;
+            let expr = plan(state, schema, item, FIELD, limits)?;
             Ok(match path {
                 Some(name) => expr.alias(name),
                 None => expr,
@@ -84,11 +92,22 @@ pub fn projection(
 }
 
 /// The row predicate: one boolean expression, no alias and no second expression after it.
-pub fn predicate(state: &SessionState, schema: &DFSchema, sql: &str) -> Result<Expr, ApiError> {
+pub fn predicate(
+    state: &SessionState,
+    schema: &DFSchema,
+    sql: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
     const FIELD: &str = "where";
 
-    let expr = parse(sql, FIELD, Parser::parse_expr)?;
-    plan(state, schema, ExprWithAlias { expr, alias: None }, FIELD)
+    let expr = parse(sql, FIELD, limits, Parser::parse_expr)?;
+    plan(
+        state,
+        schema,
+        ExprWithAlias { expr, alias: None },
+        FIELD,
+        limits,
+    )
 }
 
 /// The dotted path a caller wrote, for a select item that is only a path.
@@ -113,13 +132,14 @@ fn dotted_name(expr: &SqlExpr) -> Option<String> {
 fn parse<T>(
     sql: &str,
     field: &str,
+    limits: Limits,
     parse: impl FnOnce(&mut Parser<'static>) -> Result<T, ParserError>,
 ) -> Result<T, ApiError> {
     let refuse = |error: &ParserError| {
         ApiError::bad_request(format!("{field} is not a SQL expression: {error}"))
     };
     let mut parser = Parser::new(&DIALECT)
-        .with_recursion_limit(MAX_DEPTH)
+        .with_recursion_limit(limits.max_depth)
         .try_with_sql(sql)
         .map_err(|error| refuse(&error))?;
     let parsed = parse(&mut parser).map_err(|error| refuse(&error))?;
@@ -142,6 +162,7 @@ fn plan(
     schema: &DFSchema,
     mut expr: ExprWithAlias,
     field: &str,
+    limits: Limits,
 ) -> Result<Expr, ApiError> {
     // Idempotent, and `projection` has already done it so that a bare path's output name
     // is the file's spelling rather than the caller's.
@@ -154,7 +175,7 @@ fn plan(
         .map_err(|error| {
             ApiError::bad_request(format!("{field}: {}", unqualified(&error.to_string())))
         })?;
-    check(&expr, field)?;
+    check(&expr, field, limits)?;
     Ok(expr)
 }
 
@@ -246,15 +267,18 @@ fn resolve_segment(part: &mut Ident, fields: &Fields) -> Option<DataType> {
 }
 
 /// Walk the planned expression and refuse everything this service will not run.
-fn check(expr: &Expr, field: &str) -> Result<(), ApiError> {
+fn check(expr: &Expr, field: &str, limits: Limits) -> Result<(), ApiError> {
     let mut nodes = 0usize;
     let mut refusal = None;
     // The closure cannot fail, so the walk itself cannot: the refusal is carried out
     // rather than raised, and the walk stops at the first one.
     let _ = expr.apply(|node| {
         nodes += 1;
-        if nodes > MAX_NODES {
-            refusal = Some(format!("{field} is too large: more than {MAX_NODES} terms"));
+        if nodes > limits.max_nodes {
+            refusal = Some(format!(
+                "{field} is too large: more than {} terms",
+                limits.max_nodes
+            ));
             return Ok(TreeNodeRecursion::Stop);
         }
         match allowed(node) {
@@ -381,15 +405,20 @@ mod tests {
         SessionContext::new_with_config(crate::query::session_config()).state()
     }
 
+    /// The limits an operator who set none would get.
+    fn limits() -> Limits {
+        Limits::from(&LimitsConfig::default())
+    }
+
     fn names(sql: &str) -> Result<Vec<String>, ApiError> {
-        Ok(projection(&state(), &schema(), sql)?
+        Ok(projection(&state(), &schema(), sql, limits())?
             .iter()
             .map(|expr| expr.schema_name().to_string())
             .collect())
     }
 
     fn filter(sql: &str) -> Result<String, ApiError> {
-        Ok(predicate(&state(), &schema(), sql)?.to_string())
+        Ok(predicate(&state(), &schema(), sql, limits())?.to_string())
     }
 
     #[test]
@@ -447,9 +476,9 @@ mod tests {
             Field::new("FLUX", DataType::Float64, true),
         ]))
         .unwrap();
-        assert!(predicate(&state(), &schema, "Flux > 1").is_ok());
-        assert!(predicate(&state(), &schema, "FLUX > 1").is_ok());
-        assert!(predicate(&state(), &schema, "flux > 1").is_err());
+        assert!(predicate(&state(), &schema, "Flux > 1", limits()).is_ok());
+        assert!(predicate(&state(), &schema, "FLUX > 1", limits()).is_ok());
+        assert!(predicate(&state(), &schema, "flux > 1", limits()).is_err());
     }
 
     /// A name matching nothing is left for DataFusion, whose message names the closest
@@ -550,39 +579,47 @@ mod tests {
         }
     }
 
-    /// The node cap is not depth: this is two levels deep and enormous.
+    /// The node cap counts terms, not rows and not depth: this list is two levels deep
+    /// and arbitrarily wide. It is the operator's, so a smaller one refuses what the
+    /// default allows.
     #[test]
-    fn an_absurdly_long_list_is_refused() {
-        let list = (0..MAX_NODES + 2)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let error = filter(&format!("objectid IN ({list})"))
+    fn a_list_wider_than_the_node_cap_is_refused() {
+        let list = |n: usize| (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
+        let thousand = format!("objectid IN ({})", list(1000));
+        assert!(filter(&thousand).is_ok());
+
+        let narrow = Limits {
+            max_nodes: 100,
+            ..limits()
+        };
+        let error = predicate(&state(), &schema(), &thousand, narrow)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("too large"), "{error}");
-        // And a list of the size this service is for is not.
-        let list = (0..1000)
-            .map(|n| n.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        assert!(filter(&format!("objectid IN ({list})")).is_ok());
+        assert!(
+            error.contains("too large") && error.contains("100"),
+            "{error}"
+        );
     }
 
+    /// Depth is the parser's, and also the operator's.
     #[test]
-    fn deep_nesting_is_refused_by_the_parser() {
-        let deep = format!(
-            "{}objectid = 1{}",
-            "(".repeat(MAX_DEPTH + 10),
-            ")".repeat(MAX_DEPTH + 10)
-        );
-        assert!(filter(&deep).is_err());
+    fn nesting_deeper_than_the_depth_cap_is_refused() {
+        let nested = |n: usize| format!("{}objectid = 1{}", "(".repeat(n), ")".repeat(n));
+        assert!(filter(&nested(10)).is_ok());
+        assert!(filter(&nested(limits().max_depth + 10)).is_err());
+
+        let shallow = Limits {
+            max_depth: 3,
+            ..limits()
+        };
+        assert!(predicate(&state(), &schema(), &nested(10), shallow).is_err());
     }
 
     /// `get_field` is what a dotted path plans to, so the volatility rule has to let it
     /// through — a rule that refused it would refuse every nested column.
     #[test]
     fn the_nested_field_access_is_allowed() {
-        assert!(allowed(&projection(&state(), &schema(), "lightcurve.mag").unwrap()[0]).is_ok());
+        let exprs = projection(&state(), &schema(), "lightcurve.mag", limits()).unwrap();
+        assert!(allowed(&exprs[0]).is_ok());
     }
 }

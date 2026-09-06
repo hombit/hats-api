@@ -161,6 +161,20 @@ max_concurrent_materializations = 4
 # the request that made it ends, cancelled or not.
 # scratch_dir = "/var/tmp/hats-api"
 
+# How much SQL one API request may carry, in "select" and "where". Both bound the text
+# the caller wrote, not the answer they get back: how many rows come out is a different
+# question, and neither of these limits it.
+
+# How deeply an expression may nest — "((((a = 1))))" is four. The parser enforces it, so
+# something pathological is refused while it is still text.
+max_expression_depth = 50
+
+# How many terms an expression may have. Depth does not bound this: an IN list is one
+# term wide and arbitrarily long, and a chain of ORs is shallow. The default is generous
+# because a list of ten thousand object ids is an ordinary request here; it is set to
+# refuse the absurd, not to be a budget.
+max_expression_nodes = 50000
+
 [log]
 # RUST_LOG syntax, and RUST_LOG itself overrides this when it is set.
 filter = "hats_api=info,tower_http=info"

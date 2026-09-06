@@ -71,9 +71,12 @@ pub struct MountConfig {
 
 /// What one request, and the process as a whole, may spend.
 ///
-/// Only the materialization limits so far. They exist because a server that ignores
-/// `Range` forces the whole object onto local disk before any of it can be read, which
-/// is the one read path here whose cost is not bounded by what the caller asked for.
+/// What one request may cost before it is refused rather than served.
+///
+/// The materialization limits exist because a server that ignores `Range` forces the
+/// whole object onto local disk before any of it can be read, which is the one read path
+/// here whose cost is not bounded by what the caller asked for. The expression limits
+/// bound the other input a caller writes freely.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct LimitsConfig {
@@ -89,6 +92,14 @@ pub struct LimitsConfig {
     pub max_concurrent_materializations: usize,
     /// Where the copies go. Absent is the system temporary directory.
     pub scratch_dir: Option<PathBuf>,
+    /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
+    /// a pathological one is refused while it is still text rather than after it has
+    /// grown a stack of planner frames.
+    pub max_expression_depth: usize,
+    /// How many terms a `select` or `where` expression may have, counted after planning.
+    /// Depth does not bound this: an `IN` list is one node wide and arbitrarily long,
+    /// and a chain of `OR`s is shallow. Nothing to do with how many rows come back.
+    pub max_expression_nodes: usize,
 }
 
 impl Default for LimitsConfig {
@@ -100,6 +111,11 @@ impl Default for LimitsConfig {
             max_materialize_total_bytes: ByteSize::gib(8),
             max_concurrent_materializations: 4,
             scratch_dir: None,
+            // DataFusion's own default for the same limit.
+            max_expression_depth: 50,
+            // Generous, because a list of ten thousand object ids is a request this
+            // service exists to answer: it refuses the absurd rather than budgeting.
+            max_expression_nodes: 50_000,
         }
     }
 }

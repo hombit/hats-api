@@ -755,8 +755,18 @@ Rules to preserve:
   set and is no bound at all when they do not. What is needed is a row or byte ceiling on
   the result the operator sets, and §7.2's streaming, which removes the buffering that
   makes the size a memory question rather than a bandwidth one.
+
+  **The ceiling is per format, not one number.** A row costs far more as JSON than as
+  parquet — keys repeated per row, numbers as text, no encoding or compression — so a
+  count that is generous for one is wrong for the other, in both directions: sized for
+  JSON it refuses parquet results that would have been cheap, and sized for parquet it
+  lets a JSON answer grow to something no client wants. Bytes written is the measure the
+  two have in common, and a row count is the one a caller can predict, so it likely wants
+  both.
 - `POST` body size limit. The depth and node caps on the expressions are done, at parse
-  time. The projection needs no cap: it is bounded by the schema, and the byte and time
+  time, and are `limits.max_expression_depth` and `limits.max_expression_nodes`. They
+  bound the caller's text only; neither says anything about how many rows come back. The
+  projection needs no cap of its own: it is bounded by the schema, and the byte and time
   limits govern the data it moves.
 - Reject pathological parquet early — a footer claiming implausible row-group or column
   counts is a 400, not an allocation.
@@ -843,7 +853,26 @@ Run `cargo deny` (advisories + licences) in CI.
    where §5.3's and §7.2's no-job-queue decision is revisited.
 6. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.
-7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
+   `lightcurve.mag`, and the mean magnitude of one object is not expressible today.
+
+   The obstacle is not the expression rules: an operation over one row's list is a scalar
+   function, which §3.3's checks already allow. It is that the build registers no such
+   function — `datafusion`'s `nested_expressions` feature is off, so `array_avg`,
+   `array_sum`, `array_product`, `array_first`, `cardinality`, `length`, `distance`,
+   `cosine_distance` and `inner_product` do not exist. Turning it on makes all of them
+   callable at once, which is the decision to weigh rather than the code to write.
+
+   **`avg(lightcurve.mag)` is not this** and must keep being refused: `avg` summarizes
+   rows, so it averages the column down the file rather than along one light curve. The
+   two read almost the same and mean entirely different things, so whatever is added has
+   to be named so that a caller cannot reach for one and get the other.
+
+   `array_filter`, `array_transform` and `array_any_match` take lambdas, which §3.3
+   refuses as expression kinds. Either they stay refused — leaving a feature registered
+   but unreachable, which needs saying in the error rather than a bare "not supported" —
+   or the lambda arms are reconsidered, which is a wider decision than this item.
+8. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap` so each is usable without the others.
 
    `hats` is the catalog itself, not this service's use of it: the properties file, the
