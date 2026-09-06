@@ -30,6 +30,7 @@ thing to keep working while that is built.
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
+| 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
 | 7 | operational surface | todo | |
@@ -672,7 +673,6 @@ README's "Known costs" suggests, the duplicate footer read in §6.1 is the cheap
   status, bytes fetched from stores, cache hit rates, partitions scanned.
 - Request limits: a global concurrency cap and a per-request timeout, configured, returning
   429/504.
-- OpenAPI description of the API mode, generated rather than hand-written.
 - `docker-compose.yml` for the realistic deployment: `hats-api` + nginx cache + MinIO.
 
 ### 7.2 Long requests
@@ -701,6 +701,41 @@ defaults to 60 seconds. Two things to build instead:
 
 Document the limitation: against a non-ranging origin holding a huge object, the first
 request after a cold start times out, and prefetch is the way around it.
+
+### 7.3 Serve the API description
+
+The service describes itself: `GET {api.prefix}/openapi.json` for the document, and a
+browsable rendering of it at `{api.prefix}/docs`. A deployment is then self-documenting
+for whoever finds it, and a client generator has something to read.
+
+**Generated from the types, never written beside them.** `QueryRequest` already is the
+schema — its fields, its `deny_unknown_fields`, the storage options, the region shapes.
+A description maintained separately is one that disagrees with the service the first
+time a field is added, and a confidently wrong API document is worse than none. This is
+the same reason the endpoint rules are derived from `Backend` rather than listed next
+to it.
+
+`utoipa` (5, MIT/Apache-2.0, ~14M recent downloads) is the one to use: derive macros
+over the same `serde` types, with `utoipa-axum` binding the routes so a route added
+without a description is visible rather than quietly absent. `aide` does the same job
+from the router side but is an order of magnitude less used and still pre-1.0.
+
+- **Bundle the renderer; do not fetch it from a CDN.** `utoipa-swagger-ui` embeds its
+  assets, while the `scalar` and `redoc` variants pull a script from the internet at page
+  load. This service is built for networks where the browser cannot do that, and a
+  documentation page that is blank in exactly the deployment it was written for is not
+  documentation. It costs binary size, which is the trade being made.
+- **It describes API mode only, and must say so.** The file-server mode has no route set
+  to enumerate: every url under a mount is a data path. The listing response and the
+  query parameters are describable, "any path below this prefix" is not, so the README
+  stays the document for that half rather than OpenAPI pretending to cover it.
+- **Not before §5.** §5.2 adds `region` and `POST /api/v1/hats`, §5.3 adds the sync /
+  plan / auto modes. Describing the API before those land describes a shape that then
+  changes — the reason §4.1 waits, applied to the document that is harder to correct
+  because clients will have generated code from it.
+- IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
+  `/availability`, arriving with TAP in §9.5. Nothing here should make serving both
+  awkward: they are two renderings of one description, not two descriptions.
 
 ## 8. Security requirements
 
