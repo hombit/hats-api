@@ -74,6 +74,17 @@ Add the `Backend` variant and follow the compile errors. Every match on a `Backe
 exhaustive, and the served schemes, the accepted options and the endpoint rules are all
 derived from it rather than written out beside it, so there is no list to forget.
 
+`Backend::provider` is the fork in that road, and it decides more than one thing. A
+backend that has a provider is addressed by bucket: the url's host is a bucket name, the
+server is the `endpoint` option, and the provider's own service is what a request naming
+no endpoint means. A backend that has none is addressed by origin: the url is the server,
+so it takes no `endpoint`, no `allow_http`, and no options at all unless it has
+credentials of its own. Ask `has_provider` rather than matching on the variant, so a
+later backend of either shape lands on the right side without this being rewritten.
+
+A backend may serve more than one scheme — `Backend::schemes` returns a slice, and
+`http`/`https` are one backend reached two ways.
+
 Before committing to a service, check it offers both of these; one that does not cannot
 be served here at all.
 
@@ -83,12 +94,21 @@ be served here at all.
 - **A switch for every ambient credential source**, disabled per store rather than
   globally — `disable_config_load`, `disable_ec2_metadata`, `disable_vm_metadata`.
 
+A service with no ambient chain at all satisfies both by construction — OpenDAL's http
+service sends an `Authorization` header only when the builder was handed one — but say so
+in the backend function rather than leaving the absence of the calls to be read as an
+oversight.
+
 Then follow the shape the existing ones set:
 
 - Addressing is per backend: path-style against a named S3-compatible endpoint,
   virtual-host against the provider itself.
 - `allow_http` stays ours. OpenDAL follows the endpoint's own scheme without asking, so
-  the cleartext decision has no backend half to defer to.
+  the cleartext decision has no backend half to defer to. Whose decision it is depends on
+  the addressing: for a bucket-addressed backend cleartext risks the caller's own
+  credential, so the caller says `allow_http`; for an origin-addressed one there is no
+  credential to lose and what is at stake is whether the bytes came from the host the url
+  named, which is the operator's `allow_plain_http`.
 - `object_store` is trait-only here — the `ObjectStore` trait DataFusion consumes, plus
   `LocalFileSystem` for `file://`. Put a new backend on OpenDAL's side; never re-enable
   an `object_store` backend feature.

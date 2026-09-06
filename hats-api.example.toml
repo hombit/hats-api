@@ -65,6 +65,23 @@ allow_local_names = false
 # endpoint is an Azurite or a compatible server.
 # endpoints = ["azure"]
 
+[access.http]
+# Which plain HTTP servers a request may read from, for http:// and https:// urls. An
+# http(s) url names its own server, so there is no provider name here the way "aws" is
+# one for s3 — every entry is a url.
+#
+# The same three states: leave the key out for any server (the default, still subject to
+# [access.network]), give an empty list to turn both schemes off, or list servers for
+# exactly those.
+# endpoints = ["https://data.example.com"]
+
+# Whether an http:// url may be read when no endpoint list names one. Off by default:
+# over cleartext nothing says the bytes came from the host the url names, and a parquet
+# file something on the path rewrote is a wrong answer rather than a failed request.
+# Naming an http:// server in `endpoints` above is the same decision made deliberately,
+# and does not need this as well.
+allow_plain_http = false
+
 [access.local]
 # Directories a request may read parquet files from, written as absolute paths or
 # file:// urls. Empty by default, so the service reads no local files until one is

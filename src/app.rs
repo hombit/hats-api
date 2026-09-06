@@ -370,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_schemes_are_rejected() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "https://example.com/a.parquet", "column": "x", "value": "1",
+            "url": "ftp://example.com/a.parquet", "column": "x", "value": "1",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);

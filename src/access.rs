@@ -10,9 +10,11 @@
 //! request carries its own `endpoint` option and can point the service anywhere. So the
 //! rules are endpoints, and any bucket at an allowed endpoint is readable.
 //!
-//! Every remote backend has the same three-state list, under its own section, with its
-//! own name for "the provider's own service" — which is what a url carrying no
-//! `endpoint` option means.
+//! Every remote backend has the same three-state list, under its own section. Most of
+//! them also have a name for "the provider's own service", which is what a url carrying
+//! no `endpoint` option means. `http(s)://` is the exception: its url names the server
+//! outright, so there is no endpoint option to default and no provider to default to —
+//! only the list, and whether cleartext is acceptable when there is no list.
 //!
 //! Which *address* a request ends up reaching is a second question, and one the endpoint
 //! rules cannot answer: a name allowed here may still resolve onto the network this
@@ -31,6 +33,11 @@
 //!
 //! [access.azure]
 //! endpoints = ["azure"]
+//!
+//! [access.http]
+//! # No provider name: an http(s) url names its own server, so every entry is a url.
+//! endpoints = ["https://data.example.com"]
+//! allow_plain_http = false
 //!
 //! [access.local]
 //! paths = ["/srv/hats"]
@@ -74,23 +81,28 @@ pub enum Backend {
     S3,
     Gcs,
     Azure,
+    Http,
 }
 
 /// Every remote backend, so that a caller listing or looping over them cannot miss one
 /// a later phase adds.
-pub const BACKENDS: &[Backend] = &[Backend::S3, Backend::Gcs, Backend::Azure];
+pub const BACKENDS: &[Backend] = &[Backend::S3, Backend::Gcs, Backend::Azure, Backend::Http];
 
 /// The one scheme with no [`Backend`] behind it, named here because it is the other half
 /// of that enum rather than a string three places happen to agree on.
 pub const LOCAL_SCHEME: &str = "file";
 
 impl Backend {
-    /// The url scheme that names this backend.
-    pub fn scheme(self) -> &'static str {
+    /// The url schemes that name this backend. More than one where the scheme is also
+    /// the transport: `http` and `https` are one backend reached two ways, and which of
+    /// the two a request used is [`AccessPolicy`]'s business rather than a separate
+    /// backend's.
+    pub fn schemes(self) -> &'static [&'static str] {
         match self {
-            Self::S3 => "s3",
-            Self::Gcs => "gs",
-            Self::Azure => "az",
+            Self::S3 => &["s3"],
+            Self::Gcs => &["gs"],
+            Self::Azure => &["az"],
+            Self::Http => &["http", "https"],
         }
     }
 
@@ -98,17 +110,39 @@ impl Backend {
         BACKENDS
             .iter()
             .copied()
-            .find(|backend| backend.scheme() == scheme)
+            .find(|backend| backend.schemes().contains(&scheme))
     }
 
     /// What an endpoint entry says to mean the provider's own service, which is the
     /// endpoint a url with no `endpoint` option is asking for.
-    fn provider(self) -> &'static str {
+    ///
+    /// `None` for a backend whose url names the server itself. That is one property with
+    /// several consequences — no default server to fall back to, no `endpoint` option to
+    /// override it with, and no provider name an endpoint list can hold — so it is asked
+    /// once here rather than decided again at each of them.
+    fn provider(self) -> Option<&'static str> {
         match self {
-            Self::S3 => "aws",
-            Self::Gcs => "gcp",
-            Self::Azure => "azure",
+            Self::S3 => Some("aws"),
+            Self::Gcs => Some("gcp"),
+            Self::Azure => Some("azure"),
+            // `https://data.example.com/x.parquet` says which server as plainly as a url
+            // can. There is nothing left for an option to name.
+            Self::Http => None,
         }
+    }
+
+    /// Whether the url names a bucket at a server the request may choose, rather than
+    /// naming the server itself. The two shapes differ in more than addressing: only the
+    /// first has an `endpoint` option, a provider to default to, or a cleartext decision
+    /// that belongs to the caller.
+    pub fn has_provider(self) -> bool {
+        self.provider().is_some()
+    }
+
+    /// The endpoint a request means when it names none, which only a backend with a
+    /// provider has.
+    fn default_endpoint(self) -> Option<Endpoint> {
+        self.provider().map(Endpoint::Provider)
     }
 
     /// The config section its rules live in, for saying where to change them.
@@ -117,6 +151,7 @@ impl Backend {
             Self::S3 => "access.s3",
             Self::Gcs => "access.gcs",
             Self::Azure => "access.azure",
+            Self::Http => "access.http",
         }
     }
 }
@@ -126,6 +161,13 @@ pub struct AccessPolicy {
     s3: EndpointRules,
     gcs: EndpointRules,
     azure: EndpointRules,
+    http: EndpointRules,
+    /// Whether an `http://` url may be read when the http rules name no endpoints. A
+    /// decision of the operator's rather than the caller's: the caller sends no
+    /// credential to an `http(s)://` url, so what cleartext costs here is not a secret
+    /// but the assurance that the bytes came from the host the url names — and only the
+    /// operator knows whether the deployment's network makes that acceptable.
+    allow_plain_http: bool,
     /// Allowed directories, canonical, so that a resolved request path can simply be
     /// tested for being under one of them.
     local: Vec<PathBuf>,
@@ -181,10 +223,10 @@ impl std::fmt::Display for EndpointScheme {
 #[derive(Debug, PartialEq, Eq)]
 enum Endpoint {
     /// The provider's own service, which is what a url with no `endpoint` option means.
-    /// The backend it belongs to, not the name it is written under: the name is one of
-    /// the backend's own properties, and looking it up is what keeps a refusal from
-    /// being able to quote a different one than the parse accepted.
-    Provider(Backend),
+    /// Built only from [`Backend::provider`], never from the entry as written, so a
+    /// refusal cannot quote a spelling the parse did not accept — and a backend that has
+    /// no provider has no way to reach this variant at all.
+    Provider(&'static str),
     /// One server speaking the backend's protocol. The port is kept resolved so that
     /// `https://host` and `https://host:443` are the one endpoint they are.
     Url {
@@ -221,9 +263,10 @@ impl AccessPolicy {
             named.extend(rules.hosts());
             Ok(rules)
         };
-        let s3 = build(&config.s3, Backend::S3)?;
-        let gcs = build(&config.gcs, Backend::Gcs)?;
-        let azure = build(&config.azure, Backend::Azure)?;
+        let s3 = build(&config.s3.endpoints, Backend::S3)?;
+        let gcs = build(&config.gcs.endpoints, Backend::Gcs)?;
+        let azure = build(&config.azure.endpoints, Backend::Azure)?;
+        let http = build(&config.http.endpoints, Backend::Http)?;
 
         let network = NetworkPolicy::new(&config.network, &named)?;
         let local = config
@@ -238,6 +281,8 @@ impl AccessPolicy {
             s3,
             gcs,
             azure,
+            http,
+            allow_plain_http: config.http.allow_plain_http,
             local,
             network,
             follow_symlinks: config.local.follow_symlinks,
@@ -255,7 +300,12 @@ impl AccessPolicy {
             .iter()
             .copied()
             .filter(|backend| self.rules(*backend).enabled())
-            .map(Backend::scheme)
+            .flat_map(Backend::schemes)
+            .copied()
+            // A backend's schemes are otherwise all served or all not; `http` is the one
+            // that has a second decision behind it, and claiming to read a scheme that
+            // every url in gets refused would send a caller looking for the wrong rule.
+            .filter(|scheme| *scheme != EndpointScheme::Http.name() || self.reads_cleartext_http())
             .collect();
         if !self.local.is_empty() {
             schemes.push(LOCAL_SCHEME);
@@ -263,11 +313,29 @@ impl AccessPolicy {
         schemes
     }
 
+    /// Whether any `http://` url could be read. With a list, the operator writing a
+    /// cleartext entry in it is the decision; without one, `allow_plain_http` is.
+    fn reads_cleartext_http(&self) -> bool {
+        match &self.http {
+            EndpointRules::Any => self.allow_plain_http,
+            EndpointRules::Only(endpoints) => endpoints.iter().any(|endpoint| {
+                matches!(
+                    endpoint,
+                    Endpoint::Url {
+                        scheme: EndpointScheme::Http,
+                        ..
+                    }
+                )
+            }),
+        }
+    }
+
     fn rules(&self, backend: Backend) -> &EndpointRules {
         match backend {
             Backend::S3 => &self.s3,
             Backend::Gcs => &self.gcs,
             Backend::Azure => &self.azure,
+            Backend::Http => &self.http,
         }
     }
 
@@ -299,14 +367,24 @@ impl AccessPolicy {
         match self.rules(backend) {
             // An unrestricted policy still has a destination to decide about: the
             // service can reach a great deal that its callers cannot.
-            EndpointRules::Any => match endpoint.and_then(Url::host) {
-                Some(host) => self.network.authorize_host(&host),
-                None => Ok(()),
-            },
+            EndpointRules::Any => {
+                let Some(url) = endpoint else { return Ok(()) };
+                self.refuse_unwanted_cleartext(backend, url)?;
+                match url.host() {
+                    Some(host) => self.network.authorize_host(&host),
+                    None => Ok(()),
+                }
+            }
             EndpointRules::Only(allowed) => {
                 let wanted = match endpoint {
                     Some(url) => Endpoint::from_url(url)?,
-                    None => Endpoint::Provider(backend),
+                    None => backend.default_endpoint().ok_or_else(|| {
+                        ApiError::bad_request(format!(
+                            "a {} url names its own server, so there is no default \
+                             endpoint to ask about",
+                            backend.schemes().join(" or ")
+                        ))
+                    })?,
                 };
                 match allowed.contains(&wanted) {
                     true => Ok(()),
@@ -319,6 +397,30 @@ impl AccessPolicy {
                 }
             }
         }
+    }
+
+    /// The cleartext half, for a backend whose url is its own endpoint. Only under
+    /// [`EndpointRules::Any`]: an operator who wrote an `http://` entry in a list has
+    /// already made this decision for that server, the same way naming an endpoint
+    /// settles the network rules for it.
+    ///
+    /// The bucket-addressed backends do not come through here. Their cleartext decision
+    /// is about a credential the caller attached, which only `storage` can see, and it is
+    /// the caller's to make with `allow_http` — there is nothing for the operator to
+    /// decide about a secret that is not theirs.
+    fn refuse_unwanted_cleartext(&self, backend: Backend, endpoint: &Url) -> Result<(), ApiError> {
+        let cleartext =
+            EndpointScheme::parse(endpoint.scheme()).is_some_and(EndpointScheme::is_cleartext);
+        if backend.provider().is_some() || !cleartext || self.allow_plain_http {
+            return Ok(());
+        }
+        Err(ApiError::forbidden(format!(
+            "{endpoint} is cleartext http, so nothing guarantees the bytes came from \
+             the host it names; set {}.allow_plain_http, or name the server in \
+             {}.endpoints, to change that",
+            backend.section(),
+            backend.section()
+        )))
     }
 
     fn authorize_local(&self, url: &Url) -> Result<PathBuf, ApiError> {
@@ -392,8 +494,11 @@ impl AccessPolicy {
 }
 
 impl EndpointRules {
-    fn new(config: &crate::config::EndpointConfig, backend: Backend) -> Result<Self, ConfigError> {
-        match &config.endpoints {
+    /// The list as the config spells it: absent is any endpoint, present is exactly
+    /// those. Taking the list rather than the section it came from is what lets the http
+    /// section carry a second key without every other backend growing one.
+    fn new(endpoints: &Option<Vec<String>>, backend: Backend) -> Result<Self, ConfigError> {
+        match endpoints {
             None => Ok(Self::Any),
             Some(entries) => entries
                 .iter()
@@ -456,7 +561,7 @@ pub fn describe_endpoint_schemes() -> String {
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Provider(backend) => f.write_str(backend.provider()),
+            Self::Provider(name) => f.write_str(name),
             Self::Url { scheme, host, port } => {
                 write!(f, "{scheme}://{host}")?;
                 match port {
@@ -483,13 +588,16 @@ fn parse_endpoint(entry: &str, backend: Backend) -> Result<Endpoint, ConfigError
     let invalid = |reason: String| ConfigError::Rule(entry.to_owned(), reason);
 
     let provider = backend.provider();
-    if entry.eq_ignore_ascii_case(provider) {
-        return Ok(Endpoint::Provider(backend));
+    if let Some(name) = provider.filter(|name| entry.eq_ignore_ascii_case(name)) {
+        return Ok(Endpoint::Provider(name));
     }
     let url = Url::parse(entry).map_err(|error| {
-        invalid(format!(
-            "{error}; expected {provider:?} or a url like https://minio.example.com"
-        ))
+        invalid(match provider {
+            Some(provider) => {
+                format!("{error}; expected {provider:?} or a url like https://minio.example.com")
+            }
+            None => format!("{error}; expected a url like https://data.example.com"),
+        })
     })?;
     if EndpointScheme::parse(url.scheme()).is_none() {
         return Err(invalid(format!(
@@ -567,7 +675,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::config::{EndpointConfig, LocalConfig, NetworkConfig};
+    use crate::config::{EndpointConfig, HttpConfig, LocalConfig, NetworkConfig};
 
     use super::*;
 
@@ -596,6 +704,10 @@ mod tests {
             s3: entries(list),
             gcs: entries(list),
             azure: entries(list),
+            http: HttpConfig {
+                endpoints: entries(list).endpoints,
+                allow_plain_http: false,
+            },
             ..Default::default()
         })
     }
@@ -614,6 +726,16 @@ mod tests {
             },
             Backend::Azure => AccessConfig {
                 azure: list,
+                ..Default::default()
+            },
+            Backend::Http => AccessConfig {
+                http: HttpConfig {
+                    endpoints: list.endpoints,
+                    // The list is the operator naming servers, which settles cleartext
+                    // for the ones in it; this switch is only about the case where
+                    // there is no list.
+                    allow_plain_http: false,
+                },
                 ..Default::default()
             },
         })
@@ -748,7 +870,7 @@ mod tests {
         let no_s3 = with_endpoints(&[]);
         let error = no_s3.authorize(&url("s3://bucket/k.parquet")).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-        assert_eq!(no_s3.allowed_schemes(), ["gs", "az"]);
+        assert_eq!(no_s3.allowed_schemes(), ["gs", "az", "https"]);
 
         assert!(everywhere(&[]).allowed_schemes().is_empty());
     }
@@ -763,7 +885,7 @@ mod tests {
             azure: entries(&["https://azurite.example.com"]),
             ..Default::default()
         });
-        assert_eq!(policy.allowed_schemes(), ["s3", "az"]);
+        assert_eq!(policy.allowed_schemes(), ["s3", "az", "https"]);
 
         assert!(policy.authorize(&url("s3://b/k.parquet")).is_ok());
         assert!(policy.authorize(&url("gs://b/k.parquet")).is_err());
@@ -882,7 +1004,7 @@ mod tests {
             assert!(
                 matches!(error, ApiError::Forbidden(_)),
                 "{}: {error}",
-                backend.scheme()
+                backend.schemes().join(", ")
             );
         }
     }
@@ -1162,45 +1284,162 @@ mod tests {
     #[test]
     fn every_backend_is_allowed_only_by_a_config_that_names_it() {
         for &backend in BACKENDS {
-            let scheme = backend.scheme();
-            let object = url(&format!("{scheme}://container/key.parquet"));
+            for &scheme in backend.schemes() {
+                let object = url(&format!("{scheme}://container/key.parquet"));
 
-            // The narrowest thing that should allow it: its provider, and nothing else.
-            let narrowest = under(backend, &[backend.provider()]);
-            assert!(narrowest.authorize(&object).is_ok(), "{scheme}");
-            assert!(
-                narrowest.authorize_endpoint(backend, None).is_ok(),
-                "{scheme}"
-            );
-            assert!(
-                narrowest
-                    .authorize_endpoint(
-                        backend,
-                        endpoint(Some("https://other.example.com")).as_ref()
-                    )
-                    .is_err(),
-                "{scheme}: a provider entry allowed a server it does not name"
-            );
+                // The narrowest thing that should allow it. For a backend with a
+                // provider that is the provider's own name; for one whose url is its own
+                // address it is that address, there being nothing else to write.
+                let entry = backend
+                    .provider()
+                    .map_or_else(|| format!("{scheme}://container"), str::to_owned);
+                let narrowest = under(backend, &[&entry]);
+                assert!(narrowest.authorize(&object).is_ok(), "{scheme}");
+                assert!(
+                    narrowest
+                        .authorize_endpoint(
+                            backend,
+                            endpoint(Some("https://other.example.com")).as_ref()
+                        )
+                        .is_err(),
+                    "{scheme}: {entry} allowed a server it does not name"
+                );
 
-            // And the config that turns it off refuses it outright, at the first gate.
-            let off = under(backend, &[]);
-            let error = off.authorize(&object).unwrap_err();
-            assert!(matches!(error, ApiError::Forbidden(_)), "{scheme}: {error}");
-            assert!(!off.allowed_schemes().contains(&scheme), "{scheme}");
+                // And the config that turns it off refuses it outright, at the first
+                // gate.
+                let off = under(backend, &[]);
+                let error = off.authorize(&object).unwrap_err();
+                assert!(matches!(error, ApiError::Forbidden(_)), "{scheme}: {error}");
+                assert!(!off.allowed_schemes().contains(&scheme), "{scheme}");
+            }
+
+            // A provider entry is also what a url carrying no endpoint option asks for,
+            // which is a question only a backend that has a provider can be asked.
+            if let Some(provider) = backend.provider() {
+                assert!(
+                    under(backend, &[provider])
+                        .authorize_endpoint(backend, None)
+                        .is_ok(),
+                    "{provider}"
+                );
+            }
         }
     }
 
     #[test]
     fn the_schemes_a_policy_serves_are_the_ones_it_was_given() {
         let (_dir, root) = temp_dir();
+        // `http` is absent by default and `https` is not: the http backend is on, and
+        // its cleartext half is the one thing an operator has to ask for.
         assert_eq!(
             AccessPolicy::default().allowed_schemes(),
-            ["s3", "gs", "az"]
+            ["s3", "gs", "az", "https"]
         );
         assert_eq!(
             with_paths(&[&root], false).allowed_schemes(),
-            ["s3", "gs", "az", "file"]
+            ["s3", "gs", "az", "https", "file"]
         );
         assert_eq!(everywhere(&[]).allowed_schemes(), Vec::<&str>::new());
+    }
+
+    /// The scheme a caller writes is half the http rules: `https://` is served out of the
+    /// box and `http://` is not, because over cleartext nothing says the parquet file
+    /// came from the host the url named.
+    #[test]
+    fn plain_http_is_off_until_the_config_asks_for_it() {
+        let default = AccessPolicy::default();
+        assert!(
+            default
+                .authorize(&url("https://data.example.com/k.parquet"))
+                .is_ok()
+        );
+        let error = default
+            .authorize_endpoint(
+                Backend::Http,
+                endpoint(Some("http://data.example.com")).as_ref(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        assert!(error.to_string().contains("allow_plain_http"), "{error}");
+        // https over the same policy is not affected by the switch.
+        assert!(
+            default
+                .authorize_endpoint(
+                    Backend::Http,
+                    endpoint(Some("https://data.example.com")).as_ref()
+                )
+                .is_ok()
+        );
+
+        let allowed = policy(&AccessConfig {
+            http: HttpConfig {
+                endpoints: None,
+                allow_plain_http: true,
+            },
+            ..Default::default()
+        });
+        assert!(
+            allowed
+                .authorize_endpoint(
+                    Backend::Http,
+                    endpoint(Some("http://data.example.com")).as_ref()
+                )
+                .is_ok()
+        );
+        assert!(allowed.allowed_schemes().contains(&"http"));
+    }
+
+    /// Naming a cleartext server is the operator making the same decision deliberately,
+    /// and it does not open cleartext to anywhere else.
+    #[test]
+    fn a_named_http_endpoint_needs_no_further_permission() {
+        let policy = under(Backend::Http, &["http://data.example.com"]);
+        assert!(
+            policy
+                .authorize_endpoint(
+                    Backend::Http,
+                    endpoint(Some("http://data.example.com")).as_ref()
+                )
+                .is_ok()
+        );
+        assert!(
+            policy
+                .authorize_endpoint(
+                    Backend::Http,
+                    endpoint(Some("http://other.example.com")).as_ref()
+                )
+                .is_err()
+        );
+        assert!(policy.allowed_schemes().contains(&"http"));
+    }
+
+    /// The other backends' cleartext decision is the caller's `allow_http`, about a
+    /// credential only `storage` can see. `allow_plain_http` must not reach into it, in
+    /// either direction.
+    #[test]
+    fn the_cleartext_switch_is_the_http_backends_alone() {
+        let policy = policy(&AccessConfig {
+            http: HttpConfig {
+                endpoints: None,
+                allow_plain_http: false,
+            },
+            network: NetworkConfig {
+                allow_private: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        for &backend in BACKENDS {
+            let cleartext = endpoint(Some("http://minio.example.com"));
+            let refused = policy
+                .authorize_endpoint(backend, cleartext.as_ref())
+                .is_err();
+            assert_eq!(
+                refused,
+                !backend.has_provider(),
+                "{:?} disagreed about cleartext",
+                backend
+            );
+        }
     }
 }

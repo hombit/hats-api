@@ -87,6 +87,7 @@ pub struct AccessConfig {
     pub s3: EndpointConfig,
     pub gcs: EndpointConfig,
     pub azure: EndpointConfig,
+    pub http: HttpConfig,
     pub local: LocalConfig,
 }
 
@@ -124,6 +125,28 @@ pub struct EndpointConfig {
     /// endpoint, an empty list turns the backend off, and a list is exactly those
     /// endpoints.
     pub endpoints: Option<Vec<String>>,
+}
+
+/// `http://` and `https://` urls, which are one backend reached two ways. The endpoint
+/// list has the same three states as every other backend's; what is extra here is that
+/// the url carries the scheme, so whether cleartext is acceptable is a question about
+/// the request rather than about an option beside it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct HttpConfig {
+    /// Servers a request may read from, as urls: `["https://data.example.com"]`. There
+    /// is no provider name here — an `http(s)://` url names its own server, so there is
+    /// no "the provider's own service" for one to mean.
+    ///
+    /// Three states, as elsewhere: absent is any server, an empty list turns `http://`
+    /// and `https://` off, and a list is exactly those.
+    pub endpoints: Option<Vec<String>>,
+    /// Whether an `http://` url may be read when no endpoint list names one. Off by
+    /// default: over cleartext nothing says the bytes came from the host the url names,
+    /// and a parquet file that something on the path rewrote is a wrong answer rather
+    /// than a failed request. Distinct from `network.allow_loopback`, which is about
+    /// which address may be reached rather than what may be spoken to it.
+    pub allow_plain_http: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]

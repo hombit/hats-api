@@ -43,7 +43,8 @@ pub fn supported_schemes() -> Vec<&'static str> {
     BACKENDS
         .iter()
         .copied()
-        .map(Backend::scheme)
+        .flat_map(Backend::schemes)
+        .copied()
         .chain([LOCAL_SCHEME])
         .collect()
 }
@@ -204,14 +205,15 @@ impl StorageOptions {
     /// is a caller who has the wrong url or the wrong options; either reading is worth
     /// saying rather than guessing at, and one of them misdirects a credential.
     fn for_scheme(&self, scheme: &str) -> Result<(), ApiError> {
-        let Some(accepted) = accepted_options(scheme) else {
+        let accepted = accepted_options(scheme);
+        if accepted.is_empty() {
             return match self.is_empty() {
                 true => Ok(()),
                 false => Err(ApiError::bad_request(format!(
                     "storage options are not accepted for {scheme:?} urls, which have none"
                 ))),
             };
-        };
+        }
         match self
             .named()
             .into_iter()
@@ -235,23 +237,41 @@ impl StorageOptions {
     }
 }
 
-/// The options a scheme takes, or `None` for a scheme that takes none at all.
-fn accepted_options(scheme: &str) -> Option<Vec<&'static str>> {
-    let backend = Backend::from_scheme(scheme)?;
-    let specific = match backend {
+/// The options a scheme takes. Empty for a scheme that takes none at all, which is both
+/// `file://`, where there is no store to reach, and `http(s)://`, where the url is
+/// already the whole of the address.
+fn accepted_options(scheme: &str) -> Vec<&'static str> {
+    let Some(backend) = Backend::from_scheme(scheme) else {
+        return Vec::new();
+    };
+    let specific: &[&str] = match backend {
         Backend::S3 => S3_OPTIONS,
         Backend::Gcs => GCS_OPTIONS,
         Backend::Azure => AZURE_OPTIONS,
+        Backend::Http => &[],
     };
-    Some([SHARED_OPTIONS, specific].concat())
+    // `endpoint` and `allow_http` are the options for naming a server other than the
+    // provider's own, so they belong to the backends that have a provider to differ
+    // from. A url that is its own endpoint has nothing to point elsewhere.
+    let shared: &[&str] = match backend.has_provider() {
+        true => SHARED_OPTIONS,
+        false => &[],
+    };
+    [shared, specific].concat()
 }
 
-/// The options this url's scheme takes, for an error message that has to name them
-/// before the scheme is known to be one we serve.
-fn options_for(url: &Url) -> String {
-    match accepted_options(url.scheme()) {
-        Some(options) => options.join(", "),
-        None => SHARED_OPTIONS.join(", "),
+/// The clause naming what this url's scheme takes, for the two messages that have to say
+/// where a caller's options go. Phrased both ways rather than printing an empty list,
+/// which would read as though the scheme's options had been left out of the message.
+///
+/// Written for a scheme that may not be one this service serves at all: these messages
+/// come from checks that run before the scheme is known, and saying "ftp urls take no
+/// storage options" is true and is followed by the refusal that matters.
+fn options_clause(url: &Url) -> String {
+    let scheme = url.scheme();
+    match accepted_options(scheme).as_slice() {
+        [] => format!("{scheme} urls take no storage options"),
+        options => format!("{scheme} urls take {}", options.join(", ")),
     }
 }
 
@@ -294,6 +314,7 @@ pub fn open(
     match policy.authorize(url)? {
         Target::Local(path) => local_file(&path),
         Target::Remote(backend) => {
+            refuse_port_on_a_bucket(url, backend)?;
             // Each arm produces a configured builder and nothing more; `remote_store` is
             // the single place a builder becomes something that can make a request.
             let store: Arc<dyn ObjectStore> = match backend {
@@ -302,10 +323,11 @@ pub fn open(
                 Backend::Azure => {
                     Arc::new(remote_store(azblob_builder(url, options, policy)?, policy)?)
                 }
+                Backend::Http => Arc::new(remote_store(http_builder(url, policy)?, policy)?),
             };
             Ok(RemoteFile {
                 store,
-                base: base_url(url)?,
+                base: origin(url)?,
                 url: file_url(url),
             })
         }
@@ -331,17 +353,6 @@ fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
     })
 }
 
-/// `scheme://authority` — DataFusion looks stores up by that, without the object path.
-fn base_url(url: &Url) -> Result<Url, ApiError> {
-    let authority = authority(url)?;
-    Url::parse(&format!("{}://{authority}", url.scheme())).map_err(|error| {
-        ApiError::bad_request(format!(
-            "cannot derive store url from {}: {error}",
-            file_url(url)
-        ))
-    })
-}
-
 /// The URL as far as it is safe to print. [`refuse_userinfo`] means an opened file never
 /// has any, but this also builds the error messages — one of which is that refusal.
 fn file_url(url: &Url) -> Url {
@@ -353,10 +364,26 @@ fn file_url(url: &Url) -> Url {
     file
 }
 
-fn authority(url: &Url) -> Result<&str, ApiError> {
+/// The host part of the url, which for a bucket-addressed backend is the bucket or
+/// container name.
+fn host(url: &Url) -> Result<&str, ApiError> {
     url.host_str()
         .filter(|host| !host.is_empty())
         .ok_or_else(|| ApiError::bad_request(format!("url {} has no host", file_url(url))))
+}
+
+/// The same, plus the port when the url names one the scheme does not imply.
+///
+/// The port is only ever part of an address, so it belongs to [`origin`] and not to the
+/// three backends above, whose host is a bucket name. A bucket cannot have a port, and
+/// quietly accepting one into a bucket name would be a way to write something into a
+/// signed request that is not a bucket.
+fn authority(url: &Url) -> Result<String, ApiError> {
+    let host = host(url)?;
+    Ok(match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
 }
 
 /// `s3://key:secret@bucket/object` would survive into `RemoteFile::url`, the url every
@@ -365,11 +392,12 @@ fn authority(url: &Url) -> Result<&str, ApiError> {
 fn refuse_userinfo(url: &Url) -> Result<(), ApiError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ApiError::bad_request(format!(
-            "url {}://{} carries credentials in its authority; pass them as {} instead",
+            "url {}://{} carries credentials in its authority, which this server does \
+             not read them from; {}",
             url.scheme(),
             // Not `file_url`: that keeps the userinfo, which is the thing to not echo.
             url.host_str().unwrap_or_default(),
-            options_for(url)
+            options_clause(url)
         )));
     }
     Ok(())
@@ -381,12 +409,28 @@ fn refuse_userinfo(url: &Url) -> Result<(), ApiError> {
 fn refuse_query_string(url: &Url) -> Result<(), ApiError> {
     if url.query().is_some() {
         return Err(ApiError::bad_request(format!(
-            "url {} has a query string; storage options go in \"storage\", which takes {}",
+            "url {} has a query string; storage options go in \"storage\", and {}",
             file_url(url),
-            options_for(url)
+            options_clause(url)
         )));
     }
     Ok(())
+}
+
+/// `s3://bucket:9000/key.parquet` is a caller who thinks the host half of the url is the
+/// server. It is the bucket, and a bucket has no port — so this is refused rather than
+/// dropped, which would read the url as naming a bucket the caller did not write and
+/// send it to whatever endpoint the options named instead.
+fn refuse_port_on_a_bucket(url: &Url, backend: Backend) -> Result<(), ApiError> {
+    match url.port() {
+        Some(port) if backend.has_provider() => Err(ApiError::bad_request(format!(
+            "url {} names port {port}, but a {} url's host is a bucket rather than a \
+             server; the server goes in the endpoint option",
+            file_url(url),
+            url.scheme()
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn require_object_key(url: &Url) -> Result<(), ApiError> {
@@ -562,7 +606,7 @@ fn s3_builder(
     options: &StorageOptions,
     policy: &AccessPolicy,
 ) -> Result<services::S3, ApiError> {
-    let bucket = authority(url)?;
+    let bucket = host(url)?;
     // Virtual-host addressing puts the region in the hostname, so a region is one of
     // the strings `require_label` exists for.
     let region = require_label(
@@ -628,7 +672,7 @@ fn gcs_builder(
     policy: &AccessPolicy,
 ) -> Result<services::Gcs, ApiError> {
     let mut builder = services::Gcs::default()
-        .bucket(authority(url)?)
+        .bucket(host(url)?)
         // The request is the only source of credentials. Without these two, OpenDAL
         // reads `GOOGLE_APPLICATION_CREDENTIALS`, `~/.config/gcloud` and the GCE
         // metadata server — so a caller who sent none would be answered with the
@@ -685,7 +729,7 @@ fn azblob_builder(
     let account = require_label("account", account, "")?;
 
     let mut builder = services::Azblob::default()
-        .container(authority(url)?)
+        .container(host(url)?)
         .account_name(account.as_str());
 
     builder = match resolve_endpoint(Backend::Azure, options, policy)? {
@@ -709,6 +753,41 @@ fn azblob_builder(
         (None, None) => builder.skip_signature(),
     };
     Ok(builder)
+}
+
+/// A plain HTTP server, where the url is the whole address: no bucket, no endpoint
+/// option, no credentials.
+///
+/// The two things `CLAUDE.md` requires of a backend before it is served here are met by
+/// this one having no identity at all. OpenDAL's http service sends an `Authorization`
+/// header only when the builder was given one, and reads no environment variable, no
+/// config file and no metadata service on its way to deciding that — so an anonymous
+/// request stays anonymous without a switch having to say so.
+///
+/// What it cannot do is list, so a catalog served this way is discoverable only through
+/// the files it names rather than by walking its directories.
+fn http_builder(url: &Url, policy: &AccessPolicy) -> Result<services::Http, ApiError> {
+    let origin = origin(url)?;
+    // The url *is* the endpoint here, so this is the same gate the other backends reach
+    // through their `endpoint` option — asked about the address the caller wrote.
+    policy.authorize_endpoint(Backend::Http, Some(&origin))?;
+    // `Url` prints an empty path as a trailing `/`, and OpenDAL joins the endpoint to a
+    // key that already starts with one. Left in, every request would go to `//key`.
+    Ok(services::Http::default().endpoint(origin.as_str().trim_end_matches('/')))
+}
+
+/// `scheme://host[:port]` — the url with the object taken off it.
+///
+/// Two jobs, and they want the same value: it is the key DataFusion registers a store
+/// under, and for [`http_builder`] it is also the server itself, which is what makes it
+/// the thing the endpoint policy judges.
+fn origin(url: &Url) -> Result<Url, ApiError> {
+    Url::parse(&format!("{}://{}", url.scheme(), authority(url)?)).map_err(|error| {
+        ApiError::bad_request(format!(
+            "cannot derive the server from {}: {error}",
+            file_url(url)
+        ))
+    })
 }
 
 /// Whether a string is base64. Not a decode: what the caller needs to know is that
@@ -1194,7 +1273,7 @@ mod tests {
 
     #[test]
     fn rejects_schemes_we_cannot_serve_yet() {
-        let url = parse_url("https://example.com/a.parquet").unwrap();
+        let url = parse_url("ftp://example.com/a.parquet").unwrap();
         let error = open(&url, &no_options()).unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
         assert!(
@@ -1484,6 +1563,138 @@ mod tests {
         let url = parse_url(&format!("s3://AKIA123:{SECRET}@bucket")).unwrap();
         let error = open(&url, &no_options()).unwrap_err().to_string();
         assert!(!error.contains(SECRET), "leaked: {error}");
+    }
+
+    /// The key DataFusion actually files a store under, which is scheme and authority
+    /// and nothing else. `Url` normalises `https://host` to a `/` path, so comparing the
+    /// base url as written would be comparing a spelling rather than the key.
+    fn store_key(file: &RemoteFile) -> String {
+        format!(
+            "{}://{}",
+            file.base.scheme(),
+            &file.base[url::Position::BeforeHost..url::Position::AfterPort]
+        )
+    }
+
+    /// A plain HTTP server: the url is the whole address, so there is no bucket, no
+    /// endpoint option and nothing to sign with.
+    #[test]
+    fn opens_an_https_url() {
+        let url = parse_url("https://data.example.com/hats/part0.parquet").unwrap();
+        let file = open(&url, &no_options()).unwrap();
+        assert_eq!(store_key(&file), "https://data.example.com");
+        assert_eq!(
+            file.url.as_str(),
+            "https://data.example.com/hats/part0.parquet"
+        );
+    }
+
+    /// The port is part of which server this is, and DataFusion files a store under
+    /// scheme and authority — so dropping it would put two servers under one key and
+    /// send the second one's reads to the first.
+    #[test]
+    fn a_port_is_part_of_the_server_a_url_names() {
+        let url = parse_url("https://data.example.com:8443/part0.parquet").unwrap();
+        let file = open(&url, &no_options()).unwrap();
+        assert_eq!(store_key(&file), "https://data.example.com:8443");
+    }
+
+    /// The other half: a bucket-addressed url's host is a bucket, and a bucket has no
+    /// port. Refused rather than dropped, which would read the url as naming a bucket
+    /// the caller did not write.
+    #[test]
+    fn a_port_on_a_bucket_url_is_refused() {
+        let url = parse_url("s3://bucket:9000/key.parquet").unwrap();
+        let error = open(&url, &no_options()).unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+        assert!(
+            error.to_string().contains("bucket rather than a"),
+            "{error}"
+        );
+    }
+
+    /// There is no server for an option to name and no credential for one to carry, so
+    /// every option is the caller having confused this backend with another.
+    #[test]
+    fn an_http_url_takes_no_storage_options() {
+        let url = parse_url("https://data.example.com/part0.parquet").unwrap();
+        for option in [
+            serde_json::json!({"endpoint": "https://elsewhere.example.com"}),
+            serde_json::json!({"region": "us-west-2"}),
+            serde_json::json!({"secret_access_key": SECRET}),
+            serde_json::json!({"allow_http": true}),
+        ] {
+            let error = open(&url, &options(option.clone())).unwrap_err();
+            assert!(
+                matches!(error, ApiError::BadRequest(_)),
+                "{option}: {error}"
+            );
+            assert!(
+                error.to_string().contains("not accepted"),
+                "{option}: {error}"
+            );
+            assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+        }
+    }
+
+    /// Basic-auth credentials in the authority are the one way a caller can spell a
+    /// secret into an `https://` url, and the message says this scheme takes none rather
+    /// than naming another backend's options.
+    #[test]
+    fn credentials_in_an_http_url_are_refused_without_naming_other_options() {
+        let url = parse_url(&format!("https://user:{SECRET}@data.example.com/k.parquet")).unwrap();
+        let error = open(&url, &no_options()).unwrap_err();
+        assert!(error.to_string().contains("in its authority"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("https urls take no storage options"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+    }
+
+    #[test]
+    fn a_cleartext_http_url_needs_the_server_to_allow_it() {
+        let url = parse_url("http://data.example.com/part0.parquet").unwrap();
+        let error = open(&url, &no_options()).unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        assert!(error.to_string().contains("allow_plain_http"), "{error}");
+    }
+
+    /// The whole path for the new backend: a real server, a real ranged `GET` through
+    /// the store, and no identity of ours on it.
+    #[tokio::test]
+    async fn an_http_request_carries_no_credentials_and_asks_for_the_key() {
+        let (port, receiver) = capture_one_request();
+        let config = crate::config::AccessConfig {
+            network: crate::config::NetworkConfig {
+                allow_loopback: true,
+                ..Default::default()
+            },
+            http: crate::config::HttpConfig {
+                endpoints: None,
+                allow_plain_http: true,
+            },
+            ..Default::default()
+        };
+        let policy = AccessPolicy::new(&config).unwrap();
+        let url = parse_url(&format!("http://127.0.0.1:{port}/hats/part0.parquet")).unwrap();
+        let file = super::open(&url, &no_options(), &policy).unwrap();
+        assert_eq!(store_key(&file), format!("http://127.0.0.1:{port}"));
+
+        use object_store::ObjectStoreExt;
+        let _ = file
+            .store
+            .get(&object_store::path::Path::from("hats/part0.parquet"))
+            .await;
+        let head = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the store made no request")
+            .to_ascii_lowercase();
+        // One slash, not two: the endpoint has the trailing one trimmed off it.
+        assert!(head.contains("get /hats/part0.parquet"), "{head}");
+        assert!(!head.contains("authorization:"), "signed anyway: {head}");
     }
 
     #[test]

@@ -22,7 +22,7 @@ object_store = "0.13"
 object_store_opendal = "0.58"
 # Default features pull in every layer and a ctor; `storage` installs the transport and
 # the one layer it wants.
-opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
+opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
 # `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
 # needs both the transport adapter and reqwest by name. Both versions must match what
 # `opendal` resolves to: a `reqwest::Client` from another copy is a different type.
