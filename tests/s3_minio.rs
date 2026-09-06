@@ -19,7 +19,7 @@ mod common;
 use common::{expect_error, lookup, parquet_fixture, permissive_policy, row_count, skip_or_fail};
 use hats_api::error::ApiError;
 use hats_api::storage::StorageOptions;
-use opendal::{Operator, services};
+use opendal::{HttpTransporter, OperationContext, Operator, services};
 
 /// Where the MinIO under test is, and how to write to it.
 struct Minio {
@@ -49,6 +49,12 @@ impl Minio {
 
     /// An operator for putting fixtures in place. The service has no write path, so
     /// this is the test's own client and deliberately separate from `src/storage.rs`.
+    ///
+    /// It carries its own transport for the same reason the service's does: nothing
+    /// installs a process-wide default, so an operator built without one fails rather
+    /// than quietly finding a client that answers to no policy. Leaving that fallback
+    /// switched off is what makes this the one binary where a store reaching a real
+    /// server proves the service attached its own.
     #[expect(
         clippy::disallowed_methods,
         reason = "the fixture writer is not a request path; it talks to the MinIO this \
@@ -64,7 +70,13 @@ impl Minio {
             .secret_access_key(&self.secret_key)
             .disable_config_load()
             .disable_ec2_metadata();
-        Operator::new(builder).expect("an operator for the test MinIO")
+        Operator::new(builder)
+            .expect("an operator for the test MinIO")
+            .with_context(
+                OperationContext::new().with_http_transport(HttpTransporter::new(
+                    opendal_http_transport_reqwest::ReqwestTransport::default(),
+                )),
+            )
     }
 
     /// Put the fixture at `key` and return the url a caller would send to read it.
