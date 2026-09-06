@@ -14,7 +14,7 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason). See
 | 2.2 | GCS and Azure | done | |
 | 8.3 | network policy | done | |
 | 2.3 | HTTP/HTTPS, range probe, materialization | done | |
-| 2.4 | WebDAV | todo | the range machinery is built and backend-agnostic; what is left is the service, its credentials and its own policy section |
+| 2.4 | WebDAV | todo | blocked on the scheme question below: it decides whether a test server is reachable at all |
 | 2.5 | Hugging Face | todo | droppable |
 | 3.1 | two-mode configuration | todo | |
 | 3.2 | routing | todo | |
@@ -99,24 +99,49 @@ the pattern the remaining backends follow — see `CLAUDE.md` for what one has t
 which is the listing operation the http backend lacks, so a WebDAV-hosted catalog gets all
 three of §5.1's discovery tiers and can be served through §4's directory pages.
 
+**Settle the scheme before writing any of it.** `webdav://` names a protocol and a server
+but not the transport underneath, and everything else here depends on what fills that gap:
+
+- `http`/`https` are one backend reached two ways, so the caller's url states the
+  transport and `allow_plain_http` is only the operator's half of a decision the caller
+  also makes with `allow_http`. A single `webdav://` scheme has no caller half, so
+  `[access.webdav]` cannot carry an `allow_plain_http` that means the same thing.
+- If `webdav://` is always TLS, no server in this repository's tests can be reached
+  through it — they are all plain http on loopback, and the resolver will not reach a
+  cert-less host. The range probe, the credential on the wire and materialization would
+  then be verified for this backend only by reading them, which §8.5 and `CLAUDE.md`
+  both refuse.
+
+So the choice is between a second scheme for the cleartext case, an operator-listed
+endpoint whose own scheme decides the transport for that host, and accepting an untested
+backend. Whichever is picked, the endpoint list must not be able to hold an entry that
+nothing could ever match.
+
 | option | meaning |
 |---|---|
 | `username`, `password` | credentials, given together, and subject to §8.1 |
 
 Policy: `[api.access.webdav]`, three-state `endpoints` as elsewhere. Separate from
 `[api.access.http]` — a host that may be read as flat objects is not thereby a host whose
-directory tree may be enumerated. It carries its own `allow_plain_http`, since
-`webdav://` also names its own server and the same decision applies.
+directory tree may be enumerated.
 
 Two things are already built and need only to be pointed at it. The range probe and
 materialization are backend-agnostic — WebDAV is HTTP underneath, and
 `MaterializingStore` wraps any store — and `[access.network]` governs the host without
 knowing which backend asked.
 
-Unlike the http backend this one has credentials, which pulls it back into the machinery
-the bucket-addressed backends use: `username` and `password` are `SecretString` options
-registered with `Named::credential`, and the cleartext decision is then partly the
-caller's again, since it is their secret at risk.
+The credentials cannot simply go on the builder, though. `MaterializingStore` probes with
+a request of its own, made outside the store, so a server that authenticates would answer
+the probe `401`; the probe reads a non-success as "let the store try", and a server that
+then ignored `Range` would feed the reader the head of the file where it asked for the
+tail. WebDAV's `username` and `password` are HTTP basic auth and nothing more, so lowering
+them into the one `HeaderMap` that both the probe and the store's transport already carry
+is what makes the two provably agree.
+
+`opendal`'s `WebdavConfig` keeps `password` and `token` out of its own `Debug`, so §8.5's
+sixth obligation has nothing to add to `CREDENTIAL_UNSAFE_TARGETS` — but its `parse_error`
+puts the origin's response body into the error message, which §8.3 forbids echoing. Check
+whether the http service does the same before assuming this one is new.
 
 ### 2.5 Hugging Face
 
@@ -850,16 +875,24 @@ Run `cargo deny` (advisories + licences) in CI.
    variable, a file — is named explicitly in the config for that mount, never discovered
    from the process environment. It also invalidates the reasoning behind the one
    advisory `deny.toml` ignores, which turns on every key being the caller's own.
-2. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
+2. **WebDAV over cleartext.** §2.4 serves TLS only. A WebDAV server on an internal
+   network without a certificate is an ordinary deployment, so there needs to be a way to
+   say so — a second scheme the caller writes, an operator-listed `http://` endpoint that
+   decides the transport for that host, or both. It is deferred rather than dropped
+   because the shape has to match `[access.http]`'s two halves: the operator agreeing
+   cleartext is acceptable on this network, and the caller agreeing to put *their*
+   `username` and `password` on it. Getting one half and calling it done is how a
+   credential ends up in the open.
+3. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
    already executes (§3.5), rather than opening a second execution path. ADQL's `CONTAINS`,
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
    settles the lowering and the rejection messages before the IVOA grammar.
-3. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
+4. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
    `VOTable` output, the UWS job model. `/async` is a real job system with state, and is
    where §5.3's and §7.2's no-job-queue decision is revisited.
-4. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
+5. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.
-5. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats-query`,
+6. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats-query`,
    `adql` and `tap` so each is usable without the others.
 
 Each phase leaves the service useful, and each is a prerequisite for the next rather than a
