@@ -111,7 +111,10 @@ impl Mounts {
 
 /// The url prefix as it will be compared: absolute, with no trailing slash unless it is
 /// the root, and with nothing in it that a path resolver would have to interpret.
-fn normalize_prefix(raw: &str) -> Result<String, String> {
+///
+/// The API's own prefix goes through this too. The two claim url space the same way, and
+/// deciding whether they collide means comparing them in one spelling.
+pub(crate) fn normalize_prefix(raw: &str) -> Result<String, String> {
     if !raw.starts_with('/') {
         return Err(format!(
             "a mount path is an absolute url prefix, so it starts with /, not {raw:?}"
@@ -143,7 +146,7 @@ fn overlaps(one: &str, other: &str) -> bool {
 
 /// The part of `path` that lies under `prefix`, or `None` when it does not. `/hats` does
 /// not contain `/hatsx`: a prefix matches whole segments or nothing.
-fn within<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
+pub(crate) fn within<'a>(prefix: &str, path: &'a str) -> Option<&'a str> {
     let rest = path.strip_prefix(prefix)?;
     match prefix {
         // The root already ends in the separator, so what is left is the whole path.

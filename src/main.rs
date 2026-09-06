@@ -68,7 +68,7 @@ fn print_usage() {
 }
 
 /// Everything that can fail before the first request, failing in one place.
-fn startup() -> Result<(Config, AccessPolicy, Mounts), NotServing> {
+fn startup() -> Result<(Config, app::Service), NotServing> {
     let args: Vec<String> = env::args().skip(1).collect();
     let invalid = |error: &dyn std::fmt::Display| NotServing::Invalid(error.to_string());
     let config = match config_path(&args)? {
@@ -78,7 +78,9 @@ fn startup() -> Result<(Config, AccessPolicy, Mounts), NotServing> {
     // Before the policy, which is built from these as well as from `[api.access]`.
     let mounts = Mounts::new(&config.mounts).map_err(|error| invalid(&error))?;
     let policy = AccessPolicy::new(&config.api.access, &mounts).map_err(|error| invalid(&error))?;
-    Ok((config, policy, mounts))
+    let service = app::Service::new(policy, &config.limits, mounts, &config.api)
+        .map_err(|error| invalid(&error))?;
+    Ok((config, service))
 }
 
 /// The mounts as one line of the startup log: what is published, and out of where.
@@ -97,7 +99,7 @@ fn describe_mounts(mounts: &Mounts) -> String {
 async fn main() -> ExitCode {
     // The config decides how to log, so nothing before this point can be logged: these
     // two go to the terminal, and everything after `init_tracing` goes through it.
-    let (config, policy, mounts) = match startup() {
+    let (config, service) = match startup() {
         Ok(started) => started,
         Err(NotServing::HelpRequested) => {
             print_usage();
@@ -133,11 +135,10 @@ async fn main() -> ExitCode {
 
     tracing::info!(
         %listen_addr,
-        allows = %policy.allowed_schemes().join(", "),
-        mounts = %describe_mounts(&mounts),
+        allows = %service.policy.allowed_schemes().join(", "),
+        mounts = %describe_mounts(&service.mounts),
         "listening"
     );
-    let service = app::Service::new(policy, &config.limits);
     if let Err(error) = axum::serve(listener, app::router(service))
         .with_graceful_shutdown(shutdown_signal())
         .await

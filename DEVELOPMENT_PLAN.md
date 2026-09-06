@@ -22,7 +22,7 @@ thing to keep working while that is built.
 | 2.4 | WebDAV | deferred | until after §4. Blocked on the scheme question below, which decides whether a test server is reachable at all |
 | 2.5 | Hugging Face | deferred | until after §4, and droppable |
 | 3.1 | two-mode configuration | done | |
-| 3.2 | routing | todo | |
+| 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
 | 4 | file-server interface | todo | |
@@ -174,26 +174,6 @@ Separate configuration (§3.1), routing (§3.2) and request shapes (§3.3, §3.4
 internal query representation and one execution path. `columns`/`filters` and
 `select`/`where` parse into the same thing; a semantic divergence between them is a bug.
 
-### 3.2 Routing
-
-`api.prefix` claims its subtree, mounts claim theirs, and overlap is refused at startup,
-so dispatch is static and a request belongs to exactly one mode. A mount at `/` with the
-API at `/api/v1` is the expected arrangement; the API's prefix wins as the more specific
-route.
-
-`api.enabled = false` with no mount serves nothing, which is a startup error rather than
-a process that listens and refuses everything.
-
-**Two tables, one resolver.** `Target` grows a `Mount { mount, relative_path }` variant,
-so that a path arriving through a mount goes through the same resolution — clean it,
-canonicalize it, match it against the rule, and judge the symlink under that rule's own
-`follow_symlinks` — as a `file://` url arriving through the API. `access::resolve_local`
-is that resolution; a mount passes its own single rule rather than the API's table, so
-one mount cannot serve a file out of another's directory.
-
-**Deliverable.** With no `[[mount]]`, the API alone. With `api.enabled = false` and one
-mount, a pure file server.
-
 ### 3.3 The API request shape
 
 **The API is `POST` only**; `GET` belongs to the file-server mode (§3.4). What this step
@@ -320,26 +300,21 @@ constraint can move into the expression.
 Modelled on <https://vizcat.cds.unistra.fr/hats/> and
 <https://github.com/astronomy-commons/lsdb-server>, with the query surface from §3.4.
 
-Behaviour, in order of precedence:
+Serving a file's bytes is done: §3.2 resolves the path and `tower_http`'s `ServeFile`
+answers with the ranges, the validators and the conditional requests. What is left, in
+order of precedence:
 
 1. **A directory path** → a listing. HTML for a browser (`Accept: text/html`), JSON
    otherwise — a `readdir` over the mount. Cap entries and paginate: a HATS `Dir=` level
-   holds ten thousand entries.
-2. **A non-parquet file, or a parquet file with no query parameters** → the bytes,
-   statically. This covers `properties`, `partition_info.csv`, `point_map.fits`,
-   `_metadata` and `_common_metadata`, which `hats`/`lsdb` clients fetch verbatim. Serve
-   with:
-   - correct `Content-Type` (`application/vnd.apache.parquet` for parquet);
-   - `Range` passed through to the store, so a remote `lsdb` can read a partition without
-     downloading it;
-   - `ETag` and `Last-Modified` from store metadata, with `If-None-Match` /
-     `If-Modified-Since` handling;
-   - `Content-Length`, streaming the body rather than buffering it.
-3. **A parquet file with query parameters** → a query through `query.rs` +
-   `parquet_out.rs`, with the file taken from the mount.
+   holds ten thousand entries. A directory is a 404 until this exists.
+2. **A parquet file with query parameters** → a query through `query.rs` +
+   `parquet_out.rs`, with the file taken from the mount. The parameters are §3.4's, which
+   waits on `docs/vizcat-compat.md`. A file with no query parameters keeps going out
+   verbatim, whatever its extension.
 
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
-with no knowledge of anything else this service does.
+with no knowledge of anything else this service does. Nothing here has been tried against
+a real one yet, which is the one check this phase cannot do by reading.
 
 ### 4.1 Write the README
 
@@ -833,13 +808,32 @@ Run `cargo deny` (advisories + licences) in CI.
    the origin's `ETag` passed through, and §8.3's network policy starts applying to the
    file-server mode. `[api.access]` needs a prefix rule kind first: `source =
    "s3://bucket/hats/"` is not an endpoint entry, which would allow every bucket at that
-   endpoint, and §3.1's derived grant must stay no wider than the mount. This is
+   endpoint, and a mount's derived grant must stay no wider than the mount. This is
    also the first mount that could need credentials, so it is where §8.1's rule is
    revisited: any operator-configured credential source — a config value, an environment
    variable, a file — is named explicitly in the config for that mount, never discovered
    from the process environment. It also invalidates the reasoning behind the one
    advisory `deny.toml` ignores, which turns on every key being the caller's own.
-2. **WebDAV over cleartext.** §2.4 serves TLS only. A WebDAV server on an internal
+2. **A plain-url API for public data.** One `GET` whose only parameter is the location —
+   `s3://bucket/hats/part0.parquet`, `https://data.example.com/x.parquet` — with the
+   scheme naming the backend the way `Backend::from_scheme` already does. It is the
+   one-liner a browser, a `curl` or a notebook cell can write, and it costs nothing new
+   to execute: it lowers to the same request the `POST` shape carries.
+
+   **Anonymous only, and that is what makes it a `GET`.** §3.3 is `POST` because the
+   request carries credentials and a query string is written to every proxy's access log
+   on the way. So this shape must refuse a credential rather than ignore one — no
+   `storage` object, no headers, no url with a query string on it — and the moment
+   anything here could carry a secret it goes back to being a `POST`. Refusing is the
+   whole design: accepting a credential "just this once" is how one ends up in a log.
+
+   `[api.access]` still decides what may be named; this changes how a request is written,
+   not what it may reach. Two things to settle when it is built: where it sits in the url
+   space, given a url nested in a url needs encoding either way, and whether it answers
+   only the whole object or takes §3.4's `columns`/`filters` as well — those are the same
+   parameters the file-server mode already speaks, and having two spellings of them would
+   be the divergence §3 exists to avoid.
+3. **WebDAV over cleartext.** §2.4 serves TLS only. A WebDAV server on an internal
    network without a certificate is an ordinary deployment, so there needs to be a way to
    say so — a second scheme the caller writes, an operator-listed `http://` endpoint that
    decides the transport for that host, or both. It is deferred rather than dropped
@@ -847,17 +841,24 @@ Run `cargo deny` (advisories + licences) in CI.
    cleartext is acceptable on this network, and the caller agreeing to put *their*
    `username` and `password` on it. Getting one half and calling it done is how a
    credential ends up in the open.
-3. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
+4. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
    already executes (§3.5), rather than opening a second execution path. ADQL's `CONTAINS`,
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
    settles the lowering and the rejection messages before the IVOA grammar.
-4. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
+5. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
    `VOTable` output, the UWS job model. `/async` is a real job system with state, and is
    where §5.3's and §7.2's no-job-queue decision is revisited.
-5. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
+6. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.
-6. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats-query`,
-   `adql` and `tap` so each is usable without the others.
+7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+   and `tap` so each is usable without the others.
+
+   `hats` is the catalog itself, not this service's use of it: the properties file, the
+   partitioning, `Norder`/`Npix`/`Dir` addressing, the MOC, `_metadata` and
+   `partition_info.csv` — what the Python `hats` library covers, in Rust, for anyone
+   reading a HATS catalog with no service in front of it. §5.1 and §5.2 are where that
+   code gets written, so the split is a matter of where it lives rather than of writing
+   it twice.
 
 Each phase leaves the service useful, and each is a prerequisite for the next rather than a
 parallel track.

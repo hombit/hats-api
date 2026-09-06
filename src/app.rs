@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -8,42 +9,100 @@ use axum::{
     response::{IntoResponse, Json, Response},
     routing::{get, post},
 };
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
+use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 
-use crate::access::AccessPolicy;
-use crate::config::LimitsConfig;
+use crate::access::{self, AccessPolicy};
+use crate::config::{ApiConfig, ConfigError, LimitsConfig};
 use crate::error::ApiError;
 use crate::materialize::Transfers;
+use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
-/// What every request needs and no request may change: the rules, and the shared scratch
-/// budget. Both are built once at startup, so a request carries a handle rather than a
-/// copy and two requests cannot disagree about either.
+/// What every request needs and no request may change: the rules, the shared scratch
+/// budget, and the url space each mode claims. All built once at startup, so a request
+/// carries a handle rather than a copy and two requests cannot disagree about any of it.
 #[derive(Debug, Clone)]
 pub struct Service {
     pub policy: Arc<AccessPolicy>,
     pub transfers: Arc<Transfers>,
+    pub mounts: Arc<Mounts>,
+    /// The subtree the API answers under, normalized; `None` when API mode is off.
+    api_prefix: Option<Arc<str>>,
 }
 
 impl Service {
-    pub fn new(policy: AccessPolicy, limits: &LimitsConfig) -> Self {
-        Self {
+    /// Fails when the two modes do not divide the url space between them, which is a
+    /// question about the configuration as a whole rather than about either half of it.
+    pub fn new(
+        policy: AccessPolicy,
+        limits: &LimitsConfig,
+        mounts: Mounts,
+        api: &ApiConfig,
+    ) -> Result<Self, ConfigError> {
+        let api_prefix = match api.enabled {
+            true => Some(mount::normalize_prefix(&api.prefix).map_err(|reason| {
+                ConfigError::Route(format!("api.prefix {:?}: {reason}", api.prefix))
+            })?),
+            false => None,
+        };
+        if let Some(prefix) = &api_prefix {
+            // The other way round is the expected arrangement — a mount at `/` with the
+            // API inside it — and needs no rule: a route wins over the fallback that
+            // reaches the mounts.
+            if let Some(mount) = mounts
+                .iter()
+                .find(|mount| mount::within(prefix, mount.prefix()).is_some())
+            {
+                return Err(ConfigError::Route(format!(
+                    "the mount at {:?} is inside the API's own subtree {prefix:?}, so \
+                     nothing would ever reach it",
+                    mount.prefix()
+                )));
+            }
+        } else if mounts.is_empty() {
+            return Err(ConfigError::Route(
+                "api.enabled is false and there is no [[mount]], so there would be \
+                 nothing to serve"
+                    .to_owned(),
+            ));
+        }
+        Ok(Self {
             policy: Arc::new(policy),
             transfers: Arc::new(Transfers::new(limits)),
-        }
+            mounts: Arc::new(mounts),
+            api_prefix: api_prefix.map(Arc::from),
+        })
+    }
+
+    /// A path under the API's own subtree belongs to API mode whether or not a route
+    /// matched it, so a mistyped API path cannot fall through to a mount at `/`.
+    fn is_api_path(&self, path: &str) -> bool {
+        self.api_prefix
+            .as_ref()
+            .is_some_and(|prefix| mount::within(prefix, path).is_some())
     }
 }
 
 pub fn router(service: Service) -> Router {
-    Router::new()
-        .route("/api/v1/health", get(health))
-        // `POST`, not `GET`: the request carries credentials, and a query string is
-        // written to every proxy's access log and the caller's shell history on the way.
-        // A body also has no url-length limit and needs no url nested inside a url.
-        .route("/api/v1/select", post(select))
+    let mut router = Router::new();
+    if let Some(prefix) = service.api_prefix.clone() {
+        router = router
+            .route(&route(&prefix, "health"), get(health))
+            // `POST`, not `GET`: the request carries credentials, and a query string is
+            // written to every proxy's access log and the caller's shell history on the
+            // way. A body also has no url-length limit and needs no url nested inside a
+            // url.
+            .route(&route(&prefix, "select"), post(select));
+    }
+    router
+        // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
+        // at `/api/v1` divide the url space without either being nested in the other.
+        .fallback(serve_mounted)
         .with_state(service)
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
@@ -57,6 +116,85 @@ pub fn router(service: Service) -> Router {
                 )
             }),
         )
+}
+
+/// One route under a prefix. The root prefix already ends in the separator, so joining
+/// it the same way as any other would give `//health`.
+fn route(prefix: &str, name: &str) -> String {
+    match prefix {
+        "/" => format!("/{name}"),
+        _ => format!("{prefix}/{name}"),
+    }
+}
+
+/// What a parquet file is served as, whether it was read off a mount or encoded from a
+/// query. `mime_guess` has no answer for the extension.
+const PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
+
+/// The file-server side: a url path, a mount, and the file inside it.
+///
+/// Everything the request may decide is decided here; everything about *how* an ordinary
+/// file is served over HTTP — byte ranges, `ETag` and `Last-Modified`, the conditional
+/// requests, `HEAD` — is [`ServeFile`]'s, against a path this function has already
+/// resolved. A client reading one partition out of a mount is doing so with ranged
+/// requests, so this is not an optional part of being a file server.
+async fn serve_mounted(
+    State(service): State<Service>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let path = request.uri().path().to_owned();
+    if service.is_api_path(&path) {
+        return Err(ApiError::not_found(format!("{path} is not a route")));
+    }
+    let Some((mount, relative)) = service.mounts.resolve(&path) else {
+        return Err(ApiError::not_found(format!("{path} is not a route")));
+    };
+    let file = access::authorize_mounted(mount, &mounted_path(mount, relative)?)?;
+    // A directory is a listing rather than a file, and there are no listings yet.
+    if file.is_dir() {
+        return Err(ApiError::not_found(format!("{path} is not a file")));
+    }
+    let mut response = ServeFile::new(&file)
+        .try_call(request)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "serving a mounted file failed");
+            ApiError::internal("cannot read this file")
+        })?
+        .into_response();
+    // mime_guess has no answer for `.parquet`, and the clients that read these files
+    // look at the content type.
+    if file
+        .extension()
+        .is_some_and(|extension| extension == "parquet")
+    {
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(PARQUET_CONTENT_TYPE),
+        );
+    }
+    Ok(response)
+}
+
+/// The path a request names inside a mount, as filesystem components.
+///
+/// Percent-decoded one segment at a time, so that an encoded separator arrives as part
+/// of a name rather than as a separator, and `..` is refused outright rather than left
+/// for the resolver to clean up: a request path is not a place to be climbing from.
+fn mounted_path(mount: &Mount, relative: &str) -> Result<PathBuf, ApiError> {
+    let mut path = mount.source().to_owned();
+    for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
+        let decoded = percent_decode_str(segment)
+            .decode_utf8()
+            .map_err(|_| ApiError::bad_request("this path is not valid UTF-8"))?;
+        if matches!(decoded.as_ref(), "." | "..") || decoded.contains(['/', '\0']) {
+            return Err(ApiError::bad_request(format!(
+                "{segment:?} is not something a path here can contain"
+            )));
+        }
+        path.push(decoded.as_ref());
+    }
+    Ok(path)
 }
 
 #[derive(Debug, Serialize)]
@@ -254,10 +392,7 @@ async fn parquet_response(
     let body = parquet_out::encode(result, &layout)?;
     Ok((
         [
-            (
-                header::CONTENT_TYPE,
-                "application/vnd.apache.parquet".to_owned(),
-            ),
+            (header::CONTENT_TYPE, PARQUET_CONTENT_TYPE.to_owned()),
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{}\"", download_name(file)),
@@ -299,6 +434,17 @@ mod tests {
 
     const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
 
+    /// The API alone, at its default prefix and with nothing mounted.
+    fn api_only() -> Service {
+        Service::new(
+            AccessPolicy::default(),
+            &LimitsConfig::default(),
+            Mounts::default(),
+            &ApiConfig::default(),
+        )
+        .unwrap()
+    }
+
     async fn get(uri: &str) -> (StatusCode, String) {
         send(Request::builder().uri(uri), Body::empty()).await
     }
@@ -319,13 +465,10 @@ mod tests {
     /// The status and the body as text; axum's own rejections are plain text, ours are
     /// JSON.
     async fn send(request: http::request::Builder, body: Body) -> (StatusCode, String) {
-        let response = router(Service::new(
-            AccessPolicy::default(),
-            &LimitsConfig::default(),
-        ))
-        .oneshot(request.body(body).unwrap())
-        .await
-        .unwrap();
+        let response = router(api_only())
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8(body.to_vec()).unwrap())
@@ -499,6 +642,239 @@ mod tests {
         assert!(!shown.contains(SECRET), "leaked: {shown}");
         assert!(shown.contains("s3://b/k.parquet"), "{shown}");
         assert!(shown.contains("us-west-2"), "{shown}");
+    }
+
+    /// A directory with one file in it, and a service that publishes it at `/`.
+    fn mounted(dir: &std::path::Path, api: &ApiConfig) -> Service {
+        let mounts = Mounts::new(&[crate::config::MountConfig {
+            path: "/".to_owned(),
+            source: dir.display().to_string(),
+            follow_symlinks: false,
+            immutable: false,
+        }])
+        .unwrap();
+        let policy = AccessPolicy::new(&crate::config::AccessConfig::default(), &mounts).unwrap();
+        Service::new(policy, &LimitsConfig::default(), mounts, api).unwrap()
+    }
+
+    async fn respond(service: Service, request: http::request::Builder) -> Response {
+        router(service)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    /// The bytes, the length, the type, and the header that says a client may ask for
+    /// part of it — which is how an `lsdb` client reads one partition without
+    /// downloading it.
+    #[tokio::test]
+    async fn a_mounted_file_is_served_whole() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/part0.parquet"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            PARQUET_CONTENT_TYPE
+        );
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
+        assert!(response.headers().contains_key(header::ACCEPT_RANGES));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"0123456789");
+    }
+
+    #[tokio::test]
+    async fn a_mounted_file_is_served_by_range() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/part0.parquet")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"6789");
+    }
+
+    /// Nothing about the filesystem comes back: a file outside the mount, one that is
+    /// not there and one behind a symlink the mount does not follow are one answer.
+    #[tokio::test]
+    async fn what_a_mount_will_not_serve_is_not_described() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let published = dir.path().join("published");
+        std::fs::create_dir(&published).unwrap();
+        let secret = dir.path().join("secret.parquet");
+        std::fs::write(&secret, b"secret").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, published.join("innocent.parquet")).unwrap();
+
+        let service = || mounted(&published, &ApiConfig::default());
+        for uri in [
+            "/missing.parquet",
+            #[cfg(unix)]
+            "/innocent.parquet",
+        ] {
+            let response = respond(service(), Request::builder().uri(uri)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8(body.to_vec()).unwrap();
+            assert!(!body.contains("secret"), "{uri} leaked: {body}");
+            assert!(!body.contains("symlink"), "{uri} leaked: {body}");
+            assert!(
+                !body.contains(&dir.path().display().to_string()),
+                "{uri} leaked a local path: {body}"
+            );
+        }
+    }
+
+    /// A request path is not a place to climb from: `..` is refused whichever way it is
+    /// spelled, rather than being cleaned up and then found to be outside the mount.
+    #[tokio::test]
+    async fn a_path_cannot_climb_out_of_a_mount() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let published = dir.path().join("published");
+        std::fs::create_dir(&published).unwrap();
+        std::fs::write(dir.path().join("secret.parquet"), b"secret").unwrap();
+
+        for uri in ["/../secret.parquet", "/%2e%2e/secret.parquet"] {
+            let response = respond(
+                mounted(&published, &ApiConfig::default()),
+                Request::builder().uri(uri),
+            )
+            .await;
+            // Refused for what it says, not for where it would have landed: the
+            // containment check behind this would also refuse it, and a 400 is what
+            // says the segment never became a path component at all.
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                !String::from_utf8_lossy(&body).contains("secret"),
+                "{uri} leaked"
+            );
+        }
+    }
+
+    /// Directory listings are not built yet; what matters here is that a directory is
+    /// not answered with something else.
+    #[tokio::test]
+    async fn a_directory_is_not_a_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("hats")).unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/hats"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The API's subtree belongs to the API even where a mount covers everything else,
+    /// so a mistyped API path is a 404 rather than a file.
+    #[tokio::test]
+    async fn the_api_prefix_wins_over_a_mount_that_covers_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Files that would be served if the API's subtree were the mount's to answer.
+        let inside = dir.path().join("api/v1");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::write(inside.join("health"), b"not the health route").unwrap();
+        std::fs::write(inside.join("part0.parquet"), b"0123456789").unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let response = respond(service(), Request::builder().uri("/api/v1/health")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&body).contains("\"ok\""));
+
+        // And a path under the prefix that no route matched does not fall through to
+        // the mount, even where the mount has a file with exactly that name.
+        let response = respond(service(), Request::builder().uri("/api/v1/part0.parquet")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // The mount still serves everything outside it.
+        let response = respond(service(), Request::builder().uri("/part0.parquet")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// A pure file server: the API's own routes are not there to be found.
+    #[tokio::test]
+    async fn the_api_can_be_turned_off_and_the_mount_still_serves() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+        let service = || {
+            mounted(
+                dir.path(),
+                &ApiConfig {
+                    enabled: false,
+                    ..Default::default()
+                },
+            )
+        };
+
+        let response = respond(service(), Request::builder().uri("/api/v1/health")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = respond(service(), Request::builder().uri("/part0.parquet")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The two modes have to divide the url space between them, and a configuration
+    /// where they do not is a startup error rather than a route nothing reaches.
+    #[test]
+    fn a_url_space_that_serves_nothing_is_a_startup_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let service = |mount_path: &str, api: ApiConfig| {
+            let mounts = Mounts::new(&[crate::config::MountConfig {
+                path: mount_path.to_owned(),
+                source: dir.path().display().to_string(),
+                follow_symlinks: false,
+                immutable: false,
+            }])
+            .unwrap();
+            Service::new(
+                AccessPolicy::default(),
+                &LimitsConfig::default(),
+                mounts,
+                &api,
+            )
+        };
+
+        // A mount inside the API's subtree is one no request could reach.
+        let error = service("/api/v1/hats", ApiConfig::default())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/api/v1"), "{error}");
+        // The same directory one level up is the expected arrangement.
+        assert!(service("/hats", ApiConfig::default()).is_ok());
+        // The API off, with a mount, is a file server.
+        let off = ApiConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        assert!(service("/api/v1/hats", off).is_ok());
+
+        // The API off with nothing mounted serves nothing at all.
+        let error = Service::new(
+            AccessPolicy::default(),
+            &LimitsConfig::default(),
+            Mounts::default(),
+            &ApiConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("nothing to serve"), "{error}");
     }
 
     #[tokio::test]

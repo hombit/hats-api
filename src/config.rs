@@ -254,6 +254,10 @@ pub enum ConfigError {
     /// a prefix that is not a prefix, or two mounts claiming the same subtree. Named by
     /// its `path`, which is what the operator wrote and what tells the two apart.
     Mount(String, String),
+    /// The two modes do not divide the url space between them: an `api.prefix` that is
+    /// not a prefix, a mount inside it where no request could reach it, or a
+    /// configuration that would serve nothing at all.
+    Route(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -265,6 +269,7 @@ impl fmt::Display for ConfigError {
                 write!(f, "invalid [api.access] entry {entry:?}: {reason}")
             }
             Self::Mount(path, reason) => write!(f, "invalid [[mount]] {path:?}: {reason}"),
+            Self::Route(reason) => write!(f, "invalid routing: {reason}"),
         }
     }
 }

@@ -19,6 +19,10 @@ pub enum ApiError {
     Forbidden(String),
     #[error("{0}")]
     NotFound(String),
+    /// Something on this side went wrong. The message is ours, and says nothing about
+    /// the machine it happened on.
+    #[error("{0}")]
+    Internal(String),
     #[error("object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
     /// Raised while building a store, before any request. DataFusion's own reads come
@@ -56,6 +60,10 @@ impl ApiError {
         Self::NotFound(message.into())
     }
 
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+
     /// The status this error answers with. Public so that a test can check the status a
     /// caller sees rather than the message, which is the part that has to be right.
     pub fn status(&self) -> StatusCode {
@@ -63,6 +71,7 @@ impl ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ObjectStore(error) => object_store_status(error),
             Self::Storage(error) => storage_status(error),
             // The remote file being missing or unreadable reaches us wrapped in a

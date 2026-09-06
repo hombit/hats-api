@@ -55,7 +55,7 @@ use url::{Host, Url};
 
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
-use crate::mount::Mounts;
+use crate::mount::{Mount, Mounts};
 use crate::network::NetworkPolicy;
 
 /// What a URL turned out to be, once it was allowed.
@@ -658,6 +658,26 @@ pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// The file a path under a mount names, resolved under that mount's own rule and
+/// nothing else — so one mount cannot serve a file out of another's directory, and a
+/// mount cannot serve one out of a directory `[api.access.local]` happens to allow.
+///
+/// Every refusal is the same answer. A caller here named a place in the url space rather
+/// than a file on a disk, so which file is missing, which is outside the mount and which
+/// is behind a symlink are all distinctions about a filesystem they were never shown.
+pub fn authorize_mounted(mount: &Mount, path: &Path) -> Result<PathBuf, ApiError> {
+    let rules = [LocalRule {
+        root: mount.source().to_owned(),
+        follow_symlinks: mount.follow_symlinks(),
+    }];
+    resolve_local(&rules, path).map_err(|refusal| {
+        // The reason belongs in the log, where the operator can see it, and not in the
+        // response.
+        tracing::debug!(mount = mount.prefix(), reason = %refusal, "not served");
+        ApiError::not_found("no such file")
+    })
+}
+
 /// Why a path is not a file that may be read. Separate from [`ApiError`] because how
 /// much a refusal may say differs by mode: a caller who named the path is told which
 /// directories exist, and one who walked into it through a mount is not.
@@ -669,6 +689,19 @@ enum LocalRefusal {
     /// It goes through a symlink and the rule that governs it does not follow them.
     Symlink(PathBuf),
     Unreadable(PathBuf, std::io::Error),
+}
+
+/// For the log, which is the operator's. What a caller is told is decided where the
+/// refusal is turned into an [`ApiError`].
+impl std::fmt::Display for LocalRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotAllowed => f.write_str("outside every allowed directory"),
+            Self::NotFound(path) => write!(f, "{} does not exist", path.display()),
+            Self::Symlink(path) => write!(f, "{} goes through a symlink", path.display()),
+            Self::Unreadable(path, error) => write!(f, "cannot read {}: {error}", path.display()),
+        }
+    }
 }
 
 /// The file a path names, resolved and checked against the rules. `lexical` must already

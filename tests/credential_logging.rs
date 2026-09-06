@@ -317,10 +317,15 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         "value": "1",
     });
 
-    let router = app::router(app::Service::new(
-        permissive_policy(),
-        &hats_api::config::LimitsConfig::default(),
-    ));
+    let router = app::router(
+        app::Service::new(
+            permissive_policy(),
+            &hats_api::config::LimitsConfig::default(),
+            hats_api::mount::Mounts::default(),
+            &hats_api::config::ApiConfig::default(),
+        )
+        .expect("the API alone is a service"),
+    );
     let response = router
         .oneshot(
             http::Request::builder()
