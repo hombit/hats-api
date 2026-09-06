@@ -177,11 +177,18 @@ everything about what SQL means here is decided there.
   from the next's for the same query, which is wrong to cache and wrong to reproduce from
   a plan. The rule holds for functions this crate has never compiled in, which is why it
   is not a list of names.
-- **Identifier normalization is off**, in `query::session_config`. Astronomy column names
-  are mixed-case as a matter of course — `Gmag`, `Norder`, `objectId` — and SQL's usual
-  lowercasing would report every one of them as missing. Unquoted identifiers therefore
-  mean exactly what the file calls them. A new session config must keep this, or the same
-  query answers differently depending on which one built it.
+- **A column answers to its own name and to its name in lowercase, and to nothing else.**
+  Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
+  `objectId` — and a caller reads them off the file, so the file's spelling has to work;
+  lowercase has to work too, because that is what SQL says an unquoted name means. Every
+  other casing is refused rather than resolved, so which names a column answers to never
+  depends on what else is in the file. Two columns whose lowercase forms collide are each
+  reachable by writing them out, and the form they share names neither.
+
+  This is `resolve_identifiers`, and it needs `enable_ident_normalization` to stay off in
+  `query::session_config` — with it on, DataFusion lowercases what the pass did not
+  rewrite, and `OBJECTID` starts finding `objectid` again. Neither half works alone: a
+  session config that turns normalization back on quietly widens the rule.
 - **The schema is what types a literal.** Plan against the file's `DFSchema` so that
   `objectid = 1383212200036217` becomes an `Int64` literal, which row-group statistics,
   the page index and a bloom filter can all prune on. Compared as a string it reads the

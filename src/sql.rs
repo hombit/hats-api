@@ -10,11 +10,16 @@
 //! function and a call to `random()` are all expressions. So what the planner returns is
 //! walked, and only the node kinds this service will actually run are let through.
 
+use std::ops::ControlFlow;
+
+use datafusion::arrow::datatypes::{DataType, Fields};
 use datafusion::common::DFSchema;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::execution::context::SessionState;
-use datafusion::logical_expr::{Expr, Volatility};
-use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, ExprWithAlias};
+use datafusion::logical_expr::{Expr, UNNAMED_TABLE, Volatility};
+use datafusion::sql::sqlparser::ast::{
+    Expr as SqlExpr, ExprWithAlias, Ident, visit_expressions_mut,
+};
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::Token;
@@ -61,13 +66,16 @@ pub fn projection(
     })?;
     items
         .into_iter()
-        .map(|item| {
-            let written = match item.alias {
+        .map(|mut item| {
+            resolve_identifiers(&mut item.expr, schema);
+            // After resolving, so that the key is the file's spelling of the path rather
+            // than the caller's — which is what a plain column already comes back as.
+            let path = match item.alias {
                 Some(_) => None,
                 None => dotted_name(&item.expr),
             };
             let expr = plan(state, schema, item, FIELD)?;
-            Ok(match written {
+            Ok(match path {
                 Some(name) => expr.alias(name),
                 None => expr,
             })
@@ -132,17 +140,109 @@ fn parse<T>(
 fn plan(
     state: &SessionState,
     schema: &DFSchema,
-    expr: ExprWithAlias,
+    mut expr: ExprWithAlias,
     field: &str,
 ) -> Result<Expr, ApiError> {
+    // Idempotent, and `projection` has already done it so that a bare path's output name
+    // is the file's spelling rather than the caller's.
+    resolve_identifiers(&mut expr.expr, schema);
     // Every failure here is the caller's expression not fitting the caller's file:
     // an unknown column, a type that will not compare, a function that is not
     // registered.
     let expr = state
         .create_logical_expr_from_sql_expr(expr, schema)
-        .map_err(|error| ApiError::bad_request(format!("{field}: {error}")))?;
+        .map_err(|error| {
+            ApiError::bad_request(format!("{field}: {}", unqualified(&error.to_string())))
+        })?;
     check(&expr, field)?;
     Ok(expr)
+}
+
+/// Take DataFusion's name for the table it planned against out of a message meant for a
+/// caller.
+///
+/// It calls an unnamed one `?table?`, and its schema errors quote it: `Did you mean
+/// '"?table?"."Gmag"'?`. There is one table here and the caller never named it, so the
+/// qualifier is noise wrapped around the part that would have helped. The message itself
+/// is kept — it names the closest column, which is the useful half.
+fn unqualified(message: &str) -> String {
+    message.replace(&format!("\"{UNNAMED_TABLE}\"."), "")
+}
+
+/// Rewrite the names a caller wrote into the names the file actually uses.
+///
+/// **A column answers to its own name, and to its name in lowercase.** Nothing else.
+///
+/// SQL folds an unquoted identifier to lowercase, which puts every mixed-case column out
+/// of reach without quotes — and `Gmag`, `Norder` and `objectId` are ordinary names in an
+/// astronomy catalog, read straight off a file the caller is looking at. So the file's own
+/// spelling has to work. Lowercase has to work too, because that is what SQL says an
+/// unquoted name means and what a caller who has not looked will type.
+///
+/// Every other casing is refused rather than resolved. `GMAG` finding `Gmag` would mean
+/// the set of names a column answers to depends on what else is in the file, and a caller
+/// could not tell from their own request which column they had read.
+///
+/// The exact name is tried first, so two columns whose lowercase forms collide — `flux`
+/// and `Flux` — are each still reachable by writing them out; only the lowercase form they
+/// share resolves to neither. A quoted identifier is exact by definition and never
+/// rewritten, and a name matching nothing is left for DataFusion, whose error already
+/// names the closest column it has.
+fn resolve_identifiers(expr: &mut SqlExpr, schema: &DFSchema) {
+    let _ = visit_expressions_mut::<_, (), _>(expr, |node| {
+        match node {
+            SqlExpr::Identifier(ident) => resolve(std::slice::from_mut(ident), schema.fields()),
+            SqlExpr::CompoundIdentifier(parts) => resolve(parts, schema.fields()),
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    });
+}
+
+/// One dotted path, a segment at a time: the first against the file's columns, each next
+/// against the struct the one before it turned out to be.
+fn resolve(parts: &mut [Ident], fields: &Fields) {
+    let mut fields = fields.clone();
+    for part in parts {
+        match resolve_segment(part, &fields) {
+            Some(DataType::Struct(children)) => fields = children,
+            // Not a struct, or a name that matched nothing: there is nothing left for the
+            // rest of the path to resolve against.
+            _ => return,
+        }
+    }
+}
+
+/// One segment, and the type it named — `None` when nothing matched.
+fn resolve_segment(part: &mut Ident, fields: &Fields) -> Option<DataType> {
+    let named = |name: &str| {
+        fields
+            .iter()
+            .find(|field| field.name() == name)
+            .map(|field| field.data_type().clone())
+    };
+    if part.quote_style.is_some() {
+        return named(&part.value);
+    }
+    if let Some(data_type) = named(&part.value) {
+        return Some(data_type);
+    }
+    // ASCII folding only, so that Unicode case folding is never what decides which column
+    // a request read.
+    let mut lowercased = fields
+        .iter()
+        .filter(|field| field.name().to_ascii_lowercase() == part.value);
+    let field = lowercased.next()?;
+    // Two columns share this lowercase form, so it is the one spelling that names neither
+    // of them; each is still reachable by writing it out.
+    if lowercased.next().is_some() {
+        return None;
+    }
+    part.value = field.name().clone();
+    // Quoted, so the resolved name is exact from here on whatever the parser is told to do
+    // with unquoted identifiers.
+    part.quote_style = Some('"');
+    Some(field.data_type().clone())
 }
 
 /// Walk the planned expression and refuse everything this service will not run.
@@ -229,10 +329,11 @@ fn allowed(expr: &Expr) -> Result<(), String> {
         Expr::ScalarVariable(..) | Expr::Placeholder(_) => {
             Err("a variable has no value here; write the value itself".to_owned())
         }
-        // Deprecated in DataFusion and unreachable through `projection`, which refuses a
-        // bare `*` with the same words before parsing. Matched anyway, because the
-        // exhaustive match is the point: the variant still exists, and `t.*` reaches it.
-        #[expect(deprecated, reason = "the variant is still constructible")]
+        // Nothing here can produce one: `sqlparser`'s expression parser has no wildcard,
+        // so `*` is a parse error and `t.*` fails the end-of-input check —
+        // `no_expression_is_a_wildcard` is what holds that true. The arm exists because
+        // the match is exhaustive, which is the point of writing it that way.
+        #[expect(deprecated, reason = "matched to keep the match exhaustive")]
         Expr::Wildcard { .. } => {
             Err("omit select rather than writing *: absent means every column".to_owned())
         }
@@ -304,14 +405,79 @@ mod tests {
         assert_eq!(names("objra - 0.1 AS ra_corr").unwrap(), ["ra_corr"]);
     }
 
-    /// Astronomy catalogs are full of names like `Gmag`, `Norder` and `objectId`, and a
-    /// parser that lowercased them would report every one of them as missing.
+    /// A column answers to its own name and to its name in lowercase. `Gmag` is what the
+    /// file calls it and what a caller reads off the file; `gmag` is what SQL says an
+    /// unquoted name means. Nested fields resolve the same way, a segment at a time.
     #[test]
-    fn identifiers_keep_their_case() {
-        assert_eq!(names("Gmag").unwrap(), ["Gmag"]);
-        assert!(filter("Gmag < 20").is_ok());
-        let error = names("gmag").unwrap_err().to_string();
-        assert!(error.contains("gmag"), "{error}");
+    fn a_column_answers_to_its_name_and_to_its_lowercase() {
+        for sql in ["Gmag < 20", "gmag < 20", "\"Gmag\" < 20"] {
+            assert_eq!(filter(sql).unwrap(), "Gmag < Int64(20)", "{sql}");
+        }
+        assert_eq!(filter("objectid = 1").unwrap(), "objectid = Int64(1)");
+        // The output key is the file's spelling, not the caller's.
+        assert_eq!(names("gmag").unwrap(), ["Gmag"]);
+        assert_eq!(names("lightcurve.mag").unwrap(), ["lightcurve.mag"]);
+    }
+
+    /// Every other casing is refused rather than resolved: which names a column answers
+    /// to must not depend on what else happens to be in the file.
+    #[test]
+    fn no_other_casing_resolves() {
+        for sql in [
+            // Neither the file's spelling nor all-lowercase.
+            "GMAG < 20",
+            "GMag < 20",
+            "OBJECTID = 1",
+            "ObjectId = 1",
+            // Quoted is exact by definition.
+            "\"GMAG\" < 20",
+            "\"objectid\" = 1 AND \"Gmagg\" < 20",
+        ] {
+            assert!(filter(sql).is_err(), "{sql}");
+        }
+        assert!(names("LIGHTCURVE.MAG").is_err());
+    }
+
+    /// Two columns whose lowercase forms collide are each still reachable by writing
+    /// them out; only the form they share names neither.
+    #[test]
+    fn a_shared_lowercase_form_names_neither_column() {
+        let schema = DFSchema::try_from(Schema::new(vec![
+            Field::new("Flux", DataType::Float64, true),
+            Field::new("FLUX", DataType::Float64, true),
+        ]))
+        .unwrap();
+        assert!(predicate(&state(), &schema, "Flux > 1").is_ok());
+        assert!(predicate(&state(), &schema, "FLUX > 1").is_ok());
+        assert!(predicate(&state(), &schema, "flux > 1").is_err());
+    }
+
+    /// A name matching nothing is left for DataFusion, whose message names the closest
+    /// column it has — without the name it gave the table the caller never named.
+    #[test]
+    fn an_unresolvable_name_is_reported_as_written() {
+        let error = filter("gmagg < 20").unwrap_err().to_string();
+        assert!(error.contains("gmagg"), "{error}");
+        assert!(!error.contains(UNNAMED_TABLE), "{error}");
+    }
+
+    /// `avg` summarizes rows, so `avg(lightcurve.mag)` averages a list column *across*
+    /// rows rather than within one, whatever it looks like. Averaging inside a row's list
+    /// would be a scalar function over the list, which is a different thing and is not
+    /// what this spells.
+    #[test]
+    fn aggregating_a_list_column_is_still_aggregating_rows() {
+        let error = filter("avg(lightcurve.mag) > 20").unwrap_err().to_string();
+        assert!(error.contains("one row"), "{error}");
+    }
+
+    /// The wildcard arm in `allowed` is unreachable, and this is why: an expression is
+    /// not a select item, and `sqlparser`'s expression parser has no `*` in it.
+    #[test]
+    fn no_expression_is_a_wildcard() {
+        for sql in ["*", "t.*", "lightcurve.*"] {
+            assert!(names(sql).is_err(), "{sql}");
+        }
     }
 
     #[test]
@@ -369,10 +535,19 @@ mod tests {
         assert!(error.to_string().contains("nope"), "{error}");
     }
 
+    /// Refused by the node kind DataFusion planned them into, not by their names — which
+    /// is why no list of function names appears anywhere here.
     #[test]
     fn a_predicate_may_not_summarize_rows() {
-        let error = filter("count(objectid) > 1").unwrap_err().to_string();
-        assert!(error.contains("one row"), "{error}");
+        for sql in [
+            "count(objectid) > 1",
+            "sum(Gmag) > 1",
+            "max(objra) > 1",
+            "avg(Gmag) > 1",
+        ] {
+            let error = filter(sql).unwrap_err().to_string();
+            assert!(error.contains("one row"), "{sql}: {error}");
+        }
     }
 
     /// The node cap is not depth: this is two levels deep and enormous.

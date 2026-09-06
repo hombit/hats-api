@@ -61,10 +61,10 @@ impl std::fmt::Debug for QueryResult {
 pub(crate) fn session_config() -> SessionConfig {
     let mut config = SessionConfig::new();
     let options = config.options_mut();
-    // Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
-    // `objectId`. Normalizing an unquoted identifier to lowercase, which is DataFusion's
-    // default and ordinary SQL's rule, would report every one of them as missing, and
-    // the caller would have to know to quote a name they can see in the file.
+    // `sql::resolve_identifiers` decides which spellings of a column name reach it, and
+    // it can only do that if nothing else is folding case behind it: with normalization
+    // on, DataFusion lowercases whatever the pass left alone, so a name the rule refuses
+    // would find its column anyway.
     options.sql_parser.enable_ident_normalization = false;
     let parquet = &mut options.execution.parquet;
     // Off by default, and worth more than everything else combined: it evaluates the
