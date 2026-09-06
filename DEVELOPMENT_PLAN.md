@@ -761,6 +761,22 @@ Rules to preserve:
 - Reject pathological parquet early — a footer claiming implausible row-group or column
   counts is a 400, not an allocation.
 
+**What the query engine already offers**, checked against DataFusion 55 rather than
+assumed, so that the next person does not go looking for it twice:
+
+| bound | how |
+|---|---|
+| memory ceiling per query | `RuntimeEnvBuilder::with_memory_limit` installs a `GreedyMemoryPool`, so an over-large query fails with `ResourcesExhausted` instead of taking the process down. DataFusion's own documentation says the limit is not respected on every path, so it is a guard rather than a proof, and a byte cap is still wanted beside it |
+| spilling to disk | on by default, which quietly turns a memory limit into a disk one. `DiskManagerMode::Disabled` refuses it and `with_max_temp_directory_size` caps it; either way it is a decision to make rather than inherit |
+| cost before execution | `ExecutionPlan::partition_statistics` estimates rows and bytes from the footer without reading data — the same numbers §5.3's plan mode needs, from the same place |
+| per-request timeout | not the engine's. `tokio::time::timeout` around the collect |
+| result size | not the engine's either. Nothing in it bounds what a `collect` returns |
+
+The last two are one piece of work with the response cap above, not three: `collect`
+builds the whole answer in memory before either writer starts, so the row ceiling and
+§7.2's streaming are the same change, and the timeout is what catches the case where the
+row count alone never gets large enough to trip it.
+
 ### 8.5 Obligations on every new backend
 
 1. Its option names are on the stripping list, with a test that an error mentioning a bad

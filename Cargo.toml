@@ -16,10 +16,6 @@ bytes = "1"
 # Keep in sync with object_store
 chrono = { version = "0.4", default-features = false }
 bytesize = { version = "2", features = ["serde"] }
-# `sql` is what parses the caller's `select` and `where`; it brings `sqlparser`, which
-# `query` uses directly to split a select list into its items. The expression features
-# stay off: each one registers scalar functions a caller could then call, and the set
-# this service will run is decided here rather than inherited.
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection", "sql"] }
 futures = "0.3"
 http = "1"
