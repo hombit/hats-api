@@ -24,7 +24,7 @@ thing to keep working while that is built.
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
-| 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first. Brings `columns`/`filters` to the API body too |
+| 3.4 | file-server request shape | todo | the `filters` grammar has to be probed off the live service first. Brings `columns`/`filters` to the API body too |
 | 4 | file-server interface | in progress | listings done; the query surface is what is left, and waits on §3.4 |
 | 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
 | 5.1 | HATS catalog metadata | todo | |
@@ -245,15 +245,20 @@ vizcat equivalent — `format`, `limit` — take names of our own.
 directly. A caller who wants the catalog to choose partitions uses the API (§5.2) against
 the same data, which the mount's derived grant permits.
 
-Before implementing, complete `docs/vizcat-compat.md` from the live service — what it
-does, not what its page claims. `https://vizcat.cds.unistra.fr/hats/` answers, serves
-`application/vnd.apache.parquet`, and takes both parameters on a partition's own url;
-`2020aj_159_84b` is a catalog whose columns (`Source`, `RA_ICRS`, `E(BP-RP)`) cover both
-the ordinary and the awkward case. Probe with a filter that matches almost nothing, so
-the survey is a grammar question rather than a download — their page asks not to be
-harvested.
+Before implementing, probe the live service and fill the table above from what it does,
+not from what its page claims — "a SQL WHERE like constraint" is not a grammar.
+`https://vizcat.cds.unistra.fr/hats/` answers, serves `application/vnd.apache.parquet`,
+and takes both parameters on a partition's own url; `2020aj_159_84b` is a catalog whose
+columns (`Source`, `RA_ICRS`, `E(BP-RP)`) cover both the ordinary and the awkward case.
+Probe with a filter that matches almost nothing, so the survey is a grammar question
+rather than a download — their page asks not to be harvested.
 
-What the document has to answer, because each one changes what the lowering can be:
+The findings belong in the table above and in the tests, which are where this repository
+keeps behaviour. The one thing a test cannot hold is vizcat's own behaviour — `cargo
+test` runs without a network — so a claim about *them* rather than about us is written
+as the reason beside our rule, in the commit that establishes it.
+
+What the probing has to answer, because each one changes what the lowering can be:
 
 - The operator set: `=`, `!=`/`<>`, `<`, `>`, `<=`, `>=`, `IN`, `BETWEEN`, `IS NULL`,
   `LIKE`, arithmetic, function calls.
@@ -288,7 +293,7 @@ question and stays where it is (§9.2), for the reason §3.3 is a `POST` at all.
   §3.5 says not to do by hand: `&&` inside a string literal is not an operator, and a
   substitution that cannot tell the difference is a parser written by accident. Whether
   the rewrite is even expressible that way depends on what `filters` turns out to
-  accept, which is `docs/vizcat-compat.md`'s job to establish first.
+  accept, which the probing above settles first.
 
 ### 3.5 How much SQL
 
@@ -324,9 +329,8 @@ answers with the ranges, the validators and the conditional requests. Directorie
 with a listing. What is left:
 
 1. **A parquet file with query parameters** → a query through `query.rs` +
-   `parquet_out.rs`, with the file taken from the mount. The parameters are §3.4's, which
-   waits on `docs/vizcat-compat.md`. A file with no query parameters keeps going out
-   verbatim, whatever its extension.
+   `parquet_out.rs`, with the file taken from the mount. The parameters are §3.4's. A
+   file with no query parameters keeps going out verbatim, whatever its extension.
 
 A listing takes no query parameters of its own, so the ones §3.4 settles are a file's
 alone and the two cannot collide.
