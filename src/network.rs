@@ -12,7 +12,7 @@
 //! [access.network]
 //! allow_loopback = false     # 127.0.0.0/8, ::1, localhost
 //! allow_private = false      # RFC1918, link-local, unique-local, and the rest
-//! allow_local_names = false  # single-label names, .internal, .cluster.local, …
+//! allow_local_names = false  # names whose last label is not a delegated TLD
 //! allow_cidrs = ["10.1.2.0/24"]
 //! allow_hosts = ["minio.internal"]
 //! ```
@@ -21,6 +21,14 @@
 //! internal host on public IP space through; a name rule alone is defeated by writing the
 //! address down instead. So a name is judged before it is resolved, and every address it
 //! resolves to is judged after.
+//!
+//! **A name is judged by what exists, not by what is forbidden.** The last label has to
+//! be a top-level domain IANA has actually delegated. A list of internal suffixes to
+//! refuse fails open — it has to be told about `.corp` before it refuses one — while the
+//! delegated TLDs are a list that can be complete. `.internal`, `.local`, `.lan` and
+//! every suffix an organization invented for itself are all refused without appearing
+//! anywhere here. The cost is that the list is a snapshot: a newly delegated TLD is
+//! refused until `tld` is bumped, which `allow_hosts` covers in the meantime.
 //!
 //! **Both halves run, and the second one runs at the last possible moment.** Checking a
 //! name and then handing it to a client that resolves it again is DNS rebinding: the
@@ -84,23 +92,11 @@ const PRIVATE_V6: &[&str] = &[
     "100::/64",
 ];
 
-/// Suffixes that name something inside a network rather than on the internet. Not an
-/// exhaustive list — there cannot be one — which is why the address rules run as well.
-///
-/// `localhost` is not here: it is the loopback interface by definition, and
-/// `allow_loopback` is the switch that already means it.
-const LOCAL_SUFFIXES: &[&str] = &[
-    ".local",
-    ".internal",
-    ".intranet",
-    ".private",
-    ".corp",
-    ".home",
-    ".lan",
-    ".home.arpa",
-    ".cluster.local",
-    ".svc",
-];
+/// Top-level domains that exist but still name nothing on the internet. `arpa` is
+/// infrastructure — `in-addr.arpa`, `ip6.arpa`, and RFC8375's `home.arpa`, which is a
+/// home network by definition — and it is the one delegated TLD a caller has no reason
+/// to read a file from.
+const RESERVED_TLDS: &[&str] = &["arpa"];
 
 /// The rules themselves, without the client built from them. Shared with the resolver,
 /// which runs on every connection and must not copy them.
@@ -229,20 +225,27 @@ impl Rules {
         if self.allow_local_names {
             return Ok(());
         }
-        // A name with no dot in it resolves through the search domains of whatever
-        // network this process is on, which is the definition of somewhere internal.
-        if !name.contains('.') {
+        // The last label decides, and it decides by existing. A blocklist of internal
+        // suffixes fails open — it has to be told about `.corp` before it refuses one —
+        // whereas the delegated top-level domains are a list that can be complete.
+        // `.internal`, `.local`, `.lan` and every suffix somebody invented for their own
+        // network are refused because none of them was ever delegated.
+        let Some((_, tld)) = name.rsplit_once('.') else {
+            // No last label to judge: a single-label name resolves through the search
+            // domains of whatever network this process is on, which is the definition of
+            // somewhere internal.
             return Err(format!(
                 "{name} is a single-label name, which only means anything inside this \
                  server's own network; set access.network.allow_local_names or name it \
                  in access.network.allow_hosts to change that"
             ));
-        }
-        match LOCAL_SUFFIXES.iter().find(|suffix| name.ends_with(*suffix)) {
-            None => Ok(()),
-            Some(suffix) => Err(format!(
-                "{name} ends in {suffix}, which names a host inside a network rather than \
-                 on the internet; set access.network.allow_local_names or name it in \
+        };
+        match !RESERVED_TLDS.contains(&tld) && tld::exist(tld) {
+            true => Ok(()),
+            false => Err(format!(
+                "{name} does not end in a top-level domain that exists, so it names a \
+                 host inside a network rather than on the internet; set \
+                 access.network.allow_local_names or name it in \
                  access.network.allow_hosts to change that"
             )),
         }
@@ -378,6 +381,13 @@ mod tests {
         rules(&NetworkConfig::default())
     }
 
+    fn rules_with_local_names() -> Arc<Rules> {
+        rules(&NetworkConfig {
+            allow_local_names: true,
+            ..Default::default()
+        })
+    }
+
     fn addr(raw: &str) -> IpAddr {
         raw.parse().unwrap()
     }
@@ -482,12 +492,24 @@ mod tests {
             "metadata.google.internal",
             "db.cluster.local",
             "api.default.svc",
-            "nas.home.arpa",
             "gateway.lan",
+            "fileserver.corp",
+            "nas.home",
+            "wiki.intranet",
+            // RFC2606, reserved so that they can never be delegated.
+            "store.test",
+            "store.example",
+            "store.invalid",
+            // Delegated, but infrastructure rather than anywhere to read a file from.
+            "nas.home.arpa",
+            "254.169.254.169.in-addr.arpa",
             // A trailing dot is the same name.
             "metadata.google.internal.",
             // And case is not a distinction a resolver makes either.
             "Metadata.Google.Internal",
+            // The point of asking what exists rather than what is forbidden: nobody had
+            // to think of this suffix in advance.
+            "minio.dev-cluster",
         ] {
             assert!(rules.check_name(name).is_err(), "{name} was allowed");
         }
@@ -495,10 +517,32 @@ mod tests {
         for name in [
             "example.com",
             "s3.us-east-1.amazonaws.com",
+            "storage.googleapis.com",
+            "hatsdata.blob.core.windows.net",
             "localhost.example.com",
+            // Newer TLDs are TLDs, and an internationalized one arrives punycoded.
+            "data.cloud",
+            "store.xn--p1ai",
         ] {
             assert!(rules.check_name(name).is_ok(), "{name} was refused");
         }
+    }
+
+    /// The rule is "the last label is a delegated top-level domain", not a list of
+    /// suffixes to refuse. A blocklist has to be told about `.corp` before it refuses
+    /// one; this refuses everything nobody delegated, which is the direction that
+    /// fails safe.
+    #[test]
+    fn a_name_is_judged_by_whether_its_top_level_domain_exists() {
+        let rules = default_rules();
+        assert!(rules.check_name("host.com").is_ok());
+        assert!(rules.check_name("host.cmo").is_err());
+        // And the switch turns the whole name layer off, for a deployment that lives
+        // inside one. The addresses are still judged.
+        let allowed = rules_with_local_names();
+        assert!(allowed.check_name("metadata.google.internal").is_ok());
+        assert!(allowed.check_name("minio").is_ok());
+        assert!(allowed.check_addr(addr("169.254.169.254")).is_err());
     }
 
     /// `localhost` is the loopback interface under another spelling, and it answers to
@@ -659,8 +703,8 @@ mod tests {
         }
         for (name, setting) in [
             ("localhost", "allow_loopback"),
-            ("metadata", "allow_local_names"),
-            ("db.cluster.local", "allow_local_names"),
+            ("metadata", "single-label"),
+            ("db.cluster.local", "top-level domain"),
         ] {
             let error = rules.check_name(name).unwrap_err();
             assert!(error.contains(setting), "{name}: {error}");

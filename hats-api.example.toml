@@ -30,8 +30,10 @@ allow_loopback = false
 # link-local — which is where EC2 and GCE serve this machine's own IAM credentials.
 allow_private = false
 
-# Names that only mean something inside a network: single-label ones, and .internal,
-# .local, .cluster.local, .svc and the rest.
+# Names that only mean something inside a network. A name has to end in a top-level
+# domain that IANA has actually delegated, so .internal, .local, .lan, .cluster.local
+# and whatever suffix your own network uses are all refused, without any of them having
+# to be listed. Single-label names — "minio", "metadata" — are refused too.
 allow_local_names = false
 
 # Networks and hosts to allow whatever the three switches above say. A host named here

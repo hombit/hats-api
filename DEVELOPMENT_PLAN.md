@@ -1001,7 +1001,7 @@ the destination address rather than the protocol. Everything in it is off by def
 [access.network]
 allow_loopback = false      # 127.0.0.0/8, ::1, localhost
 allow_private = false       # RFC1918, fc00::/7, link-local incl. 169.254.0.0/16
-allow_local_names = false   # single-label, .local, .internal, .cluster.local, …
+allow_local_names = false   # single-label, and anything not on a delegated TLD
 # allow_cidrs = ["10.1.2.0/24"]
 # allow_hosts = ["minio.internal"]
 ```

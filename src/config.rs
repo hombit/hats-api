@@ -101,8 +101,8 @@ pub struct NetworkConfig {
     /// Everything else that is not the public internet: RFC1918, link-local — which is
     /// where the cloud metadata services are — unique-local, and the reserved ranges.
     pub allow_private: bool,
-    /// Names that only resolve inside a network: single-label ones, `.internal`,
-    /// `.cluster.local`, and the rest.
+    /// Names that only resolve inside a network: single-label ones, and anything whose
+    /// last label is not a top-level domain IANA has delegated.
     pub allow_local_names: bool,
     /// Networks to allow whatever the switches above say, e.g. `["10.1.2.0/24"]`.
     pub allow_cidrs: Vec<String>,
