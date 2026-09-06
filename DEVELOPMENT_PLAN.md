@@ -2,43 +2,20 @@
 
 ## Progress tracker
 
-**This tracker is part of the plan. Whoever implements a step updates it in the same
-commit as the code.** A step is `done` only when its tests pass, `cargo clippy
---all-targets` and `cargo fmt --check` are clean, and the invariants in §0 still hold.
+Updated in the same commit as the code. A step is `done` only when its tests pass,
+`cargo clippy --all-targets` and `cargo fmt --check` are clean, and §0 still holds.
 
-**This document is a plan, not a log of the work.** It says what is still to be done and
-what constrains it. Nothing here describes what was implemented, in what order, or by
-whom — the code, the tests and `git log` already say that, and better. So when a step is
-finished, do not write down what you built; change only what a later step now has to do
-differently:
-
-- a question the step settled, where the answer decides something later — a version, a
-  limit, a measured number, a constraint every following backend inherits;
-- a decision that turned out differently from what this document assumed, with the
-  assumption corrected rather than annotated;
-- work the step revealed but did not do, entered as its own row rather than a note.
-
-If a step changed nothing about what comes next, its row moving to `done` is the whole
-update. A note that could begin "we added" belongs in the commit message.
-
-**Nothing outside this file may refer to it.** No section number, no filename, no "see
-the development plan" — not in comments, doc comments, test names, config files or
-workflows. This document is scaffolding and will be deleted once the work in it is
-done; a reference to `§8.1` in a comment becomes a dangling pointer the moment that
-happens, and the reader has no way to recover what it meant. When code needs a reason,
-the comment states the reason. If that makes a comment longer, the comment was
-depending on this file to finish its sentence.
-
-Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
+Status values: `todo`, `in progress`, `done`, `dropped` (with the reason). See
+`CLAUDE.md` for what goes in this file and what does not.
 
 | § | step | status | notes |
 |---|---|---|---|
-| 2.1 | OpenDAL backend layer, s3 migrated first | done | `object_store_opendal` 0.58.0 → `object_store ^0.13.1`, matching DataFusion 55's 0.13.2, one copy in the lock file. The §2.1 gate is met; the phase is not blocked. See the notes below. |
-| 2.2 | GCS and Azure | done | `gs://` and `az://`. `abfss://` dropped — see below; the deliverable's scheme list loses it. See also the constraints §2.2 added. |
-| 8.3 | network policy | done | `[access.network]`, checked in the HTTP client's own resolver. See the constraints §8.3 added. |
-| 2.3 | HTTP/HTTPS, range probe, materialization | todo | needs §8.3 |
-| 2.4 | WebDAV | todo | needs §8.3 |
-| 2.5 | Hugging Face | todo | droppable; §2.1's gate was met, so no reason to drop it yet |
+| 2.1 | OpenDAL backend layer, s3 migrated first | done | |
+| 2.2 | GCS and Azure | done | |
+| 8.3 | network policy | done | |
+| 2.3 | HTTP/HTTPS, range probe, materialization | todo | |
+| 2.4 | WebDAV | todo | |
+| 2.5 | Hugging Face | todo | droppable |
 | 3.1 | two-mode configuration | todo | |
 | 3.2 | routing | todo | |
 | 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
@@ -52,105 +29,12 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
 | 7 | operational surface | todo | |
 
-Constraints §2.1 discovered that bind every backend after it:
-
-- **Every remote backend must build its operator through `storage::operator`.** OpenDAL
-  0.58 has no HTTP client until one is given to it, and a store built without one builds
-  fine and fails on its first request — a failure no test that stops short of the wire
-  will catch. §8.3 gave that transport a policy, so the same call is now also the only
-  thing standing between a backend and the network rules.
-- **Ambient credential discovery is disabled per store, not globally.** s3 uses
-  `disable_config_load` and `disable_ec2_metadata`; §2.2's GCS and Azure builders need
-  their own equivalents, and §8.1 is not satisfied until each has one.
-- **Addressing is per backend, not global**: path-style for a named S3-compatible
-  endpoint, virtual-host for AWS itself.
-- **`allow_http` stays ours.** OpenDAL follows the endpoint's own scheme without
-  asking, so the cleartext decision has no backend half to defer to.
-- **`file` stays on `object_store`'s `LocalFileSystem`.** It has no options and no
-  credentials, so it is not the second option-and-credential surface §2.1 was avoiding.
-  Revisit if §3.1's mounts want OpenDAL's listing.
-- **OpenDAL's retry, timeout and concurrent-limit layers are available but unapplied** —
-  enabling a Cargo feature only makes a layer constructible. §7.1 and §8.4 wire them.
-- **`object_store` is now trait-only**: no `aws` feature, so it supplies the
-  `ObjectStore` trait DataFusion consumes and `LocalFileSystem`, nothing else. Adding a
-  backend means adding it to OpenDAL's side, never re-enabling one here.
-- **`disable_config_load` is untested.** `skip_signature` is what makes an anonymous
-  request unsigned, and that is covered; the config guard's other job — stopping
-  `AWS_ENDPOINT_URL` from redirecting a request — is not observable through a url with
-  no `endpoint` option, because virtual-host addressing turns a redirected endpoint
-  into `bucket.<host>`, which does not resolve. Each new backend's equivalent guard
-  inherits the same blind spot.
-
-Constraints §2.2 added, which bind every backend after it:
-
-- **A backend with no `skip_signature` cannot be served at all.** It is what makes an
-  anonymous request anonymous, and without it OpenDAL walks its ambient chain and
-  answers with the deployment's identity — §8.1's central rule, with no way to satisfy
-  it from this side. Check for it before committing to a service, alongside the
-  ambient-discovery switches: it is the reason `abfss://` is not here.
-- **Any option that ends up inside a hostname is checked before it gets there.** A `/`
-  in what was meant to be a subdomain moves the host to whatever preceded it, so
-  `region` and `account` are restricted to characters that cannot mean anything else.
-  This is a way past the endpoint policy, not a tidiness rule, and every backend that
-  interpolates a caller's string into a url inherits it.
-- **No credential option is a path.** GCS's `credential_path` and Azure's connection
-  string would have the service read a credential off its own disk at a caller's
-  direction, which is §8.1's "the request body is the only source" and §8.2's local
-  filesystem rules at once. A credential arrives as a value or not at all — so §2.5's
-  `token` is a value, and a future backend's file-shaped option is refused rather than
-  wired up.
-- **`cargo deny` now carries one ignored advisory**, RUSTSEC-2023-0071 in `rsa`, which
-  `gs://` pulls in unconditionally through `reqsign-google`. The reasoning is in
-  `deny.toml` and turns on the key being the caller's own; an operator-configured
-  credential source (§9) would invalidate it.
-- **A signer that logs credentials is found by running it, not by reading it.** The
-  canary asserts each backend actually logged something, because a backend whose signer
-  never ran reads exactly like a backend that leaked nothing.
-
-Constraints §8.3 added, which bind every backend and every phase after it:
-
-- **A store is built through `storage::operator`, never `Operator::new`.** That is what
-  attaches the access policy's own HTTP transport. OpenDAL's process-wide default client
-  resolves and connects to whatever it is handed, so a backend that builds its own
-  operator silently opts out of the whole network policy and nothing fails to compile.
-- **The address check lives in the resolver.** Nowhere else can hold: a host checked and
-  then handed to a client that resolves it again is DNS rebinding. This is also why the
-  check applies to hosts nothing authorized — a provider's own endpoint, a url a backend
-  built itself — rather than only to what a caller wrote.
-- **Redirects are not followed.** A 3xx is the origin choosing the next destination,
-  which would carry the caller's credentials to a host no endpoint rule named. §2.3
-  inherits this rather than deciding it again.
-- **Naming a host in the config is permission at both layers.** The endpoint lists' hosts
-  are seeded into the network rules, so an operator pointing at a MinIO on RFC1918 space
-  does not have to say so twice. A rule that a caller can reach is the only kind these
-  rules govern.
-- **An operator deny list of host names was left out.** `allow_hosts` is the lever that
-  the default-deny shape actually needs; a deny list would only matter for internal hosts
-  on public names, which is the case `allow_private` and the resolver already cover. Add
-  one when a deployment turns up that needs it, not before.
-
-Written against `781ceac`: a stateless service with one endpoint, `GET /api/v1/select`,
-doing point lookups in a single parquet file over `s3://` or `file://`, under an access
-policy in a TOML config file.
-
 §1 is the target shape, §2–§7 the phases in order, §8 the conditions every phase must
 keep, §9 what is deferred.
 
-## 0. Where we are
+Rules a finished phase leaves behind live in `CLAUDE.md`, not here.
 
-| piece | state |
-|---|---|
-| `src/access.rs` | endpoint- and directory-level policy; one section per remote backend, plus local |
-| `src/network.rs` | which addresses may be reached; the HTTP transport every store is built on |
-| `src/storage.rs` | url → `ObjectStore`; `s3`, `gs`, `az`, `file`; options passed beside the url |
-| `src/query.rs` | DataFusion session per request, `column == value`, projection pushdown |
-| `src/parquet_out.rs` | writes the answer with the source file's own layout |
-| `src/app.rs` | axum router, `/api/v1/health`, `/api/v1/select` |
-| `src/config.rs` | TOML, `deny_unknown_fields`, every key defaulted |
-| `src/error.rs` | `ApiError` → status + message; credentials never reach it |
-| `src/main.rs` | `--config` / `HATS_API_CONFIG`, logging setup, graceful shutdown |
-
-Baseline to hold: 144 tests, `cargo clippy --all-targets` clean, `cargo fmt` clean.
+## 0. Invariants
 
 Three invariants for every phase below:
 
@@ -205,72 +89,9 @@ Both modes may be enabled at once, and either may be off.
 
 ## 2. Phase 1 — more storage backends
 
-Adding a backend is a match arm in `storage::open`, a name in `SUPPORTED_SCHEMES`, an
-option table, and a rule kind in `access.rs`. §2.1 settles the plumbing all four share.
-
-### 2.1 The backend layer: OpenDAL
-
-**Decision: OpenDAL for every backend, migrated in one step**, rather than
-`object_store`'s own `gcp`/`azure`/`http` features alongside the existing native s3.
-Two store-construction paths would mean two option and credential surfaces to strip and
-audit, and §8.5's checklist written twice.
-
-This replaces the backend layer, not the interface DataFusion sees: DataFusion consumes
-`object_store::ObjectStore` trait objects, and `object_store_opendal` adapts an OpenDAL
-`Operator` into that trait. `RemoteFile.store` does not change type.
-
-**The adapter's `object_store` version must match DataFusion's.** A mismatch links two
-copies of the crate, whose `ObjectStore` traits are distinct types, so the adapter's output
-cannot be registered with DataFusion at all — a type error rather than a version warning.
-Pick the adapter release that matches, and treat this as the constraint that can block the
-phase.
-
-**Migrate s3 first.** `storage::tests` is the specification for behaviour that already
-works — unsigned-when-anonymous, path-style addressing against a custom endpoint,
-`allow_http`, region defaulting — and the migration is done when those pass unchanged.
-s3 has the most tests, so it answers whether OpenDAL can express current behaviour before
-the other three depend on the answer.
-
-If the versions cannot be matched, or a service cannot express what is needed, keep
-`object_store` native and drop Hugging Face (§2.5) rather than run both layers.
-
-### 2.2 GCS and Azure
-
-`opendal`'s `services-gcs` and `services-azblob`, following the s3 precedent: credentials
-and endpoint arrive beside the url as `StorageOptions`, never inside it, and are held in
-types that do not print.
-
-| scheme | options |
-|---|---|
-| `gs://bucket/key` | `service_account_key` (base64), `access_token`, `endpoint`, `allow_http` |
-| `az://container/key` | `account` (required), `access_key`, `sas_token`, `endpoint`, `allow_http` |
-
-**`abfss://` is dropped.** ADLS Gen2 is its own OpenDAL service, `azdls`, and it has
-neither a `skip_signature` nor any way to disable ambient discovery: every request is
-signed, through a credential provider that reads `AZURE_*` and the managed-identity
-endpoint. So a caller sending no credentials would be answered with the deployment's
-own identity, and there is no hook to prevent it — §8.1 cannot be met. Revisit only if
-OpenDAL adds the switches `azblob` and `gcs` already have.
-
-`account` is required for `az://` rather than optional: Azure has no single host to
-default to, and it is also what stops a shared key from being silently ignored and the
-environment consulted in its place.
-
-Policy: `[access.gcs]` and `[access.azure]`, with the same three-state `endpoints` key as
-s3 — absent means any, `[]` means off, a list means exactly those. The provider's own
-endpoint is the `"gcp"` / `"azure"` sentinel, as `"aws"` is for s3. The sections are named
-for the services, not for the schemes.
-
-**Anonymous access is the primary case.** Most data served here is public. `storage.rs`
-already does this for s3: no credentials means `with_skip_signature(true)`, an unsigned
-request. GCS and Azure must match.
-
-**Ambient credential discovery must be explicitly disabled** on all three. GCS and Azure
-builders otherwise pick up `GOOGLE_APPLICATION_CREDENTIALS`, `~/.config/gcloud`, workload
-identity, the GCE metadata server, `AZURE_*` variables, or the managed-identity endpoint.
-A caller sending no credentials would then get the service's own identity and every
-private bucket the deployment can reach. No credentials in the url means unsigned. See
-§8.1.
+OpenDAL is the backend layer for everything but `file://`; `object_store_opendal` adapts
+an `Operator` into the `ObjectStore` trait DataFusion consumes. `s3`, `gs` and `az` set
+the pattern the remaining backends follow — see `CLAUDE.md` for what one has to satisfy.
 
 ### 2.3 HTTP/HTTPS and range requests
 
@@ -359,7 +180,7 @@ so §4's directory pages and §5.1's tier 3 work.
 Options: `revision` (default `main`), and `token` for gated datasets — a credential,
 handled as §8.1 requires.
 
-**Drop this backend** if §2.1's version constraint cannot be met: it has the least
+**Drop this backend** if it will not fit the shape the others set: it has the least
 astronomy data behind it and its absence costs nothing structural.
 
 **Deliverable.** `SUPPORTED_SCHEMES = ["s3", "gs", "az", "http", "https", "webdav", "hf", "file"]`,
@@ -367,9 +188,9 @@ one policy section per backend, a matrix test that every scheme is allowed by th
 narrowest config that should allow it and refused by the config that turns it off, and
 `storage::tests` passing unchanged across the migration.
 
-The matrix cannot yet say "refused by the default config": the default for a remote
-backend is any endpoint, not none, which is the gap §8.3 exists to close. When §8.3
-lands, that half of the matrix becomes writable and this line goes.
+The matrix cannot say "refused by the default config": the default for a remote backend
+is any endpoint, not none. Making remote backends default-deny is §3.1's to decide,
+along with the rest of the access table.
 
 ## 3. Phase 2 — two modes of operation
 
@@ -1065,7 +886,8 @@ Run `cargo deny` (advisories + licences) in CI.
    also the first mount that could need credentials, so it is where §8.1's rule is
    revisited: any operator-configured credential source — a config value, an environment
    variable, a file — is named explicitly in the config for that mount, never discovered
-   from the process environment.
+   from the process environment. It also invalidates the reasoning behind the one
+   advisory `deny.toml` ignores, which turns on every key being the caller's own.
 2. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
    already executes (§3.5), rather than opening a second execution path. ADQL's `CONTAINS`,
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
