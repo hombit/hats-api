@@ -228,8 +228,14 @@ inside them; not their URL structure, not their limits.
 
 | vizcat parameter | meaning | ours |
 |---|---|---|
-| `columns` | comma-separated column names, projection (`${X}` escapes awkward names) | same name, same meaning, no count limit |
+| `columns` | comma-separated column names, projection (`${X}` escapes awkward names). Their own limit is eight | same name, same meaning, no count limit |
 | `filters` | a SQL-`WHERE`-like row constraint, e.g. `Gmag>8.0 && o_Gmag>100` | same name, same meaning; accept `AND` as well as `&&` |
+
+`AND` is not a convenience alias. `&` ends a query parameter, so `&&` has to reach the
+server percent-encoded, and a caller writing the documented spelling by hand gets a
+request that parses as `filters=Gmag>8.0` and a silently unfiltered second clause.
+Accepting `AND` gives that caller something they can type. Whether vizcat itself accepts
+`AND` is one of the things to establish below.
 
 Never reuse one of their parameter names for different semantics. Extensions with no
 vizcat equivalent — `format`, `limit` — take names of our own.
@@ -238,9 +244,27 @@ vizcat equivalent — `format`, `limit` — take names of our own.
 directly. A caller who wants the catalog to choose partitions uses the API (§5.2) against
 the same data, which the mount's derived grant permits.
 
-Before implementing, complete `docs/vizcat-compat.md` from the live service: the operator
-set `filters` accepts, whether `AND`/`OR` work alongside `&&`, the `${X}` escaping rules,
-and the response shapes.
+Before implementing, complete `docs/vizcat-compat.md` from the live service — what it
+does, not what its page claims. `https://vizcat.cds.unistra.fr/hats/` answers, serves
+`application/vnd.apache.parquet`, and takes both parameters on a partition's own url;
+`2020aj_159_84b` is a catalog whose columns (`Source`, `RA_ICRS`, `E(BP-RP)`) cover both
+the ordinary and the awkward case. Probe with a filter that matches almost nothing, so
+the survey is a grammar question rather than a download — their page asks not to be
+harvested.
+
+What the document has to answer, because each one changes what the lowering can be:
+
+- The operator set: `=`, `!=`/`<>`, `<`, `>`, `<=`, `>=`, `IN`, `BETWEEN`, `IS NULL`,
+  `LIKE`, arithmetic, function calls.
+- Which connectives work: `&&`, `AND`, `||`, `OR`, `!`, `NOT`, and parentheses.
+- `${X}` — what it escapes, and whether `E(BP-RP)` is reachable without it.
+- Whether a name is matched case-sensitively, which decides whether their rule and the
+  one in `CLAUDE.md` agree.
+- What a bad filter answers with: a status, and whether the message quotes the input
+  back.
+- Whether anything in it has no SQL spelling at all. That is the finding that decides
+  whether `filters` can lower by rewriting text before `sqlparser`, or needs its own
+  parser — and if it needs one, whether the compatibility is worth it.
 
 #### The same two languages in the API body
 
