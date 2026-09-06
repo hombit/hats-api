@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use axum::{
     Router,
-    extract::{Query, Request, State, rejection::JsonRejection},
+    extract::{Request, State, rejection::JsonRejection},
     http::{Method, StatusCode, header, request::Parts},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
@@ -35,8 +35,6 @@ pub struct Service {
     pub mounts: Arc<Mounts>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
-    /// How many entries one page of a directory listing may carry.
-    pub max_listing_entries: usize,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     api_prefix: Option<Arc<str>>,
 }
@@ -82,7 +80,6 @@ impl Service {
             transfers: Arc::new(Transfers::new(limits)),
             mounts: Arc::new(mounts),
             sql_limits: limits.into(),
-            max_listing_entries: limits.max_listing_entries,
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -145,6 +142,9 @@ fn route(prefix: &str, name: &str) -> String {
 /// query. `mime_guess` has no answer for the extension.
 const PARQUET_CONTENT_TYPE: &str = "application/vnd.apache.parquet";
 
+/// The file a directory is served as when it has one, in place of a generated listing.
+const DIRECTORY_INDEX: &str = "index.html";
+
 /// The file-server side: a url path, a mount, and the file inside it.
 ///
 /// Everything the request may decide is decided here; everything about *how* an ordinary
@@ -169,9 +169,16 @@ async fn serve_mounted(
     let segments = path_segments(relative)?;
     let mut requested = mount.source().to_owned();
     requested.extend(&segments);
-    let file = access::authorize_mounted(mount, &requested)?;
+    let mut file = access::authorize_mounted(mount, &requested)?;
     if file.is_dir() {
-        return list_directory(&service, mount, &segments, &file, &parts).await;
+        // A directory that publishes its own page says what it wants said about itself,
+        // and the generated listing is only the fallback. Through `authorize_mounted`
+        // like any other file, so a link the mount does not follow is not followed here
+        // either.
+        match access::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)) {
+            Ok(index) if index.is_file() => file = index,
+            _ => return list_directory(mount, &segments, &file, &parts).await,
+        }
     }
     let mut response = ServeFile::new(&file)
         .try_call(Request::from_parts(parts, body))
@@ -195,18 +202,8 @@ async fn serve_mounted(
     Ok(response)
 }
 
-/// Where one page of a listing carries on from. The name of its last entry, not a count:
-/// a directory is read afresh for each page, and a file appearing or disappearing in
-/// between must not shift the ones that have not been seen yet.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListingParams {
-    after: Option<String>,
-}
-
 /// A directory, as a page or as JSON. Which one is [`listing::wants_html`]'s decision.
 async fn list_directory(
-    service: &Service,
     mount: &Mount,
     segments: &[String],
     dir: &Path,
@@ -217,8 +214,6 @@ async fn list_directory(
             "a listing is read, not written",
         ));
     }
-    let params = Query::<ListingParams>::try_from_uri(&request.uri)
-        .map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
     // The url as this service spells it, built from the decoded segments rather than
     // from the request path, so every entry's url has one spelling whatever the request
     // used to get here.
@@ -229,31 +224,21 @@ async fn list_directory(
         .map(|(_, above)| listing::url(mount.prefix(), above));
 
     let (dir, follow_symlinks) = (dir.to_owned(), mount.follow_symlinks());
-    let limit = service.max_listing_entries;
-    let after = params.0.after;
     // `read_dir` and a `stat` per entry are blocking calls, and a HATS `Dir=` level is
     // ten thousand of them.
-    let listing = tokio::task::spawn_blocking(move || {
-        Listing::read(
-            &dir,
-            &path,
-            parent,
-            follow_symlinks,
-            after.as_deref(),
-            limit,
-        )
-    })
-    .await
-    .map_err(|error| {
-        tracing::error!(%error, "listing a directory panicked");
-        ApiError::internal("cannot read this directory")
-    })?
-    .map_err(|error| {
-        // The path is the operator's business and not the caller's, so what comes back
-        // is the same answer as for a directory that is not published at all.
-        tracing::warn!(%error, mount = mount.prefix(), "cannot list");
-        ApiError::not_found("no such directory")
-    })?;
+    let listing =
+        tokio::task::spawn_blocking(move || Listing::read(&dir, &path, parent, follow_symlinks))
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "listing a directory panicked");
+                ApiError::internal("cannot read this directory")
+            })?
+            .map_err(|error| {
+                // The path is the operator's business and not the caller's, so what comes back
+                // is the same answer as for a directory that is not published at all.
+                tracing::warn!(%error, mount = mount.prefix(), "cannot list");
+                ApiError::not_found("no such directory")
+            })?;
 
     Ok(match listing::wants_html(&request.headers) {
         true => Html(listing.to_html()).into_response(),
@@ -857,7 +842,6 @@ mod tests {
         let listing: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
         assert_eq!(listing["path"], "/Norder=5");
         assert_eq!(listing["parent"], "/");
-        assert_eq!(listing["next"], serde_json::Value::Null);
         assert_eq!(listing["entries"][0]["name"], "Npix=12240.parquet");
         assert_eq!(listing["entries"][0]["type"], "file");
         assert_eq!(listing["entries"][0]["size"], 10);
@@ -916,56 +900,20 @@ mod tests {
         }
     }
 
-    /// A directory too large for one page hands back the url of the next one, and the
-    /// pages together are the whole directory with nothing repeated.
+    /// A directory that has its own page is served it, and the generated listing is what
+    /// happens when it does not.
     #[tokio::test]
-    async fn a_large_directory_is_paginated() {
-        let dir = tempfile::TempDir::new().unwrap();
-        for index in 0..5 {
-            std::fs::write(dir.path().join(format!("part{index}.parquet")), b"x").unwrap();
-        }
-        let mut service = mounted(dir.path(), &ApiConfig::default());
-        service.max_listing_entries = 2;
-
-        let mut names = Vec::new();
-        let mut uri = "/".to_owned();
-        loop {
-            let response = respond(service.clone(), Request::builder().uri(&uri)).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let listing: serde_json::Value =
-                serde_json::from_str(&body_of(response).await).unwrap();
-            for entry in listing["entries"].as_array().unwrap() {
-                names.push(entry["name"].as_str().unwrap().to_owned());
-            }
-            match listing["next"].as_str() {
-                Some(next) => uri = next.to_owned(),
-                None => break,
-            }
-        }
-        assert_eq!(
-            names,
-            [
-                "part0.parquet",
-                "part1.parquet",
-                "part2.parquet",
-                "part3.parquet",
-                "part4.parquet"
-            ]
-        );
-    }
-
-    /// A query parameter a listing does not have is a mistake to report, not one to
-    /// ignore: silently listing from the start would look like an empty directory.
-    #[tokio::test]
-    async fn an_unknown_listing_parameter_is_named_rather_than_ignored() {
+    async fn a_directory_with_an_index_is_served_it() {
         let dir = tree();
+        std::fs::write(dir.path().join("index.html"), b"<p>the catalog</p>").unwrap();
+
         let response = respond(
             mounted(dir.path(), &ApiConfig::default()),
-            Request::builder().uri("/?offset=10"),
+            Request::builder().uri("/"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert!(body_of(response).await.contains("offset"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "<p>the catalog</p>");
     }
 
     /// Nothing here is written, so a verb that would write is refused at the listing

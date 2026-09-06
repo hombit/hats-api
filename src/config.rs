@@ -100,11 +100,6 @@ pub struct LimitsConfig {
     /// Depth does not bound this: an `IN` list is one node wide and arbitrarily long,
     /// and a chain of `OR`s is shallow. Nothing to do with how many rows come back.
     pub max_expression_nodes: usize,
-    /// How many entries one directory listing may carry before the rest is offered as a
-    /// further page. Sized to hold a whole HATS `Dir=` level, because a client that
-    /// walks a listing and ignores the continuation would otherwise conclude that the
-    /// partitions past the cap are not there.
-    pub max_listing_entries: usize,
 }
 
 impl Default for LimitsConfig {
@@ -121,9 +116,6 @@ impl Default for LimitsConfig {
             // Generous, because a list of ten thousand object ids is a request this
             // service exists to answer: it refuses the absurd rather than budgeting.
             max_expression_nodes: 50_000,
-            // A HATS `Dir=` level holds ten thousand `Npix=` entries, so this is one
-            // page for the largest directory the data actually has.
-            max_listing_entries: 10_000,
         }
     }
 }

@@ -280,9 +280,8 @@ with a listing. What is left:
    waits on `docs/vizcat-compat.md`. A file with no query parameters keeps going out
    verbatim, whatever its extension.
 
-A directory's query string is already spoken for by the listing's own `after`, and is
-refused when it carries anything else — so the parameters §3.4 settles are a file's
-alone, and the two cannot collide.
+A listing takes no query parameters of its own, so the ones §3.4 settles are a file's
+alone and the two cannot collide.
 
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does. Nothing here has been tried against

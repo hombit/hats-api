@@ -45,38 +45,19 @@ const SEGMENT: &AsciiSet = &CONTROLS
     .add(b'}')
     .add(b'/');
 
-/// A cursor rides in a query string, where `=` and `&` are the delimiters, so it is
-/// encoded harder than a path segment is.
-const QUERY_VALUE: &AsciiSet = percent_encoding::NON_ALPHANUMERIC;
-
-/// Whether the caller asked for HTML by name.
-///
-/// Only an exact `text/html` with a non-zero weight counts. A wildcard does not: `*/*`
-/// is what every program that is not a browser sends, and answering it with a page
-/// would give the JSON reading to nobody. That is also why this is not one of the
-/// content-negotiation crates — theirs resolve a wildcard *to* `text/html`, which is
-/// the opposite of what a data service wants.
+/// Whether the caller named `text/html`. Everything else, `*/*` included, gets JSON:
+/// a wildcard is what every program that is not a browser sends.
 pub fn wants_html(headers: &HeaderMap) -> bool {
-    let Some(accept) = headers.get(ACCEPT).and_then(|value| value.to_str().ok()) else {
-        return false;
-    };
-    accept.split(',').any(|offer| {
-        let mut parts = offer.split(';').map(str::trim);
-        if !parts
-            .next()
-            .is_some_and(|mime| mime.eq_ignore_ascii_case("text/html"))
-        {
-            return false;
-        }
-        // `text/html;q=0` names the type in order to refuse it.
-        parts.all(|parameter| match parameter.split_once('=') {
-            Some((name, weight)) if name.eq_ignore_ascii_case("q") => weight
-                .trim()
-                .parse::<f32>()
-                .is_ok_and(|weight| weight > 0.0),
-            _ => true,
+    headers
+        .get(ACCEPT)
+        .and_then(|accept| accept.to_str().ok())
+        .is_some_and(|accept| {
+            accept.split(',').any(|offer| {
+                // `text/html;q=0.9` is the type with a weight on it, still the type.
+                let mime = offer.split(';').next().unwrap_or(offer);
+                mime.trim().eq_ignore_ascii_case("text/html")
+            })
         })
-    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -105,7 +86,7 @@ pub struct Entry {
     pub url: String,
 }
 
-/// One page of one directory.
+/// One directory, whole.
 #[derive(Debug, Serialize)]
 pub struct Listing {
     /// This directory's own url.
@@ -115,28 +96,25 @@ pub struct Listing {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
     pub entries: Vec<Entry>,
-    /// The rest of the directory, when it did not fit. Absent means this is all of it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next: Option<String>,
 }
 
 impl Listing {
-    /// Read one page of `dir`, which is `path` in the url space.
+    /// Read `dir`, which is `path` in the url space.
     ///
-    /// Entries are ordered by name, which is what makes `after` a cursor rather than an
-    /// offset: a page is decided by the last name on the one before it, so a file
-    /// appearing or disappearing in between shifts nothing.
+    /// Every entry, ordered by name, the way `apache` and `nginx` list a directory. A cap
+    /// would have to either truncate — which reads to a client as the files past it not
+    /// existing — or page, and a paged listing is one more thing every client has to know
+    /// about a plain file server. The cost is a `readdir` and a `stat` per entry, both
+    /// paid against a directory the operator chose to publish.
     pub fn read(
         dir: &Path,
         path: &str,
         parent: Option<String>,
         follow_symlinks: bool,
-        after: Option<&str>,
-        limit: usize,
     ) -> std::io::Result<Self> {
         // Names first and nothing else: `read_dir` hands out the file type for free on
-        // the platforms this runs on, while a size costs a `stat` per entry. Sorting has
-        // to see every name, so only the page that survives the sort is worth paying for.
+        // the platforms this runs on, while a size costs a `stat` per entry, and sorting
+        // has to see every name before any of them is worth asking about.
         let mut names: Vec<(String, Kind)> = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
@@ -145,9 +123,6 @@ impl Listing {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if after.is_some_and(|after| name.as_str() <= after) {
-                continue;
-            }
             let file_type = entry.file_type()?;
             // A mount that does not follow links will not serve one either, so listing
             // it would describe a 404. A mount that does follow them still refuses a
@@ -172,14 +147,6 @@ impl Listing {
         }
         names.sort_by(|(one, _), (other, _)| one.cmp(other));
 
-        // Counted against the whole directory rather than guessed from the page being
-        // exactly full, which would offer a second page that turns out to be empty.
-        let more = names.len() > limit;
-        names.truncate(limit);
-        let next = match more {
-            true => names.last().map(|(name, _)| name.clone()),
-            false => None,
-        };
         let entries = names
             .into_iter()
             .map(|(name, kind)| {
@@ -207,8 +174,6 @@ impl Listing {
             path: path.to_owned(),
             parent,
             entries,
-            next: next
-                .map(|name| format!("{path}?after={}", utf8_percent_encode(&name, QUERY_VALUE))),
         })
     }
 
@@ -248,14 +213,7 @@ impl Listing {
                 modified = entry.modified.as_deref().unwrap_or_default(),
             ));
         }
-        html.push_str("</table>\n");
-        if let Some(next) = &self.next {
-            html.push_str(&format!(
-                "<p><a href=\"{}\">next page</a></p>\n",
-                html_escape::encode_double_quoted_attribute(next)
-            ));
-        }
-        html.push_str("</body>\n</html>\n");
+        html.push_str("</table>\n</body>\n</html>\n");
         html
     }
 }
@@ -324,8 +282,6 @@ mod tests {
             "*/*",
             "application/json",
             "text/*",
-            "text/html;q=0",
-            "text/html;q=0.0",
             "application/json, */*;q=0.1",
         ] {
             assert!(!wants_html(&accepting(accept)), "{accept}");
@@ -355,8 +311,8 @@ mod tests {
         assert_eq!(child("/hats", "dr1"), "/hats/dr1");
     }
 
-    fn listing(dir: &TempDir, after: Option<&str>, limit: usize) -> Listing {
-        Listing::read(dir.path(), "/", None, false, after, limit).unwrap()
+    fn listing(dir: &TempDir) -> Listing {
+        Listing::read(dir.path(), "/", None, false).unwrap()
     }
 
     #[test]
@@ -366,7 +322,7 @@ mod tests {
         fs::write(dir.path().join("a.parquet"), b"01").unwrap();
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
 
-        let listing = listing(&dir, None, 10);
+        let listing = listing(&dir);
         let names: Vec<_> = listing.entries.iter().map(|entry| &*entry.name).collect();
         assert_eq!(names, ["Norder=5", "a.parquet", "b.parquet"]);
         assert_eq!(listing.entries[0].kind, Kind::Directory);
@@ -375,42 +331,17 @@ mod tests {
         assert_eq!(listing.entries[1].kind, Kind::File);
         assert_eq!(listing.entries[1].size, Some(2));
         assert!(listing.entries[1].modified.is_some());
-        assert_eq!(listing.next, None);
     }
 
-    /// A page ends at the cap, and the cursor is a name rather than a count — so the
-    /// pages join up even though the directory is read afresh for each one.
+    /// A directory arrives whole, however many entries it has: nothing is held back for
+    /// a second request, so a client that reads one listing has read the directory.
     #[test]
-    fn a_directory_larger_than_the_page_is_continued_rather_than_truncated() {
+    fn a_large_directory_is_listed_in_full() {
         let dir = TempDir::new().unwrap();
-        for index in 0..5 {
-            fs::write(dir.path().join(format!("part{index}.parquet")), b"x").unwrap();
+        for index in 0..2_000 {
+            fs::write(dir.path().join(format!("Npix={index}.parquet")), b"x").unwrap();
         }
-
-        let first = listing(&dir, None, 2);
-        assert_eq!(first.entries.len(), 2);
-        assert_eq!(first.next.as_deref(), Some("/?after=part1%2Eparquet"));
-
-        let second = Listing::read(dir.path(), "/", None, false, Some("part1.parquet"), 2).unwrap();
-        let names: Vec<_> = second.entries.iter().map(|entry| &*entry.name).collect();
-        assert_eq!(names, ["part2.parquet", "part3.parquet"]);
-        assert!(second.next.is_some());
-
-        let last = Listing::read(dir.path(), "/", None, false, Some("part3.parquet"), 2).unwrap();
-        let names: Vec<_> = last.entries.iter().map(|entry| &*entry.name).collect();
-        assert_eq!(names, ["part4.parquet"]);
-        assert_eq!(last.next, None, "the last page does not offer another");
-    }
-
-    /// A directory of exactly one page is complete, not the first of two: the reading
-    /// looks one entry past the cap rather than inferring it from a full page.
-    #[test]
-    fn a_directory_that_exactly_fills_a_page_offers_no_next() {
-        let dir = TempDir::new().unwrap();
-        for index in 0..2 {
-            fs::write(dir.path().join(format!("part{index}.parquet")), b"x").unwrap();
-        }
-        assert_eq!(listing(&dir, None, 2).next, None);
+        assert_eq!(listing(&dir).entries.len(), 2_000);
     }
 
     /// What the mount will not serve is not advertised either.
@@ -428,7 +359,7 @@ mod tests {
         .unwrap();
 
         let listed = |follow| {
-            Listing::read(&published, "/", None, follow, None, 10)
+            Listing::read(&published, "/", None, follow)
                 .unwrap()
                 .entries
                 .len()
@@ -446,7 +377,7 @@ mod tests {
         fs::write(dir.path().join("<script>alert(1)<script>"), b"x").unwrap();
         fs::write(dir.path().join("a\"b.parquet"), b"x").unwrap();
 
-        let html = listing(&dir, None, 10).to_html();
+        let html = listing(&dir).to_html();
         assert!(!html.contains("<script>"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         // And the quote does not end the href it sits in.

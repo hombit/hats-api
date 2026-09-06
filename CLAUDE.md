@@ -200,12 +200,13 @@ deliberately.
 
 ## Directory listings
 
-- **A wildcard is not a request for a page.** HTML is served only when `Accept` names
-  `text/html` outright with a weight above zero; `*/*` is what every client library
-  sends, and answering it with markup would leave the machine-readable rendering
-  unreachable. This is also why none of the content-negotiation crates is used: they
-  resolve a wildcard *to* `text/html`, which is the right default for a website and the
-  wrong one for a data service.
+A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it
+has one, otherwise every entry, ordered by name. No paging, no cap, no sort parameters.
+
+- **`text/html` gets a page; everything else gets JSON.** `*/*` is what every client
+  library sends, and it is not a request for markup. This is also why none of the
+  content-negotiation crates is used: they resolve a wildcard *to* `text/html`, which is
+  the right default for a website and the wrong one for a data service.
 - **A name is the filesystem's, and it is encoded twice.** Into a url — where `/`, `%`
   and the delimiters must not survive literally, and `=` must, because HATS directories
   are called `Norder=5` — and into HTML, where a name is markup until it is escaped.
@@ -215,10 +216,6 @@ deliberately.
   404. `DirEntry::metadata` is an `lstat` and answers "a symlink" a second time; a mount
   that does follow them needs `fs::metadata` on the resolved path to learn what is
   behind one.
-- **A page ends at a name, not at a count.** The directory is read afresh for each page,
-  so an offset would skip or repeat entries when a file appears or disappears between
-  two requests. Whether there is a next page is counted against the whole directory,
-  never inferred from the page coming back full.
 
 ## Comments
 
