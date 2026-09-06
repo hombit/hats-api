@@ -24,12 +24,11 @@ use opendal::{OperationContext, Operator, services};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
-use crate::access::{AccessPolicy, BACKENDS, Backend, Target};
+use crate::access::{
+    AccessPolicy, BACKENDS, Backend, EndpointScheme, LOCAL_SCHEME, Target,
+    describe_endpoint_schemes,
+};
 use crate::error::ApiError;
-
-/// The one scheme with no backend behind it: a local file has no host to decide about,
-/// so the directory rules are its whole policy.
-const LOCAL_SCHEME: &str = "file";
 
 /// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
 /// list written out by hand, so a backend cannot be added and then refused here by a
@@ -413,32 +412,31 @@ fn resolve_endpoint(
     options: &StorageOptions,
     policy: &AccessPolicy,
 ) -> Result<Option<Url>, ApiError> {
-    let endpoint = options
-        .endpoint
-        .as_deref()
-        .map(parse_endpoint)
-        .transpose()?;
-    // Before the policy: an endpoint in a scheme this service does not speak is not a
-    // request the policy has anything useful to say about, and saying which host it
-    // will not reach would answer a question the caller did not ask.
-    if let Some(endpoint) = &endpoint {
-        require_http_scheme(endpoint)?;
-    }
-    policy.authorize_endpoint(backend, endpoint.as_ref())?;
-    match &endpoint {
-        Some(endpoint) => {
-            allow_cleartext(endpoint, options.allow_http, options.has_credentials())?;
-        }
+    let Some(raw) = options.endpoint.as_deref() else {
+        policy.authorize_endpoint(backend, None)?;
         // A provider's own service is https, so there is nothing here for `allow_http`
         // to permit, and a caller who set it has misunderstood what it does.
-        None if options.allow_http => {
+        if options.allow_http {
             return Err(ApiError::bad_request(
                 "allow_http only applies together with endpoint",
             ));
         }
-        None => {}
-    }
-    Ok(endpoint)
+        return Ok(None);
+    };
+
+    let endpoint = parse_endpoint(raw)?;
+    // Before the policy: an endpoint in a scheme this service does not speak is not a
+    // request the policy has anything useful to say about, and saying which host it
+    // will not reach would answer a question the caller did not ask.
+    let scheme = require_endpoint_scheme(&endpoint)?;
+    policy.authorize_endpoint(backend, Some(&endpoint))?;
+    allow_cleartext(
+        &endpoint,
+        scheme,
+        options.allow_http,
+        options.has_credentials(),
+    )?;
+    Ok(Some(endpoint))
 }
 
 /// A caller's string that has been checked to be safe inside a hostname. The check is
@@ -484,14 +482,17 @@ fn require_label<'a>(name: &str, value: &'a str, extra: &str) -> Result<HostLabe
     }
 }
 
-/// An endpoint is an HTTP service whatever the storage behind it is.
-fn require_http_scheme(endpoint: &Url) -> Result<(), ApiError> {
-    match endpoint.scheme() {
-        "http" | "https" => Ok(()),
-        scheme => Err(ApiError::bad_request(format!(
-            "endpoint {endpoint} has scheme {scheme:?}, expected http or https"
-        ))),
-    }
+/// An endpoint is an HTTP service whatever the storage behind it is. The scheme is handed
+/// back rather than merely approved, so the cleartext decision below reads a parsed value
+/// instead of comparing the string again.
+fn require_endpoint_scheme(endpoint: &Url) -> Result<EndpointScheme, ApiError> {
+    EndpointScheme::parse(endpoint.scheme()).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "endpoint {endpoint} has scheme {:?}, expected {}",
+            endpoint.scheme(),
+            describe_endpoint_schemes()
+        ))
+    })
 }
 
 /// Decide whether this endpoint may be spoken to over cleartext. The backend would not
@@ -499,12 +500,13 @@ fn require_http_scheme(endpoint: &Url) -> Result<(), ApiError> {
 /// and it happens before a connection is opened rather than after one fails.
 fn allow_cleartext(
     endpoint: &Url,
+    scheme: EndpointScheme,
     allow_http: bool,
     has_credentials: bool,
 ) -> Result<(), ApiError> {
     // Nothing to expose when the request is anonymous, and that is the common case of a
     // local MinIO or a test server.
-    match endpoint.scheme() != "http" || !has_credentials || allow_http {
+    match !scheme.is_cleartext() || !has_credentials || allow_http {
         true => Ok(()),
         // Display, not Debug: Debug on a Url prints the whole parsed struct. The
         // endpoint is safe to echo either way — credentials are separate options.

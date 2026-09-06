@@ -112,8 +112,10 @@ struct Rules {
     allow_hosts: HashSet<String>,
     /// The same permission for an operator who wrote an address instead of a name.
     allow_addrs: HashSet<IpAddr>,
-    private_v4: Vec<IpNet>,
-    private_v6: Vec<IpNet>,
+    /// [`PRIVATE_V4`] and [`PRIVATE_V6`] together: an `IpNet` only ever contains
+    /// addresses of its own family, so keeping them apart would only mean choosing
+    /// between two lists that already know which addresses are theirs.
+    private: Vec<IpNet>,
 }
 
 /// What `[access.network]` came to, and the HTTP client that enforces it.
@@ -167,8 +169,10 @@ impl NetworkPolicy {
             allow_cidrs,
             allow_hosts,
             allow_addrs,
-            private_v4: parse_nets(PRIVATE_V4),
-            private_v6: parse_nets(PRIVATE_V6),
+            private: parse_nets(PRIVATE_V4)
+                .into_iter()
+                .chain(parse_nets(PRIVATE_V6))
+                .collect(),
         });
         let transport = build_transport(Arc::clone(&rules))?;
         Ok(Self { rules, transport })
@@ -197,10 +201,22 @@ impl NetworkPolicy {
     }
 }
 
+/// The compile-time range lists, parsed. A typo here would otherwise drop that range
+/// from the check and quietly allow it, which is the one direction a mistake in this
+/// module must not go — so it panics at startup instead.
+#[expect(
+    clippy::expect_used,
+    reason = "the entries are compile-time constants in this file; one that fails to \
+              parse is a range this module thinks it is refusing and is not"
+)]
 fn parse_nets(entries: &[&str]) -> Vec<IpNet> {
     entries
         .iter()
-        .filter_map(|entry| entry.parse().ok())
+        .map(|entry| {
+            entry
+                .parse()
+                .expect("the ranges in this file are written as valid CIDR")
+        })
         .collect()
 }
 
@@ -275,16 +291,7 @@ impl Rules {
                 )),
             };
         }
-        let private = match addr {
-            IpAddr::V4(ip) => self
-                .private_v4
-                .iter()
-                .any(|net| net.contains(&IpAddr::V4(ip))),
-            IpAddr::V6(ip) => self
-                .private_v6
-                .iter()
-                .any(|net| net.contains(&IpAddr::V6(ip))),
-        };
+        let private = self.private.iter().any(|net| net.contains(&addr));
         match private && !self.allow_private {
             false => Ok(()),
             true => Err(format!(

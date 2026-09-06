@@ -169,6 +169,13 @@ fn column_names(fields: &datafusion::arrow::datatypes::Fields) -> String {
 ///
 /// A typed literal is what makes statistics, page index and bloom filter pruning
 /// possible; comparing everything as a string would silently read the whole file.
+///
+/// Written out rather than deferred to `ScalarValue::try_from_string`, which is an arrow
+/// cast: it is equally strict about the values, but it accepts every type arrow can cast
+/// a string to — dates, timestamps, decimals — and whether a column of one of those
+/// filters usefully here is a question to answer per type rather than to inherit. Its
+/// failure is also an `ArrowError`, which this service reports as a 500; a value that
+/// does not fit the column is the caller's to fix.
 fn parse_scalar(data_type: &DataType, raw: &str) -> Result<ScalarValue, ApiError> {
     fn parse<T: std::str::FromStr>(raw: &str, data_type: &DataType) -> Result<T, ApiError> {
         raw.parse::<T>().map_err(|_| {

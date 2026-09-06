@@ -80,6 +80,10 @@ pub enum Backend {
 /// a later phase adds.
 pub const BACKENDS: &[Backend] = &[Backend::S3, Backend::Gcs, Backend::Azure];
 
+/// The one scheme with no [`Backend`] behind it, named here because it is the other half
+/// of that enum rather than a string three places happen to agree on.
+pub const LOCAL_SCHEME: &str = "file";
+
 impl Backend {
     /// The url scheme that names this backend.
     pub fn scheme(self) -> &'static str {
@@ -138,15 +142,53 @@ enum EndpointRules {
     Only(Vec<Endpoint>),
 }
 
+/// The schemes an endpoint can have: it is an HTTP service whatever the storage behind
+/// it is. An enum rather than a string because `http` is a decision — it is the one that
+/// puts a credential where anything on the path can read it — and a decision compared by
+/// spelling is one that a typo silently reverses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointScheme {
+    Http,
+    Https,
+}
+
+impl EndpointScheme {
+    pub const ALL: [Self; 2] = [Self::Http, Self::Https];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+
+    pub fn parse(scheme: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|known| known.name() == scheme)
+    }
+
+    /// Whether what goes over it can be read by anything on the path.
+    pub fn is_cleartext(self) -> bool {
+        matches!(self, Self::Http)
+    }
+}
+
+impl std::fmt::Display for EndpointScheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Endpoint {
-    /// The provider's own service, which is what a url with no `endpoint` option
-    /// means. Held as the name it is written under so that a refusal can say it back.
-    Provider(&'static str),
+    /// The provider's own service, which is what a url with no `endpoint` option means.
+    /// The backend it belongs to, not the name it is written under: the name is one of
+    /// the backend's own properties, and looking it up is what keeps a refusal from
+    /// being able to quote a different one than the parse accepted.
+    Provider(Backend),
     /// One server speaking the backend's protocol. The port is kept resolved so that
     /// `https://host` and `https://host:443` are the one endpoint they are.
     Url {
-        scheme: String,
+        scheme: EndpointScheme,
         host: Host<String>,
         port: Option<u16>,
     },
@@ -208,7 +250,7 @@ impl AccessPolicy {
             .map(Backend::scheme)
             .collect();
         if !self.local.is_empty() {
-            schemes.push("file");
+            schemes.push(LOCAL_SCHEME);
         }
         schemes
     }
@@ -226,7 +268,7 @@ impl AccessPolicy {
     /// because it lives in the url's options and only `storage` knows how to read those.
     pub fn authorize(&self, url: &Url) -> Result<Target, ApiError> {
         let scheme = url.scheme();
-        if scheme == "file" {
+        if scheme == LOCAL_SCHEME {
             return self.authorize_local(url).map(Target::Local);
         }
         match Backend::from_scheme(scheme) {
@@ -256,7 +298,7 @@ impl AccessPolicy {
             EndpointRules::Only(allowed) => {
                 let wanted = match endpoint {
                     Some(url) => Endpoint::from_url(url)?,
-                    None => Endpoint::Provider(backend.provider()),
+                    None => Endpoint::Provider(backend),
                 };
                 match allowed.contains(&wanted) {
                     true => Ok(()),
@@ -377,12 +419,19 @@ impl EndpointRules {
 
 impl Endpoint {
     fn from_url(url: &Url) -> Result<Self, ApiError> {
+        let scheme = EndpointScheme::parse(url.scheme()).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "endpoint {url} has scheme {:?}, expected {}",
+                url.scheme(),
+                describe_endpoint_schemes()
+            ))
+        })?;
         let host = url
             .host()
             .filter(|host| !matches!(host, Host::Domain(name) if name.is_empty()))
             .ok_or_else(|| ApiError::bad_request(format!("endpoint {url} has no host")))?;
         Ok(Self::Url {
-            scheme: url.scheme().to_owned(),
+            scheme,
             // `Url` has already lowercased a domain and canonicalized an address, so
             // two spellings of one endpoint compare equal here.
             host: host.to_owned(),
@@ -391,10 +440,15 @@ impl Endpoint {
     }
 }
 
+/// The endpoint schemes, for a refusal that has to name them.
+pub fn describe_endpoint_schemes() -> String {
+    EndpointScheme::ALL.map(EndpointScheme::name).join(" or ")
+}
+
 impl std::fmt::Display for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Provider(name) => f.write_str(name),
+            Self::Provider(backend) => f.write_str(backend.provider()),
             Self::Url { scheme, host, port } => {
                 write!(f, "{scheme}://{host}")?;
                 match port {
@@ -417,27 +471,23 @@ fn describe(items: &[impl std::fmt::Display]) -> String {
     }
 }
 
-/// Schemes an endpoint entry may use. An endpoint is an HTTP service whatever the
-/// storage behind it is.
-const ENDPOINT_SCHEMES: &[&str] = &["http", "https"];
-
 fn parse_endpoint(entry: &str, backend: Backend) -> Result<Endpoint, ConfigError> {
     let invalid = |reason: String| ConfigError::Rule(entry.to_owned(), reason);
 
     let provider = backend.provider();
     if entry.eq_ignore_ascii_case(provider) {
-        return Ok(Endpoint::Provider(provider));
+        return Ok(Endpoint::Provider(backend));
     }
     let url = Url::parse(entry).map_err(|error| {
         invalid(format!(
             "{error}; expected {provider:?} or a url like https://minio.example.com"
         ))
     })?;
-    if !ENDPOINT_SCHEMES.contains(&url.scheme()) {
+    if EndpointScheme::parse(url.scheme()).is_none() {
         return Err(invalid(format!(
             "scheme {:?} is not one an endpoint can have; use {}",
             url.scheme(),
-            ENDPOINT_SCHEMES.join(" or ")
+            describe_endpoint_schemes()
         )));
     }
     // An endpoint is a server, not a place in one: a path here would be silently
@@ -462,7 +512,7 @@ fn canonical_root(entry: &str) -> Result<PathBuf, ConfigError> {
                 "{error}; expected an absolute path or a file:// url"
             ))
         })?;
-        if url.scheme() != "file" {
+        if url.scheme() != LOCAL_SCHEME {
             return Err(invalid(format!(
                 "scheme {:?} is not a local path; expected an absolute path or a \
                  file:// url",

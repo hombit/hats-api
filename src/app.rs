@@ -76,8 +76,12 @@ enum Format {
 }
 
 impl Format {
-    const NAMES: &'static [&'static str] = &["json", "parquet"];
+    /// Every format, in the order a refusal lists them. The default is the first.
+    const ALL: [Self; 2] = [Self::Json, Self::Parquet];
 
+    /// The one place a format's name is written. [`Self::parse`] and the list in a
+    /// refusal are both derived from it, so a format cannot be renamed in one and not
+    /// the others, or added and left unparseable.
     fn name(self) -> &'static str {
         match self {
             Self::Json => "json",
@@ -86,14 +90,18 @@ impl Format {
     }
 
     fn parse(raw: Option<&str>) -> Result<Self, ApiError> {
-        match raw {
-            None | Some("json") => Ok(Self::Json),
-            Some("parquet") => Ok(Self::Parquet),
-            Some(other) => Err(ApiError::bad_request(format!(
-                "unknown format {other:?}; supported formats are {}",
-                Self::NAMES.join(", ")
-            ))),
-        }
+        let Some(raw) = raw else {
+            return Ok(Self::Json);
+        };
+        Self::ALL
+            .into_iter()
+            .find(|format| format.name() == raw)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "unknown format {raw:?}; supported formats are {}",
+                    Self::ALL.map(Self::name).join(", ")
+                ))
+            })
     }
 }
 
