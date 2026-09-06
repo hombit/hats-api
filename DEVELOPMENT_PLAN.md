@@ -24,7 +24,7 @@ thing to keep working while that is built.
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
-| 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
+| 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first. Brings `columns`/`filters` to the API body too |
 | 4 | file-server interface | in progress | listings done; the query surface is what is left, and waits on §3.4 |
 | 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
 | 5.1 | HATS catalog metadata | todo | |
@@ -241,6 +241,29 @@ the same data, which the mount's derived grant permits.
 Before implementing, complete `docs/vizcat-compat.md` from the live service: the operator
 set `filters` accepts, whether `AND`/`OR` work alongside `&&`, the `${X}` escaping rules,
 and the response shapes.
+
+#### The same two languages in the API body
+
+`columns`/`filters` is a second way of saying what `select`/`where` say, so a caller who
+knows one should not have to learn the other to move between the modes. The API body
+accepts either pair — `{select, where}` or `{columns, filters}` — and refuses a request
+carrying fields from both, which is a caller who thinks they mean different things.
+
+This is one endpoint with two vocabularies, not two endpoints: the transport, the
+policy, the target and the output are identical, and only the wording of the projection
+and the predicate differ. It is also not a query string. The `GET` shape is a separate
+question and stays where it is (§9.2), for the reason §3.3 is a `POST` at all.
+
+- **The narrower language stays narrower.** `select` takes expressions and aliases;
+  `columns` takes names. Accepting `columns` in the API body does not widen it to
+  expressions — a caller who wants one writes `select`.
+- **One parser, one allowlist.** `filters` lowers to the expression `sql.rs` already
+  checks, rather than executing down a path of its own. The lowering is a rewrite of the
+  caller's text before it reaches `sqlparser`, and rewriting SQL-ish text is the thing
+  §3.5 says not to do by hand: `&&` inside a string literal is not an operator, and a
+  substitution that cannot tell the difference is a parser written by accident. Whether
+  the rewrite is even expressible that way depends on what `filters` turns out to
+  accept, which is `docs/vizcat-compat.md`'s job to establish first.
 
 ### 3.5 How much SQL
 
@@ -831,11 +854,9 @@ Run `cargo deny` (advisories + licences) in CI.
    whole design: accepting a credential "just this once" is how one ends up in a log.
 
    `[api.access]` still decides what may be named; this changes how a request is written,
-   not what it may reach. Two things to settle when it is built: where it sits in the url
-   space, given a url nested in a url needs encoding either way, and whether it answers
-   only the whole object or takes §3.4's `columns`/`filters` as well — those are the same
-   parameters the file-server mode already speaks, and having two spellings of them would
-   be the divergence §3 exists to avoid.
+   not what it may reach. It takes §3.4's `columns`/`filters`, which by then every other
+   shape speaks. One thing left to settle when it is built: where it sits in the url
+   space, given a url nested in a url needs encoding either way.
 3. **WebDAV over cleartext.** §2.4 serves TLS only. A WebDAV server on an internal
    network without a certificate is an ordinary deployment, so there needs to be a way to
    say so — a second scheme the caller writes, an operator-listed `http://` endpoint that
