@@ -122,6 +122,7 @@ struct Rules {
 #[derive(Debug)]
 pub struct NetworkPolicy {
     rules: Arc<Rules>,
+    client: reqwest::Client,
     transport: HttpTransporter,
 }
 
@@ -174,8 +175,15 @@ impl NetworkPolicy {
                 .chain(parse_nets(PRIVATE_V6))
                 .collect(),
         });
-        let transport = build_transport(Arc::clone(&rules))?;
-        Ok(Self { rules, transport })
+        let client = build_client(Arc::clone(&rules))?;
+        let transport = HttpTransporter::new(
+            opendal_http_transport_reqwest::ReqwestTransport::new(client.clone()),
+        );
+        Ok(Self {
+            rules,
+            client,
+            transport,
+        })
     }
 
     /// The name half, run before anything is resolved, so that a caller who named
@@ -198,6 +206,14 @@ impl NetworkPolicy {
     /// actually connected to.
     pub fn transport(&self) -> HttpTransporter {
         self.transport.clone()
+    }
+
+    /// The same client the transport above is built on, for the requests this crate makes
+    /// itself rather than through a store. Handing out the built client rather than a way
+    /// to build one is what keeps those requests on this policy's resolver: a second
+    /// client would resolve names again, with nothing checking the answer.
+    pub fn client(&self) -> reqwest::Client {
+        self.client.clone()
     }
 }
 
@@ -361,7 +377,15 @@ impl reqwest::dns::Resolve for PolicyResolver {
     }
 }
 
-fn build_transport(rules: Arc<Rules>) -> Result<HttpTransporter, ConfigError> {
+/// The one HTTP client this process makes requests with. Every store is built on it
+/// through [`NetworkPolicy::transport`], and the requests this crate makes directly —
+/// the range probe in [`crate::materialize`] — go through [`NetworkPolicy::client`], so
+/// there is one resolver and one redirect policy rather than one per caller.
+fn build_client(rules: Arc<Rules>) -> Result<reqwest::Client, ConfigError> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the one permitted call; the lint exists to send every other one here"
+    )]
     let client = reqwest::Client::builder()
         .dns_resolver(Arc::new(PolicyResolver { rules }))
         // A redirect is the origin choosing the next destination, which is the one
@@ -371,9 +395,7 @@ fn build_transport(rules: Arc<Rules>) -> Result<HttpTransporter, ConfigError> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| ConfigError::Rule("access.network".to_owned(), error.to_string()))?;
-    Ok(HttpTransporter::new(
-        opendal_http_transport_reqwest::ReqwestTransport::new(client),
-    ))
+    Ok(client)
 }
 
 #[cfg(test)]

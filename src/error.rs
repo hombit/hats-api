@@ -7,6 +7,8 @@ use datafusion::error::DataFusionError;
 use datafusion::parquet::errors::ParquetError;
 use serde::Serialize;
 
+use crate::materialize::{Refused, TooLarge};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     #[error("{0}")]
@@ -54,7 +56,9 @@ impl ApiError {
         Self::NotFound(message.into())
     }
 
-    fn status(&self) -> StatusCode {
+    /// The status this error answers with. Public so that a test can check the status a
+    /// caller sees rather than the message, which is the part that has to be right.
+    pub fn status(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
@@ -96,7 +100,28 @@ fn object_store_status(error: &object_store::Error) -> StatusCode {
         object_store::Error::NotFound { .. } => StatusCode::NOT_FOUND,
         object_store::Error::PermissionDenied { .. }
         | object_store::Error::Unauthenticated { .. } => StatusCode::FORBIDDEN,
+        // A store is free to wrap anything in `Generic`, so the default below would
+        // report this service's own limits as the origin misbehaving.
+        object_store::Error::Generic { source, .. } => match source.downcast_ref::<Refused>() {
+            Some(refused) => refused_status(&refused.source),
+            None => StatusCode::BAD_GATEWAY,
+        },
         _ => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// A copy this service would not make. The distinction that matters to a caller is
+/// whether asking again could work.
+fn refused_status(error: &TooLarge) -> StatusCode {
+    match error {
+        // The object is larger than this service will ever copy, or it will not copy at
+        // all. Retrying changes nothing.
+        TooLarge::Declared { .. } | TooLarge::WhileStreaming { .. } | TooLarge::Disabled => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
+        // The process-wide budget was full, which is other requests rather than this
+        // one. The same request later is a different answer.
+        TooLarge::Total { .. } => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 

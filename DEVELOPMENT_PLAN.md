@@ -13,8 +13,8 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason). See
 | 2.1 | OpenDAL backend layer, s3 migrated first | done | |
 | 2.2 | GCS and Azure | done | |
 | 8.3 | network policy | done | |
-| 2.3 | HTTP/HTTPS, range probe, materialization | todo | |
-| 2.4 | WebDAV | todo | |
+| 2.3 | HTTP/HTTPS, range probe, materialization | done | |
+| 2.4 | WebDAV | todo | the range machinery is built and backend-agnostic; what is left is the service, its credentials and its own policy section |
 | 2.5 | Hugging Face | todo | droppable |
 | 3.1 | two-mode configuration | todo | |
 | 3.2 | routing | todo | |
@@ -93,84 +93,30 @@ OpenDAL is the backend layer for everything but `file://`; `object_store_opendal
 an `Operator` into the `ObjectStore` trait DataFusion consumes. `s3`, `gs` and `az` set
 the pattern the remaining backends follow — see `CLAUDE.md` for what one has to satisfy.
 
-### 2.3 HTTP/HTTPS and range requests
-
-`opendal`'s `services-http`: `GET` with `Range`. A plain HTTP server has no listing
-operation, so an `http(s)://` catalog has only §5.1's tiers 1 and 2 for partition
-discovery, and §4's directory pages cannot be served from one.
-
-This is the first backend where the caller supplies the host, which makes §8.3's network
-policy a prerequisite for it rather than a later addition. The same applies to §2.4
-and §2.5.
-
-**The problem.** A parquet read is many ranged reads: footer length, footer, page index,
-then a chunk per column per surviving row group. Against a server that ignores `Range`
-and returns `200` with the whole body, the reader gets the wrong bytes at the footer
-offsets; passing the failure through instead would cost *N × filesize* per query, with N
-in the tens.
-
-**The fix** is to fetch such an object once and serve every subsequent range from that
-copy:
-
-1. **Probe per host.** On the first read of an `http(s)://` url, issue a `HEAD`;
-   `Accept-Ranges: bytes` is the affirmation. Cache the verdict per (scheme, host, port)
-   with a short TTL.
-2. **Verify on the first ranged read.** A `200` where `206` was requested demotes the host
-   to non-ranging, catching servers that advertise ranges without honouring them.
-3. **Materialize to disk, not memory.** For a non-ranging host, wrap the store in a
-   `MaterializingStore`: the first read streams the whole object into a temporary file and
-   every `get_range` is a `pread` from it. Partitions run to gigabytes, so an in-memory
-   buffer would OOM under concurrency.
-4. **`max_materialize_bytes`, default 2 GiB** — multi-GiB partitions are ordinary, so a
-   smaller cap would refuse ordinary data. `0` disables materialization.
-5. **`max_materialize_total_bytes`** across in-flight materializations, plus a concurrency
-   limit on them; over either, the request waits or gets a 503. Clean up temp files on
-   every exit path including cancellation. Scratch directory is configurable.
-6. **`Content-Length` is not required** — a service generating parquet on the fly (vizcat
-   among them) answers chunked with no length. Discover the size in this order:
-
-   | | source | when it works |
-   |---|---|---|
-   | a | `Content-Range` on a suffix range request (`Range: bytes=-8`) | any range-honouring server; returns the footer tail in the same request |
-   | b | `Content-Length` on the `HEAD` | static objects |
-   | c | counting bytes while streaming to disk | everything else |
-
-   In case (c) the cap is enforced during transfer: abort and delete the temp file when
-   the running count passes `max_materialize_bytes`.
-
-7. **Dynamically generated responses are a separate case.** Their bytes may differ between
-   requests, so ranged reads over them are meaningless even when offered. Always
-   materialize whole, and **never enter them in the §6 object cache under a url key** —
-   the url does not identify the content.
-
-Errors must be distinguishable: 413 for over-cap, saying whether the size was declared or
-exceeded while streaming, and 504 for timeout. At these sizes the timeout is reached before
-the cap; §7.2 covers that.
-
-Wire `MaterializingStore` to `[cache.object]` with `dir` set (§6.5), so the copy outlives
-the request that made it.
-
-Configuration: `[api.access.http]` with `hosts` (three-state), and `allow_plain_http`
-distinct from `allow_loopback`.
-
 ### 2.4 WebDAV
 
 `opendal`'s `services-webdav`, as `webdav://host/path`. WebDAV is HTTP plus `PROPFIND`,
-which is the listing operation §2.3 lacks, so a WebDAV-hosted catalog gets all three of
-§5.1's discovery tiers and can be served through §4's directory pages.
+which is the listing operation the http backend lacks, so a WebDAV-hosted catalog gets all
+three of §5.1's discovery tiers and can be served through §4's directory pages.
 
 | option | meaning |
 |---|---|
-| `allow_http` | contact the host over plain `http`; `webdav://` is `https` otherwise |
 | `username`, `password` | credentials, given together, and subject to §8.1 |
 
-Policy: `[api.access.webdav]` with `hosts`, three-state as elsewhere. Separate from
+Policy: `[api.access.webdav]`, three-state `endpoints` as elsewhere. Separate from
 `[api.access.http]` — a host that may be read as flat objects is not thereby a host whose
-directory tree may be enumerated.
+directory tree may be enumerated. It carries its own `allow_plain_http`, since
+`webdav://` also names its own server and the same decision applies.
 
-Everything in §2.3 applies unchanged: WebDAV is HTTP underneath, so the range probe,
-materialization and size ladder are the same code, and §8.3's network policy governs the
-host the same way.
+Two things are already built and need only to be pointed at it. The range probe and
+materialization are backend-agnostic — WebDAV is HTTP underneath, and
+`MaterializingStore` wraps any store — and `[access.network]` governs the host without
+knowing which backend asked.
+
+Unlike the http backend this one has credentials, which pulls it back into the machinery
+the bucket-addressed backends use: `username` and `password` are `SecretString` options
+registered with `Named::credential`, and the cleartext decision is then partly the
+caller's again, since it is their secret at risk.
 
 ### 2.5 Hugging Face
 
@@ -446,12 +392,12 @@ every catalog open.
 
 - `_common_metadata` cannot substitute: schema only, no row groups, no `file_path`
   entries. It is useful for validating a projection before reading data.
-- `_metadata` can reach hundreds of MB for a wide schema over many partitions. Size it by
-  §2.3's ladder and cap it; fall through to tier 3 rather than blocking on a large
-  download.
-- Listing may be unavailable entirely: an `http(s)://` catalog has no listing operation
-  (§2.3), leaving tiers 1 and 2. The same catalog served over WebDAV (§2.4) has all
-  three.
+- `_metadata` can reach hundreds of MB for a wide schema over many partitions. Cap it,
+  and fall through to tier 3 rather than blocking on a large download. Against a
+  non-ranging server it has already been copied whole by the time it is read, so the cap
+  that matters there is `limits.max_materialize_bytes`.
+- Listing may be unavailable entirely: an `http(s)://` catalog has no listing operation,
+  leaving tiers 1 and 2. The same catalog served over WebDAV (§2.4) has all three.
 
 If tiers 1 and 2 disagree, prefer `partition_info.csv` and log at `warn` — they disagree
 when a catalog is malformed or being rewritten.
@@ -579,7 +525,7 @@ No job queue, job ids or polling: the plan is a list of stateless requests. See 
 |---|---|---|---|---|
 | **HATS catalog metadata** | parsed `properties`, partition list, derived MOC | catalog url + validator | entries | on |
 | **Parquet file metadata** | `FileMetaData` footer, page index, bloom filter headers | object url + validator | bytes | on |
-| **Range-support verdict** (§2.3) | does this host honour `Range`? | scheme + host + port | entries | on |
+| **Range-support verdict** | does this object's server honour `Range`? | object url | entries, short TTL | on |
 | **Object bytes** | whole objects or ranges | object url + validator (+ range) | bytes, disk if enabled | off |
 | **Directory listings** (§4) | one page of a listing | prefix + validator | entries | on, short TTL |
 | **Negative results** | 404 for a missing object | url | entries | on, very short TTL |
@@ -591,6 +537,14 @@ the source layout; fix that directly as well as caching it.
 
 Negative caching applies to absence only. A 403 is recomputed every time, since the policy
 behind it can be reloaded.
+
+The range-support verdict is keyed by object rather than by host, which is how
+`materialize` already decides it. A host is not one answer: the same server can hand back
+static files that range and generated responses that do not. Caching it saves the probe
+request on a second read of the same object, and nothing more — so it is worth little
+until there is a second read, which is what makes it the last of these three to build.
+The probe is also the transfer for a non-ranging object, so caching the verdict alone
+does not avoid re-fetching; that is the object-bytes layer's job.
 
 ### 6.2 Expiration and validation
 
@@ -679,9 +633,12 @@ nginx in front, `proxy_cache_valid` tuned for immutable objects and `slice 1m`, 
 `docs/caching.md`. `[cache.object]` exists for deployments that cannot front the service
 with a proxy, and stays off by default.
 
-The exception is §2.3's materialized copy for non-ranging hosts, where there is no ranged
-request for a proxy to cache. **Enable `[cache.object]` with `dir` set for that case**,
-under the same `max_bytes` and eviction rules as every other layer.
+The exception is the scratch copy `materialize` makes for a non-ranging server, where
+there is no ranged request for a proxy to cache. It is deleted with the request that made
+it today, so a second read of the same object copies it again. **Enable `[cache.object]`
+with `dir` set for that case**, under the same `max_bytes` and eviction rules as every
+other layer, and have the copy outlive its request — which means the eviction budget and
+`limits.max_materialize_total_bytes` become one accounting rather than two.
 
 **Query results are not cached.** The key space is the cross product of url, predicate,
 projection and format, and the hit rate on point lookups is near zero.
@@ -745,7 +702,7 @@ specifies its shape, so it is built once rather than invented and then reconcile
 |---|---|---|
 | large region over many partitions | yes, by partition | §5.3 plan mode |
 | all-columns read of one big partition | partly, by column | request fewer columns |
-| materializing 2 GiB from a non-ranging host (§2.3) | no | prefetch, below |
+| materializing 2 GiB from a non-ranging host | no | prefetch, below |
 | a slow or distant origin | no | timeout, reported clearly |
 
 A job system would break §0's statelessness invariant and add job ids as an authorization
@@ -840,7 +797,7 @@ Rules to preserve:
   resolve-then-connect gap; a check anywhere earlier is a check against an answer that
   can be replaced.
 - **Never echo a remote response body into an error** — report the status code and the
-  stripped url. Still to hold when §2.3 lands.
+  stripped url.
 - Naming an endpoint in `[access.s3].endpoints` remains permission enough for it, at both
   layers. The network rules govern what a caller may reach, not what the operator
   configured.
@@ -849,9 +806,14 @@ Rules to preserve:
 
 ### 8.4 Bounded work per request
 
-- Per request: a timeout, a cap on bytes fetched from the store, §2.3's
-  `max_materialize_bytes`, §5.3's `max_partitions` and `max_scanned_bytes`.
-- Per process: a concurrency limit (§7.1).
+- Per request: a timeout, a cap on bytes fetched from the store, §5.3's
+  `max_partitions` and `max_scanned_bytes`. `limits.max_materialize_bytes` is done.
+- Per process: a concurrency limit (§7.1). `limits.max_materialize_total_bytes` and
+  `limits.max_concurrent_materializations` are done, and `[limits]` is where the rest of
+  these belong.
+- **A timeout is still missing on every one of these paths**, materialization included.
+  At multi-GiB sizes it is what a slow origin hits first, well before any byte cap, and
+  §7.2 is where it lands.
 - `POST` body size limit, and caps on `where` expression depth and node count, rejected at
   parse time against the `Expr` tree. The projection needs no cap: it is bounded by the
   schema, and the byte and time limits govern the data it moves.

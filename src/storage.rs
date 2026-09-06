@@ -29,6 +29,7 @@ use crate::access::{
     describe_endpoint_schemes,
 };
 use crate::error::ApiError;
+use crate::materialize::{MaterializingStore, Transfers};
 
 /// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
 /// list written out by hand, so a backend cannot be added and then refused here by a
@@ -298,6 +299,7 @@ pub fn open(
     url: &Url,
     options: &StorageOptions,
     policy: &AccessPolicy,
+    transfers: &Arc<Transfers>,
 ) -> Result<RemoteFile, ApiError> {
     require_object_key(url)?;
     refuse_userinfo(url)?;
@@ -323,7 +325,14 @@ pub fn open(
                 Backend::Azure => {
                     Arc::new(remote_store(azblob_builder(url, options, policy)?, policy)?)
                 }
-                Backend::Http => Arc::new(remote_store(http_builder(url, policy)?, policy)?),
+                // The one backend whose server may refuse to serve byte ranges, since it
+                // is the one whose server the caller chose rather than the operator.
+                Backend::Http => Arc::new(MaterializingStore::new(
+                    Arc::new(remote_store(http_builder(url, policy)?, policy)?),
+                    origin(url)?,
+                    policy.network().client(),
+                    Arc::clone(transfers),
+                )),
             };
             Ok(RemoteFile {
                 store,
@@ -921,7 +930,13 @@ mod tests {
     /// under one that allows every bucket. What the policy itself allows is
     /// [`crate::access`]'s own business, and tested there.
     fn open(url: &Url, options: &StorageOptions) -> Result<RemoteFile, ApiError> {
-        super::open(url, options, &AccessPolicy::default())
+        super::open(url, options, &AccessPolicy::default(), &transfers())
+    }
+
+    /// The scratch budget at its defaults. Only a server that refuses byte ranges
+    /// consults it, and none of these tests has one.
+    fn transfers() -> Arc<Transfers> {
+        Arc::new(Transfers::new(&crate::config::LimitsConfig::default()))
     }
 
     /// The same, for a server configured to let requests reach the loopback interface
@@ -934,7 +949,12 @@ mod tests {
             },
             ..Default::default()
         };
-        super::open(url, options, &AccessPolicy::new(&config).unwrap())
+        super::open(
+            url,
+            options,
+            &AccessPolicy::new(&config).unwrap(),
+            &transfers(),
+        )
     }
 
     #[test]
@@ -1680,7 +1700,7 @@ mod tests {
         };
         let policy = AccessPolicy::new(&config).unwrap();
         let url = parse_url(&format!("http://127.0.0.1:{port}/hats/part0.parquet")).unwrap();
-        let file = super::open(&url, &no_options(), &policy).unwrap();
+        let file = super::open(&url, &no_options(), &policy, &transfers()).unwrap();
         assert_eq!(store_key(&file), format!("http://127.0.0.1:{port}"));
 
         use object_store::ObjectStoreExt;

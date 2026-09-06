@@ -17,7 +17,9 @@ mod common;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use common::{SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy};
+use common::{
+    SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy, transfers,
+};
 use hats_api::logging::CREDENTIAL_UNSAFE_TARGETS;
 use hats_api::storage::{self, StorageOptions};
 use tracing_subscriber::EnvFilter;
@@ -60,6 +62,7 @@ async fn signing_request(raw: &str, options: impl FnOnce(String) -> StorageOptio
         &url,
         &options(format!("http://127.0.0.1:{port}")),
         &permissive_policy(),
+        &transfers(),
     )
     .expect("the policy allows loopback");
 

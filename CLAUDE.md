@@ -112,15 +112,29 @@ Then follow the shape the existing ones set:
 - `object_store` is trait-only here — the `ObjectStore` trait DataFusion consumes, plus
   `LocalFileSystem` for `file://`. Put a new backend on OpenDAL's side; never re-enable
   an `object_store` backend feature.
+- **Ask whether its servers honour `Range`.** A provider's does. A server the caller
+  named may not, and OpenDAL accepts a `200` to a ranged read without complaint, so the
+  reader gets the head of the file where it asked for the tail — a wrong answer, not an
+  error. Any backend whose host comes from the request goes behind
+  `materialize::MaterializingStore`, which decides per object and copies to scratch when
+  it has to. Reading the code cannot tell the two servers apart; `tests/http_ranges.rs`
+  serves both and checks the rows.
 
 ## The network
 
 - A remote store is built through `storage::remote_store`, which is the one thing that
   turns a configured builder into something that can make a request — and the one place
   that puts the access policy's HTTP transport on it. A backend function returns its
-  builder and never holds an `Operator`. `clippy.toml` disallows `Operator::new` and
-  `reqwest::Client::new` outside their single permitted call sites, each of which carries
-  an `#[expect]` saying so; a new one needs a reason written down next to it.
+  builder and never holds an `Operator`. `clippy.toml` disallows `Operator::new`,
+  `reqwest::Client::new` and `reqwest::Client::builder` outside their single permitted
+  call sites, each of which carries an `#[expect]` saying so; a new one needs a reason
+  written down next to it. An `#[expect]` clippy reports as *unfulfilled* means the rule
+  is not covering the call it was written for — check what the call actually resolves to
+  rather than deleting the attribute.
+- A request this crate makes itself, rather than through a store, goes through
+  `NetworkPolicy::client`. It is the same built client the transport wraps, so it carries
+  the same resolver and the same refusal to follow redirects. Building a second client
+  would resolve names again with nothing checking the answer.
 - The address check belongs in the resolver and nowhere else. Checking a host and then
   letting a client resolve it again is DNS rebinding: the answer that passed is not the
   answer that gets connected to.

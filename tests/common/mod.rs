@@ -16,8 +16,9 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, 
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use hats_api::access::AccessPolicy;
-use hats_api::config::{AccessConfig, EndpointConfig, NetworkConfig};
+use hats_api::config::{AccessConfig, EndpointConfig, LimitsConfig, NetworkConfig};
 use hats_api::error::ApiError;
+use hats_api::materialize::Transfers;
 use hats_api::query::{QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -209,6 +210,12 @@ pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
     .expect("endpoint policy")
 }
 
+/// The scratch budget, at its defaults. Only the http backend consults it, and only for
+/// a server that will not serve byte ranges, so every test here gets the same one.
+pub fn transfers() -> Arc<Transfers> {
+    Arc::new(Transfers::new(&LimitsConfig::default()))
+}
+
 /// Open a url and run one point lookup through it: the whole path a request takes.
 pub async fn lookup(
     raw_url: &str,
@@ -219,7 +226,7 @@ pub async fn lookup(
     columns: Option<&[String]>,
 ) -> Result<QueryResult, ApiError> {
     let url = storage::parse_url(raw_url)?;
-    let file = storage::open(&url, options, policy)?;
+    let file = storage::open(&url, options, policy, &transfers())?;
     hats_api::query::run(
         &file,
         &Selection {

@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use common::{
     ACCESS_KEY_ID, SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy,
+    transfers,
 };
 use hats_api::access::AccessPolicy;
 use hats_api::app;
@@ -162,7 +163,8 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
         };
 
         let url = storage::parse_url(raw).expect("a valid url");
-        let file = storage::open(&url, &options, &permissive_policy()).expect("it should open");
+        let file = storage::open(&url, &options, &permissive_policy(), &transfers())
+            .expect("it should open");
 
         // Both `Debug`s, which is what a handler holds and one `?value` from a log.
         tracing::debug!(?options, ?file, store = ?file.store, "the state a handler holds");
@@ -289,7 +291,10 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         "value": "1",
     });
 
-    let router = app::router(Arc::new(permissive_policy()));
+    let router = app::router(app::Service::new(
+        permissive_policy(),
+        &hats_api::config::LimitsConfig::default(),
+    ));
     let response = router
         .oneshot(
             axum::http::Request::builder()
@@ -331,8 +336,8 @@ async fn debug_formatting_the_request_state_logs_no_secret() {
     let options = server.credentialed_options();
     let source = hats_api::storage::SourceUrl::from(raw.clone());
     let url = hats_api::storage::parse_url(&raw).expect("the url should parse");
-    let file =
-        hats_api::storage::open(&url, &options, &permissive_policy()).expect("it should open");
+    let file = hats_api::storage::open(&url, &options, &permissive_policy(), &transfers())
+        .expect("it should open");
 
     tracing::debug!(?source, ?options, ?file, store = ?file.store, "the state a handler holds");
     assert_no_secret(&captured.contents(), "debug-formatted request state");

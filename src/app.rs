@@ -12,19 +12,39 @@ use serde::{Deserialize, Serialize};
 use tower_http::trace::TraceLayer;
 
 use crate::access::AccessPolicy;
+use crate::config::LimitsConfig;
 use crate::error::ApiError;
+use crate::materialize::Transfers;
 use crate::parquet_out;
 use crate::query::{self, QueryResult, Selection};
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
-pub fn router(policy: Arc<AccessPolicy>) -> Router {
+/// What every request needs and no request may change: the rules, and the shared scratch
+/// budget. Both are built once at startup, so a request carries a handle rather than a
+/// copy and two requests cannot disagree about either.
+#[derive(Debug, Clone)]
+pub struct Service {
+    pub policy: Arc<AccessPolicy>,
+    pub transfers: Arc<Transfers>,
+}
+
+impl Service {
+    pub fn new(policy: AccessPolicy, limits: &LimitsConfig) -> Self {
+        Self {
+            policy: Arc::new(policy),
+            transfers: Arc::new(Transfers::new(limits)),
+        }
+    }
+}
+
+pub fn router(service: Service) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         // `POST`, not `GET`: the request carries credentials, and a query string is
         // written to every proxy's access log and the caller's shell history on the way.
         // A body also has no url-length limit and needs no url nested inside a url.
         .route("/api/v1/select", post(select))
-        .with_state(policy)
+        .with_state(service)
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
         // something in.
@@ -167,7 +187,7 @@ const NUM_ROWS_HEADER: &str = "x-hats-num-rows";
 const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
 async fn select(
-    State(policy): State<Arc<AccessPolicy>>,
+    State(service): State<Service>,
     body: Result<Json<SelectRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
@@ -175,7 +195,12 @@ async fn select(
     // Everything decidable from the request alone, before anything is opened.
     let format = Format::parse(params.format.as_deref())?;
     check_columns(params.columns.as_ref())?;
-    let file = storage::open(&parse_url(params.url.as_str())?, &params.storage, &policy)?;
+    let file = storage::open(
+        &parse_url(params.url.as_str())?,
+        &params.storage,
+        &service.policy,
+        &service.transfers,
+    )?;
     let result = query::run(
         &file,
         &Selection {
@@ -294,10 +319,13 @@ mod tests {
     /// The status and the body as text; axum's own rejections are plain text, ours are
     /// JSON.
     async fn send(request: axum::http::request::Builder, body: Body) -> (StatusCode, String) {
-        let response = router(Arc::new(AccessPolicy::default()))
-            .oneshot(request.body(body).unwrap())
-            .await
-            .unwrap();
+        let response = router(Service::new(
+            AccessPolicy::default(),
+            &LimitsConfig::default(),
+        ))
+        .oneshot(request.body(body).unwrap())
+        .await
+        .unwrap();
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8(body.to_vec()).unwrap())
@@ -436,9 +464,12 @@ mod tests {
     #[test]
     fn names_the_download_after_the_source_object() {
         let policy = AccessPolicy::default();
+        let transfers = Arc::new(Transfers::new(&LimitsConfig::default()));
         let name = |raw: &str| {
             let url = parse_url(raw).unwrap();
-            download_name(&storage::open(&url, &StorageOptions::default(), &policy).unwrap())
+            download_name(
+                &storage::open(&url, &StorageOptions::default(), &policy, &transfers).unwrap(),
+            )
         };
         assert_eq!(
             name("s3://b/dir/part0.snappy.parquet"),

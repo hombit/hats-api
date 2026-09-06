@@ -10,6 +10,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+use bytesize::ByteSize;
 use serde::Deserialize;
 
 /// Where to look for the file when `--config` is not given.
@@ -20,7 +21,43 @@ pub const CONFIG_ENV_VAR: &str = "HATS_API_CONFIG";
 pub struct Config {
     pub server: ServerConfig,
     pub access: AccessConfig,
+    pub limits: LimitsConfig,
     pub log: LogConfig,
+}
+
+/// What one request, and the process as a whole, may spend.
+///
+/// Only the materialization limits so far. They exist because a server that ignores
+/// `Range` forces the whole object onto local disk before any of it can be read, which
+/// is the one read path here whose cost is not bounded by what the caller asked for.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct LimitsConfig {
+    /// The most this service will copy to disk for one object whose server will not
+    /// serve byte ranges. `0` refuses to copy at all, which makes such a server
+    /// unreadable rather than expensive.
+    pub max_materialize_bytes: ByteSize,
+    /// The same across every copy resident at once. One request cannot exceed the limit
+    /// above; this is what stops many of them together from filling the disk.
+    pub max_materialize_total_bytes: ByteSize,
+    /// How many copies may be in flight at once. Beyond this a request waits, since the
+    /// transfers are competing for the same disk and the same upstream bandwidth.
+    pub max_concurrent_materializations: usize,
+    /// Where the copies go. Absent is the system temporary directory.
+    pub scratch_dir: Option<PathBuf>,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            // Multi-GiB HATS partitions are ordinary, so a smaller cap would refuse
+            // ordinary data rather than protecting against anything.
+            max_materialize_bytes: ByteSize::gib(2),
+            max_materialize_total_bytes: ByteSize::gib(8),
+            max_concurrent_materializations: 4,
+            scratch_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

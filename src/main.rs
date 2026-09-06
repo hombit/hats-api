@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{env, path::PathBuf, process::ExitCode};
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -121,7 +121,8 @@ async fn main() -> ExitCode {
         allows = %policy.allowed_schemes().join(", "),
         "listening"
     );
-    if let Err(error) = axum::serve(listener, app::router(Arc::new(policy)))
+    let service = app::Service::new(policy, &config.limits);
+    if let Err(error) = axum::serve(listener, app::router(service))
         .with_graceful_shutdown(shutdown_signal())
         .await
     {

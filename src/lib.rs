@@ -35,6 +35,7 @@ pub mod app;
 pub mod config;
 pub mod error;
 pub mod logging;
+pub mod materialize;
 pub mod network;
 pub mod parquet_out;
 pub mod query;

@@ -22,7 +22,7 @@
 
 mod common;
 
-use common::{capture_one_request, permissive_policy};
+use common::{capture_one_request, permissive_policy, transfers};
 use hats_api::storage::{self, StorageOptions};
 
 /// Values that are syntactically valid, so that anything picking them up would sign
@@ -40,8 +40,8 @@ async fn request_head(raw: &str, endpoint_to: impl FnOnce(String) -> StorageOpti
     let (port, receiver) = capture_one_request();
     let url = storage::parse_url(raw).expect("a valid url");
     let options = endpoint_to(format!("http://127.0.0.1:{port}"));
-    let file =
-        storage::open(&url, &options, &permissive_policy()).expect("the policy allows loopback");
+    let file = storage::open(&url, &options, &permissive_policy(), &transfers())
+        .expect("the policy allows loopback");
 
     use object_store::ObjectStoreExt;
     let _ = file

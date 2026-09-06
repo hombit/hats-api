@@ -94,6 +94,30 @@ paths = []
 # link inside an allowed directory still cannot lead out of one.
 follow_symlinks = false
 
+[limits]
+# A plain HTTP server may ignore a Range request and answer with the whole object. A
+# parquet read is tens of ranged reads, so passing that through would transfer the file
+# tens of times over — and the reader would get the wrong bytes at every offset. Such an
+# object is copied to scratch once instead, and read from local disk after that.
+#
+# Only http:// and https:// urls can reach this: every other backend serves ranges.
+
+# The most that will be copied for one object. Multi-GiB HATS partitions are ordinary,
+# so a smaller cap refuses ordinary data. "0" refuses to copy at all, which makes a
+# server that will not serve ranges unreadable rather than expensive.
+max_materialize_bytes = "2GiB"
+
+# The same across every copy resident at once, which is what stops many requests
+# together from filling the disk.
+max_materialize_total_bytes = "8GiB"
+
+# How many copies may be in flight at once. Beyond this a request waits.
+max_concurrent_materializations = 4
+
+# Where the copies go. Absent is the system temporary directory. Each is deleted when
+# the request that made it ends, cancelled or not.
+# scratch_dir = "/var/tmp/hats-api"
+
 [log]
 # RUST_LOG syntax, and RUST_LOG itself overrides this when it is set.
 filter = "hats_api=info,tower_http=info"

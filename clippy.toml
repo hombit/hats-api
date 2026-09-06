@@ -9,6 +9,9 @@ disallowed-methods = [
     # — the whole of what `network` exists to stop.
     { path = "opendal::Operator::new", reason = "build stores through storage::remote_store, which attaches the network policy's transport" },
     # The same for the client itself: a default `reqwest::Client` has the default
-    # resolver, and the resolver is where the address check lives.
-    { path = "reqwest::Client::new", reason = "build clients through network::build_transport, which installs the policy's resolver" },
+    # resolver, and the resolver is where the address check lives. Both constructors,
+    # since `Client::builder().build()` reaches the same place as `Client::new()` and
+    # banning only the short spelling would leave the rule saying less than it means.
+    { path = "reqwest::Client::new", reason = "build clients through network::build_client, which installs the policy's resolver" },
+    { path = "reqwest::Client::builder", reason = "build clients through network::build_client, which installs the policy's resolver" },
 ]
