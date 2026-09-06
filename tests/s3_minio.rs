@@ -49,6 +49,12 @@ impl Minio {
 
     /// An operator for putting fixtures in place. The service has no write path, so
     /// this is the test's own client and deliberately separate from `src/storage.rs`.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fixture writer is not a request path; it talks to the MinIO this \
+                  test was given, and the policy it is proving things about is the one \
+                  the service builds on the read side"
+    )]
     fn writer(&self) -> Operator {
         let builder = services::S3::default()
             .bucket(&self.bucket)

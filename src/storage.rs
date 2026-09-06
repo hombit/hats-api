@@ -2,8 +2,9 @@
 //!
 //! Everything storage-specific lives here. The rest of the service only ever sees a
 //! [`RemoteFile`]; it does not know that S3 exists, that S3 needs a region, or that a
-//! region has to be asked for. Adding a backend means adding a match arm to [`open`], a
-//! name to [`SUPPORTED_SCHEMES`], an option list, and a [`Backend`] variant.
+//! region has to be asked for. Adding a backend means adding a [`Backend`] variant and
+//! following the compile errors: every match on one is exhaustive, and the served
+//! schemes and option lists are derived from it rather than written out beside it.
 //!
 //! Storage options arrive beside the URL as [`StorageOptions`], never inside it. A
 //! URL's query string is the origin's — a presigned signature, a CDN token, part of
@@ -23,12 +24,30 @@ use opendal::{OperationContext, Operator, services};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
-use crate::access::{AccessPolicy, Backend, Target};
+use crate::access::{AccessPolicy, BACKENDS, Backend, Target};
 use crate::error::ApiError;
 
-/// Schemes [`open`] can serve today. Whether a given URL in one of them may actually be
-/// read is the [`AccessPolicy`]'s business, not this list's.
-pub const SUPPORTED_SCHEMES: &[&str] = &["s3", "gs", "az", "file"];
+/// The one scheme with no backend behind it: a local file has no host to decide about,
+/// so the directory rules are its whole policy.
+const LOCAL_SCHEME: &str = "file";
+
+/// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
+/// list written out by hand, so a backend cannot be added and then refused here by a
+/// list nobody updated. Whether a given url in a served scheme may *actually* be read is
+/// the [`AccessPolicy`]'s business, not this one's.
+fn is_supported_scheme(scheme: &str) -> bool {
+    Backend::from_scheme(scheme).is_some() || scheme == LOCAL_SCHEME
+}
+
+/// The same set, spelled out for an error message.
+pub fn supported_schemes() -> Vec<&'static str> {
+    BACKENDS
+        .iter()
+        .copied()
+        .map(Backend::scheme)
+        .chain([LOCAL_SCHEME])
+        .collect()
+}
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
@@ -79,31 +98,107 @@ const S3_OPTIONS: &[&str] = &[
 const GCS_OPTIONS: &[&str] = &["service_account_key", "access_token"];
 const AZURE_OPTIONS: &[&str] = &["account", "access_key", "sas_token"];
 
+/// Whether an option is proof of identity. What separates the two is not the type — an
+/// Azure `account` is a `String` and a GCS `access_token` is a `SecretString`, and both
+/// are sent — but whether the store would treat it as saying who is asking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Plain,
+    Credential,
+}
+
+/// One option, as a request spells it.
+struct Named {
+    name: &'static str,
+    set: bool,
+    kind: Kind,
+}
+
+/// The types a [`Kind::Plain`] option is allowed to have. [`SecretString`] is
+/// deliberately not among them, so classifying a secret as plain does not compile —
+/// which is the mistake worth catching, since it is the one that makes
+/// [`allow_cleartext`] wave a credential through.
+trait NotACredential {}
+impl NotACredential for String {}
+
+impl Named {
+    /// An option that says something about where to go, not about who is asking.
+    fn plain<T: NotACredential>(name: &'static str, value: &Option<T>) -> Self {
+        Self {
+            name,
+            set: value.is_some(),
+            kind: Kind::Plain,
+        }
+    }
+
+    /// The same for a bool, which is set by being true rather than by being there.
+    fn flag(name: &'static str, value: bool) -> Self {
+        Self {
+            name,
+            set: value,
+            kind: Kind::Plain,
+        }
+    }
+
+    /// Proof of identity. Taking [`SecretString`] and nothing else is the other half of
+    /// the check: a credential declared as a plain `String` cannot be classified as one,
+    /// and so cannot be declared that way at all.
+    fn credential(name: &'static str, value: &Option<SecretString>) -> Self {
+        Self {
+            name,
+            set: value.is_some(),
+            kind: Kind::Credential,
+        }
+    }
+}
+
 impl StorageOptions {
-    /// Every option, under the name a request spells it, and whether it is set.
+    /// Every option, under the name a request spells it, whether it is set, and whether
+    /// it is a credential.
     ///
-    /// The per-scheme check is driven off this one list rather than a match per scheme,
-    /// so a field added without a scheme to belong to is refused everywhere instead of
-    /// being quietly accepted everywhere.
-    fn named(&self) -> [(&'static str, bool); 11] {
+    /// Everything that has to know the full set of options reads this one list: the
+    /// per-scheme check, [`Self::is_empty`], and [`Self::has_credentials`]. Two lists
+    /// would be two chances to forget a field, and forgetting one in the credential list
+    /// is the expensive direction — it makes [`allow_cleartext`] wave through a request
+    /// that does carry a secret.
+    ///
+    /// Two things keep the list honest, both at compile time: the destructuring means a
+    /// field added to the struct and not listed here does not compile, and the
+    /// constructors mean a field listed under the wrong [`Kind`] does not either.
+    fn named(&self) -> [Named; 11] {
+        let Self {
+            endpoint,
+            allow_http,
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            service_account_key,
+            access_token,
+            account,
+            access_key,
+            sas_token,
+        } = self;
         [
-            ("endpoint", self.endpoint.is_some()),
-            ("allow_http", self.allow_http),
-            ("region", self.region.is_some()),
-            ("access_key_id", self.access_key_id.is_some()),
-            ("secret_access_key", self.secret_access_key.is_some()),
-            ("session_token", self.session_token.is_some()),
-            ("service_account_key", self.service_account_key.is_some()),
-            ("access_token", self.access_token.is_some()),
-            ("account", self.account.is_some()),
-            ("access_key", self.access_key.is_some()),
-            ("sas_token", self.sas_token.is_some()),
+            Named::plain("endpoint", endpoint),
+            Named::flag("allow_http", *allow_http),
+            Named::plain("region", region),
+            Named::credential("access_key_id", access_key_id),
+            Named::credential("secret_access_key", secret_access_key),
+            Named::credential("session_token", session_token),
+            Named::credential("service_account_key", service_account_key),
+            Named::credential("access_token", access_token),
+            // The storage account, which is the host half of an `az://` address rather
+            // than anything that authenticates. It is signed *over*, not sent as proof.
+            Named::plain("account", account),
+            Named::credential("access_key", access_key),
+            Named::credential("sas_token", sas_token),
         ]
     }
 
     /// Nothing set at all, which is what a public object needs.
     pub fn is_empty(&self) -> bool {
-        self.named().iter().all(|(_, set)| !set)
+        self.named().iter().all(|option| !option.set)
     }
 
     /// A `file://` url with a `secret_access_key`, or an `s3://` one with a `sas_token`,
@@ -121,11 +216,12 @@ impl StorageOptions {
         match self
             .named()
             .into_iter()
-            .find(|(name, set)| *set && !accepted.contains(name))
+            .find(|option| option.set && !accepted.contains(&option.name))
         {
             None => Ok(()),
-            Some((name, _)) => Err(ApiError::bad_request(format!(
-                "option {name:?} is not one {scheme:?} urls take; they take {}",
+            Some(option) => Err(ApiError::bad_request(format!(
+                "option {:?} is not one {scheme:?} urls take; they take {}",
+                option.name,
                 accepted.join(", ")
             ))),
         }
@@ -134,13 +230,9 @@ impl StorageOptions {
     /// Whether anything here would be sent to the store as proof of identity — which is
     /// the whole of what [`allow_cleartext`] is protecting.
     fn has_credentials(&self) -> bool {
-        self.access_key_id.is_some()
-            || self.secret_access_key.is_some()
-            || self.session_token.is_some()
-            || self.service_account_key.is_some()
-            || self.access_token.is_some()
-            || self.access_key.is_some()
-            || self.sas_token.is_some()
+        self.named()
+            .iter()
+            .any(|option| option.set && option.kind == Kind::Credential)
     }
 }
 
@@ -191,30 +283,25 @@ pub fn open(
     require_object_key(url)?;
     refuse_userinfo(url)?;
     refuse_query_string(url)?;
-    if !SUPPORTED_SCHEMES.contains(&url.scheme()) {
+    if !is_supported_scheme(url.scheme()) {
         return Err(ApiError::bad_request(format!(
             "unsupported URL scheme {:?}: supported schemes are {}",
             url.scheme(),
-            SUPPORTED_SCHEMES.join(", ")
+            supported_schemes().join(", ")
         )));
     }
     options.for_scheme(url.scheme())?;
     // Before anything is built, and before the filesystem is touched.
     match policy.authorize(url)? {
         Target::Local(path) => local_file(&path),
-        Target::Remote => {
-            let store: Arc<dyn ObjectStore> = match Backend::from_scheme(url.scheme()) {
-                Some(Backend::S3) => Arc::new(s3_store(url, options, policy)?),
-                Some(Backend::Gcs) => Arc::new(gcs_store(url, options, policy)?),
-                Some(Backend::Azure) => Arc::new(azblob_store(url, options, policy)?),
-                // Every supported remote scheme has an arm above, and `file` went to
-                // the local branch.
-                None => {
-                    let scheme = url.scheme();
-                    return Err(ApiError::bad_request(format!(
-                        "unsupported URL scheme {scheme:?}: supported schemes are {}",
-                        SUPPORTED_SCHEMES.join(", ")
-                    )));
+        Target::Remote(backend) => {
+            // Each arm produces a configured builder and nothing more; `remote_store` is
+            // the single place a builder becomes something that can make a request.
+            let store: Arc<dyn ObjectStore> = match backend {
+                Backend::S3 => Arc::new(remote_store(s3_builder(url, options, policy)?, policy)?),
+                Backend::Gcs => Arc::new(remote_store(gcs_builder(url, options, policy)?, policy)?),
+                Backend::Azure => {
+                    Arc::new(remote_store(azblob_builder(url, options, policy)?, policy)?)
                 }
             };
             Ok(RemoteFile {
@@ -354,19 +441,38 @@ fn resolve_endpoint(
     Ok(endpoint)
 }
 
+/// A caller's string that has been checked to be safe inside a hostname. The check is
+/// [`require_label`], and this is the only thing it hands back — so the value a backend
+/// passes on is one that came from the check rather than one that merely had it run
+/// nearby.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HostLabel<'a>(&'a str);
+
+impl HostLabel<'_> {
+    fn as_str(&self) -> &str {
+        self.0
+    }
+}
+
+impl std::fmt::Display for HostLabel<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
 /// Anything that ends up inside a hostname the service then connects to has to be
 /// checked before it gets there. `format!` does not care that a `/` in the middle of
 /// what was meant to be a subdomain moves the host to whatever came before it, so a
 /// region or an account name is a way past the endpoint policy unless it is restricted
 /// to characters that cannot mean anything else.
-fn require_label(name: &str, value: &str, extra: &str) -> Result<(), ApiError> {
+fn require_label<'a>(name: &str, value: &'a str, extra: &str) -> Result<HostLabel<'a>, ApiError> {
     let ok = !value.is_empty()
         && value.len() <= 63
         && value
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(c));
     match ok {
-        true => Ok(()),
+        true => Ok(HostLabel(value)),
         false => Err(ApiError::bad_request(format!(
             "{name} {value:?} is not a name this backend has: it becomes part of a \
              hostname, so it may only hold lowercase letters, digits{}",
@@ -409,16 +515,27 @@ fn allow_cleartext(
     }
 }
 
-/// Everything a remote store needs after its builder is configured: the policy's own
-/// HTTP transport, whose resolver decides what may be connected to, and the retries.
+/// The only way a configured builder becomes a store, and so the only place in the crate
+/// that calls `Operator::new` — which `clippy.toml` forbids everywhere else. A backend
+/// function hands its builder here and never holds an [`Operator`] of its own, so it has
+/// nothing to attach the wrong transport to.
 ///
-/// OpenDAL would otherwise reach for the process-wide default transport — a plain
-/// `reqwest::Client` that resolves and connects to whatever it is given. Every remote
-/// backend goes through here so that none of them can end up on that one.
-fn operator(builder: impl opendal::Builder, policy: &AccessPolicy) -> Result<Operator, ApiError> {
-    Ok(Operator::new(builder)?
+/// What gets attached: the policy's own HTTP transport, whose resolver decides which
+/// addresses may be connected to, and the retries. OpenDAL would otherwise reach for the
+/// process-wide default transport — a plain `reqwest::Client` that resolves and connects
+/// to whatever it is given, which is the whole of what [`crate::network`] exists to stop.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one permitted call; the lint exists to send every other one here"
+)]
+fn remote_store(
+    builder: impl opendal::Builder,
+    policy: &AccessPolicy,
+) -> Result<OpendalStore, ApiError> {
+    let operator = Operator::new(builder)?
         .with_context(OperationContext::new().with_http_transport(policy.network().transport()))
-        .layer(retries()))
+        .layer(retries());
+    Ok(OpendalStore::new(operator))
 }
 
 /// Retry the failures OpenDAL marks temporary: a connection an origin closed between
@@ -438,20 +555,23 @@ fn retries() -> RetryLayer {
         .with_max_delay(std::time::Duration::from_secs(2))
 }
 
-fn s3_store(
+fn s3_builder(
     url: &Url,
     options: &StorageOptions,
     policy: &AccessPolicy,
-) -> Result<OpendalStore, ApiError> {
+) -> Result<services::S3, ApiError> {
     let bucket = authority(url)?;
-    let region = options.region.as_deref().unwrap_or(DEFAULT_S3_REGION);
     // Virtual-host addressing puts the region in the hostname, so a region is one of
     // the strings `require_label` exists for.
-    require_label("region", region, "-")?;
+    let region = require_label(
+        "region",
+        options.region.as_deref().unwrap_or(DEFAULT_S3_REGION),
+        "-",
+    )?;
 
     let mut builder = services::S3::default()
         .bucket(bucket)
-        .region(region)
+        .region(region.as_str())
         // The request is the only source of credentials. Without these two, OpenDAL
         // reads `AWS_*` from the environment, `~/.aws/{config,credentials}`, and the
         // EC2 metadata service — so a caller who sent none would be answered with the
@@ -497,14 +617,14 @@ fn s3_store(
             ));
         }
     };
-    Ok(OpendalStore::new(operator(builder, policy)?))
+    Ok(builder)
 }
 
-fn gcs_store(
+fn gcs_builder(
     url: &Url,
     options: &StorageOptions,
     policy: &AccessPolicy,
-) -> Result<OpendalStore, ApiError> {
+) -> Result<services::Gcs, ApiError> {
     let mut builder = services::Gcs::default()
         .bucket(authority(url)?)
         // The request is the only source of credentials. Without these two, OpenDAL
@@ -542,14 +662,14 @@ fn gcs_store(
         // No credentials given: ask anonymously rather than signing with nothing.
         (None, None) => builder.skip_signature(),
     };
-    Ok(OpendalStore::new(operator(builder, policy)?))
+    Ok(builder)
 }
 
-fn azblob_store(
+fn azblob_builder(
     url: &Url,
     options: &StorageOptions,
     policy: &AccessPolicy,
-) -> Result<OpendalStore, ApiError> {
+) -> Result<services::Azblob, ApiError> {
     // Azure has no one host to default to: every account is its own. The url carries
     // the container, so the account has to come from the options — and naming it is
     // also what keeps a credential from being ignored, since OpenDAL only installs a
@@ -560,11 +680,11 @@ fn azblob_store(
             "az:// urls need an account option: the storage account the container is in",
         )
     })?;
-    require_label("account", account, "")?;
+    let account = require_label("account", account, "")?;
 
     let mut builder = services::Azblob::default()
         .container(authority(url)?)
-        .account_name(account);
+        .account_name(account.as_str());
 
     builder = match resolve_endpoint(Backend::Azure, options, policy)? {
         // Azurite and the rest are addressed as they are written; the account is still
@@ -586,7 +706,7 @@ fn azblob_store(
         // identity rather than the caller's.
         (None, None) => builder.skip_signature(),
     };
-    Ok(OpendalStore::new(operator(builder, policy)?))
+    Ok(builder)
 }
 
 /// Whether a string is base64. Not a decode: what the caller needs to know is that

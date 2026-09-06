@@ -47,25 +47,32 @@ warning.
 
 - A credential is never a `String`. Use `secrecy::SecretString`, and
   `storage::SourceUrl` for a caller-supplied url. Neither prints its value, so
-  `#[derive(Debug)]` around them is safe. New backends' option structs follow the same
-  rule.
+  `#[derive(Debug)]` around them is safe. `StorageOptions::named` enforces this: a
+  credential is registered with `Named::credential`, which takes a `SecretString` and
+  nothing else, and a `SecretString` cannot be registered with `Named::plain`. Both
+  mistakes are compile errors, and so is adding an option field and not registering it
+  at all.
 - `url::Url`'s own `Debug` prints its `password` field, so a struct holding one needs a
   hand-written `Debug` rather than a derive.
 - A credential option is a value, never a path or a filename. Reading a credential off
   local disk at a caller's direction is both "the request is the only source" and the
   local-path rules, broken at once.
 - A caller's string that ends up inside a hostname — a region, an account — goes through
-  `storage::require_label` first. A `/` in it moves the host to whatever came before,
-  which is a way past the endpoint policy rather than a cosmetic problem.
+  `storage::require_label` first, and what gets passed on is the `HostLabel` it returns,
+  not the `&str` that went in. A `/` in it moves the host to whatever came before, which
+  is a way past the endpoint policy rather than a cosmetic problem.
 - Nothing downstream of `storage::open` sees a url with options on it.
 - A dependency that logs credentials goes in `logging::CREDENTIAL_UNSAFE_TARGETS`, with
   a reason. `tests/credential_logging.rs` is what catches the next one.
 
 ## Adding a backend
 
-A match arm in `storage::open`, a scheme in `SUPPORTED_SCHEMES`, an option list, a
-`Backend` variant, a rule kind in `access`. Before committing to a service, check it
-offers both of these; one that does not cannot be served here at all.
+Add the `Backend` variant and follow the compile errors. Every match on a `Backend` is
+exhaustive, and the served schemes, the accepted options and the endpoint rules are all
+derived from it rather than written out beside it, so there is no list to forget.
+
+Before committing to a service, check it offers both of these; one that does not cannot
+be served here at all.
 
 - **`skip_signature`, or whatever the service calls it.** It is what makes an anonymous
   request anonymous. Without it OpenDAL walks its ambient chain and answers with the
@@ -85,10 +92,12 @@ Then follow the shape the existing ones set:
 
 ## The network
 
-- A remote store is built through `storage::operator`, never `Operator::new` directly.
-  That is what puts the access policy's own HTTP transport on it; OpenDAL's process-wide
-  default client resolves and connects to whatever it is handed, which is the whole of
-  what `network` exists to stop.
+- A remote store is built through `storage::remote_store`, which is the one thing that
+  turns a configured builder into something that can make a request — and the one place
+  that puts the access policy's HTTP transport on it. A backend function returns its
+  builder and never holds an `Operator`. `clippy.toml` disallows `Operator::new` and
+  `reqwest::Client::new` outside their single permitted call sites, each of which carries
+  an `#[expect]` saying so; a new one needs a reason written down next to it.
 - The address check belongs in the resolver and nowhere else. Checking a host and then
   letting a client resolve it again is DNS rebinding: the answer that passed is not the
   answer that gets connected to.

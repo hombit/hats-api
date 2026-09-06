@@ -1,0 +1,14 @@
+# Calls that are correct in exactly one place in this crate, and a mistake everywhere
+# else. Clippy is what makes that a rule rather than a note somebody has to have read:
+# the one permitted call site carries an `#[expect]` naming itself.
+
+disallowed-methods = [
+    # A remote store must be built through `storage::remote_store`, which attaches the
+    # access policy's HTTP transport. An `Operator` built anywhere else gets OpenDAL's
+    # process-wide default client, which resolves and connects to whatever it is handed
+    # — the whole of what `network` exists to stop.
+    { path = "opendal::Operator::new", reason = "build stores through storage::remote_store, which attaches the network policy's transport" },
+    # The same for the client itself: a default `reqwest::Client` has the default
+    # resolver, and the resolver is where the address check lives.
+    { path = "reqwest::Client::new", reason = "build clients through network::build_transport, which installs the policy's resolver" },
+]

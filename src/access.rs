@@ -53,10 +53,15 @@ use crate::network::NetworkPolicy;
 /// What a URL turned out to be, once it was allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// Read it through the object store for its scheme. For a remote backend this is
-    /// not the whole answer: the endpoint is only known once the url's options are
-    /// parsed, so [`AccessPolicy::authorize_endpoint`] is the second half.
-    Remote,
+    /// Read it through this backend's object store. Carrying the backend rather than
+    /// leaving the caller to work it out again from the scheme is what makes the match
+    /// on the other side exhaustive: a backend with no arm is a compile error instead of
+    /// a scheme that got this far and then had nothing to open it with.
+    ///
+    /// Not the whole answer for a remote backend: the endpoint is only known once the
+    /// url's options are parsed, so [`AccessPolicy::authorize_endpoint`] is the second
+    /// half.
+    Remote(Backend),
     /// Read this local file. Absolute, with every symlink already resolved and the
     /// result checked against the policy.
     Local(PathBuf),
@@ -225,7 +230,7 @@ impl AccessPolicy {
             return self.authorize_local(url).map(Target::Local);
         }
         match Backend::from_scheme(scheme) {
-            Some(backend) if self.rules(backend).enabled() => Ok(Target::Remote),
+            Some(backend) if self.rules(backend).enabled() => Ok(Target::Remote(backend)),
             _ => Err(ApiError::forbidden(format!(
                 "this server does not read {scheme}:// urls; it reads {}",
                 self.describe_schemes()
