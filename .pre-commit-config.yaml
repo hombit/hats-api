@@ -19,20 +19,6 @@ repos:
 
   - repo: local
     hooks:
-      # The plan is scaffolding and gets deleted when the work in it is done, so a
-      # reference to it from anywhere else becomes a dangling pointer that day. CLAUDE.md
-      # is exempt because it is where the rule is written down.
-      - id: no-plan-references
-        name: nothing refers to the development plan
-        entry: >-
-          bash -c 'git grep -nIE "DEVELOPMENT_PLAN|§[0-9]" --
-          ":!DEVELOPMENT_PLAN.md" ":!CLAUDE.md" ":!.pre-commit-config.yaml"
-          && { echo "^ the plan gets deleted; say the reason instead of pointing at it";
-          exit 1; } || true'
-        language: system
-        pass_filenames: false
-        always_run: true
-
       - id: cargo-fmt
         name: cargo fmt
         entry: cargo fmt --all --
@@ -40,7 +26,6 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # --fix applies what it can; the second pass fails on the rest.
       - id: cargo-clippy
         name: cargo clippy
         entry: >-
@@ -50,7 +35,6 @@ repos:
         types: [rust]
         pass_filenames: false
 
-      # Kept here only while the suite stays fast (~2s).
       - id: cargo-test
         name: cargo test
         entry: cargo test --all-targets

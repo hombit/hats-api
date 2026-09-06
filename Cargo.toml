@@ -13,25 +13,16 @@ lto = "thin"
 async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
-# `ObjectMeta::last_modified` is a `chrono` type, so building one by hand needs the same
-# `chrono` object_store resolves to; two copies would be two distinct `DateTime`s.
+# Keep in sync with object_store
 chrono = { version = "0.4", default-features = false }
-# Byte sizes in the config file: `max_materialize_bytes = "2GiB"` rather than a count of
-# bytes nobody can read back. Apache-2.0, and no dependencies beyond serde.
 bytesize = { version = "2", features = ["serde"] }
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection"] }
 futures = "0.3"
-# `HttpTransport` speaks `http::Request`, so attaching a header to one needs the same
-# `http` opendal and reqwest resolve to.
 http = "1"
-# CIDR arithmetic for `network`. Already in the tree under hyper-util, and it has no
-# dependencies of its own.
 ipnet = "2"
-# Keep in sync with datafusion's; two copies are two distinct `ObjectStore` traits.
+# Keep in sync with datafusion
 object_store = "0.13"
 object_store_opendal = "0.58"
-# Default features pull in every layer and a ctor; `storage` installs the transport and
-# the one layer it wants.
 opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
 # `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
 # needs both the transport adapter and reqwest by name. Both versions must match what
@@ -39,8 +30,6 @@ opendal = { version = "0.58", default-features = false, features = ["services-s3
 opendal-http-transport-reqwest = "0.58.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
-# The scratch copy of an object from a server that will not serve byte ranges. Deleted
-# on drop, which is what makes a cancelled request clean up after itself.
 tempfile = "3"
 tld = "2"
 serde = { version = "1", features = ["derive"] }
@@ -48,13 +37,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
 toml = "0.9"
-# `fs` is what serves a mounted file: byte ranges, `ETag`/`Last-Modified` and the two
-# conditional requests, all against a path this crate has already resolved and checked.
-# MIT, and its extra dependencies — mime_guess, httpdate, http-range-header — are small
-# and already implied by axum's tree.
 tower-http = { version = "0.7", features = ["fs", "trace"] }
-# Decoding one path segment of a request at a time, so that an encoded separator cannot
-# become one. Already in the tree under tower-http.
 percent-encoding = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
