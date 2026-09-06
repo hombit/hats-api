@@ -34,6 +34,7 @@ pub mod access;
 pub mod app;
 pub mod config;
 pub mod error;
+pub mod listing;
 pub mod logging;
 pub mod materialize;
 pub mod mount;

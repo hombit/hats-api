@@ -19,6 +19,10 @@ pub enum ApiError {
     Forbidden(String),
     #[error("{0}")]
     NotFound(String),
+    /// The route exists and this verb is not one of its. Nothing here is written, so
+    /// every route has the same answer to a verb that would write.
+    #[error("{0}")]
+    MethodNotAllowed(String),
     /// Something on this side went wrong. The message is ours, and says nothing about
     /// the machine it happened on.
     #[error("{0}")]
@@ -60,6 +64,10 @@ impl ApiError {
         Self::NotFound(message.into())
     }
 
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self::MethodNotAllowed(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -71,6 +79,7 @@ impl ApiError {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ObjectStore(error) => object_store_status(error),
             Self::Storage(error) => storage_status(error),

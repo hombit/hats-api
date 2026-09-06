@@ -1,12 +1,12 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
     Router,
-    extract::{Request, State, rejection::JsonRejection},
-    http::{StatusCode, header},
-    response::{IntoResponse, Json, Response},
+    extract::{Query, Request, State, rejection::JsonRejection},
+    http::{Method, StatusCode, header, request::Parts},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
 use percent_encoding::percent_decode_str;
@@ -17,6 +17,7 @@ use tower_http::trace::TraceLayer;
 use crate::access::{self, AccessPolicy};
 use crate::config::{ApiConfig, ConfigError, LimitsConfig};
 use crate::error::ApiError;
+use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
@@ -34,6 +35,8 @@ pub struct Service {
     pub mounts: Arc<Mounts>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
+    /// How many entries one page of a directory listing may carry.
+    pub max_listing_entries: usize,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     api_prefix: Option<Arc<str>>,
 }
@@ -79,6 +82,7 @@ impl Service {
             transfers: Arc::new(Transfers::new(limits)),
             mounts: Arc::new(mounts),
             sql_limits: limits.into(),
+            max_listing_entries: limits.max_listing_entries,
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -152,20 +156,25 @@ async fn serve_mounted(
     State(service): State<Service>,
     request: Request,
 ) -> Result<Response, ApiError> {
-    let path = request.uri().path().to_owned();
+    // The head on its own, so that a listing can be built from it while a `Body` — which
+    // is not `Sync`, and would make this future unable to cross a thread — is set aside.
+    let (parts, body) = request.into_parts();
+    let path = parts.uri.path().to_owned();
     if service.is_api_path(&path) {
         return Err(ApiError::not_found(format!("{path} is not a route")));
     }
     let Some((mount, relative)) = service.mounts.resolve(&path) else {
         return Err(ApiError::not_found(format!("{path} is not a route")));
     };
-    let file = access::authorize_mounted(mount, &mounted_path(mount, relative)?)?;
-    // A directory is a listing rather than a file, and there are no listings yet.
+    let segments = path_segments(relative)?;
+    let mut requested = mount.source().to_owned();
+    requested.extend(&segments);
+    let file = access::authorize_mounted(mount, &requested)?;
     if file.is_dir() {
-        return Err(ApiError::not_found(format!("{path} is not a file")));
+        return list_directory(&service, mount, &segments, &file, &parts).await;
     }
     let mut response = ServeFile::new(&file)
-        .try_call(request)
+        .try_call(Request::from_parts(parts, body))
         .await
         .map_err(|error| {
             tracing::warn!(%error, "serving a mounted file failed");
@@ -186,13 +195,79 @@ async fn serve_mounted(
     Ok(response)
 }
 
-/// The path a request names inside a mount, as filesystem components.
+/// Where one page of a listing carries on from. The name of its last entry, not a count:
+/// a directory is read afresh for each page, and a file appearing or disappearing in
+/// between must not shift the ones that have not been seen yet.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListingParams {
+    after: Option<String>,
+}
+
+/// A directory, as a page or as JSON. Which one is [`listing::wants_html`]'s decision.
+async fn list_directory(
+    service: &Service,
+    mount: &Mount,
+    segments: &[String],
+    dir: &Path,
+    request: &Parts,
+) -> Result<Response, ApiError> {
+    if !matches!(request.method, Method::GET | Method::HEAD) {
+        return Err(ApiError::method_not_allowed(
+            "a listing is read, not written",
+        ));
+    }
+    let params = Query::<ListingParams>::try_from_uri(&request.uri)
+        .map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
+    // The url as this service spells it, built from the decoded segments rather than
+    // from the request path, so every entry's url has one spelling whatever the request
+    // used to get here.
+    let path = listing::url(mount.prefix(), segments);
+    // A listing goes no higher than the top of the mount, whatever is above it on disk.
+    let parent = segments
+        .split_last()
+        .map(|(_, above)| listing::url(mount.prefix(), above));
+
+    let (dir, follow_symlinks) = (dir.to_owned(), mount.follow_symlinks());
+    let limit = service.max_listing_entries;
+    let after = params.0.after;
+    // `read_dir` and a `stat` per entry are blocking calls, and a HATS `Dir=` level is
+    // ten thousand of them.
+    let listing = tokio::task::spawn_blocking(move || {
+        Listing::read(
+            &dir,
+            &path,
+            parent,
+            follow_symlinks,
+            after.as_deref(),
+            limit,
+        )
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "listing a directory panicked");
+        ApiError::internal("cannot read this directory")
+    })?
+    .map_err(|error| {
+        // The path is the operator's business and not the caller's, so what comes back
+        // is the same answer as for a directory that is not published at all.
+        tracing::warn!(%error, mount = mount.prefix(), "cannot list");
+        ApiError::not_found("no such directory")
+    })?;
+
+    Ok(match listing::wants_html(&request.headers) {
+        true => Html(listing.to_html()).into_response(),
+        false => Json(listing).into_response(),
+    })
+}
+
+/// The path a request names inside a mount, one component per url segment.
 ///
 /// Percent-decoded one segment at a time, so that an encoded separator arrives as part
 /// of a name rather than as a separator, and `..` is refused outright rather than left
 /// for the resolver to clean up: a request path is not a place to be climbing from.
-fn mounted_path(mount: &Mount, relative: &str) -> Result<PathBuf, ApiError> {
-    let mut path = mount.source().to_owned();
+fn path_segments(relative: &str) -> Result<Vec<String>, ApiError> {
+    let mut segments = Vec::new();
     for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
         let decoded = percent_decode_str(segment)
             .decode_utf8()
@@ -202,9 +277,9 @@ fn mounted_path(mount: &Mount, relative: &str) -> Result<PathBuf, ApiError> {
                 "{segment:?} is not something a path here can contain"
             )));
         }
-        path.push(decoded.as_ref());
+        segments.push(decoded.into_owned());
     }
-    Ok(path)
+    Ok(segments)
 }
 
 #[derive(Debug, Serialize)]
@@ -629,7 +704,7 @@ mod tests {
     }
 
     /// A directory with one file in it, and a service that publishes it at `/`.
-    fn mounted(dir: &std::path::Path, api: &ApiConfig) -> Service {
+    fn mounted(dir: &Path, api: &ApiConfig) -> Service {
         let mounts = Mounts::new(&[crate::config::MountConfig {
             path: "/".to_owned(),
             source: dir.display().to_string(),
@@ -747,19 +822,163 @@ mod tests {
         }
     }
 
-    /// Directory listings are not built yet; what matters here is that a directory is
-    /// not answered with something else.
-    #[tokio::test]
-    async fn a_directory_is_not_a_file() {
+    /// A tree with something at two levels, so a listing has a parent to point at.
+    fn tree() -> tempfile::TempDir {
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::create_dir(dir.path().join("hats")).unwrap();
+        let inner = dir.path().join("Norder=5");
+        std::fs::create_dir(&inner).unwrap();
+        std::fs::write(inner.join("Npix=12240.parquet"), b"0123456789").unwrap();
+        std::fs::write(dir.path().join("properties"), b"x").unwrap();
+        dir
+    }
 
+    async fn body_of(response: Response) -> String {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    /// The default reading: a client walking the tree gets the names, the types and the
+    /// urls to ask for next, without having to know how a name becomes a url.
+    #[tokio::test]
+    async fn a_directory_is_listed_as_json() {
+        let dir = tree();
         let response = respond(
             mounted(dir.path(), &ApiConfig::default()),
-            Request::builder().uri("/hats"),
+            Request::builder().uri("/Norder=5"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json")
+        );
+        let listing: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+        assert_eq!(listing["path"], "/Norder=5");
+        assert_eq!(listing["parent"], "/");
+        assert_eq!(listing["next"], serde_json::Value::Null);
+        assert_eq!(listing["entries"][0]["name"], "Npix=12240.parquet");
+        assert_eq!(listing["entries"][0]["type"], "file");
+        assert_eq!(listing["entries"][0]["size"], 10);
+        assert_eq!(listing["entries"][0]["url"], "/Norder=5/Npix=12240.parquet");
+    }
+
+    /// The top of a mount has nothing above it, whatever is above it on disk.
+    #[tokio::test]
+    async fn a_listing_does_not_point_above_its_mount() {
+        let dir = tree();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/"),
+        )
+        .await;
+        let listing: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+        assert_eq!(listing["path"], "/");
+        assert_eq!(listing["parent"], serde_json::Value::Null);
+    }
+
+    /// Only a browser gets the page. Everything else — and `*/*` above all, which is
+    /// what every client library sends — gets the reading it can parse.
+    #[tokio::test]
+    async fn a_browser_gets_a_page_and_a_client_does_not() {
+        let dir = tree();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+        let accepting = |accept: &'static str| {
+            Request::builder()
+                .uri("/Norder=5")
+                .header(header::ACCEPT, accept)
+        };
+
+        let response = respond(service(), accepting("text/html,application/xhtml+xml")).await;
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .starts_with("text/html")
+        );
+        let body = body_of(response).await;
+        // The href is what a browser clicks and what `fsspec` scrapes.
+        assert!(
+            body.contains("href=\"/Norder=5/Npix=12240.parquet\""),
+            "{body}"
+        );
+
+        for accept in ["*/*", "application/json"] {
+            let response = respond(service(), accepting(accept)).await;
+            assert!(
+                response.headers()[header::CONTENT_TYPE]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("application/json"),
+                "{accept}"
+            );
+        }
+    }
+
+    /// A directory too large for one page hands back the url of the next one, and the
+    /// pages together are the whole directory with nothing repeated.
+    #[tokio::test]
+    async fn a_large_directory_is_paginated() {
+        let dir = tempfile::TempDir::new().unwrap();
+        for index in 0..5 {
+            std::fs::write(dir.path().join(format!("part{index}.parquet")), b"x").unwrap();
+        }
+        let mut service = mounted(dir.path(), &ApiConfig::default());
+        service.max_listing_entries = 2;
+
+        let mut names = Vec::new();
+        let mut uri = "/".to_owned();
+        loop {
+            let response = respond(service.clone(), Request::builder().uri(&uri)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let listing: serde_json::Value =
+                serde_json::from_str(&body_of(response).await).unwrap();
+            for entry in listing["entries"].as_array().unwrap() {
+                names.push(entry["name"].as_str().unwrap().to_owned());
+            }
+            match listing["next"].as_str() {
+                Some(next) => uri = next.to_owned(),
+                None => break,
+            }
+        }
+        assert_eq!(
+            names,
+            [
+                "part0.parquet",
+                "part1.parquet",
+                "part2.parquet",
+                "part3.parquet",
+                "part4.parquet"
+            ]
+        );
+    }
+
+    /// A query parameter a listing does not have is a mistake to report, not one to
+    /// ignore: silently listing from the start would look like an empty directory.
+    #[tokio::test]
+    async fn an_unknown_listing_parameter_is_named_rather_than_ignored() {
+        let dir = tree();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/?offset=10"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(body_of(response).await.contains("offset"));
+    }
+
+    /// Nothing here is written, so a verb that would write is refused at the listing
+    /// rather than answered with one.
+    #[tokio::test]
+    async fn a_listing_is_not_written_to() {
+        let dir = tree();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().method("POST").uri("/"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     /// The API's subtree belongs to the API even where a mount covers everything else,

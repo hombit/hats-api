@@ -198,6 +198,28 @@ Adding a scalar function feature to the `datafusion` dependency adds everything 
 registers to what a caller may call. That is the decision being made; make it
 deliberately.
 
+## Directory listings
+
+- **A wildcard is not a request for a page.** HTML is served only when `Accept` names
+  `text/html` outright with a weight above zero; `*/*` is what every client library
+  sends, and answering it with markup would leave the machine-readable rendering
+  unreachable. This is also why none of the content-negotiation crates is used: they
+  resolve a wildcard *to* `text/html`, which is the right default for a website and the
+  wrong one for a data service.
+- **A name is the filesystem's, and it is encoded twice.** Into a url — where `/`, `%`
+  and the delimiters must not survive literally, and `=` must, because HATS directories
+  are called `Norder=5` — and into HTML, where a name is markup until it is escaped.
+  Both encodings live in `listing.rs`; nothing outside it builds a url out of a name.
+- **A listing describes only what the same mount would serve.** A mount that does not
+  follow symlinks does not list them either, since listing one would only advertise a
+  404. `DirEntry::metadata` is an `lstat` and answers "a symlink" a second time; a mount
+  that does follow them needs `fs::metadata` on the resolved path to learn what is
+  behind one.
+- **A page ends at a name, not at a count.** The directory is read afresh for each page,
+  so an offset would skip or repeat entries when a file appears or disappears between
+  two requests. Whether there is a next page is counted against the whole directory,
+  never inferred from the page coming back full.
+
 ## Comments
 
 Focused and informative. Say what the code does and what a reader could not work out

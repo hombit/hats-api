@@ -14,10 +14,11 @@ async-trait = "0.1"
 axum = "0.8"
 bytes = "1"
 # Keep in sync with object_store
-chrono = { version = "0.4", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytesize = { version = "2", features = ["serde"] }
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection", "sql"] }
 futures = "0.3"
+html-escape = "0.2"
 http = "1"
 ipnet = "2"
 # Keep in sync with datafusion

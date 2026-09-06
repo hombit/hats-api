@@ -175,6 +175,13 @@ max_expression_depth = 50
 # refuse the absurd, not to be a budget.
 max_expression_nodes = 50000
 
+# How many entries one page of a directory listing carries. The rest is offered as a
+# further page, reached by the "next" url the listing hands back. The default holds a
+# whole HATS "Dir=" level, so the largest directory the data actually has arrives in one
+# piece: a client that walks a listing and ignores the continuation would otherwise
+# conclude that the partitions past the cap do not exist.
+max_listing_entries = 10000
+
 [log]
 # RUST_LOG syntax, and RUST_LOG itself overrides this when it is set.
 filter = "hats_api=info,tower_http=info"

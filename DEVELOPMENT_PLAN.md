@@ -25,7 +25,7 @@ thing to keep working while that is built.
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
-| 4 | file-server interface | todo | |
+| 4 | file-server interface | in progress | listings done; the query surface is what is left, and waits on §3.4 |
 | 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
@@ -272,16 +272,17 @@ Modelled on <https://vizcat.cds.unistra.fr/hats/> and
 <https://github.com/astronomy-commons/lsdb-server>, with the query surface from §3.4.
 
 Serving a file's bytes is done: §3.2 resolves the path and `tower_http`'s `ServeFile`
-answers with the ranges, the validators and the conditional requests. What is left, in
-order of precedence:
+answers with the ranges, the validators and the conditional requests. Directories answer
+with a listing. What is left:
 
-1. **A directory path** → a listing. HTML for a browser (`Accept: text/html`), JSON
-   otherwise — a `readdir` over the mount. Cap entries and paginate: a HATS `Dir=` level
-   holds ten thousand entries. A directory is a 404 until this exists.
-2. **A parquet file with query parameters** → a query through `query.rs` +
+1. **A parquet file with query parameters** → a query through `query.rs` +
    `parquet_out.rs`, with the file taken from the mount. The parameters are §3.4's, which
    waits on `docs/vizcat-compat.md`. A file with no query parameters keeps going out
    verbatim, whatever its extension.
+
+A directory's query string is already spoken for by the listing's own `after`, and is
+refused when it carries anything else — so the parameters §3.4 settles are a file's
+alone, and the two cannot collide.
 
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does. Nothing here has been tried against
