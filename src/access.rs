@@ -55,6 +55,7 @@ use url::{Host, Url};
 
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
+use crate::mount::Mounts;
 use crate::network::NetworkPolicy;
 
 /// What a URL turned out to be, once it was allowed.
@@ -170,8 +171,18 @@ pub struct AccessPolicy {
     allow_plain_http: bool,
     /// Allowed directories, canonical, so that a resolved request path can simply be
     /// tested for being under one of them.
-    local: Vec<PathBuf>,
+    local: Vec<LocalRule>,
     network: NetworkPolicy,
+}
+
+/// One allowed directory and the resolution rules that come with it.
+///
+/// The rules are per directory rather than one switch over all of them because a mount
+/// brings its own: publishing a directory of symlinks must not decide the question for
+/// every other directory this policy allows.
+#[derive(Debug)]
+struct LocalRule {
+    root: PathBuf,
     follow_symlinks: bool,
 }
 
@@ -243,12 +254,20 @@ impl Default for AccessPolicy {
                   no rule for `new` to reject; a panic here would be a bug in this file"
     )]
     fn default() -> Self {
-        Self::new(&AccessConfig::default()).expect("the default access config is valid")
+        Self::new(&AccessConfig::default(), &Mounts::default())
+            .expect("the default access config is valid")
     }
 }
 
 impl AccessPolicy {
-    pub fn new(config: &AccessConfig) -> Result<Self, ConfigError> {
+    /// The rules as configured, plus what the mounts grant.
+    ///
+    /// A mount is passed in rather than looked up later because the grant is not
+    /// optional: the bytes under a mount are already served whole over its own route, so
+    /// refusing to query them through the API would withhold nothing. Taking the mounts
+    /// as an argument is what makes that a thing this function does rather than a thing
+    /// each caller has to remember.
+    pub fn new(config: &AccessConfig, mounts: &Mounts) -> Result<Self, ConfigError> {
         // Every host the operator named, collected as the rules are built rather than by
         // walking them again afterwards: a second pass would be a second list of
         // backends to keep in step, and a backend missing from it would have its own
@@ -269,14 +288,27 @@ impl AccessPolicy {
         let http = build(&config.http.endpoints, Backend::Http)?;
 
         let network = NetworkPolicy::new(&config.network, &named)?;
-        let local = config
+        let mut local = config
             .local
             .paths
             .iter()
             // Resolved now so that startup fails on a directory that is not there,
             // rather than every request failing later for a reason nobody can see.
-            .map(|entry| canonical_root(entry))
-            .collect::<Result<_, _>>()?;
+            .map(|entry| {
+                canonical_root(entry)
+                    .map(|root| LocalRule {
+                        root,
+                        follow_symlinks: config.local.follow_symlinks,
+                    })
+                    .map_err(|reason| ConfigError::Rule(entry.to_owned(), reason))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Scoped to what the mount publishes and no wider, and under the mount's own
+        // resolution rules, so both routes agree about the same file.
+        local.extend(mounts.iter().map(|mount| LocalRule {
+            root: mount.source().to_owned(),
+            follow_symlinks: mount.follow_symlinks(),
+        }));
         Ok(Self {
             s3,
             gcs,
@@ -285,7 +317,6 @@ impl AccessPolicy {
             allow_plain_http: config.http.allow_plain_http,
             local,
             network,
-            follow_symlinks: config.local.follow_symlinks,
         })
     }
 
@@ -427,7 +458,7 @@ impl AccessPolicy {
         if self.local.is_empty() {
             return Err(ApiError::forbidden(
                 "this server reads no local files; add a directory to \
-                 access.local.paths to change that",
+                 api.access.local.paths, or mount one, to change that",
             ));
         }
         let path = url
@@ -436,48 +467,27 @@ impl AccessPolicy {
         let lexical = lexically_clean(&path)
             .ok_or_else(|| ApiError::bad_request(format!("path {} escapes /", path.display())))?;
 
-        // Without symlink resolution the path as written is the path that gets opened,
-        // so it can be judged before the filesystem is touched at all — and a path
-        // outside every allowed directory then gets the same answer whether or not it
-        // exists. With resolution on, only the resolved path can be judged, so the
-        // check moves below and this only decides how much a refusal may say.
-        let named_an_allowed_path = self.contains(&lexical);
-        if !self.follow_symlinks && !named_an_allowed_path {
-            return Err(self.local_refusal(url));
-        }
-        let canonical = std::fs::canonicalize(&lexical).map_err(|error| match error.kind() {
-            // Saying "no such file" about a path the caller was never allowed to name
-            // would answer a question they did not get to ask.
-            _ if !named_an_allowed_path => self.local_refusal(url),
-            std::io::ErrorKind::NotFound => {
-                ApiError::not_found(format!("{} does not exist", lexical.display()))
-            }
-            _ => ApiError::forbidden(format!("cannot read {}: {error}", lexical.display())),
-        })?;
-        if !self.follow_symlinks && canonical != lexical {
-            return Err(ApiError::forbidden(format!(
+        resolve_local(&self.local, &lexical).map_err(|refusal| match refusal {
+            LocalRefusal::NotAllowed => self.local_refusal(url),
+            LocalRefusal::Symlink(path) => ApiError::forbidden(format!(
                 "{} goes through a symlink, which this server does not follow; set \
-                 access.local.follow_symlinks to change that",
-                lexical.display()
-            )));
-        }
-        // Again on the resolved path: with follow_symlinks on, a link inside an allowed
-        // directory must still not land outside every allowed directory.
-        if !self.contains(&canonical) {
-            return Err(self.local_refusal(url));
-        }
-        Ok(canonical)
-    }
-
-    fn contains(&self, path: &Path) -> bool {
-        self.local.iter().any(|root| path.starts_with(root))
+                 api.access.local.follow_symlinks, or the mount's own, to change that",
+                path.display()
+            )),
+            LocalRefusal::NotFound(path) => {
+                ApiError::not_found(format!("{} does not exist", path.display()))
+            }
+            LocalRefusal::Unreadable(path, error) => {
+                ApiError::forbidden(format!("cannot read {}: {error}", path.display()))
+            }
+        })
     }
 
     fn local_refusal(&self, url: &Url) -> ApiError {
         let roots: Vec<String> = self
             .local
             .iter()
-            .map(|root| root.display().to_string())
+            .map(|rule| rule.root.display().to_string())
             .collect();
         ApiError::forbidden(format!(
             "{url} is not under any allowed directory; this server reads {}",
@@ -617,37 +627,82 @@ fn parse_endpoint(entry: &str, backend: Backend) -> Result<Endpoint, ConfigError
     Endpoint::from_url(&url).map_err(|error| invalid(error.to_string()))
 }
 
-fn canonical_root(entry: &str) -> Result<PathBuf, ConfigError> {
-    let invalid = |reason: String| ConfigError::Rule(entry.to_owned(), reason);
-
+/// The directory an entry names, resolved: an absolute path or a `file://` url, and a
+/// directory that is there now rather than a rule that silently never matches.
+///
+/// Returns the reason rather than a [`ConfigError`], because the entry means the same
+/// thing in `[api.access.local]` and in a `[[mount]]` while the two name it differently,
+/// and a message that says the wrong section is worse than one that says none.
+pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
     let path = if entry.starts_with('/') {
         PathBuf::from(entry)
     } else {
-        let url = Url::parse(entry).map_err(|error| {
-            invalid(format!(
-                "{error}; expected an absolute path or a file:// url"
-            ))
-        })?;
+        let url = Url::parse(entry)
+            .map_err(|error| format!("{error}; expected an absolute path or a file:// url"))?;
         if url.scheme() != LOCAL_SCHEME {
-            return Err(invalid(format!(
+            return Err(format!(
                 "scheme {:?} is not a local path; expected an absolute path or a \
                  file:// url",
                 url.scheme()
-            )));
+            ));
         }
         url.to_file_path()
-            .map_err(|()| invalid("not an absolute local path".to_owned()))?
+            .map_err(|()| "not an absolute local path".to_owned())?
     };
 
     let canonical = std::fs::canonicalize(&path)
-        .map_err(|error| invalid(format!("cannot resolve {}: {error}", path.display())))?;
+        .map_err(|error| format!("cannot resolve {}: {error}", path.display()))?;
     match canonical.is_dir() {
         true => Ok(canonical),
-        false => Err(invalid(format!(
-            "{} is not a directory",
-            canonical.display()
-        ))),
+        false => Err(format!("{} is not a directory", canonical.display())),
     }
+}
+
+/// Why a path is not a file that may be read. Separate from [`ApiError`] because how
+/// much a refusal may say differs by mode: a caller who named the path is told which
+/// directories exist, and one who walked into it through a mount is not.
+enum LocalRefusal {
+    /// Under none of the rules.
+    NotAllowed,
+    /// Under a rule, but nothing is there.
+    NotFound(PathBuf),
+    /// It goes through a symlink and the rule that governs it does not follow them.
+    Symlink(PathBuf),
+    Unreadable(PathBuf, std::io::Error),
+}
+
+/// The file a path names, resolved and checked against the rules. `lexical` must already
+/// be [`lexically_clean`], so that comparing it with the canonical path is a question
+/// about symlinks and nothing else.
+fn resolve_local(rules: &[LocalRule], lexical: &Path) -> Result<PathBuf, LocalRefusal> {
+    // The rule the path was written under. Without symlink resolution the path as
+    // written is the path that gets opened, so having none settles it before the
+    // filesystem is touched at all — and a path outside every allowed directory then
+    // gets the same answer whether or not it exists.
+    let named = rules.iter().find(|rule| lexical.starts_with(&rule.root));
+    if named.is_none() && !rules.iter().any(|rule| rule.follow_symlinks) {
+        return Err(LocalRefusal::NotAllowed);
+    }
+    let canonical = std::fs::canonicalize(lexical).map_err(|error| match error.kind() {
+        // Saying "no such file" about a path the caller was never allowed to name would
+        // answer a question they did not get to ask.
+        _ if named.is_none() => LocalRefusal::NotAllowed,
+        std::io::ErrorKind::NotFound => LocalRefusal::NotFound(lexical.to_owned()),
+        _ => LocalRefusal::Unreadable(lexical.to_owned(), error),
+    })?;
+    // Again on the resolved path: a link inside an allowed directory must still not
+    // lead out of every allowed directory.
+    let destination = rules
+        .iter()
+        .find(|rule| canonical.starts_with(&rule.root))
+        .ok_or(LocalRefusal::NotAllowed)?;
+    // The rule the path was written under is the one that decides about the link, so a
+    // directory whose rules allow symlinks cannot become a way of following one out of
+    // a directory whose rules do not.
+    if !named.unwrap_or(destination).follow_symlinks && canonical != lexical {
+        return Err(LocalRefusal::Symlink(lexical.to_owned()));
+    }
+    Ok(canonical)
 }
 
 /// Resolve `.` and `..` without touching the filesystem, so that the result can be
@@ -680,7 +735,7 @@ mod tests {
     use super::*;
 
     fn policy(config: &AccessConfig) -> AccessPolicy {
-        AccessPolicy::new(config).unwrap()
+        AccessPolicy::new(config, &Mounts::default()).unwrap()
     }
 
     fn entries(entries: &[&str]) -> EndpointConfig {
@@ -1209,6 +1264,103 @@ mod tests {
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
     }
 
+    fn mounted(source: &Path, follow_symlinks: bool) -> Mounts {
+        Mounts::new(&[crate::config::MountConfig {
+            path: "/".to_owned(),
+            source: source.display().to_string(),
+            follow_symlinks,
+            immutable: false,
+        }])
+        .unwrap()
+    }
+
+    /// The bytes under a mount are already served whole over its own route, so the API
+    /// can read them too — without `api.access.local.paths` naming the directory again.
+    #[test]
+    fn a_mount_lets_the_api_read_what_it_publishes() {
+        let (_dir, root) = temp_dir();
+        let published = root.join("published");
+        fs::create_dir(&published).unwrap();
+        let file = published.join("part0.parquet");
+        fs::write(&file, b"").unwrap();
+        let elsewhere = root.join("elsewhere.parquet");
+        fs::write(&elsewhere, b"").unwrap();
+
+        let policy =
+            AccessPolicy::new(&AccessConfig::default(), &mounted(&published, false)).unwrap();
+        assert_eq!(
+            policy.authorize(&file_url(&file)).unwrap(),
+            Target::Local(file.clone())
+        );
+        // Scoped to what the mount publishes: mounting a directory is not a way to read
+        // its parent.
+        let error = policy.authorize(&file_url(&elsewhere)).unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        // And the grant is one way: the API's own table says nothing about the mount.
+        assert!(AccessPolicy::default().authorize(&file_url(&file)).is_err());
+    }
+
+    /// Two directories, two answers about the same question, because the rules that
+    /// decide it are the mount's rather than the service's.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_brings_its_own_symlink_rule() {
+        let (_dir, root) = temp_dir();
+        let published = root.join("published");
+        fs::create_dir(&published).unwrap();
+        let real = published.join("part0.parquet");
+        fs::write(&real, b"").unwrap();
+        let link = published.join("link.parquet");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let refuses = AccessPolicy::new(&AccessConfig::default(), &mounted(&published, false))
+            .unwrap()
+            .authorize(&file_url(&link));
+        assert!(refuses.is_err(), "{refuses:?}");
+
+        let follows = AccessPolicy::new(&AccessConfig::default(), &mounted(&published, true))
+            .unwrap()
+            .authorize(&file_url(&link))
+            .unwrap();
+        assert_eq!(follows, Target::Local(real));
+    }
+
+    /// A directory the operator listed keeps its own answer whatever a mount says, so a
+    /// mount that follows symlinks cannot become a way of following one out of a
+    /// directory that does not.
+    #[cfg(unix)]
+    #[test]
+    fn a_mount_that_follows_symlinks_does_not_widen_the_api_table() {
+        let (_dir, root) = temp_dir();
+        let listed = root.join("listed");
+        let published = root.join("published");
+        fs::create_dir(&listed).unwrap();
+        fs::create_dir(&published).unwrap();
+        let target = published.join("part0.parquet");
+        fs::write(&target, b"").unwrap();
+        let link = listed.join("innocent.parquet");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let policy = AccessPolicy::new(
+            &AccessConfig {
+                local: LocalConfig {
+                    paths: vec![listed.display().to_string()],
+                    follow_symlinks: false,
+                },
+                ..Default::default()
+            },
+            &mounted(&published, true),
+        )
+        .unwrap();
+        let error = policy.authorize(&file_url(&link)).unwrap_err();
+        assert!(error.to_string().contains("symlink"), "{error}");
+        // The file itself is still readable where it actually lives.
+        assert_eq!(
+            policy.authorize(&file_url(&target)).unwrap(),
+            Target::Local(target)
+        );
+    }
+
     #[test]
     fn a_rule_that_could_never_match_is_a_startup_error() {
         let (_dir, root) = temp_dir();
@@ -1233,7 +1385,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                AccessPolicy::new(&config).is_err(),
+                AccessPolicy::new(&config, &Mounts::default()).is_err(),
                 "{entry} was accepted as an s3 endpoint"
             );
         }
@@ -1241,18 +1393,24 @@ mod tests {
         // And the same the other way round, so that no section quietly accepts a name
         // that means a different provider.
         assert!(
-            AccessPolicy::new(&AccessConfig {
-                gcs: entries(&["aws"]),
-                ..Default::default()
-            })
+            AccessPolicy::new(
+                &AccessConfig {
+                    gcs: entries(&["aws"]),
+                    ..Default::default()
+                },
+                &Mounts::default()
+            )
             .is_err(),
             "the gcs section accepted \"aws\""
         );
         assert!(
-            AccessPolicy::new(&AccessConfig {
-                azure: entries(&["gcp"]),
-                ..Default::default()
-            })
+            AccessPolicy::new(
+                &AccessConfig {
+                    azure: entries(&["gcp"]),
+                    ..Default::default()
+                },
+                &Mounts::default()
+            )
             .is_err(),
             "the azure section accepted \"gcp\""
         );
@@ -1272,7 +1430,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                AccessPolicy::new(&config).is_err(),
+                AccessPolicy::new(&config, &Mounts::default()).is_err(),
                 "{entry} was accepted as a local directory"
             );
         }

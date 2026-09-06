@@ -19,6 +19,7 @@ use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, NetworkConfig};
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
+use hats_api::mount::Mounts;
 use hats_api::query::{QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -191,27 +192,34 @@ pub fn loopback() -> NetworkConfig {
 /// A policy that will talk to anything, including the loopback interface — the tests
 /// here are about storage, not about the policy, which has its own tests.
 pub fn permissive_policy() -> AccessPolicy {
-    AccessPolicy::new(&AccessConfig {
-        network: loopback(),
-        // Cleartext too, since every test server here is a plain http one on loopback.
-        http: HttpConfig {
-            endpoints: None,
-            allow_plain_http: true,
+    AccessPolicy::new(
+        &AccessConfig {
+            network: loopback(),
+            // Cleartext too, since every test server here is a plain http one on
+            // loopback.
+            http: HttpConfig {
+                endpoints: None,
+                allow_plain_http: true,
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    })
+        &Mounts::default(),
+    )
     .expect("permissive policy")
 }
 
 /// A policy restricted to exactly these endpoints, for the tests that check a refusal.
 pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
-    AccessPolicy::new(&AccessConfig {
-        network: loopback(),
-        s3: EndpointConfig {
-            endpoints: Some(endpoints.iter().map(|e| (*e).to_owned()).collect()),
+    AccessPolicy::new(
+        &AccessConfig {
+            network: loopback(),
+            s3: EndpointConfig {
+                endpoints: Some(endpoints.iter().map(|e| (*e).to_owned()).collect()),
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    })
+        &Mounts::default(),
+    )
     .expect("endpoint policy")
 }
 

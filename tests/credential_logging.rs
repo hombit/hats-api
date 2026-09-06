@@ -381,13 +381,16 @@ async fn a_policy_refusal_logs_no_secret() {
     let server = TestS3::authenticated().await;
 
     // A policy that will not talk to this endpoint at all.
-    let policy = AccessPolicy::new(&hats_api::config::AccessConfig {
-        network: common::loopback(),
-        s3: hats_api::config::EndpointConfig {
-            endpoints: Some(vec!["https://minio.example.com".to_owned()]),
+    let policy = AccessPolicy::new(
+        &hats_api::config::AccessConfig {
+            network: common::loopback(),
+            s3: hats_api::config::EndpointConfig {
+                endpoints: Some(vec!["https://minio.example.com".to_owned()]),
+            },
+            ..Default::default()
         },
-        ..Default::default()
-    })
+        &hats_api::mount::Mounts::default(),
+    )
     .expect("policy");
 
     let error = common::expect_error(

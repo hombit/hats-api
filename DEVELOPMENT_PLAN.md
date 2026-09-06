@@ -5,8 +5,13 @@
 Updated in the same commit as the code. A step is `done` only when its tests pass,
 `cargo clippy --all-targets` and `cargo fmt --check` are clean, and §0 still holds.
 
-Status values: `todo`, `in progress`, `done`, `dropped` (with the reason). See
-`CLAUDE.md` for what goes in this file and what does not.
+Status values: `todo`, `in progress`, `done`, `deferred` (with what it waits for) and
+`dropped` (with the reason). See `CLAUDE.md` for what goes in this file and what does
+not.
+
+The two deferred backends wait on §3 and §4 rather than on each other: the file-server
+interface is what the service is for, and every backend added before it is one more
+thing to keep working while that is built.
 
 | § | step | status | notes |
 |---|---|---|---|
@@ -14,9 +19,9 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason). See
 | 2.2 | GCS and Azure | done | |
 | 8.3 | network policy | done | |
 | 2.3 | HTTP/HTTPS, range probe, materialization | done | |
-| 2.4 | WebDAV | todo | blocked on the scheme question below: it decides whether a test server is reachable at all |
-| 2.5 | Hugging Face | todo | droppable |
-| 3.1 | two-mode configuration | todo | |
+| 2.4 | WebDAV | deferred | until after §4. Blocked on the scheme question below, which decides whether a test server is reachable at all |
+| 2.5 | Hugging Face | deferred | until after §4, and droppable |
+| 3.1 | two-mode configuration | done | |
 | 3.2 | routing | todo | |
 | 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
@@ -169,63 +174,22 @@ Separate configuration (§3.1), routing (§3.2) and request shapes (§3.3, §3.4
 internal query representation and one execution path. `columns`/`filters` and
 `select`/`where` parse into the same thing; a semantic divergence between them is a bug.
 
-### 3.1 Configuration
-
-`[api.access]` governs API mode alone, so that `[api.access.local] paths = []` does not
-disable a configured mount, and mounting `/srv/data` does not let a caller pass
-`url=/srv/data/x.parquet` to the API.
-
-```toml
-[api]                      # API mode: the caller names the location
-enabled = true
-prefix = "/api/v1"
-
-[api.access]               # caller-supplied urls only
-[api.access.network]
-allow_loopback = false
-[api.access.s3]
-# endpoints = ["aws"]
-[api.access.local]
-paths = []
-follow_symlinks = false
-
-[[mount]]                  # file-server mode: zero or more mounts
-path = "/"                 # url prefix
-source = "/srv/data"       # a local directory
-follow_symlinks = false    # resolution rules are per-mount, not global
-immutable = false          # never changes once published — skip revalidation, §6.2
-
-[[mount]]
-path = "/hats"
-source = "/data/hats"
-immutable = true
-```
-
-**A mount's `source` is a local directory.** A non-local `source` is a startup error.
-
-**Mount prefixes must be non-overlapping** — a startup error, not first-match-wins.
-
-**Two tables, one resolver.** `Target` grows a `Mount { mount, relative_path }` variant so
-the existing local-path resolution — canonicalize before matching, no climbing out with
-`..`, symlink policy — is reused. The tables stay per mode.
-
-**Each mount grants API access to what it mounts**, unconditionally: the bytes are already
-served whole over the file-server route, so refusing to query them through the API would
-withhold nothing. The grant is one-way — the API table says nothing about mounts.
-
-Two constraints on the derived rule:
-
-- **Scoped to the mount's prefix**, which is the shape `[api.access.local]` already has,
-  so no new rule kind is needed. A derived rule is never wider than the mount.
-- **Inherits the mount's resolution rules**, `follow_symlinks` in particular, so both
-  routes agree about the same file.
-
 ### 3.2 Routing
 
 `api.prefix` claims its subtree, mounts claim theirs, and overlap is refused at startup,
 so dispatch is static and a request belongs to exactly one mode. A mount at `/` with the
 API at `/api/v1` is the expected arrangement; the API's prefix wins as the more specific
 route.
+
+`api.enabled = false` with no mount serves nothing, which is a startup error rather than
+a process that listens and refuses everything.
+
+**Two tables, one resolver.** `Target` grows a `Mount { mount, relative_path }` variant,
+so that a path arriving through a mount goes through the same resolution — clean it,
+canonicalize it, match it against the rule, and judge the symlink under that rule's own
+`follow_symlinks` — as a `file://` url arriving through the API. `access::resolve_local`
+is that resolution; a mount passes its own single rule rather than the API's table, so
+one mount cannot serve a file out of another's directory.
 
 **Deliverable.** With no `[[mount]]`, the API alone. With `api.enabled = false` and one
 mount, a pure file server.

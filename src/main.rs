@@ -6,6 +6,7 @@ use hats_api::access::AccessPolicy;
 use hats_api::app;
 use hats_api::config::{self, CONFIG_ENV_VAR, Config, LogConfig, LogFormat};
 use hats_api::logging;
+use hats_api::mount::Mounts;
 
 const USAGE: &str = "\
 usage: hats-api [--config <path>]
@@ -67,22 +68,36 @@ fn print_usage() {
 }
 
 /// Everything that can fail before the first request, failing in one place.
-fn startup() -> Result<(Config, AccessPolicy), NotServing> {
+fn startup() -> Result<(Config, AccessPolicy, Mounts), NotServing> {
     let args: Vec<String> = env::args().skip(1).collect();
     let invalid = |error: &dyn std::fmt::Display| NotServing::Invalid(error.to_string());
     let config = match config_path(&args)? {
         Some(path) => config::load(&path).map_err(|error| invalid(&error))?,
         None => Config::default(),
     };
-    let policy = AccessPolicy::new(&config.access).map_err(|error| invalid(&error))?;
-    Ok((config, policy))
+    // Before the policy, which is built from these as well as from `[api.access]`.
+    let mounts = Mounts::new(&config.mounts).map_err(|error| invalid(&error))?;
+    let policy = AccessPolicy::new(&config.api.access, &mounts).map_err(|error| invalid(&error))?;
+    Ok((config, policy, mounts))
+}
+
+/// The mounts as one line of the startup log: what is published, and out of where.
+fn describe_mounts(mounts: &Mounts) -> String {
+    match mounts.is_empty() {
+        true => "none".to_owned(),
+        false => mounts
+            .iter()
+            .map(|mount| format!("{} -> {}", mount.prefix(), mount.source().display()))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
     // The config decides how to log, so nothing before this point can be logged: these
     // two go to the terminal, and everything after `init_tracing` goes through it.
-    let (config, policy) = match startup() {
+    let (config, policy, mounts) = match startup() {
         Ok(started) => started,
         Err(NotServing::HelpRequested) => {
             print_usage();
@@ -119,6 +134,7 @@ async fn main() -> ExitCode {
     tracing::info!(
         %listen_addr,
         allows = %policy.allowed_schemes().join(", "),
+        mounts = %describe_mounts(&mounts),
         "listening"
     );
     let service = app::Service::new(policy, &config.limits);

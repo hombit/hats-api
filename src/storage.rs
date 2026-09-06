@@ -1180,7 +1180,7 @@ mod tests {
         super::open(
             url,
             options,
-            &AccessPolicy::new(&config).unwrap(),
+            &AccessPolicy::new(&config, &crate::mount::Mounts::default()).unwrap(),
             &transfers(),
         )
     }
@@ -1928,7 +1928,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let policy = AccessPolicy::new(&config).unwrap();
+        let policy = AccessPolicy::new(&config, &crate::mount::Mounts::default()).unwrap();
         let url = parse_url(&format!("http://127.0.0.1:{port}/hats/part0.parquet")).unwrap();
         let file = super::open(&url, &no_options(), &policy, &transfers()).unwrap();
         assert_eq!(store_key(&file), format!("http://127.0.0.1:{port}"));
@@ -2111,17 +2111,20 @@ mod tests {
     /// A policy that allows the loopback interface and cleartext, which is what a test
     /// server on `127.0.0.1` needs.
     fn policy_allowing_plain_http() -> AccessPolicy {
-        AccessPolicy::new(&crate::config::AccessConfig {
-            network: crate::config::NetworkConfig {
-                allow_loopback: true,
+        AccessPolicy::new(
+            &crate::config::AccessConfig {
+                network: crate::config::NetworkConfig {
+                    allow_loopback: true,
+                    ..Default::default()
+                },
+                http: crate::config::HttpConfig {
+                    endpoints: None,
+                    allow_plain_http: true,
+                },
                 ..Default::default()
             },
-            http: crate::config::HttpConfig {
-                endpoints: None,
-                allow_plain_http: true,
-            },
-            ..Default::default()
-        })
+            &crate::mount::Mounts::default(),
+        )
         .unwrap()
     }
 

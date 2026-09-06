@@ -12,7 +12,17 @@
 address = "0.0.0.0"
 port = 80
 
-[access.network]
+[api]
+# API mode: the caller names the location of the data in the request, and [api.access]
+# below decides what it may name. Turn it off for a pure file server, which then serves
+# nothing but the mounts below.
+enabled = true
+
+# The url subtree the API answers under. It wins over a mount that would cover the same
+# paths, so a mount at "/" alongside the API here is the ordinary arrangement.
+prefix = "/api/v1"
+
+[api.access.network]
 # Which addresses a request may reach, whatever backend it goes through — the question
 # is a property of the destination rather than of the protocol. Everything here is off
 # by default: the service sits somewhere its callers do not, and can reach a great deal
@@ -41,7 +51,7 @@ allow_local_names = false
 # allow_cidrs = ["10.1.2.0/24"]
 # allow_hosts = ["minio.internal"]
 
-[access.s3]
+[api.access.s3]
 # Which S3 servers a request may point this service at. For an object store the
 # endpoint is the thing worth deciding, not the bucket: a bucket name says nothing
 # about the host, because the request carries its own `endpoint` option and can aim
@@ -51,27 +61,27 @@ allow_local_names = false
 #   "https://minio.example.com"  one S3-compatible server
 #
 # Three states, and the first two differ: leave the key out for any endpoint (the
-# default, still subject to [access.network]), give an empty list to turn s3 off
+# default, still subject to [api.access.network]), give an empty list to turn s3 off
 # entirely, or list endpoints for exactly those. Naming an endpoint here is permission
-# enough on its own — [access.network] is not consulted for it, at either layer.
+# enough on its own — [api.access.network] is not consulted for it, at either layer.
 # endpoints = ["aws"]
 
-[access.gcs]
+[api.access.gcs]
 # The same three states for gs:// urls. "gcp" is Google Cloud Storage itself.
 # endpoints = ["gcp"]
 
-[access.azure]
+[api.access.azure]
 # The same three states for az:// urls. "azure" is Azure Blob Storage itself; a named
 # endpoint is an Azurite or a compatible server.
 # endpoints = ["azure"]
 
-[access.http]
+[api.access.http]
 # Which plain HTTP servers a request may read from, for http:// and https:// urls. An
 # http(s) url names its own server, so there is no provider name here the way "aws" is
 # one for s3 — every entry is a url.
 #
 # The same three states: leave the key out for any server (the default, still subject to
-# [access.network]), give an empty list to turn both schemes off, or list servers for
+# [api.access.network]), give an empty list to turn both schemes off, or list servers for
 # exactly those.
 # endpoints = ["https://data.example.com"]
 
@@ -89,7 +99,7 @@ allow_local_names = false
 # and does not need this as well.
 allow_plain_http = false
 
-[access.local]
+[api.access.local]
 # Directories a request may read parquet files from, written as absolute paths or
 # file:// urls. Empty by default, so the service reads no local files until one is
 # listed. A directory that does not exist is a startup error rather than a rule that
@@ -100,6 +110,32 @@ paths = []
 # not widen which files can be read: a path is resolved before it is matched, so a
 # link inside an allowed directory still cannot lead out of one.
 follow_symlinks = false
+
+# File-server mode: zero or more mounts, each publishing one local directory under a url
+# prefix. There are none by default, so the service is the API alone until one is added.
+# Both keys are required — a mount is a place and a directory, and neither half has a
+# default that could stand in for the other.
+#
+# Two mounts may not claim the same subtree: overlapping prefixes are a startup error
+# rather than a rule about which one wins.
+#
+# Mounting a directory also lets the API read it, scoped to that directory and under the
+# mount's own follow_symlinks. The bytes are already served whole over the file-server
+# route, so refusing to query them through the API would withhold nothing. The grant is
+# one way: [api.access.local] says nothing about what the mounts publish.
+#
+# [[mount]]
+# path = "/"                   # the url prefix
+# source = "/srv/data"         # an absolute path or a file:// url, and a directory
+# follow_symlinks = false      # per mount, so one mount of links decides nothing for
+#                              # the others or for the API
+# immutable = false            # never changes once published, so a cached copy needs no
+#                              # revalidating
+#
+# [[mount]]
+# path = "/hats"
+# source = "/data/hats"
+# immutable = true
 
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. A

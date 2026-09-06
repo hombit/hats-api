@@ -20,9 +20,53 @@ pub const CONFIG_ENV_VAR: &str = "HATS_API_CONFIG";
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
     pub server: ServerConfig,
-    pub access: AccessConfig,
+    pub api: ApiConfig,
+    /// Zero or more `[[mount]]` tables. Each publishes a local directory under a url
+    /// prefix; with none, the service is the API alone.
+    #[serde(rename = "mount")]
+    pub mounts: Vec<MountConfig>,
     pub limits: LimitsConfig,
     pub log: LogConfig,
+}
+
+/// The mode where the caller names the location of the data.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ApiConfig {
+    pub enabled: bool,
+    /// The url subtree the API answers under.
+    pub prefix: String,
+    pub access: AccessConfig,
+}
+
+impl Default for ApiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            prefix: "/api/v1".to_owned(),
+            access: AccessConfig::default(),
+        }
+    }
+}
+
+/// One published directory. `path` and `source` are required: a mount with either
+/// missing is not a mount with a sensible default, it is an unfinished sentence.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MountConfig {
+    /// The url prefix it answers under, e.g. `/` or `/hats`.
+    pub path: String,
+    /// The local directory it publishes, as an absolute path or a `file://` url.
+    pub source: String,
+    /// Whether a path under it may go through a symlink. Per mount rather than global,
+    /// so publishing a directory of links does not decide the question for every other
+    /// mount and for the API.
+    #[serde(default)]
+    pub follow_symlinks: bool,
+    /// Whether what is published never changes once published, which is what lets a
+    /// cached copy be served without revalidating it.
+    #[serde(default)]
+    pub immutable: bool,
 }
 
 /// What one request, and the process as a whole, may spend.
@@ -114,9 +158,13 @@ impl Default for LogConfig {
     }
 }
 
-/// What the service may read. See [`crate::access`] for what the entries mean.
+/// What the service may read when the request says where to read from. See
+/// [`crate::access`] for what the entries mean.
 ///
 /// The default is every remote endpoint on the public internet, and no local files.
+/// It governs API mode alone: a mount publishes its own directory whatever
+/// `[api.access.local]` says, and mounting one does not let a caller name a path
+/// outside it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AccessConfig {
@@ -149,7 +197,7 @@ pub struct NetworkConfig {
 }
 
 /// One remote backend's endpoint rules. Every backend has the same shape, under its own
-/// section: `[access.s3]`, `[access.gcs]`, `[access.azure]`.
+/// section: `[api.access.s3]`, `[api.access.gcs]`, `[api.access.azure]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct EndpointConfig {
@@ -200,8 +248,12 @@ pub struct LocalConfig {
 pub enum ConfigError {
     Read(PathBuf, io::Error),
     Parse(PathBuf, toml::de::Error),
-    /// An `[access]` entry — an endpoint or a directory — that means nothing.
+    /// An `[api.access]` entry — an endpoint or a directory — that means nothing.
     Rule(String, String),
+    /// A `[[mount]]` that cannot be served: a source that is not a local directory, or
+    /// a prefix that is not a prefix, or two mounts claiming the same subtree. Named by
+    /// its `path`, which is what the operator wrote and what tells the two apart.
+    Mount(String, String),
 }
 
 impl fmt::Display for ConfigError {
@@ -210,8 +262,9 @@ impl fmt::Display for ConfigError {
             Self::Read(path, error) => write!(f, "cannot read {}: {error}", path.display()),
             Self::Parse(path, error) => write!(f, "invalid config {}: {error}", path.display()),
             Self::Rule(entry, reason) => {
-                write!(f, "invalid [access] entry {entry:?}: {reason}")
+                write!(f, "invalid [api.access] entry {entry:?}: {reason}")
             }
+            Self::Mount(path, reason) => write!(f, "invalid [[mount]] {path:?}: {reason}"),
         }
     }
 }
@@ -236,17 +289,22 @@ mod tests {
     fn an_empty_file_is_the_default_configuration() {
         let config = parse("").unwrap();
         assert_eq!(config.server.listen_addr().to_string(), "0.0.0.0:80");
+        let access = &config.api.access;
         // Absent, not empty: any endpoint rather than none.
-        assert_eq!(config.access.s3.endpoints, None);
-        assert_eq!(config.access.gcs.endpoints, None);
-        assert_eq!(config.access.azure.endpoints, None);
-        assert!(config.access.local.paths.is_empty());
-        assert!(!config.access.network.allow_loopback);
-        assert!(!config.access.network.allow_private);
-        assert!(!config.access.network.allow_local_names);
-        assert!(config.access.network.allow_cidrs.is_empty());
-        assert!(config.access.network.allow_hosts.is_empty());
-        assert!(!config.access.local.follow_symlinks);
+        assert_eq!(access.s3.endpoints, None);
+        assert_eq!(access.gcs.endpoints, None);
+        assert_eq!(access.azure.endpoints, None);
+        assert!(access.local.paths.is_empty());
+        assert!(!access.network.allow_loopback);
+        assert!(!access.network.allow_private);
+        assert!(!access.network.allow_local_names);
+        assert!(access.network.allow_cidrs.is_empty());
+        assert!(access.network.allow_hosts.is_empty());
+        assert!(!access.local.follow_symlinks);
+        // The API on its own: no directory is published until a mount says so.
+        assert!(config.api.enabled);
+        assert_eq!(config.api.prefix, "/api/v1");
+        assert!(config.mounts.is_empty());
     }
 
     #[test]
@@ -255,10 +313,51 @@ mod tests {
         assert_eq!(config.server.listen_addr().to_string(), "127.0.0.1:80");
         let config = parse("[server]\nport = 8080").unwrap();
         assert_eq!(config.server.listen_addr().to_string(), "0.0.0.0:8080");
-        let config = parse("[access.local]\nfollow_symlinks = true").unwrap();
-        assert!(config.access.local.follow_symlinks);
+        let config = parse("[api.access.local]\nfollow_symlinks = true").unwrap();
+        assert!(config.api.access.local.follow_symlinks);
         // Setting one access key must not disturb the others.
-        assert_eq!(config.access.s3.endpoints, None);
+        assert_eq!(config.api.access.s3.endpoints, None);
+        // Nor the mode switches: naming one part of [api] leaves the rest default.
+        assert!(config.api.enabled);
+        assert_eq!(config.api.prefix, "/api/v1");
+    }
+
+    #[test]
+    fn a_mount_needs_both_halves() {
+        let config = parse("[[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"").unwrap();
+        let [mount] = config.mounts.as_slice() else {
+            panic!("expected one mount, got {:?}", config.mounts)
+        };
+        assert_eq!(mount.path, "/hats");
+        assert_eq!(mount.source, "/data/hats");
+        assert!(!mount.follow_symlinks);
+        assert!(!mount.immutable);
+        // Neither half has a default that could stand in for the other.
+        assert!(parse("[[mount]]\npath = \"/hats\"").is_err());
+        assert!(parse("[[mount]]\nsource = \"/data/hats\"").is_err());
+        assert!(parse("[[mount]]\npath = \"/a\"\nsource = \"/b\"\nimmutabe = true").is_err());
+    }
+
+    /// Several mounts are the ordinary case, and each keeps its own resolution rules.
+    #[test]
+    fn mounts_are_a_list_and_do_not_share_their_rules() {
+        let config = parse(
+            "[[mount]]\npath = \"/\"\nsource = \"/srv/data\"\nfollow_symlinks = true\n\
+             [[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"\nimmutable = true",
+        )
+        .unwrap();
+        let [first, second] = config.mounts.as_slice() else {
+            panic!("expected two mounts, got {:?}", config.mounts)
+        };
+        assert!(first.follow_symlinks && !first.immutable);
+        assert!(!second.follow_symlinks && second.immutable);
+    }
+
+    #[test]
+    fn the_api_can_be_turned_off() {
+        let config = parse("[api]\nenabled = false\nprefix = \"/query\"").unwrap();
+        assert!(!config.api.enabled);
+        assert_eq!(config.api.prefix, "/query");
     }
 
     #[test]
@@ -282,12 +381,18 @@ mod tests {
     #[test]
     fn an_absent_endpoint_list_is_not_an_empty_one() {
         for section in ["s3", "gcs", "azure"] {
-            let config = parse(&format!("[access.{section}]")).unwrap();
-            let empty = parse(&format!("[access.{section}]\nendpoints = []")).unwrap();
+            let any = parse(&format!("[api.access.{section}]"))
+                .unwrap()
+                .api
+                .access;
+            let none = parse(&format!("[api.access.{section}]\nendpoints = []"))
+                .unwrap()
+                .api
+                .access;
             let (present, absent) = match section {
-                "s3" => (empty.access.s3.endpoints, config.access.s3.endpoints),
-                "gcs" => (empty.access.gcs.endpoints, config.access.gcs.endpoints),
-                _ => (empty.access.azure.endpoints, config.access.azure.endpoints),
+                "s3" => (none.s3.endpoints, any.s3.endpoints),
+                "gcs" => (none.gcs.endpoints, any.gcs.endpoints),
+                _ => (none.azure.endpoints, any.azure.endpoints),
             };
             assert_eq!(absent, None, "{section}");
             assert_eq!(present, Some(Vec::new()), "{section}");
@@ -297,35 +402,47 @@ mod tests {
     /// A backend's section is set on its own, without disturbing the others.
     #[test]
     fn each_backend_has_its_own_section() {
-        let config = parse("[access.gcs]\nendpoints = [\"gcp\"]").unwrap();
+        let access = parse("[api.access.gcs]\nendpoints = [\"gcp\"]")
+            .unwrap()
+            .api
+            .access;
         assert_eq!(
-            config.access.gcs.endpoints.as_deref(),
+            access.gcs.endpoints.as_deref(),
             Some(["gcp".to_owned()].as_slice())
         );
-        assert_eq!(config.access.s3.endpoints, None);
-        assert_eq!(config.access.azure.endpoints, None);
+        assert_eq!(access.s3.endpoints, None);
+        assert_eq!(access.azure.endpoints, None);
     }
 
     #[test]
     fn a_misspelled_key_is_an_error_rather_than_a_silent_default() {
         for toml in [
             "[server]\nadress = \"127.0.0.1\"",
-            "[access.local]\nallow_symlinks = true",
-            "[access.s3]\nendpoint = \"aws\"",
-            "[access.gcs]\nendpoint = \"gcp\"",
-            "[access.azure]\nendpoitns = []",
-            "[access.network]\nallow_privte = true",
-            "[access.network]\nallow_cidr = []",
-            "[acess.network]\nallow_loopback = true",
+            "[api.access.local]\nallow_symlinks = true",
+            "[api.access.s3]\nendpoint = \"aws\"",
+            "[api.access.gcs]\nendpoint = \"gcp\"",
+            "[api.access.azure]\nendpoitns = []",
+            "[api.access.network]\nallow_privte = true",
+            "[api.access.network]\nallow_cidr = []",
+            "[api.acess.network]\nallow_loopback = true",
+            "[api]\nenable = true",
+            "[api]\nrefix = \"/v2\"",
             // Not sections this file has: the schemes are `gs` and `az`, but the
             // sections are named for the services.
-            "[access.gs]\nendpoints = []",
-            "[access.az]\nendpoints = []",
+            "[api.access.gs]\nendpoints = []",
+            "[api.access.az]\nendpoints = []",
             // The keys these replaced, so an old config fails loudly.
-            "[access]\nallow = []",
-            "[access]\nfollow_symlinks = true",
+            "[api.access]\nallow = []",
+            "[api.access]\nfollow_symlinks = true",
             // Loopback is one case of a destination rule, and lives with the rest.
-            "[access]\nallow_loopback = true",
+            "[api.access]\nallow_loopback = true",
+            // `[access]` is now `[api.access]`, and governs API mode alone; a config
+            // written against the old shape must not be read as the new one.
+            "[access.local]\npaths = [\"/srv/data\"]",
+            "[access.s3]\nendpoints = [\"aws\"]",
+            // A mount is `[[mount]]`, not `[mount]`, and not `[[mounts]]`.
+            "[[mounts]]\npath = \"/\"\nsource = \"/srv/data\"",
+            "[mount]\npath = \"/\"\nsource = \"/srv/data\"",
         ] {
             assert!(parse(toml).is_err(), "{toml} was accepted");
         }

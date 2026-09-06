@@ -216,17 +216,20 @@ fn requested_range(head: &str, len: u64) -> Option<(u64, u64)> {
 
 /// Loopback and cleartext, which is what a test server on `127.0.0.1` is.
 fn policy() -> AccessPolicy {
-    AccessPolicy::new(&AccessConfig {
-        network: NetworkConfig {
-            allow_loopback: true,
+    AccessPolicy::new(
+        &AccessConfig {
+            network: NetworkConfig {
+                allow_loopback: true,
+                ..Default::default()
+            },
+            http: HttpConfig {
+                endpoints: None,
+                allow_plain_http: true,
+            },
             ..Default::default()
         },
-        http: HttpConfig {
-            endpoints: None,
-            allow_plain_http: true,
-        },
-        ..Default::default()
-    })
+        &hats_api::mount::Mounts::default(),
+    )
     .expect("the policy should build")
 }
 
