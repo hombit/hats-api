@@ -52,12 +52,29 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+
+# A second copy of any of these is a second set of types, not a second version: the
+# adapters between them pass values across, so the mismatch surfaces as an error about a
+# trait not being implemented, several crates away from the line that caused it. Denied
+# by name so that `cargo deny` says which crate went double, which is the one thing that
+# error will not.
+
 # `object_store_opendal` adapts OpenDAL into the `object_store` trait DataFusion
-# consumes. Two copies of `object_store` in the tree are two distinct `ObjectStore`
-# traits, so the adapter's output could not be registered with DataFusion at all. That
-# fails to compile rather than misbehaving, but it is why those versions must stay
-# matched when either is bumped.
-deny = []
+# consumes. Two copies are two distinct `ObjectStore` traits, and the adapter's output
+# could not be registered with DataFusion at all.
+[[bans.deny]]
+name = "object_store"
+deny-multiple-versions = true
+
+# `network` hands OpenDAL a `reqwest::Client` it built itself, to put its own DNS
+# resolver in. A client from another copy of `reqwest` is a different type.
+[[bans.deny]]
+name = "reqwest"
+deny-multiple-versions = true
+
+[[bans.deny]]
+name = "opendal"
+deny-multiple-versions = true
 
 [[bans.skip-tree]]
 # Dev-only: the test S3 server brings its own tree, and duplicate versions inside it

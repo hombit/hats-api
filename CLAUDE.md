@@ -24,7 +24,8 @@ not in code, comments, test names, config or workflows. It is scaffolding and ge
 deleted when the work in it is done, and a reference to `§8.1` becomes a dangling
 pointer the moment that happens. When code needs a reason, the comment states the
 reason; if that makes the comment longer, it was leaning on the plan to finish its
-sentence.
+sentence. The `no-plan-references` pre-commit hook greps for both spellings; this file
+is exempt because it is where the rule is written down.
 
 ## Dependencies
 
@@ -41,7 +42,9 @@ at hand.
 Keep `object_store` matched to DataFusion's, and `reqwest` and
 `opendal-http-transport-reqwest` matched to what `opendal` resolves to. Two copies of a
 crate are two distinct types, so a mismatch is a type error rather than a version
-warning.
+warning — and one that surfaces several crates from the line that caused it.
+`deny.toml` denies multiple versions of those three by name, so `cargo deny check bans`
+says which crate went double before the compiler gets a chance to be unhelpful about it.
 
 ## Credentials
 
