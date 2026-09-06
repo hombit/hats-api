@@ -30,39 +30,66 @@ fn init_tracing(config: &LogConfig) {
     }
 }
 
+/// Why the service is not going to serve. Two outcomes rather than one, because asking
+/// for the usage is not a failure: it goes to stdout and exits zero, the way every other
+/// command does, so `hats-api --help | less` reads it and a script does not think the
+/// binary is broken.
+enum NotServing {
+    HelpRequested,
+    Invalid(String),
+}
+
 /// `--config <path>`, or nothing. Anything else is a usage error: this is the whole
 /// command line, and silently ignoring an argument is how a config file gets missed.
-fn config_path(args: &[String]) -> Result<Option<PathBuf>, String> {
+fn config_path(args: &[String]) -> Result<Option<PathBuf>, NotServing> {
     match args {
         [] => Ok(env::var_os(CONFIG_ENV_VAR).map(PathBuf::from)),
-        [flag] if flag == "-h" || flag == "--help" => Err(String::new()),
+        [flag] if flag == "-h" || flag == "--help" => Err(NotServing::HelpRequested),
         [flag, path] if flag == "-c" || flag == "--config" => Ok(Some(PathBuf::from(path))),
-        [flag] if flag == "-c" || flag == "--config" => Err(format!("{flag} needs a path")),
-        [other, ..] => Err(format!("unexpected argument {other:?}")),
+        [flag] if flag == "-c" || flag == "--config" => {
+            Err(NotServing::Invalid(format!("{flag} needs a path")))
+        }
+        [other, ..] => Err(NotServing::Invalid(format!(
+            "unexpected argument {other:?}"
+        ))),
     }
 }
 
+/// The one thing this binary writes to stdout. `print_stdout` is denied across the crate
+/// so that nothing in a request path can write there — a service's stdout is its log —
+/// and answering `--help` is the single case that belongs there instead.
+#[expect(
+    clippy::print_stdout,
+    reason = "requested output, written before there is any logging to write it to"
+)]
+fn print_usage() {
+    print!("{USAGE}");
+}
+
 /// Everything that can fail before the first request, failing in one place.
-fn startup() -> Result<(Config, AccessPolicy), String> {
+fn startup() -> Result<(Config, AccessPolicy), NotServing> {
     let args: Vec<String> = env::args().skip(1).collect();
+    let invalid = |error: &dyn std::fmt::Display| NotServing::Invalid(error.to_string());
     let config = match config_path(&args)? {
-        Some(path) => config::load(&path).map_err(|error| error.to_string())?,
+        Some(path) => config::load(&path).map_err(|error| invalid(&error))?,
         None => Config::default(),
     };
-    let policy = AccessPolicy::new(&config.access).map_err(|error| error.to_string())?;
+    let policy = AccessPolicy::new(&config.access).map_err(|error| invalid(&error))?;
     Ok((config, policy))
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // The config decides how to log, so nothing before this point can be logged.
+    // The config decides how to log, so nothing before this point can be logged: these
+    // two go to the terminal, and everything after `init_tracing` goes through it.
     let (config, policy) = match startup() {
         Ok(started) => started,
-        Err(message) => {
-            if !message.is_empty() {
-                eprintln!("{message}\n");
-            }
-            eprint!("{USAGE}");
+        Err(NotServing::HelpRequested) => {
+            print_usage();
+            return ExitCode::SUCCESS;
+        }
+        Err(NotServing::Invalid(message)) => {
+            eprintln!("{message}\n{USAGE}");
             return ExitCode::FAILURE;
         }
     };
@@ -74,7 +101,7 @@ async fn main() -> ExitCode {
         Ok(value) => match value.parse() {
             Ok(addr) => addr,
             Err(error) => {
-                eprintln!("invalid HATS_API_LISTEN_ADDR {value:?}: {error}");
+                tracing::error!(%error, value, "invalid HATS_API_LISTEN_ADDR");
                 return ExitCode::FAILURE;
             }
         },
@@ -84,7 +111,7 @@ async fn main() -> ExitCode {
     let listener = match tokio::net::TcpListener::bind(listen_addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("failed to bind {listen_addr}: {error}");
+            tracing::error!(%error, %listen_addr, "failed to bind");
             return ExitCode::FAILURE;
         }
     };
@@ -98,7 +125,7 @@ async fn main() -> ExitCode {
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
-        eprintln!("server error: {error}");
+        tracing::error!(%error, "server error");
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

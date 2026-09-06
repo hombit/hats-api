@@ -111,6 +111,10 @@ impl Format {
 /// — `invalid type: string "AKIA…"`. So the message is ours, except for the two serde
 /// phrasings that name a key rather than a value. The rest state what was expected,
 /// which is what the caller needed anyway.
+///
+/// Recognising those two by their wording is the weak part: serde could reword them, and
+/// the only cost would be a caller who stops being told which key they misspelled. It
+/// fails towards the safe message, and the two tests below are what notice.
 fn body_error(rejection: &JsonRejection) -> ApiError {
     const SHAPE: &str = "expected a JSON object with url, column and value, and \
                          optionally storage, columns, format";
@@ -182,7 +186,7 @@ async fn select(
     )
     .await?;
 
-    let num_rows: usize = result.batches.iter().map(|batch| batch.num_rows()).sum();
+    let num_rows = result.num_rows();
     let response = match format {
         Format::Json => json_response(&result, started)?,
         Format::Parquet => parquet_response(&result, &file, num_rows, started).await?,

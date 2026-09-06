@@ -207,16 +207,24 @@ impl Default for AccessPolicy {
 
 impl AccessPolicy {
     pub fn new(config: &AccessConfig) -> Result<Self, ConfigError> {
-        let s3 = EndpointRules::new(&config.s3, Backend::S3)?;
-        let gcs = EndpointRules::new(&config.gcs, Backend::Gcs)?;
-        let azure = EndpointRules::new(&config.azure, Backend::Azure)?;
-        // Every host the operator named, so that the network rules let the deployment
-        // reach the endpoints it was configured for. A MinIO on RFC1918 space is the
-        // ordinary case of this, and it must not need saying twice.
-        let named: Vec<Host<String>> = [&s3, &gcs, &azure]
-            .into_iter()
-            .flat_map(EndpointRules::hosts)
-            .collect();
+        // Every host the operator named, collected as the rules are built rather than by
+        // walking them again afterwards: a second pass would be a second list of
+        // backends to keep in step, and a backend missing from it would have its own
+        // configured endpoint refused by the network rules.
+        //
+        // Naming a host is what puts it here, and that is the point — the network rules
+        // govern what a caller may point the service at, not what the deployment was set
+        // up for. A MinIO on RFC1918 space must not need saying twice.
+        let mut named: Vec<Host<String>> = Vec::new();
+        let mut build = |endpoints, backend| -> Result<EndpointRules, ConfigError> {
+            let rules = EndpointRules::new(endpoints, backend)?;
+            named.extend(rules.hosts());
+            Ok(rules)
+        };
+        let s3 = build(&config.s3, Backend::S3)?;
+        let gcs = build(&config.gcs, Backend::Gcs)?;
+        let azure = build(&config.azure, Backend::Azure)?;
+
         let network = NetworkPolicy::new(&config.network, &named)?;
         let local = config
             .local

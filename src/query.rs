@@ -34,6 +34,13 @@ pub struct QueryResult {
     pub batches: Vec<RecordBatch>,
 }
 
+impl QueryResult {
+    /// How many rows matched, across every batch.
+    pub fn num_rows(&self) -> usize {
+        self.batches.iter().map(RecordBatch::num_rows).sum()
+    }
+}
+
 /// The shape of the answer, not the answer. A derived `Debug` would print every row,
 /// so a result that turned up in a log line or a panic message would be the query
 /// result itself — which is the caller's data, and can be millions of values.
@@ -42,14 +49,7 @@ impl std::fmt::Debug for QueryResult {
         f.debug_struct("QueryResult")
             .field("schema", &self.schema)
             .field("num_batches", &self.batches.len())
-            .field(
-                "num_rows",
-                &self
-                    .batches
-                    .iter()
-                    .map(RecordBatch::num_rows)
-                    .sum::<usize>(),
-            )
+            .field("num_rows", &self.num_rows())
             .finish()
     }
 }
