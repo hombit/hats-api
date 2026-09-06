@@ -12,27 +12,56 @@
 address = "0.0.0.0"
 port = 80
 
-[access]
-# Whether a request may reach the loopback interface — an s3 endpoint of
-# http://127.0.0.1:9000, say. Off by default: the service can reach things on its own
-# machine that its callers are not meant to reach through it. Turn it on to work
-# against a local MinIO without naming its endpoint below.
+[access.network]
+# Which addresses a request may reach, whatever backend it goes through — the question
+# is a property of the destination rather than of the protocol. Everything here is off
+# by default: the service sits somewhere its callers do not, and can reach a great deal
+# from there that they are not meant to reach through it.
+#
+# Names and addresses are both checked. A name is judged before it is resolved, and
+# every address it resolves to is judged afterwards, inside the HTTP client's own
+# resolver — so a name that answers differently the second time round does not help.
+
+# 127.0.0.0/8, ::1, and localhost. Turn it on to work against a local MinIO without
+# naming its endpoint below.
 allow_loopback = false
 
+# Everything else that is not the public internet: RFC1918, unique-local, and
+# link-local — which is where EC2 and GCE serve this machine's own IAM credentials.
+allow_private = false
+
+# Names that only mean something inside a network: single-label ones, and .internal,
+# .local, .cluster.local, .svc and the rest.
+allow_local_names = false
+
+# Networks and hosts to allow whatever the three switches above say. A host named here
+# is allowed along with whatever it resolves to, which is the point of naming one.
+# allow_cidrs = ["10.1.2.0/24"]
+# allow_hosts = ["minio.internal"]
+
 [access.s3]
-# Which S3 servers a request may point this service at. For s3 the endpoint is the
-# thing worth deciding, not the bucket: a bucket name says nothing about the host,
-# because the request carries its own `endpoint` option and can aim anywhere. Any
-# bucket at an allowed endpoint is readable.
+# Which S3 servers a request may point this service at. For an object store the
+# endpoint is the thing worth deciding, not the bucket: a bucket name says nothing
+# about the host, because the request carries its own `endpoint` option and can aim
+# anywhere. Any bucket at an allowed endpoint is readable.
 #
 #   "aws"                        AWS S3 itself: a url with no `endpoint` option
 #   "https://minio.example.com"  one S3-compatible server
 #
 # Three states, and the first two differ: leave the key out for any endpoint (the
-# default, still subject to allow_loopback), give an empty list to turn s3 off
-# entirely, or list endpoints for exactly those. Naming an endpoint here is
-# permission enough on its own — allow_loopback is not consulted for it.
+# default, still subject to [access.network]), give an empty list to turn s3 off
+# entirely, or list endpoints for exactly those. Naming an endpoint here is permission
+# enough on its own — [access.network] is not consulted for it, at either layer.
 # endpoints = ["aws"]
+
+[access.gcs]
+# The same three states for gs:// urls. "gcp" is Google Cloud Storage itself.
+# endpoints = ["gcp"]
+
+[access.azure]
+# The same three states for az:// urls. "azure" is Azure Blob Storage itself; a named
+# endpoint is an Azurite or a compatible server.
+# endpoints = ["azure"]
 
 [access.local]
 # Directories a request may read parquet files from, written as absolute paths or

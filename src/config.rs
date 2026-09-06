@@ -79,17 +79,35 @@ impl Default for LogConfig {
 
 /// What the service may read. See [`crate::access`] for what the entries mean.
 ///
-/// The default is every remote endpoint but the loopback interface, and no local files.
+/// The default is every remote endpoint on the public internet, and no local files.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AccessConfig {
-    /// Whether a request may reach the loopback interface. Consulted only where the
-    /// configuration did not name a host itself.
-    pub allow_loopback: bool,
+    pub network: NetworkConfig,
     pub s3: EndpointConfig,
     pub gcs: EndpointConfig,
     pub azure: EndpointConfig,
     pub local: LocalConfig,
+}
+
+/// Which addresses a request may reach, whatever backend it goes through: the
+/// destination is a property of the address rather than of the protocol. See
+/// [`crate::network`].
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NetworkConfig {
+    /// `127.0.0.0/8`, `::1`, and `localhost`.
+    pub allow_loopback: bool,
+    /// Everything else that is not the public internet: RFC1918, link-local — which is
+    /// where the cloud metadata services are — unique-local, and the reserved ranges.
+    pub allow_private: bool,
+    /// Names that only resolve inside a network: single-label ones, `.internal`,
+    /// `.cluster.local`, and the rest.
+    pub allow_local_names: bool,
+    /// Networks to allow whatever the switches above say, e.g. `["10.1.2.0/24"]`.
+    pub allow_cidrs: Vec<String>,
+    /// Hosts to allow whatever the switches above say, and whatever they resolve to.
+    pub allow_hosts: Vec<String>,
 }
 
 /// One remote backend's endpoint rules. Every backend has the same shape, under its own
@@ -163,7 +181,11 @@ mod tests {
         assert_eq!(config.access.gcs.endpoints, None);
         assert_eq!(config.access.azure.endpoints, None);
         assert!(config.access.local.paths.is_empty());
-        assert!(!config.access.allow_loopback);
+        assert!(!config.access.network.allow_loopback);
+        assert!(!config.access.network.allow_private);
+        assert!(!config.access.network.allow_local_names);
+        assert!(config.access.network.allow_cidrs.is_empty());
+        assert!(config.access.network.allow_hosts.is_empty());
         assert!(!config.access.local.follow_symlinks);
     }
 
@@ -232,7 +254,9 @@ mod tests {
             "[access.s3]\nendpoint = \"aws\"",
             "[access.gcs]\nendpoint = \"gcp\"",
             "[access.azure]\nendpoitns = []",
-            "[acess]\nallow_loopback = true",
+            "[access.network]\nallow_privte = true",
+            "[access.network]\nallow_cidr = []",
+            "[acess.network]\nallow_loopback = true",
             // Not sections this file has: the schemes are `gs` and `az`, but the
             // sections are named for the services.
             "[access.gs]\nendpoints = []",
@@ -240,9 +264,26 @@ mod tests {
             // The keys these replaced, so an old config fails loudly.
             "[access]\nallow = []",
             "[access]\nfollow_symlinks = true",
+            // Loopback is one case of a destination rule, and lives with the rest.
+            "[access]\nallow_loopback = true",
         ] {
             assert!(parse(toml).is_err(), "{toml} was accepted");
         }
+    }
+
+    /// The example file says every value shown is the default, and that it is complete.
+    /// Both halves are checked: it parses under `deny_unknown_fields`, so it cannot name
+    /// a key that no longer exists, and it produces the default config, so no value in
+    /// it has drifted from what it claims to show.
+    #[test]
+    fn the_example_config_is_the_default_configuration() {
+        let example = parse(include_str!("../hats-api.example.toml")).unwrap();
+        let default = Config::default();
+        assert_eq!(
+            format!("{example:?}"),
+            format!("{default:?}"),
+            "hats-api.example.toml no longer shows the defaults"
+        );
     }
 
     #[test]

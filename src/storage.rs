@@ -19,7 +19,7 @@ use std::sync::Arc;
 use object_store::{ObjectStore, local::LocalFileSystem};
 use object_store_opendal::OpendalStore;
 use opendal::layers::RetryLayer;
-use opendal::{Operator, services};
+use opendal::{OperationContext, Operator, services};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
@@ -132,7 +132,7 @@ impl StorageOptions {
     }
 
     /// Whether anything here would be sent to the store as proof of identity — which is
-    /// the whole of what [`allow_http_endpoint`] is protecting.
+    /// the whole of what [`allow_cleartext`] is protecting.
     fn has_credentials(&self) -> bool {
         self.access_key_id.is_some()
             || self.secret_access_key.is_some()
@@ -331,10 +331,16 @@ fn resolve_endpoint(
         .as_deref()
         .map(parse_endpoint)
         .transpose()?;
+    // Before the policy: an endpoint in a scheme this service does not speak is not a
+    // request the policy has anything useful to say about, and saying which host it
+    // will not reach would answer a question the caller did not ask.
+    if let Some(endpoint) = &endpoint {
+        require_http_scheme(endpoint)?;
+    }
     policy.authorize_endpoint(backend, endpoint.as_ref())?;
     match &endpoint {
         Some(endpoint) => {
-            allow_http_endpoint(endpoint, options.allow_http, options.has_credentials())?;
+            allow_cleartext(endpoint, options.allow_http, options.has_credentials())?;
         }
         // A provider's own service is https, so there is nothing here for `allow_http`
         // to permit, and a caller who set it has misunderstood what it does.
@@ -372,37 +378,47 @@ fn require_label(name: &str, value: &str, extra: &str) -> Result<(), ApiError> {
     }
 }
 
-/// Decide whether this endpoint may be spoken to over cleartext. The backend would not
-/// ask — it just follows the endpoint's scheme — so this is the whole of the decision,
-/// and it happens before a connection is opened rather than after one fails.
-fn allow_http_endpoint(
-    endpoint: &Url,
-    allow_http: bool,
-    has_credentials: bool,
-) -> Result<(), ApiError> {
+/// An endpoint is an HTTP service whatever the storage behind it is.
+fn require_http_scheme(endpoint: &Url) -> Result<(), ApiError> {
     match endpoint.scheme() {
-        "https" => Ok(()),
-        // Nothing to expose when the request is anonymous, and that is the common case
-        // of a local MinIO or a test server.
-        "http" if !has_credentials || allow_http => Ok(()),
-        // Display, not Debug: Debug on a Url prints the whole parsed struct. The
-        // endpoint is safe to echo either way — credentials are separate options.
-        "http" => Err(ApiError::bad_request(format!(
-            "endpoint {endpoint} is not https and credentials were given, which would \
-             be sent in cleartext; pass allow_http=true to do it anyway"
-        ))),
+        "http" | "https" => Ok(()),
         scheme => Err(ApiError::bad_request(format!(
             "endpoint {endpoint} has scheme {scheme:?}, expected http or https"
         ))),
     }
 }
 
-/// OpenDAL has no HTTP client until one is installed process-wide, and a store built
-/// without one fails on its first request rather than at build time. Installing is
-/// idempotent and first-one-wins, so every remote backend calls this before building.
-fn install_http_transport() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(opendal::install_default);
+/// Decide whether this endpoint may be spoken to over cleartext. The backend would not
+/// ask — it just follows the endpoint's scheme — so this is the whole of the decision,
+/// and it happens before a connection is opened rather than after one fails.
+fn allow_cleartext(
+    endpoint: &Url,
+    allow_http: bool,
+    has_credentials: bool,
+) -> Result<(), ApiError> {
+    // Nothing to expose when the request is anonymous, and that is the common case of a
+    // local MinIO or a test server.
+    match endpoint.scheme() != "http" || !has_credentials || allow_http {
+        true => Ok(()),
+        // Display, not Debug: Debug on a Url prints the whole parsed struct. The
+        // endpoint is safe to echo either way — credentials are separate options.
+        false => Err(ApiError::bad_request(format!(
+            "endpoint {endpoint} is not https and credentials were given, which would \
+             be sent in cleartext; pass allow_http=true to do it anyway"
+        ))),
+    }
+}
+
+/// Everything a remote store needs after its builder is configured: the policy's own
+/// HTTP transport, whose resolver decides what may be connected to, and the retries.
+///
+/// OpenDAL would otherwise reach for the process-wide default transport — a plain
+/// `reqwest::Client` that resolves and connects to whatever it is given. Every remote
+/// backend goes through here so that none of them can end up on that one.
+fn operator(builder: impl opendal::Builder, policy: &AccessPolicy) -> Result<Operator, ApiError> {
+    Ok(Operator::new(builder)?
+        .with_context(OperationContext::new().with_http_transport(policy.network().transport()))
+        .layer(retries()))
 }
 
 /// Retry the failures OpenDAL marks temporary: a connection an origin closed between
@@ -427,7 +443,6 @@ fn s3_store(
     options: &StorageOptions,
     policy: &AccessPolicy,
 ) -> Result<OpendalStore, ApiError> {
-    install_http_transport();
     let bucket = authority(url)?;
     let region = options.region.as_deref().unwrap_or(DEFAULT_S3_REGION);
     // Virtual-host addressing puts the region in the hostname, so a region is one of
@@ -482,7 +497,7 @@ fn s3_store(
             ));
         }
     };
-    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+    Ok(OpendalStore::new(operator(builder, policy)?))
 }
 
 fn gcs_store(
@@ -490,8 +505,6 @@ fn gcs_store(
     options: &StorageOptions,
     policy: &AccessPolicy,
 ) -> Result<OpendalStore, ApiError> {
-    install_http_transport();
-
     let mut builder = services::Gcs::default()
         .bucket(authority(url)?)
         // The request is the only source of credentials. Without these two, OpenDAL
@@ -529,7 +542,7 @@ fn gcs_store(
         // No credentials given: ask anonymously rather than signing with nothing.
         (None, None) => builder.skip_signature(),
     };
-    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+    Ok(OpendalStore::new(operator(builder, policy)?))
 }
 
 fn azblob_store(
@@ -537,8 +550,6 @@ fn azblob_store(
     options: &StorageOptions,
     policy: &AccessPolicy,
 ) -> Result<OpendalStore, ApiError> {
-    install_http_transport();
-
     // Azure has no one host to default to: every account is its own. The url carries
     // the container, so the account has to come from the options — and naming it is
     // also what keeps a credential from being ignored, since OpenDAL only installs a
@@ -575,7 +586,7 @@ fn azblob_store(
         // identity rather than the caller's.
         (None, None) => builder.skip_signature(),
     };
-    Ok(OpendalStore::new(Operator::new(builder)?.layer(retries())))
+    Ok(OpendalStore::new(operator(builder, policy)?))
 }
 
 /// Whether a string is base64. Not a decode: what the caller needs to know is that
@@ -716,7 +727,10 @@ mod tests {
     /// — which is what running against a local MinIO means.
     fn open_loopback(url: &Url, options: &StorageOptions) -> Result<RemoteFile, ApiError> {
         let config = crate::config::AccessConfig {
-            allow_loopback: true,
+            network: crate::config::NetworkConfig {
+                allow_loopback: true,
+                ..Default::default()
+            },
             ..Default::default()
         };
         super::open(url, options, &AccessPolicy::new(&config).unwrap())
@@ -1080,6 +1094,12 @@ mod tests {
     /// the head back to the test and answers 404. Whether a request was signed is not
     /// visible on the builder, only on the wire, so this is where it gets checked.
     fn capture_one_request() -> (u16, std::sync::mpsc::Receiver<String>) {
+        // 404 rather than a hang or a reset: a retry would find nothing listening.
+        serve_one("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_owned())
+    }
+
+    /// The same, answering whatever the caller wants answered.
+    fn serve_one(response: String) -> (u16, std::sync::mpsc::Receiver<String>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1097,8 +1117,7 @@ mod tests {
                     _ => break,
                 }
             }
-            // 404 rather than a hang or a reset: a retry would find nothing listening.
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.write_all(response.as_bytes());
             let _ = sender.send(String::from_utf8_lossy(&head).into_owned());
         });
         (port, receiver)
@@ -1235,6 +1254,63 @@ mod tests {
         .await;
         assert!(head.contains("sig=abc"), "the token was not sent: {head}");
         assert!(!head.contains("authorization:"), "{head}");
+    }
+
+    /// The stores are built on the access policy's own HTTP transport, whose resolver is
+    /// the network policy. A store on OpenDAL's process-wide default client would
+    /// resolve and connect to whatever it was handed, so this checks that a name a store
+    /// is pointed at goes through a resolver that works — the refusing half is
+    /// [`crate::network`]'s own test.
+    #[tokio::test]
+    async fn a_store_reaches_a_named_host_through_the_policys_own_resolver() {
+        let (port, receiver) = capture_one_request();
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let endpoint = options(serde_json::json!({
+            "endpoint": format!("http://localhost:{port}"),
+        }));
+        let file = open_loopback(&url, &endpoint).unwrap();
+
+        use object_store::ObjectStoreExt;
+        let _ = file
+            .store
+            .get(&object_store::path::Path::from("key.parquet"))
+            .await;
+        let head = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the store made no request");
+        assert!(head.contains("/bucket/key.parquet"), "{head}");
+    }
+
+    /// A redirect is the origin picking the next destination, and the next destination
+    /// is the one thing only the config gets to pick: the hop would carry the caller's
+    /// credentials to a host no endpoint rule named.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed() {
+        let (elsewhere, never_reached) = capture_one_request();
+        let (port, _redirected) = serve_one(format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{elsewhere}/bucket/key.parquet\r\n\
+             Content-Length: 0\r\n\r\n"
+        ));
+
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        let endpoint = options(serde_json::json!({
+            "endpoint": format!("http://127.0.0.1:{port}"),
+        }));
+        let file = open_loopback(&url, &endpoint).unwrap();
+
+        use object_store::ObjectStoreExt;
+        let error = file
+            .store
+            .get(&object_store::path::Path::from("key.parquet"))
+            .await
+            .expect_err("a 302 is not a response the store can read");
+        assert!(!format!("{error}").is_empty());
+        assert!(
+            never_reached
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .is_err(),
+            "the redirect was followed"
+        );
     }
 
     /// Printing the options, and printing the opened file. Both are `Debug` and both

@@ -30,6 +30,18 @@ at hand.
 - A dependency that logs credentials goes in `logging::CREDENTIAL_UNSAFE_TARGETS`, with
   a reason. `tests/credential_logging.rs` is what catches the next one.
 
+## The network
+
+- A remote store is built through `storage::operator`, never `Operator::new` directly.
+  That is what puts the access policy's own HTTP transport on it; OpenDAL's process-wide
+  default client resolves and connects to whatever it is handed, which is the whole of
+  what `network` exists to stop.
+- The address check belongs in the resolver and nowhere else. Checking a host and then
+  letting a client resolve it again is DNS rebinding: the answer that passed is not the
+  answer that gets connected to.
+- `access` decides which endpoint may be named; `network` decides which address may be
+  reached. A new rule belongs in whichever of those it is actually about.
+
 ## Comments
 
 Focused and informative. Say what the code does and what a reader could not work out

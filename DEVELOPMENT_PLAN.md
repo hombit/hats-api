@@ -35,7 +35,7 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 |---|---|---|---|
 | 2.1 | OpenDAL backend layer, s3 migrated first | done | `object_store_opendal` 0.58.0 → `object_store ^0.13.1`, matching DataFusion 55's 0.13.2, one copy in the lock file. The §2.1 gate is met; the phase is not blocked. See the notes below. |
 | 2.2 | GCS and Azure | done | `gs://` and `az://`. `abfss://` dropped — see below; the deliverable's scheme list loses it. See also the constraints §2.2 added. |
-| 8.3 | network policy | todo | prerequisite for §2.3, per §8.3 |
+| 8.3 | network policy | done | `[access.network]`, checked in the HTTP client's own resolver. See the constraints §8.3 added. |
 | 2.3 | HTTP/HTTPS, range probe, materialization | todo | needs §8.3 |
 | 2.4 | WebDAV | todo | needs §8.3 |
 | 2.5 | Hugging Face | todo | droppable; §2.1's gate was met, so no reason to drop it yet |
@@ -54,10 +54,11 @@ Status values: `todo`, `in progress`, `done`, `dropped` (with the reason).
 
 Constraints §2.1 discovered that bind every backend after it:
 
-- **Every remote backend must call `storage::install_http_transport` before building.**
-  OpenDAL 0.58 has no HTTP client until one is installed process-wide, and a store
-  built without it builds fine and fails on its first request — a failure no test that
-  stops short of the wire will catch.
+- **Every remote backend must build its operator through `storage::operator`.** OpenDAL
+  0.58 has no HTTP client until one is given to it, and a store built without one builds
+  fine and fails on its first request — a failure no test that stops short of the wire
+  will catch. §8.3 gave that transport a policy, so the same call is now also the only
+  thing standing between a backend and the network rules.
 - **Ambient credential discovery is disabled per store, not globally.** s3 uses
   `disable_config_load` and `disable_ec2_metadata`; §2.2's GCS and Azure builders need
   their own equivalents, and §8.1 is not satisfied until each has one.
@@ -106,6 +107,28 @@ Constraints §2.2 added, which bind every backend after it:
   canary asserts each backend actually logged something, because a backend whose signer
   never ran reads exactly like a backend that leaked nothing.
 
+Constraints §8.3 added, which bind every backend and every phase after it:
+
+- **A store is built through `storage::operator`, never `Operator::new`.** That is what
+  attaches the access policy's own HTTP transport. OpenDAL's process-wide default client
+  resolves and connects to whatever it is handed, so a backend that builds its own
+  operator silently opts out of the whole network policy and nothing fails to compile.
+- **The address check lives in the resolver.** Nowhere else can hold: a host checked and
+  then handed to a client that resolves it again is DNS rebinding. This is also why the
+  check applies to hosts nothing authorized — a provider's own endpoint, a url a backend
+  built itself — rather than only to what a caller wrote.
+- **Redirects are not followed.** A 3xx is the origin choosing the next destination,
+  which would carry the caller's credentials to a host no endpoint rule named. §2.3
+  inherits this rather than deciding it again.
+- **Naming a host in the config is permission at both layers.** The endpoint lists' hosts
+  are seeded into the network rules, so an operator pointing at a MinIO on RFC1918 space
+  does not have to say so twice. A rule that a caller can reach is the only kind these
+  rules govern.
+- **An operator deny list of host names was left out.** `allow_hosts` is the lever that
+  the default-deny shape actually needs; a deny list would only matter for internal hosts
+  on public names, which is the case `allow_private` and the resolver already cover. Add
+  one when a deployment turns up that needs it, not before.
+
 Written against `781ceac`: a stateless service with one endpoint, `GET /api/v1/select`,
 doing point lookups in a single parquet file over `s3://` or `file://`, under an access
 policy in a TOML config file.
@@ -118,6 +141,7 @@ keep, §9 what is deferred.
 | piece | state |
 |---|---|
 | `src/access.rs` | endpoint- and directory-level policy; one section per remote backend, plus local |
+| `src/network.rs` | which addresses may be reached; the HTTP transport every store is built on |
 | `src/storage.rs` | url → `ObjectStore`; `s3`, `gs`, `az`, `file`; options passed beside the url |
 | `src/query.rs` | DataFusion session per request, `column == value`, projection pushdown |
 | `src/parquet_out.rs` | writes the answer with the source file's own layout |
@@ -126,7 +150,7 @@ keep, §9 what is deferred.
 | `src/error.rs` | `ApiError` → status + message; credentials never reach it |
 | `src/main.rs` | `--config` / `HATS_API_CONFIG`, logging setup, graceful shutdown |
 
-Baseline to hold: 129 tests, `cargo clippy --all-targets` clean, `cargo fmt` clean.
+Baseline to hold: 144 tests, `cargo clippy --all-targets` clean, `cargo fmt` clean.
 
 Three invariants for every phase below:
 
@@ -365,6 +389,7 @@ enabled = true
 prefix = "/api/v1"
 
 [api.access]               # caller-supplied urls only
+[api.access.network]
 allow_loopback = false
 [api.access.s3]
 # endpoints = ["aws"]
@@ -969,41 +994,37 @@ backend in §2 is a chance to break it.
 
 ### 8.3 No local network until the config says so
 
-**This is a real gap today, not a rule to preserve.** `allow_loopback` covers `127.0.0.0/8`
-and `::1` only. With `[api.access.s3].endpoints` absent — meaning any endpoint — a caller
-can aim the service at `169.254.169.254` (the EC2/GCE instance metadata service, a source
-of IAM credentials), at RFC1918 space, or at any internal hostname resolving there. §2.3's
-HTTP backend turns that from probing into direct reads, so **the network policy must land
-with or before the HTTP backend**.
+A single **`[access.network]`** section governs every backend, since this is a property of
+the destination address rather than the protocol. Everything in it is off by default.
 
-- A single **`[api.access.network]`** section governing every backend, since this is a
-  property of the destination address rather than the protocol:
+```toml
+[access.network]
+allow_loopback = false      # 127.0.0.0/8, ::1, localhost
+allow_private = false       # RFC1918, fc00::/7, link-local incl. 169.254.0.0/16
+allow_local_names = false   # single-label, .local, .internal, .cluster.local, …
+# allow_cidrs = ["10.1.2.0/24"]
+# allow_hosts = ["minio.internal"]
+```
 
-  ```toml
-  [api.access.network]
-  allow_loopback = false      # 127.0.0.0/8, ::1
-  allow_private = false       # RFC1918, fc00::/7, link-local incl. 169.254.0.0/16
-  allow_local_names = false   # single-label, .local, .internal, .cluster.local, …
-  # allow_cidrs = ["10.1.2.0/24"]
-  # allow_hosts = ["minio.internal"]
-  ```
+Rules to preserve:
 
-- **Decide on the resolved address**, which also handles literal-form tricks (decimal
-  `2130706433`, octal, IPv4-mapped IPv6). **Every** resolved address must pass, not only
-  the first.
-- **Refuse local names before resolution**, since internal hosts on public IP space defeat
-  the address rules: single-label names, `.local`, `.internal`, `.localhost`, `.home.arpa`,
-  `.cluster.local`, `.svc`, plus an operator deny list. Names and addresses are two layers
-  and both are needed.
-- **Close the resolve-then-connect gap** with a connector that re-validates the socket
-  address at connection time; checking a name and letting the client resolve it again is
-  DNS rebinding.
-- **Follow no redirects** on the HTTP backend by default; if ever needed, each hop is a
-  fresh policy decision.
+- **Names and addresses are two layers and both are needed.** An internal host on public
+  address space defeats the address rules; writing the address down defeats the name
+  rules. A name is judged before resolution, every address it resolves to after.
+- **Decide on the resolved address**, which also settles literal-form tricks — IPv4-mapped
+  IPv6, NAT64's embedded v4. **Every** resolved address must pass, not only the first: an
+  answer mixing a public address with `127.0.0.1` is an answer built to be retried.
+- **The check runs inside the HTTP client's own resolver**, whose return value *is* the
+  set of addresses the connection is attempted against. That is what closes the
+  resolve-then-connect gap; a check anywhere earlier is a check against an answer that
+  can be replaced.
 - **Never echo a remote response body into an error** — report the status code and the
-  stripped url.
-- Naming an endpoint in `[api.access.s3].endpoints` remains permission enough for it. The
-  network rules govern what a caller may reach, not what the operator configured.
+  stripped url. Still to hold when §2.3 lands.
+- Naming an endpoint in `[access.s3].endpoints` remains permission enough for it, at both
+  layers. The network rules govern what a caller may reach, not what the operator
+  configured.
+
+§3.1 moves this under `[api.access.network]` along with the rest of the access table.
 
 ### 8.4 Bounded work per request
 

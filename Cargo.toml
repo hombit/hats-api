@@ -14,12 +14,20 @@ axum = "0.8"
 bytes = "1"
 datafusion = { version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection"] }
 futures = "0.3"
+# CIDR arithmetic for `network`. Already in the tree under hyper-util, and it has no
+# dependencies of its own.
+ipnet = "2"
 # Keep in sync with datafusion's; two copies are two distinct `ObjectStore` traits.
 object_store = "0.13"
 object_store_opendal = "0.58"
 # Default features pull in every layer and a ctor; `storage` installs the transport and
 # the one layer it wants.
 opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
+# `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
+# needs both the transport adapter and reqwest by name. Both versions must match what
+# `opendal` resolves to: a `reqwest::Client` from another copy is a different type.
+opendal-http-transport-reqwest = "0.58.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

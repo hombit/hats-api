@@ -14,8 +14,12 @@
 //! own name for "the provider's own service" — which is what a url carrying no
 //! `endpoint` option means.
 //!
+//! Which *address* a request ends up reaching is a second question, and one the endpoint
+//! rules cannot answer: a name allowed here may still resolve onto the network this
+//! process happens to sit on. That is [`crate::network`]'s, under `[access.network]`.
+//!
 //! ```toml
-//! [access]
+//! [access.network]
 //! allow_loopback = false
 //!
 //! [access.s3]
@@ -44,6 +48,7 @@ use url::{Host, Url};
 
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
+use crate::network::NetworkPolicy;
 
 /// What a URL turned out to be, once it was allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,16 +120,16 @@ pub struct AccessPolicy {
     /// Allowed directories, canonical, so that a resolved request path can simply be
     /// tested for being under one of them.
     local: Vec<PathBuf>,
-    allow_loopback: bool,
+    network: NetworkPolicy,
     follow_symlinks: bool,
 }
 
 #[derive(Debug)]
 enum EndpointRules {
-    /// No list was configured: any endpoint, subject to `allow_loopback`.
+    /// No list was configured: any endpoint, subject to the network rules.
     Any,
     /// Exactly these, and an empty list turns the backend off. An entry here is the
-    /// operator naming a host, so `allow_loopback` has nothing left to decide.
+    /// operator naming a host, so the network rules have nothing left to decide.
     Only(Vec<Endpoint>),
 }
 
@@ -137,7 +142,7 @@ enum Endpoint {
     /// `https://host` and `https://host:443` are the one endpoint they are.
     Url {
         scheme: String,
-        host: String,
+        host: Host<String>,
         port: Option<u16>,
     },
 }
@@ -158,6 +163,14 @@ impl AccessPolicy {
         let s3 = EndpointRules::new(&config.s3, Backend::S3)?;
         let gcs = EndpointRules::new(&config.gcs, Backend::Gcs)?;
         let azure = EndpointRules::new(&config.azure, Backend::Azure)?;
+        // Every host the operator named, so that the network rules let the deployment
+        // reach the endpoints it was configured for. A MinIO on RFC1918 space is the
+        // ordinary case of this, and it must not need saying twice.
+        let named: Vec<Host<String>> = [&s3, &gcs, &azure]
+            .into_iter()
+            .flat_map(EndpointRules::hosts)
+            .collect();
+        let network = NetworkPolicy::new(&config.network, &named)?;
         let local = config
             .local
             .paths
@@ -171,9 +184,14 @@ impl AccessPolicy {
             gcs,
             azure,
             local,
-            allow_loopback: config.allow_loopback,
+            network,
             follow_symlinks: config.local.follow_symlinks,
         })
+    }
+
+    /// The destination rules, and the HTTP transport built from them.
+    pub fn network(&self) -> &NetworkPolicy {
+        &self.network
     }
 
     /// Every scheme this policy can serve, for logs and error messages.
@@ -224,19 +242,11 @@ impl AccessPolicy {
         endpoint: Option<&Url>,
     ) -> Result<(), ApiError> {
         match self.rules(backend) {
-            EndpointRules::Any => match endpoint {
-                // The one thing an unrestricted policy still refuses: the service can
-                // reach things on its own machine that its callers cannot.
-                Some(url)
-                    if url.host().is_some_and(|host| is_loopback(&host))
-                        && !self.allow_loopback =>
-                {
-                    Err(ApiError::forbidden(format!(
-                        "endpoint {url} is on the loopback interface, which this server \
-                         does not allow; set access.allow_loopback to change that"
-                    )))
-                }
-                _ => Ok(()),
+            // An unrestricted policy still has a destination to decide about: the
+            // service can reach a great deal that its callers cannot.
+            EndpointRules::Any => match endpoint.and_then(Url::host) {
+                Some(host) => self.network.authorize_host(&host),
+                None => Ok(()),
             },
             EndpointRules::Only(allowed) => {
                 let wanted = match endpoint {
@@ -343,17 +353,34 @@ impl EndpointRules {
     fn enabled(&self) -> bool {
         !matches!(self, Self::Only(endpoints) if endpoints.is_empty())
     }
+
+    /// The hosts the operator wrote here. A provider entry has none: it stands for the
+    /// provider's own service, which is on the public internet by construction.
+    fn hosts(&self) -> Vec<Host<String>> {
+        match self {
+            Self::Any => Vec::new(),
+            Self::Only(endpoints) => endpoints
+                .iter()
+                .filter_map(|endpoint| match endpoint {
+                    Endpoint::Provider(_) => None,
+                    Endpoint::Url { host, .. } => Some(host.clone()),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl Endpoint {
     fn from_url(url: &Url) -> Result<Self, ApiError> {
         let host = url
-            .host_str()
-            .filter(|host| !host.is_empty())
+            .host()
+            .filter(|host| !matches!(host, Host::Domain(name) if name.is_empty()))
             .ok_or_else(|| ApiError::bad_request(format!("endpoint {url} has no host")))?;
         Ok(Self::Url {
             scheme: url.scheme().to_owned(),
-            host: host.to_ascii_lowercase(),
+            // `Url` has already lowercased a domain and canonicalized an address, so
+            // two spellings of one endpoint compare equal here.
+            host: host.to_owned(),
             port: url.port_or_known_default(),
         })
     }
@@ -471,27 +498,13 @@ fn lexically_clean(path: &Path) -> Option<PathBuf> {
     Some(clean)
 }
 
-fn is_loopback(host: &Host<&str>) -> bool {
-    match host {
-        // `.localhost` is reserved for the loopback interface, and a resolver is free
-        // to answer for all of it.
-        Host::Domain(name) => {
-            let name = name.trim_end_matches('.').to_ascii_lowercase();
-            name == "localhost" || name.ends_with(".localhost")
-        }
-        // Unspecified as well as loopback: connecting to 0.0.0.0 reaches this machine.
-        Host::Ipv4(ip) => ip.is_loopback() || ip.is_unspecified(),
-        Host::Ipv6(ip) => ip.is_loopback() || ip.is_unspecified(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use tempfile::TempDir;
 
-    use crate::config::{EndpointConfig, LocalConfig};
+    use crate::config::{EndpointConfig, LocalConfig, NetworkConfig};
 
     use super::*;
 
@@ -761,10 +774,86 @@ mod tests {
         );
     }
 
+    /// Loopback was never the whole of it. Everything else this machine can reach and
+    /// its callers cannot is refused by the same default, and by the same gate.
+    #[test]
+    fn an_unrestricted_policy_still_refuses_a_destination_that_is_not_public() {
+        let policy = AccessPolicy::default();
+        for raw in [
+            // The instance metadata service, which is where the machine's own IAM
+            // credentials are.
+            "http://169.254.169.254",
+            "http://[::ffff:169.254.169.254]",
+            "http://10.0.0.5:9000",
+            "http://192.168.1.1",
+            // And the name half, since an internal host on public address space would
+            // otherwise walk straight through.
+            "http://minio",
+            "https://metadata.google.internal",
+            "https://store.svc",
+        ] {
+            let error = policy
+                .authorize_endpoint(Backend::S3, endpoint(Some(raw)).as_ref())
+                .unwrap_err();
+            assert!(matches!(error, ApiError::Forbidden(_)), "{raw}: {error}");
+        }
+        assert!(
+            policy
+                .authorize_endpoint(
+                    Backend::S3,
+                    endpoint(Some("https://minio.example.com")).as_ref()
+                )
+                .is_ok()
+        );
+    }
+
+    /// The same rule for every backend: the destination is a property of the address,
+    /// not of the protocol that would be spoken to it.
+    #[test]
+    fn the_network_rules_apply_to_every_backend() {
+        let policy = AccessPolicy::default();
+        for &backend in BACKENDS {
+            let error = policy
+                .authorize_endpoint(backend, endpoint(Some("http://169.254.169.254")).as_ref())
+                .unwrap_err();
+            assert!(
+                matches!(error, ApiError::Forbidden(_)),
+                "{}: {error}",
+                backend.scheme()
+            );
+        }
+    }
+
+    /// Naming an endpoint is the operator pointing at it deliberately, and that is
+    /// permission enough — the network rules are about what a *caller* may point the
+    /// service at. Otherwise the ordinary deployment, a MinIO on an internal network,
+    /// would have to say so twice.
+    #[test]
+    fn a_configured_endpoint_is_not_subject_to_the_network_rules() {
+        let policy = with_endpoints(&["http://10.0.0.5:9000", "https://minio.internal"]);
+        for raw in ["http://10.0.0.5:9000", "https://minio.internal"] {
+            assert!(
+                policy
+                    .authorize_endpoint(Backend::S3, endpoint(Some(raw)).as_ref())
+                    .is_ok(),
+                "{raw}"
+            );
+        }
+        // And nothing else on those networks came along with it.
+        assert!(
+            policy
+                .authorize_endpoint(Backend::S3, endpoint(Some("http://10.0.0.6:9000")).as_ref())
+                .is_err()
+        );
+    }
+
     #[test]
     fn the_loopback_interface_can_be_turned_on() {
         let policy = policy(&AccessConfig {
-            allow_loopback: true,
+            network: NetworkConfig {
+                allow_loopback: true,
+                ..Default::default()
+            },
             ..Default::default()
         });
         assert!(
@@ -782,7 +871,6 @@ mod tests {
     #[test]
     fn a_named_loopback_endpoint_needs_no_further_permission() {
         let policy = with_endpoints(&["http://127.0.0.1:9000"]);
-        assert!(!policy.allow_loopback);
         assert!(
             policy
                 .authorize_endpoint(

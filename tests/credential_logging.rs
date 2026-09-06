@@ -351,7 +351,7 @@ async fn a_policy_refusal_logs_no_secret() {
 
     // A policy that will not talk to this endpoint at all.
     let policy = AccessPolicy::new(&hats_api::config::AccessConfig {
-        allow_loopback: true,
+        network: common::loopback(),
         s3: hats_api::config::EndpointConfig {
             endpoints: Some(vec!["https://minio.example.com".to_owned()]),
         },

@@ -16,7 +16,7 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, 
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use hats_api::access::AccessPolicy;
-use hats_api::config::{AccessConfig, EndpointConfig};
+use hats_api::config::{AccessConfig, EndpointConfig, NetworkConfig};
 use hats_api::error::ApiError;
 use hats_api::query::{QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
@@ -178,11 +178,20 @@ pub fn parquet_fixture() -> Vec<u8> {
     buffer
 }
 
+/// Network rules that reach the loopback interface, which is where every test server
+/// here listens.
+pub fn loopback() -> NetworkConfig {
+    NetworkConfig {
+        allow_loopback: true,
+        ..Default::default()
+    }
+}
+
 /// A policy that will talk to anything, including the loopback interface — the tests
 /// here are about storage, not about the policy, which has its own tests.
 pub fn permissive_policy() -> AccessPolicy {
     AccessPolicy::new(&AccessConfig {
-        allow_loopback: true,
+        network: loopback(),
         ..Default::default()
     })
     .expect("permissive policy")
@@ -191,7 +200,7 @@ pub fn permissive_policy() -> AccessPolicy {
 /// A policy restricted to exactly these endpoints, for the tests that check a refusal.
 pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
     AccessPolicy::new(&AccessConfig {
-        allow_loopback: true,
+        network: loopback(),
         s3: EndpointConfig {
             endpoints: Some(endpoints.iter().map(|e| (*e).to_owned()).collect()),
         },
