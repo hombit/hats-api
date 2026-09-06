@@ -171,6 +171,16 @@ fn refused_header(name: &HeaderName) -> Option<&'static str> {
         http::header::UPGRADE,
         http::header::CONTENT_LENGTH,
     ];
+    // What the backend sets on a read of its own, and would therefore be overridden
+    // rather than merged. Every one of these is a header whose value decides which bytes
+    // come back, so a caller's copy of it is a caller quietly answering a question this
+    // service had already answered.
+    let conditional = [
+        http::header::IF_MATCH,
+        http::header::IF_NONE_MATCH,
+        http::header::IF_MODIFIED_SINCE,
+        http::header::IF_UNMODIFIED_SINCE,
+    ];
     if *name == http::header::HOST {
         return Some(
             "it names the server, which the url already does and the access policy has already judged",
@@ -178,6 +188,18 @@ fn refused_header(name: &HeaderName) -> Option<&'static str> {
     }
     if *name == http::header::RANGE {
         return Some("every read this service makes is a ranged one, so it sets its own");
+    }
+    if conditional.contains(name) {
+        return Some(
+            "it decides whether the server answers with the object or with a 304, which \
+             is this service's question to ask",
+        );
+    }
+    if *name == http::header::ACCEPT_ENCODING {
+        return Some(
+            "a compressed body has different offsets from the object, so a ranged read \
+             of it returns the wrong bytes",
+        );
     }
     if hop_by_hop.contains(name) || name.as_str().eq_ignore_ascii_case("keep-alive") {
         return Some("it describes the connection rather than the request");
@@ -771,11 +793,14 @@ impl HttpTransport for WithHeaders {
         &self,
         mut request: http::Request<opendal::Buffer>,
     ) -> opendal::Result<http::Response<opendal::HttpBody>> {
-        // The caller's headers win over the backend's. Nothing the http service sets can
-        // collide with one: `refused_header` has already turned away every header this
-        // service decides for itself, so what is left is the service's own auth headers,
-        // which it only sets when it was configured with credentials — and this backend
-        // never is.
+        // `insert`, so a caller cannot append a second value to a header the backend
+        // already set and leave the server to choose between them.
+        //
+        // It can only ever be replacing nothing. Every header the backend sets on a read
+        // — the range, and the four conditional ones — is refused by `refused_header`, so
+        // by the time a name reaches here it is one the backend does not use. Keep that
+        // true: a header this service starts sending for itself has to be refused there
+        // in the same change, or a caller silently overrides it.
         for (name, value) in &self.headers {
             request.headers_mut().insert(name, value.clone());
         }
@@ -1985,15 +2010,38 @@ mod tests {
         for (name, expected) in [
             ("Host", "names the server"),
             ("Range", "ranged one"),
+            // Set by the backend on a read, so a caller's copy would replace it.
+            ("If-Match", "304"),
+            ("If-None-Match", "304"),
+            ("If-Modified-Since", "304"),
+            ("If-Unmodified-Since", "304"),
+            // A gzipped body has different offsets from the object it encodes.
+            ("Accept-Encoding", "wrong bytes"),
             ("Content-Length", "describes the connection"),
             ("Transfer-Encoding", "describes the connection"),
             ("Connection", "describes the connection"),
             ("Keep-Alive", "describes the connection"),
+            ("TE", "describes the connection"),
+            ("Upgrade", "describes the connection"),
         ] {
             let option = serde_json::json!({"headers": {name: "whatever"}});
             let error = open(&url, &options(option)).unwrap_err();
             assert!(matches!(error, ApiError::BadRequest(_)), "{name}: {error}");
             assert!(error.to_string().contains(expected), "{name}: {error}");
+            // Case is not a distinction a header name makes, and the refusal must not
+            // depend on how the caller spelled it.
+            let shouted = serde_json::json!({"headers": {name.to_uppercase(): "whatever"}});
+            assert!(
+                open(&url, &options(shouted)).is_err(),
+                "{name} in upper case"
+            );
+        }
+
+        // And the list is not so wide that it refuses what the option is for. These are
+        // the headers a service actually authenticates with.
+        for name in ["Authorization", "X-Api-Key", "Cookie", "X-Auth-Token"] {
+            let option = serde_json::json!({"headers": {name: "value"}});
+            assert!(open(&url, &options(option)).is_ok(), "{name} was refused");
         }
     }
 
