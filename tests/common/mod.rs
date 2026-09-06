@@ -16,7 +16,7 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, 
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use hats_api::access::AccessPolicy;
-use hats_api::config::{AccessConfig, EndpointConfig, LimitsConfig, NetworkConfig};
+use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, NetworkConfig};
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
 use hats_api::query::{QueryResult, Selection};
@@ -193,6 +193,11 @@ pub fn loopback() -> NetworkConfig {
 pub fn permissive_policy() -> AccessPolicy {
     AccessPolicy::new(&AccessConfig {
         network: loopback(),
+        // Cleartext too, since every test server here is a plain http one on loopback.
+        http: HttpConfig {
+            endpoints: None,
+            allow_plain_http: true,
+        },
         ..Default::default()
     })
     .expect("permissive policy")

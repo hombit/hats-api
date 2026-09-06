@@ -21,6 +21,9 @@ chrono = { version = "0.4", default-features = false }
 bytesize = { version = "2", features = ["serde"] }
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection"] }
 futures = "0.3"
+# `HttpTransport` speaks `http::Request`, so attaching a header to one needs the same
+# `http` opendal and reqwest resolve to.
+http = "1"
 # CIDR arithmetic for `network`. Already in the tree under hyper-util, and it has no
 # dependencies of its own.
 ipnet = "2"

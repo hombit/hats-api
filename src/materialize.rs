@@ -182,13 +182,18 @@ pub enum TooLarge {
 /// `get_ranges` and `head` are all defined in terms of it. Everything else is delegated,
 /// and the write paths are the inner store's refusals rather than new ones, since the
 /// service never writes.
-#[derive(Debug)]
 pub struct MaterializingStore {
     inner: Arc<dyn ObjectStore>,
     /// `scheme://authority` of the server, which is what a key is resolved against to
     /// get the url the probe asks for.
     origin: Url,
     client: reqwest::Client,
+    /// The caller's own headers, already checked. The store below carries these too; the
+    /// probe is made here rather than through it, so it has to be given them.
+    ///
+    /// Never printed: this is why [`MaterializingStore`]'s `Debug` is written out rather
+    /// than derived.
+    headers: http::HeaderMap,
     transfers: Arc<Transfers>,
     /// One cell per key, so that the tens of concurrent ranged reads a parquet scan
     /// opens with collapse into a single probe rather than a race to copy the same
@@ -219,12 +224,14 @@ impl MaterializingStore {
         inner: Arc<dyn ObjectStore>,
         origin: Url,
         client: reqwest::Client,
+        headers: http::HeaderMap,
         transfers: Arc<Transfers>,
     ) -> Self {
         Self {
             inner,
             origin,
             client,
+            headers,
             transfers,
             objects: Mutex::new(HashMap::new()),
         }
@@ -251,6 +258,7 @@ impl MaterializingStore {
         let response = self
             .client
             .get(url)
+            .headers(self.headers.clone())
             .header(reqwest::header::RANGE, format!("bytes=-{PROBE_SUFFIX}"))
             .send()
             .await
@@ -437,6 +445,26 @@ impl Scratch {
 impl std::fmt::Display for MaterializingStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MaterializingStore({})", self.inner)
+    }
+}
+
+/// Written out rather than derived, for two of these fields.
+///
+/// `headers` is the caller's credentials. A `HeaderMap` redacts values marked sensitive
+/// but prints every name in the clear, and both halves of one of these came from the
+/// caller — so the count is all that is printed. `origin` is a `Url`, whose own `Debug`
+/// prints its `password` field.
+impl std::fmt::Debug for MaterializingStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaterializingStore")
+            .field("inner", &self.inner)
+            .field("origin", &self.origin.as_str())
+            .field(
+                "headers",
+                &format_args!("<{} header(s)>", self.headers.len()),
+            )
+            .field("transfers", &self.transfers)
+            .finish_non_exhaustive()
     }
 }
 

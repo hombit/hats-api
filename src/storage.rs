@@ -11,16 +11,25 @@
 //! what identifies the bytes — and nothing could tell one of those from one of ours.
 //! Options never leave this module, and a credential never reaches an error message.
 //!
+//! ```json
+//! {
+//!   "url": "https://data.example.com/hats/part0.parquet",
+//!   "storage": {"headers": {"Authorization": "Bearer …"}}
+//! }
+//! ```
+//!
 //! Which URLs may be opened at all is not decided here: [`open`] asks the
 //! [`AccessPolicy`] first, and every path into a store goes through that one call.
 
+use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 use std::sync::Arc;
 
+use http::{HeaderMap, HeaderName, HeaderValue};
 use object_store::{ObjectStore, local::LocalFileSystem};
 use object_store_opendal::OpendalStore;
 use opendal::layers::RetryLayer;
-use opendal::{OperationContext, Operator, services};
+use opendal::{HttpTransport, HttpTransporter, OperationContext, Operator, services};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
@@ -85,11 +94,105 @@ pub struct StorageOptions {
     /// An Azure storage account key, base64 as Azure issues it.
     pub access_key: Option<SecretString>,
     pub sas_token: Option<SecretString>,
+
+    /// Headers to send with every request to an `http(s)://` server, for a service that
+    /// authenticates with one — a bearer token, an API key. Treated as a credential
+    /// whatever the caller puts in it, since that is what it is for.
+    #[serde(default)]
+    pub headers: Headers,
 }
 
-/// Options every remote backend takes, since every one of them has a host to name and a
-/// cleartext decision to make about it.
-const SHARED_OPTIONS: &[&str] = &["endpoint", "allow_http"];
+/// Caller-supplied request headers.
+///
+/// A newtype rather than a bare map for one reason: the derived `Debug` on a map prints
+/// its keys, and both halves of an entry here come from the caller. A token in the value
+/// is the point of the option; a token in the *name* is a caller's mistake, but it would
+/// be this service's log it landed in. So neither is printed, and what a reader gets is
+/// how many there were.
+#[derive(Default, Clone, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Headers(BTreeMap<String, SecretString>);
+
+impl std::fmt::Debug for Headers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} header(s)>", self.0.len())
+    }
+}
+
+impl Headers {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The headers as something that can go on a request, with every name checked.
+    ///
+    /// A name is refused rather than dropped: a caller who asked for a header that does
+    /// not arrive has been told their request is authenticated when it is not.
+    fn to_header_map(&self) -> Result<HeaderMap, ApiError> {
+        let mut map = HeaderMap::with_capacity(self.0.len());
+        for (name, value) in &self.0 {
+            let parsed = HeaderName::try_from(name.as_str()).map_err(|_| {
+                ApiError::bad_request(format!("{name:?} is not a valid header name"))
+            })?;
+            if let Some(reason) = refused_header(&parsed) {
+                return Err(ApiError::bad_request(format!(
+                    "header {name:?} cannot be set on a request this service makes: {reason}"
+                )));
+            }
+            // The value is the caller's secret, so a parse failure says nothing about
+            // what was in it — only that it cannot go in a header.
+            let mut parsed_value = HeaderValue::from_str(value.expose_secret()).map_err(|_| {
+                ApiError::bad_request(format!(
+                    "the value given for header {name:?} contains characters a header \
+                     cannot carry"
+                ))
+            })?;
+            // Marks it for redaction in anything that formats a `HeaderMap`, which is
+            // the last line of defence rather than the first.
+            parsed_value.set_sensitive(true);
+            map.insert(parsed, parsed_value);
+        }
+        Ok(map)
+    }
+}
+
+/// Headers a caller may not set, and why. Two kinds: the ones that decide where the
+/// request goes or how much of it to read, which are this service's to set, and the
+/// hop-by-hop ones, which describe a connection rather than a request and would be a way
+/// to confuse the client rather than to authenticate to the server.
+fn refused_header(name: &HeaderName) -> Option<&'static str> {
+    let hop_by_hop = [
+        http::header::CONNECTION,
+        http::header::PROXY_AUTHENTICATE,
+        http::header::PROXY_AUTHORIZATION,
+        http::header::TE,
+        http::header::TRAILER,
+        http::header::TRANSFER_ENCODING,
+        http::header::UPGRADE,
+        http::header::CONTENT_LENGTH,
+    ];
+    if *name == http::header::HOST {
+        return Some(
+            "it names the server, which the url already does and the access policy has already judged",
+        );
+    }
+    if *name == http::header::RANGE {
+        return Some("every read this service makes is a ranged one, so it sets its own");
+    }
+    if hop_by_hop.contains(name) || name.as_str().eq_ignore_ascii_case("keep-alive") {
+        return Some("it describes the connection rather than the request");
+    }
+    None
+}
+
+/// The caller's half of the cleartext decision, which every remote backend has: each of
+/// them can be given a credential, and none may send one over cleartext unless the
+/// caller who owns it said so.
+const CLEARTEXT_OPTION: &[&str] = &["allow_http"];
+/// Naming a server other than the provider's own, which only a backend that has a
+/// provider can do.
+const ENDPOINT_OPTION: &[&str] = &["endpoint"];
+const HTTP_OPTIONS: &[&str] = &["headers"];
 const S3_OPTIONS: &[&str] = &[
     "region",
     "access_key_id",
@@ -151,6 +254,17 @@ impl Named {
             kind: Kind::Credential,
         }
     }
+
+    /// Several of them under one option name. [`Headers`] is a credential by
+    /// construction — it exists to carry a token — so there is no plain counterpart to
+    /// register it with by mistake.
+    fn credentials(name: &'static str, value: &Headers) -> Self {
+        Self {
+            name,
+            set: !value.is_empty(),
+            kind: Kind::Credential,
+        }
+    }
 }
 
 impl StorageOptions {
@@ -166,7 +280,7 @@ impl StorageOptions {
     /// Two things keep the list honest, both at compile time: the destructuring means a
     /// field added to the struct and not listed here does not compile, and the
     /// constructors mean a field listed under the wrong [`Kind`] does not either.
-    fn named(&self) -> [Named; 11] {
+    fn named(&self) -> [Named; 12] {
         let Self {
             endpoint,
             allow_http,
@@ -179,6 +293,7 @@ impl StorageOptions {
             account,
             access_key,
             sas_token,
+            headers,
         } = self;
         [
             Named::plain("endpoint", endpoint),
@@ -194,6 +309,7 @@ impl StorageOptions {
             Named::plain("account", account),
             Named::credential("access_key", access_key),
             Named::credential("sas_token", sas_token),
+            Named::credentials("headers", headers),
         ]
     }
 
@@ -249,16 +365,16 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
         Backend::S3 => S3_OPTIONS,
         Backend::Gcs => GCS_OPTIONS,
         Backend::Azure => AZURE_OPTIONS,
-        Backend::Http => &[],
+        Backend::Http => HTTP_OPTIONS,
     };
-    // `endpoint` and `allow_http` are the options for naming a server other than the
-    // provider's own, so they belong to the backends that have a provider to differ
-    // from. A url that is its own endpoint has nothing to point elsewhere.
-    let shared: &[&str] = match backend.has_provider() {
-        true => SHARED_OPTIONS,
+    // A url that is its own endpoint has nothing for `endpoint` to point elsewhere at.
+    // `allow_http` is a different question and every backend has it, because every
+    // backend can now be handed a credential the caller would not want in cleartext.
+    let endpoint: &[&str] = match backend.has_provider() {
+        true => ENDPOINT_OPTION,
         false => &[],
     };
-    [shared, specific].concat()
+    [endpoint, CLEARTEXT_OPTION, specific].concat()
 }
 
 /// The clause naming what this url's scheme takes, for the two messages that have to say
@@ -319,18 +435,39 @@ pub fn open(
             refuse_port_on_a_bucket(url, backend)?;
             // Each arm produces a configured builder and nothing more; `remote_store` is
             // the single place a builder becomes something that can make a request.
+            // Every backend takes these; only the http one has anything to put in them.
+            let headers = options.headers.to_header_map()?;
             let store: Arc<dyn ObjectStore> = match backend {
-                Backend::S3 => Arc::new(remote_store(s3_builder(url, options, policy)?, policy)?),
-                Backend::Gcs => Arc::new(remote_store(gcs_builder(url, options, policy)?, policy)?),
-                Backend::Azure => {
-                    Arc::new(remote_store(azblob_builder(url, options, policy)?, policy)?)
-                }
+                Backend::S3 => Arc::new(remote_store(
+                    s3_builder(url, options, policy)?,
+                    policy,
+                    &headers,
+                )?),
+                Backend::Gcs => Arc::new(remote_store(
+                    gcs_builder(url, options, policy)?,
+                    policy,
+                    &headers,
+                )?),
+                Backend::Azure => Arc::new(remote_store(
+                    azblob_builder(url, options, policy)?,
+                    policy,
+                    &headers,
+                )?),
                 // The one backend whose server may refuse to serve byte ranges, since it
                 // is the one whose server the caller chose rather than the operator.
                 Backend::Http => Arc::new(MaterializingStore::new(
-                    Arc::new(remote_store(http_builder(url, policy)?, policy)?),
+                    Arc::new(remote_store(
+                        http_builder(url, options, policy)?,
+                        policy,
+                        &headers,
+                    )?),
                     origin(url)?,
                     policy.network().client(),
+                    // The probe is a request of this service's own, made outside the
+                    // store, so it needs the headers handed to it separately — a server
+                    // that authenticates would answer it 401 otherwise, and the object
+                    // would look unreadable rather than unauthenticated.
+                    headers,
                     Arc::clone(transfers),
                 )),
             };
@@ -586,11 +723,64 @@ fn allow_cleartext(
 fn remote_store(
     builder: impl opendal::Builder,
     policy: &AccessPolicy,
+    headers: &HeaderMap,
 ) -> Result<OpendalStore, ApiError> {
     let operator = Operator::new(builder)?
-        .with_context(OperationContext::new().with_http_transport(policy.network().transport()))
+        .with_context(OperationContext::new().with_http_transport(transport(policy, headers)))
         .layer(retries());
     Ok(OpendalStore::new(operator))
+}
+
+/// The policy's transport, with the caller's headers on it if they gave any.
+///
+/// Wrapped per operator rather than per process: the headers are one request's
+/// credentials, and the transport underneath is shared by every store in the process.
+/// Putting them on the shared one would send one caller's token to every other caller's
+/// server.
+fn transport(policy: &AccessPolicy, headers: &HeaderMap) -> HttpTransporter {
+    let inner = policy.network().transport();
+    match headers.is_empty() {
+        true => inner,
+        false => HttpTransporter::new(WithHeaders {
+            inner,
+            headers: headers.clone(),
+        }),
+    }
+}
+
+/// Adds the caller's headers to every request an operator makes.
+///
+/// Below the store and above the policy's client, which is the only layer that sees a
+/// whole request and still belongs to one caller. It cannot reach another store: the
+/// wrapper is built per operator and holds that operator's headers alone.
+struct WithHeaders {
+    inner: HttpTransporter,
+    headers: HeaderMap,
+}
+
+/// Never derived: the headers are the caller's credentials, and this type is one field
+/// of something a `tracing` call could print.
+impl std::fmt::Debug for WithHeaders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WithHeaders(<{} header(s)>)", self.headers.len())
+    }
+}
+
+impl HttpTransport for WithHeaders {
+    async fn fetch(
+        &self,
+        mut request: http::Request<opendal::Buffer>,
+    ) -> opendal::Result<http::Response<opendal::HttpBody>> {
+        // The caller's headers win over the backend's. Nothing the http service sets can
+        // collide with one: `refused_header` has already turned away every header this
+        // service decides for itself, so what is left is the service's own auth headers,
+        // which it only sets when it was configured with credentials — and this backend
+        // never is.
+        for (name, value) in &self.headers {
+            request.headers_mut().insert(name, value.clone());
+        }
+        self.inner.fetch(request).await
+    }
 }
 
 /// Retry the failures OpenDAL marks temporary: a connection an origin closed between
@@ -775,11 +965,24 @@ fn azblob_builder(
 ///
 /// What it cannot do is list, so a catalog served this way is discoverable only through
 /// the files it names rather than by walking its directories.
-fn http_builder(url: &Url, policy: &AccessPolicy) -> Result<services::Http, ApiError> {
+fn http_builder(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<services::Http, ApiError> {
     let origin = origin(url)?;
     // The url *is* the endpoint here, so this is the same gate the other backends reach
     // through their `endpoint` option — asked about the address the caller wrote.
     policy.authorize_endpoint(Backend::Http, Some(&origin))?;
+    // The operator has already allowed cleartext by this point, or the line above
+    // refused it. This is the other half, and it is the caller's: `headers` may carry a
+    // token, and whether that goes out in the clear is not the operator's to decide.
+    allow_cleartext(
+        &origin,
+        require_endpoint_scheme(&origin)?,
+        options.allow_http,
+        options.has_credentials(),
+    )?;
     // `Url` prints an empty path as a trailing `/`, and OpenDAL joins the endpoint to a
     // key that already starts with one. Left in, every request would go to `//key`.
     Ok(services::Http::default().endpoint(origin.as_str().trim_end_matches('/')))
@@ -1633,44 +1836,46 @@ mod tests {
         );
     }
 
-    /// There is no server for an option to name and no credential for one to carry, so
-    /// every option is the caller having confused this backend with another.
+    /// The url is its own server, so there is nothing for `endpoint` to point elsewhere
+    /// at and no bucket-backend option that means anything here. What it does take is
+    /// `headers`, and `allow_http` to say those may go over cleartext.
     #[test]
-    fn an_http_url_takes_no_storage_options() {
+    fn an_http_url_takes_only_headers_and_the_cleartext_flag() {
         let url = parse_url("https://data.example.com/part0.parquet").unwrap();
         for option in [
             serde_json::json!({"endpoint": "https://elsewhere.example.com"}),
             serde_json::json!({"region": "us-west-2"}),
             serde_json::json!({"secret_access_key": SECRET}),
-            serde_json::json!({"allow_http": true}),
+            serde_json::json!({"account": "hatsdata"}),
         ] {
             let error = open(&url, &options(option.clone())).unwrap_err();
             assert!(
                 matches!(error, ApiError::BadRequest(_)),
                 "{option}: {error}"
             );
-            assert!(
-                error.to_string().contains("not accepted"),
-                "{option}: {error}"
-            );
+            assert!(error.to_string().contains("they take"), "{option}: {error}");
             assert!(!error.to_string().contains(SECRET), "leaked: {error}");
         }
+
+        assert!(open(&url, &options(serde_json::json!({"allow_http": true}))).is_ok());
+        assert!(
+            open(
+                &url,
+                &options(serde_json::json!({"headers": {"Authorization": "Bearer t"}})),
+            )
+            .is_ok()
+        );
     }
 
-    /// Basic-auth credentials in the authority are the one way a caller can spell a
-    /// secret into an `https://` url, and the message says this scheme takes none rather
-    /// than naming another backend's options.
+    /// Basic-auth credentials in the authority are the other way to spell a secret into
+    /// an `https://` url. Refused, with the message naming the option that does carry
+    /// one and never echoing what was written.
     #[test]
-    fn credentials_in_an_http_url_are_refused_without_naming_other_options() {
+    fn credentials_in_an_http_url_authority_are_refused() {
         let url = parse_url(&format!("https://user:{SECRET}@data.example.com/k.parquet")).unwrap();
         let error = open(&url, &no_options()).unwrap_err();
         assert!(error.to_string().contains("in its authority"), "{error}");
-        assert!(
-            error
-                .to_string()
-                .contains("https urls take no storage options"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("headers"), "{error}");
         assert!(!error.to_string().contains(SECRET), "leaked: {error}");
     }
 
@@ -1715,6 +1920,233 @@ mod tests {
         // One slash, not two: the endpoint has the trailing one trimmed off it.
         assert!(head.contains("get /hats/part0.parquet"), "{head}");
         assert!(!head.contains("authorization:"), "signed anyway: {head}");
+    }
+
+    /// A token the caller gave goes on the request the store makes. Checked on the wire
+    /// rather than on the builder, since the builder has nowhere to put one — the
+    /// headers ride on a transport wrapped around this operator alone.
+    #[tokio::test]
+    async fn caller_headers_are_sent_to_an_http_server() {
+        let heads = http_request_heads(serde_json::json!({
+            "headers": {"Authorization": "Bearer secret-token", "X-Api-Key": "key-value"},
+            "allow_http": true,
+        }))
+        .await;
+        // Both requests: the probe, which asks for a suffix range, and the store's own
+        // read afterwards. A server that authenticates would refuse either one alone.
+        let requests: Vec<&str> = heads.split("--- next request ---").collect();
+        assert_eq!(requests.len(), 2, "{heads}");
+        for request in &requests {
+            assert!(
+                request.contains("authorization: bearer secret-token"),
+                "a request went out without the caller's token: {request}"
+            );
+            assert!(request.contains("x-api-key: key-value"), "{request}");
+        }
+        // And the two really are the probe and the read, not the same one twice.
+        assert!(heads.contains("range: bytes=-8"), "{heads}");
+    }
+
+    /// And a store built without them sends none, so the headers above came from the
+    /// option rather than from anything ambient.
+    #[tokio::test]
+    async fn no_headers_are_sent_when_the_caller_gave_none() {
+        let heads = http_request_heads(serde_json::json!({"allow_http": true})).await;
+        assert!(!heads.contains("authorization:"), "{heads}");
+        assert!(!heads.contains("x-api-key:"), "{heads}");
+    }
+
+    /// The headers are one caller's credentials, so they must not reach a store built
+    /// for another. The wrapper is per operator; this is what says so.
+    #[tokio::test]
+    async fn one_callers_headers_do_not_reach_another_callers_store() {
+        let with_token = http_request_heads(serde_json::json!({
+            "headers": {"Authorization": "Bearer secret-token"},
+            "allow_http": true,
+        }))
+        .await;
+        assert!(with_token.contains("bearer secret-token"), "{with_token}");
+
+        // A second store, built afterwards from the same policy and the same shared
+        // transport underneath it.
+        let without = http_request_heads(serde_json::json!({"allow_http": true})).await;
+        assert!(
+            !without.contains("secret-token"),
+            "a previous caller's token leaked into another store: {without}"
+        );
+    }
+
+    /// Headers this service decides for itself, and headers that describe a connection
+    /// rather than a request. Refused rather than dropped: a caller whose header does
+    /// not arrive has been told their request is authenticated when it is not.
+    #[test]
+    fn headers_the_service_owns_cannot_be_set_by_a_caller() {
+        let url = parse_url("https://data.example.com/k.parquet").unwrap();
+        for (name, expected) in [
+            ("Host", "names the server"),
+            ("Range", "ranged one"),
+            ("Content-Length", "describes the connection"),
+            ("Transfer-Encoding", "describes the connection"),
+            ("Connection", "describes the connection"),
+            ("Keep-Alive", "describes the connection"),
+        ] {
+            let option = serde_json::json!({"headers": {name: "whatever"}});
+            let error = open(&url, &options(option)).unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)), "{name}: {error}");
+            assert!(error.to_string().contains(expected), "{name}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_header_that_is_not_one_is_refused_without_echoing_its_value() {
+        let url = parse_url("https://data.example.com/k.parquet").unwrap();
+        let bad_name = serde_json::json!({"headers": {"not a header": SECRET}});
+        let error = open(&url, &options(bad_name)).unwrap_err();
+        assert!(
+            error.to_string().contains("not a valid header name"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+
+        // A newline in the value is header injection, and the message must not quote it
+        // back either.
+        let bad_value =
+            serde_json::json!({"headers": {"X-Token": format!("{SECRET}\r\nX-Evil: 1")}});
+        let error = open(&url, &options(bad_value)).unwrap_err();
+        assert!(error.to_string().contains("cannot carry"), "{error}");
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+    }
+
+    /// A token over cleartext is the caller's own secret in the open, so it needs their
+    /// say-so — the operator's `allow_plain_http` is a different question and answering
+    /// it does not answer this one.
+    #[test]
+    fn headers_over_cleartext_need_the_caller_to_say_so() {
+        let url = parse_url("http://data.example.com/k.parquet").unwrap();
+        let policy = policy_allowing_plain_http();
+        let with_token = options(serde_json::json!({
+            "headers": {"Authorization": format!("Bearer {SECRET}")},
+        }));
+
+        let error = super::open(&url, &with_token, &policy, &transfers()).unwrap_err();
+        assert!(error.to_string().contains("cleartext"), "{error}");
+        assert!(error.to_string().contains("allow_http"), "{error}");
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+
+        let allowed = options(serde_json::json!({
+            "headers": {"Authorization": format!("Bearer {SECRET}")},
+            "allow_http": true,
+        }));
+        assert!(super::open(&url, &allowed, &policy, &transfers()).is_ok());
+
+        // And with no headers there is no secret to protect, so cleartext is fine.
+        let anonymous = options(serde_json::json!({}));
+        assert!(super::open(&url, &anonymous, &policy, &transfers()).is_ok());
+    }
+
+    /// Neither half of a header is printed. Both come from the caller, and a token in
+    /// the name is a mistake that would still land in this service's log.
+    #[test]
+    fn debug_output_carries_no_header_name_or_value() {
+        let with_headers = options(serde_json::json!({
+            "headers": {SECRET: format!("Bearer {SECRET}")},
+        }));
+        let shown = format!("{with_headers:?}");
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        // Still says there were some, which is what a reader needs to know.
+        assert!(shown.contains("1 header(s)"), "{shown}");
+
+        let none = format!("{:?}", no_options());
+        assert!(none.contains("0 header(s)"), "{none}");
+    }
+
+    /// A policy that allows the loopback interface and cleartext, which is what a test
+    /// server on `127.0.0.1` needs.
+    fn policy_allowing_plain_http() -> AccessPolicy {
+        AccessPolicy::new(&crate::config::AccessConfig {
+            network: crate::config::NetworkConfig {
+                allow_loopback: true,
+                ..Default::default()
+            },
+            http: crate::config::HttpConfig {
+                endpoints: None,
+                allow_plain_http: true,
+            },
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    /// Every request head one read through an `http://` store puts on the wire,
+    /// lowercased and joined.
+    ///
+    /// There are two, and both have to be checked. `materialize` probes with a request of
+    /// its own before the store makes any, and the two get their headers by different
+    /// routes — the probe from the client call, the store's from the transport wrapped
+    /// around its operator. Capturing only the first would pass with the wrapper missing
+    /// entirely.
+    async fn http_request_heads(mut option: serde_json::Value) -> String {
+        let (port, receiver) = capture_requests(2);
+        let url = parse_url(&format!("http://127.0.0.1:{port}/key.parquet")).unwrap();
+        if option.get("allow_http").is_none() {
+            option["allow_http"] = serde_json::json!(true);
+        }
+        let file = super::open(
+            &url,
+            &options(option),
+            &policy_allowing_plain_http(),
+            &transfers(),
+        )
+        .unwrap();
+
+        use object_store::ObjectStoreExt;
+        let _ = file
+            .store
+            .get(&object_store::path::Path::from("key.parquet"))
+            .await;
+        let mut heads = Vec::new();
+        for _ in 0..2 {
+            heads.push(
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("the store made too few requests")
+                    .to_ascii_lowercase(),
+            );
+        }
+        heads.join("\n--- next request ---\n")
+    }
+
+    /// A server that answers `count` requests with a 404 and hands each head back. Each
+    /// request gets its own connection, which is what the store does anyway once the
+    /// first answer closes.
+    fn capture_requests(count: usize) -> (u16, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..count {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                // `Connection: close` so the store opens a fresh one for the next
+                // request rather than reusing this and never being accepted again.
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+                let _ = sender.send(String::from_utf8_lossy(&head).into_owned());
+            }
+        });
+        (port, receiver)
     }
 
     #[test]

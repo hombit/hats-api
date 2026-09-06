@@ -318,7 +318,7 @@ mod tests {
 
     /// The status and the body as text; axum's own rejections are plain text, ours are
     /// JSON.
-    async fn send(request: axum::http::request::Builder, body: Body) -> (StatusCode, String) {
+    async fn send(request: http::request::Builder, body: Body) -> (StatusCode, String) {
         let response = router(Service::new(
             AccessPolicy::default(),
             &LimitsConfig::default(),

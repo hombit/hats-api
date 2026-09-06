@@ -48,6 +48,13 @@ says which crate went double before the compiler gets a chance to be unhelpful a
 
 ## Credentials
 
+- **A credential is never printed, and neither is anything a caller wrote beside one.**
+  `storage::Headers` prints its count and nothing else: both the name and the value of a
+  header come from the caller, and a token typed into a name is still a token in this
+  service's log. The same reasoning is why anything holding one — `MaterializingStore`,
+  `WithHeaders` — has a hand-written `Debug`. A `HeaderMap`'s own `Debug` redacts values
+  marked sensitive but prints every name in the clear, so a derive is not enough. Mark
+  values `set_sensitive(true)` as well; it is the backstop, not the guarantee.
 - A credential is never a `String`. Use `secrecy::SecretString`, and
   `storage::SourceUrl` for a caller-supplied url. Neither prints its value, so
   `#[derive(Debug)]` around them is safe. `StorageOptions::named` enforces this: a
@@ -74,13 +81,14 @@ Add the `Backend` variant and follow the compile errors. Every match on a `Backe
 exhaustive, and the served schemes, the accepted options and the endpoint rules are all
 derived from it rather than written out beside it, so there is no list to forget.
 
-`Backend::provider` is the fork in that road, and it decides more than one thing. A
-backend that has a provider is addressed by bucket: the url's host is a bucket name, the
-server is the `endpoint` option, and the provider's own service is what a request naming
-no endpoint means. A backend that has none is addressed by origin: the url is the server,
-so it takes no `endpoint`, no `allow_http`, and no options at all unless it has
-credentials of its own. Ask `has_provider` rather than matching on the variant, so a
-later backend of either shape lands on the right side without this being rewritten.
+`Backend::provider` is the fork in that road. A backend that has a provider is addressed
+by bucket: the url's host is a bucket name, the server is the `endpoint` option, and the
+provider's own service is what a request naming no endpoint means. A backend that has
+none is addressed by origin: the url is the server, so it takes no `endpoint` and has no
+default to fall back to. That is all `provider` decides — it says nothing about
+credentials, and an origin-addressed backend can still take `headers`. Ask `has_provider`
+rather than matching on the variant, so a later backend of either shape lands on the
+right side without this being rewritten.
 
 A backend may serve more than one scheme — `Backend::schemes` returns a slice, and
 `http`/`https` are one backend reached two ways.
@@ -104,11 +112,15 @@ Then follow the shape the existing ones set:
 - Addressing is per backend: path-style against a named S3-compatible endpoint,
   virtual-host against the provider itself.
 - `allow_http` stays ours. OpenDAL follows the endpoint's own scheme without asking, so
-  the cleartext decision has no backend half to defer to. Whose decision it is depends on
-  the addressing: for a bucket-addressed backend cleartext risks the caller's own
-  credential, so the caller says `allow_http`; for an origin-addressed one there is no
-  credential to lose and what is at stake is whether the bytes came from the host the url
-  named, which is the operator's `allow_plain_http`.
+  the cleartext decision has no backend half to defer to. It has two halves of its own,
+  and both must pass:
+  - **the operator's**, `access.<backend>.allow_plain_http`, for a backend whose url is
+    its own address. What cleartext costs there is the assurance that the bytes came from
+    the host the url named, and only the operator knows the network.
+  - **the caller's**, the `allow_http` option, wherever the request can carry a
+    credential. That is every backend: an origin-addressed one has no `endpoint` option
+    but may still be given `headers`. Do not reason from "this backend has no endpoint"
+    to "this backend has no secret to protect".
 - `object_store` is trait-only here — the `ObjectStore` trait DataFusion consumes, plus
   `LocalFileSystem` for `file://`. Put a new backend on OpenDAL's side; never re-enable
   an `object_store` backend feature.

@@ -1996,6 +1996,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
+ "http",
  "http-body-util",
  "hyper-util",
  "ipnet",

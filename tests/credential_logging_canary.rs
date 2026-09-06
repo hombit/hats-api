@@ -29,6 +29,9 @@ use tracing_subscriber::fmt::MakeWriter;
 /// leak says which one it was. Azure's is base64 because its signer requires that.
 const AZURE_KEY: &str = "Y2FuYXJ5QXp1cmVBY2NvdW50S2V5Rm9yTG9nZ2luZw==";
 const GCS_TOKEN: &str = "ya29.canary-gcs-access-token";
+/// The http backend's, which reaches the wire as a header rather than through a signer —
+/// so it is the one that would be logged by the HTTP client rather than by a signer.
+const HEADER_TOKEN: &str = "canary-http-bearer-token";
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -65,6 +68,31 @@ async fn signing_request(raw: &str, options: impl FnOnce(String) -> StorageOptio
         &transfers(),
     )
     .expect("the policy allows loopback");
+
+    use object_store::ObjectStoreExt;
+    let _ = file
+        .store
+        .get(&object_store::path::Path::from("key.parquet"))
+        .await;
+}
+
+/// One request to an `http(s)://` url carrying a caller's header, for its side effect on
+/// the logs. The url is the address here, so there is no endpoint option to point
+/// elsewhere with.
+async fn http_request_with_headers(token: &str) {
+    let (port, _receiver) = capture_one_request();
+    let raw = format!("http://127.0.0.1:{port}/key.parquet");
+    let url = storage::parse_url(&raw).expect("a valid url");
+    let options = StorageOptions {
+        headers: serde_json::from_value(serde_json::json!({
+            "Authorization": format!("Bearer {token}"),
+        }))
+        .expect("the headers should deserialize"),
+        allow_http: true,
+        ..Default::default()
+    };
+    let file = storage::open(&url, &options, &permissive_policy(), &transfers())
+        .expect("the policy allows loopback and cleartext");
 
     use object_store::ObjectStoreExt;
     let _ = file
@@ -116,11 +144,16 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     })
     .await;
 
+    // The http backend has no signer: its credential goes out as a header this service
+    // puts on the request, so what could log it is the HTTP client rather than a signer.
+    // Its url is its own endpoint, so this one is built rather than passed an endpoint.
+    http_request_with_headers(HEADER_TOKEN).await;
+
     let logs = String::from_utf8_lossy(&captured.0.lock().expect("log buffer")).into_owned();
     let leaking: Vec<&str> = logs
         .lines()
         .filter(|line| {
-            [SECRET_ACCESS_KEY, AZURE_KEY, GCS_TOKEN]
+            [SECRET_ACCESS_KEY, AZURE_KEY, GCS_TOKEN, HEADER_TOKEN]
                 .iter()
                 .any(|secret| line.contains(secret))
         })
@@ -161,7 +194,7 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     );
     // A backend whose signer never ran is a backend this file is not watching, and the
     // silence would read exactly like a pass.
-    for service in ["s3", "gcs", "azblob"] {
+    for service in ["s3", "gcs", "azblob", "http"] {
         assert!(
             logs.contains(service),
             "{service} logged nothing at all, so it was not checked:\n{logs}"

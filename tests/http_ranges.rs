@@ -48,6 +48,16 @@ struct Server {
 impl Server {
     /// Serves `body` at every path, for as long as the test runs.
     fn start(body: Vec<u8>, ranges: Ranges) -> Self {
+        Self::start_inner(body, ranges, None)
+    }
+
+    /// The same, but answering `401` unless the request carries this exact
+    /// `Authorization` header — which is what a caller sets `headers` for.
+    fn start_requiring_auth(body: Vec<u8>, ranges: Ranges, token: &str) -> Self {
+        Self::start_inner(body, ranges, Some(format!("Bearer {token}")))
+    }
+
+    fn start_inner(body: Vec<u8>, ranges: Ranges, require: Option<String>) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
         let port = listener.local_addr().expect("a bound address").port();
         listener.set_nonblocking(true).expect("nonblocking");
@@ -63,8 +73,9 @@ impl Server {
                 };
                 let body = Arc::clone(&body);
                 let counter = Arc::clone(&counter);
+                let require = require.clone();
                 tokio::spawn(async move {
-                    let _ = serve(stream, &body, ranges, &counter).await;
+                    let _ = serve(stream, &body, ranges, require.as_deref(), &counter).await;
                 });
             }
         });
@@ -86,6 +97,7 @@ async fn serve(
     mut stream: tokio::net::TcpStream,
     body: &[u8],
     ranges: Ranges,
+    require: Option<&str>,
     counter: &AtomicUsize,
 ) -> std::io::Result<()> {
     let mut pending = Vec::new();
@@ -106,10 +118,23 @@ async fn serve(
         pending.drain(..end);
         counter.fetch_add(1, Ordering::Relaxed);
 
-        let response = answer(&head, body, ranges);
+        let response = match require {
+            Some(expected) if !carries_authorization(&head, expected) => {
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec()
+            }
+            _ => answer(&head, body, ranges),
+        };
         stream.write_all(&response).await?;
         stream.flush().await?;
     }
+}
+
+/// Whether the request head carries exactly this `Authorization`. Header names are
+/// case-insensitive; the value is compared as sent.
+fn carries_authorization(head: &str, expected: &str) -> bool {
+    head.lines()
+        .filter_map(|line| line.split_once(':'))
+        .any(|(name, value)| name.eq_ignore_ascii_case("authorization") && value.trim() == expected)
 }
 
 fn find_head(pending: &[u8]) -> Option<usize> {
@@ -206,10 +231,18 @@ fn policy() -> AccessPolicy {
 }
 
 async fn read_one_row(url: &str, limits: &LimitsConfig) -> Result<QueryResult, ApiError> {
+    read_one_row_with(url, limits, StorageOptions::default()).await
+}
+
+async fn read_one_row_with(
+    url: &str,
+    limits: &LimitsConfig,
+    options: StorageOptions,
+) -> Result<QueryResult, ApiError> {
     let parsed = storage::parse_url(url)?;
     let file = storage::open(
         &parsed,
-        &StorageOptions::default(),
+        &options,
         &policy(),
         &Arc::new(Transfers::new(limits)),
     )?;
@@ -302,7 +335,7 @@ async fn an_object_larger_than_the_cap_is_refused() {
         .expect_err("an object over the cap must be refused");
     assert_eq!(
         error.status(),
-        axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        http::StatusCode::PAYLOAD_TOO_LARGE,
         "{error}"
     );
     assert!(error.to_string().contains("byte ranges"), "{error}");
@@ -322,7 +355,7 @@ async fn a_chunked_object_over_the_cap_is_refused_while_it_streams() {
         .expect_err("an object over the cap must be refused");
     assert_eq!(
         error.status(),
-        axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        http::StatusCode::PAYLOAD_TOO_LARGE,
         "{error}"
     );
     assert!(
@@ -379,6 +412,72 @@ async fn the_scratch_copy_does_not_outlive_the_request() {
         .expect("the scratch directory should still be there")
         .count();
     assert_eq!(left, 0, "a scratch copy outlived its request");
+}
+
+/// The whole point of the `headers` option: a server that authenticates. Both the probe
+/// and every read the store makes have to carry the token, and against a ranging server
+/// that is several requests over a reused connection.
+#[tokio::test]
+async fn a_caller_header_authenticates_every_request_of_a_read() {
+    const TOKEN: &str = "the-caller-s-own-token";
+    let server = Server::start_requiring_auth(parquet_fixture().to_vec(), Ranges::Honour, TOKEN);
+    let authenticated = |token: &str| StorageOptions {
+        headers: serde_json::from_value(serde_json::json!({
+            "Authorization": format!("Bearer {token}"),
+        }))
+        .expect("the headers should deserialize"),
+        allow_http: true,
+        ..Default::default()
+    };
+
+    let result = read_one_row_with(
+        &server.url("part0.parquet"),
+        &LimitsConfig::default(),
+        authenticated(TOKEN),
+    )
+    .await
+    .expect("the token should authenticate the read");
+    assert_eq!(row_count(&result), 1);
+    assert!(
+        server.requests() > 1,
+        "only one request was made, so the store's own reads were not covered"
+    );
+
+    // Without it, and with the wrong one: the server refuses and the read fails rather
+    // than quietly returning nothing.
+    for options in [StorageOptions::default(), authenticated("wrong-token")] {
+        let error = read_one_row_with(
+            &server.url("part0.parquet"),
+            &LimitsConfig::default(),
+            options,
+        )
+        .await
+        .expect_err("an unauthenticated read must fail");
+        assert!(!error.to_string().contains(TOKEN), "leaked: {error}");
+    }
+}
+
+/// The same against a server that does not range, where the token has to be on the one
+/// request that fetches the whole object.
+#[tokio::test]
+async fn a_caller_header_authenticates_a_materialized_read() {
+    const TOKEN: &str = "the-caller-s-own-token";
+    let server = Server::start_requiring_auth(parquet_fixture().to_vec(), Ranges::Ignore, TOKEN);
+    let result = read_one_row_with(
+        &server.url("part0.parquet"),
+        &LimitsConfig::default(),
+        StorageOptions {
+            headers: serde_json::from_value(serde_json::json!({
+                "Authorization": format!("Bearer {TOKEN}"),
+            }))
+            .expect("the headers should deserialize"),
+            allow_http: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the token should authenticate the copy");
+    assert_eq!(row_count(&result), 1);
 }
 
 /// A key with `=` in it, which is every HATS partition path. The probe builds the url

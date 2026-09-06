@@ -75,6 +75,13 @@ allow_local_names = false
 # exactly those.
 # endpoints = ["https://data.example.com"]
 
+# A request may carry a "headers" storage option for these urls — a bearer token or an
+# API key for a server that authenticates. Those are the caller's own credentials and
+# are never logged, not even their names. Sending them over cleartext http needs the
+# caller's own allow_http as well as the switch below: this one is the operator saying
+# cleartext is acceptable on this network, which is not the same as a caller agreeing to
+# put their token on it.
+
 # Whether an http:// url may be read when no endpoint list names one. Off by default:
 # over cleartext nothing says the bytes came from the host the url names, and a parquet
 # file something on the path rewrote is a wrong answer rather than a failed request.

@@ -108,9 +108,13 @@ fn assert_no_secret(logs: &str, context: &str) {
 const AZURE_KEY: &str = "YXp1cmVBY2NvdW50S2V5VGhhdE11c3ROb3RCZUxvZ2dlZA==";
 const GCS_TOKEN: &str = "ya29.gcs-access-token-that-must-not-be-logged";
 const SAS_TOKEN: &str = "sv=2021-06-08&sig=sas-signature-that-must-not-be-logged";
+/// The http backend's credential. Both halves are the caller's, so both are checked: a
+/// token in a header *name* is a caller's mistake that would still land in our log.
+const HEADER_TOKEN: &str = "bearer-token-that-must-not-be-logged";
+const HEADER_NAME: &str = "x-secret-name-that-must-not-be-logged";
 
 fn assert_no_other_secret(logs: &str, context: &str) {
-    for secret in [AZURE_KEY, GCS_TOKEN, SAS_TOKEN] {
+    for secret in [AZURE_KEY, GCS_TOKEN, SAS_TOKEN, HEADER_TOKEN, HEADER_NAME] {
         assert!(
             !logs.contains(secret),
             "{context}: a credential reached the logs as {secret:?}\n--- logs ---\n{logs}"
@@ -127,7 +131,12 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
 
     let captured = logs();
     // One case per signer, since each takes its own path to the wire.
-    for credential in ["gcs access token", "azure shared key", "azure sas token"] {
+    for credential in [
+        "gcs access token",
+        "azure shared key",
+        "azure sas token",
+        "http headers",
+    ] {
         let (port, _receiver) = capture_one_request();
         let endpoint = Some(format!("http://127.0.0.1:{port}"));
         let azure = || StorageOptions {
@@ -153,11 +162,28 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
                     ..azure()
                 },
             ),
-            _ => (
+            "azure sas token" => (
                 "az://container/key.parquet",
                 StorageOptions {
                     sas_token: Some(SAS_TOKEN.to_owned().into()),
                     ..azure()
+                },
+            ),
+            // The http backend, whose credential goes out as a header rather than
+            // through a signer. Its url carries the server, so the endpoint the others
+            // take as an option is the url itself here.
+            _ => (
+                // Leaked into `raw` deliberately: this is the one backend whose address
+                // is the url, and the port is the capturing server's.
+                Box::leak(format!("http://127.0.0.1:{port}/key.parquet").into_boxed_str()) as &str,
+                StorageOptions {
+                    headers: serde_json::from_value(serde_json::json!({
+                        "Authorization": format!("Bearer {HEADER_TOKEN}"),
+                        HEADER_NAME: "value",
+                    }))
+                    .expect("the headers should deserialize"),
+                    allow_http: true,
+                    ..Default::default()
                 },
             ),
         };
@@ -176,7 +202,7 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
             .await;
     }
 
-    assert_no_other_secret(&captured.contents(), "gcs and azure");
+    assert_no_other_secret(&captured.contents(), "gcs, azure and http headers");
     assert!(
         captured.contents().contains("azblob"),
         "the azure store logged nothing, so nothing was checked"
@@ -297,7 +323,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
     ));
     let response = router
         .oneshot(
-            axum::http::Request::builder()
+            http::Request::builder()
                 .method("POST")
                 .uri("/api/v1/select")
                 .header("content-type", "application/json")
