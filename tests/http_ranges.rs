@@ -252,9 +252,8 @@ async fn read_one_row_with(
     hats_api::query::run(
         &file,
         &hats_api::query::Selection {
-            filter_column: "objectid",
-            filter_value: "42",
-            columns: None,
+            predicate: Some("objectid = 42"),
+            ..Default::default()
         },
     )
     .await

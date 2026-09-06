@@ -9,6 +9,7 @@ mod common;
 
 use common::{FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
 use hats_api::error::ApiError;
+use hats_api::query::Selection;
 use hats_api::storage::StorageOptions;
 
 /// The baseline: a file put in a bucket comes back through the whole path, and the
@@ -56,6 +57,38 @@ async fn a_point_lookup_finds_one_row_among_fifty_thousand() {
     assert_eq!(row_count(&result), 1);
     // The projection, not the file's schema.
     assert_eq!(result.schema.fields().len(), 2);
+}
+
+/// The query language against a real file, rather than against a schema: a computed and
+/// aliased select item, a predicate over two columns, and a row cap. `sql.rs` checks
+/// what each of these plans to; this checks that what they plan to actually runs.
+#[tokio::test]
+async fn a_select_list_and_a_predicate_run_against_a_real_file() {
+    let server = TestS3::anonymous().await;
+    server.put_parquet("catalog/part0.parquet");
+
+    let result = common::query(
+        &server.url("catalog/part0.parquet"),
+        &server.options(),
+        &permissive_policy(),
+        &Selection {
+            select: Some("objectid, objra - 0.5 AS ra_corr"),
+            predicate: Some("band = 'g' AND objectid < 100"),
+            limit: Some(10),
+        },
+    )
+    .await
+    .expect("the query should succeed");
+
+    // 50 of the first hundred rows are in `g`, and the cap takes ten of them.
+    assert_eq!(row_count(&result), 10);
+    let names: Vec<&str> = result
+        .schema
+        .fields()
+        .iter()
+        .map(|field| field.name().as_str())
+        .collect();
+    assert_eq!(names, ["objectid", "ra_corr"]);
 }
 
 /// A HATS partition key has `=` in it. It survives url parsing (a unit test covers

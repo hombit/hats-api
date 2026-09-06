@@ -93,11 +93,17 @@ pub fn router(service: Service) -> Router {
     if let Some(prefix) = service.api_prefix.clone() {
         router = router
             .route(&route(&prefix, "health"), get(health))
+            // The path names the target, and the predicate never appears in it: a
+            // spatial constraint is one clause of a query, so a `{target}/{predicate}`
+            // path set would grow as the product of the predicate kinds rather than
+            // their sum.
+            //
             // `POST`, not `GET`: the request carries credentials, and a query string is
             // written to every proxy's access log and the caller's shell history on the
-            // way. A body also has no url-length limit and needs no url nested inside a
-            // url.
-            .route(&route(&prefix, "select"), post(select));
+            // way. A body also has no url-length limit — a long `IN` list and a wide
+            // select list both run past nginx's 8 KB header buffer — and needs no url
+            // nested inside a url.
+            .route(&route(&prefix, "parquet"), post(query_parquet));
     }
     router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -208,7 +214,7 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SelectRequest {
+struct QueryRequest {
     /// Where the data is, treated as opaque: whatever query string it has belongs to
     /// the origin, not to us.
     url: SourceUrl,
@@ -216,14 +222,15 @@ struct SelectRequest {
     /// public object read anonymously, which is the common case.
     #[serde(default)]
     storage: StorageOptions,
-    /// What to select. These are the only domain parameters.
-    column: String,
-    value: String,
-    /// Columns to return, dotted for nested fields (`lightcurve.mag`). Absent returns
-    /// every column.
-    columns: Option<Vec<String>>,
+    /// The projection, as a SQL select list, so `mag - 0.1 AS mag_corr` works. Absent
+    /// returns every column.
+    select: Option<String>,
+    /// One boolean SQL expression over this file's columns. Absent returns every row.
+    r#where: Option<String>,
     /// `json` (the default) or `parquet`.
     format: Option<String>,
+    /// Most rows to return.
+    limit: Option<usize>,
 }
 
 /// What the caller wants back.
@@ -274,8 +281,8 @@ impl Format {
 /// the only cost would be a caller who stops being told which key they misspelled. It
 /// fails towards the safe message, and the two tests below are what notice.
 fn body_error(rejection: &JsonRejection) -> ApiError {
-    const SHAPE: &str = "expected a JSON object with url, column and value, and \
-                         optionally storage, columns, format";
+    const SHAPE: &str = "expected a JSON object with url, and optionally storage, \
+                         select, where, format, limit";
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -284,7 +291,7 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
         }
         JsonRejection::JsonDataError(error) => {
             let message = error.body_text();
-            // `unknown field \`regoin\`` and `missing field \`column\`` name a key. Every
+            // `unknown field \`regoin\`` and `missing field \`url\`` name a key. Every
             // other message may quote a value.
             let names_a_key = ["unknown field", "missing field"]
                 .iter()
@@ -296,20 +303,6 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
         }
         _ => ApiError::bad_request(format!("{}; {SHAPE}", rejection.body_text())),
     }
-}
-
-/// Reject a `columns` list that would silently return the wrong thing: an empty list
-/// reads as "no columns" but would be served as "every column".
-fn check_columns(columns: Option<&Vec<String>>) -> Result<(), ApiError> {
-    let Some(columns) = columns else {
-        return Ok(());
-    };
-    if columns.is_empty() || columns.iter().any(|path| path.trim().is_empty()) {
-        return Err(ApiError::bad_request(
-            "columns must be a non-empty list of non-empty column names",
-        ));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -324,15 +317,14 @@ struct SelectResponse {
 const NUM_ROWS_HEADER: &str = "x-hats-num-rows";
 const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
-async fn select(
+async fn query_parquet(
     State(service): State<Service>,
-    body: Result<Json<SelectRequest>, JsonRejection>,
+    body: Result<Json<QueryRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
     // Everything decidable from the request alone, before anything is opened.
     let format = Format::parse(params.format.as_deref())?;
-    check_columns(params.columns.as_ref())?;
     let file = storage::open(
         &parse_url(params.url.as_str())?,
         &params.storage,
@@ -342,9 +334,9 @@ async fn select(
     let result = query::run(
         &file,
         &Selection {
-            filter_column: &params.column,
-            filter_value: &params.value,
-            columns: params.columns.as_deref(),
+            select: params.select.as_deref(),
+            predicate: params.r#where.as_deref(),
+            limit: params.limit,
         },
     )
     .await?;
@@ -355,17 +347,16 @@ async fn select(
         Format::Parquet => parquet_response(&result, &file, num_rows, started).await?,
     };
     tracing::info!(
-        // file.url, not the parameter: the parameter may carry credentials.
+        // file.url, not the parameter: the parameter may carry credentials. The two
+        // expressions are the caller's own text and can be megabytes of `IN` list, so
+        // what is logged is that they were there.
         url = %file.url,
-        column = %params.column,
-        columns = params
-            .columns
-            .as_ref()
-            .map_or_else(|| "*".to_owned(), |paths| paths.join(",")),
+        selected = params.select.is_some(),
+        filtered = params.r#where.is_some(),
         format = format.name(),
         num_rows,
         elapsed_ms = started.elapsed().as_millis(),
-        "select"
+        "query"
     );
     Ok(response)
 }
@@ -449,13 +440,13 @@ mod tests {
         send(Request::builder().uri(uri), Body::empty()).await
     }
 
-    /// A `POST /api/v1/select` with the given body, under a policy that allows
+    /// A `POST /api/v1/parquet` with the given body, under a policy that allows
     /// everything — what the policy allows is `access.rs`'s business.
     async fn select_with(body: serde_json::Value) -> (StatusCode, String) {
         send(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/select")
+                .uri("/api/v1/parquet")
                 .header("content-type", "application/json"),
             Body::from(body.to_string()),
         )
@@ -487,22 +478,22 @@ mod tests {
     /// The credential-bearing shape is not reachable by a method that puts its
     /// parameters in a url.
     #[tokio::test]
-    async fn select_is_not_a_get() {
-        let (status, _) = get("/api/v1/select?url=s3://b/k.parquet&column=x&value=1").await;
+    async fn the_query_endpoint_is_not_a_get() {
+        let (status, _) = get("/api/v1/parquet?url=s3://b/k.parquet&where=x%3D1").await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]
     async fn a_missing_field_is_named() {
-        let (status, body) = select_with(serde_json::json!({"url": "s3://b/k.parquet"})).await;
+        let (status, body) = select_with(serde_json::json!({"where": "x = 1"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("column"), "{body}");
+        assert!(body.contains("url"), "{body}");
     }
 
     #[tokio::test]
     async fn a_misspelled_field_is_named_rather_than_ignored() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "s3://b/k.parquet", "column": "x", "value": "1",
+            "url": "s3://b/k.parquet",
             "storage": {"regoin": "us-west-2"},
         }))
         .await;
@@ -510,12 +501,25 @@ mod tests {
         assert!(body.contains("regoin"), "{body}");
     }
 
+    /// `region` is specified but not built, and the shape is closed, so a caller who
+    /// sends one is told rather than quietly served every row in the file.
+    #[tokio::test]
+    async fn a_field_that_does_not_exist_yet_is_not_ignored() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet",
+            "region": [{"type": "circle", "ra": 320.6, "dec": -12.4, "radius": 0.01}],
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("region"), "{body}");
+    }
+
     /// A body that does not fit is described, never quoted: a mistyped `storage` is
     /// exactly where a secret would be sitting.
     #[tokio::test]
     async fn a_body_that_does_not_fit_is_not_quoted_back() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "s3://b/k.parquet", "column": "x", "value": "1",
+            "url": "s3://b/k.parquet",
             "storage": SECRET,
         }))
         .await;
@@ -529,7 +533,7 @@ mod tests {
         let (status, body) = send(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/select")
+                .uri("/api/v1/parquet")
                 .header("content-type", "application/json"),
             Body::from(format!("{{\"url\": \"{SECRET}\"")),
         )
@@ -541,7 +545,7 @@ mod tests {
     #[tokio::test]
     async fn unsupported_schemes_are_rejected() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "ftp://example.com/a.parquet", "column": "x", "value": "1",
+            "url": "ftp://example.com/a.parquet",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -554,36 +558,11 @@ mod tests {
     async fn storage_options_in_the_url_are_refused() {
         let (status, body) = select_with(serde_json::json!({
             "url": format!("s3://b/k.parquet?secret_access_key={SECRET}"),
-            "column": "x", "value": "1",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("query string"), "{body}");
         assert!(!body.contains(SECRET), "leaked: {body}");
-    }
-
-    #[test]
-    fn rejects_empty_column_lists() {
-        assert!(check_columns(None).is_ok());
-        assert!(check_columns(Some(&vec!["objectid".to_owned()])).is_ok());
-        for columns in [
-            vec![],
-            vec![String::new()],
-            vec!["a".to_owned(), " ".to_owned()],
-        ] {
-            let error = check_columns(Some(&columns)).unwrap_err();
-            assert!(error.to_string().contains("non-empty"), "{error}");
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_column_lists_are_rejected_over_http() {
-        let (status, body) = select_with(serde_json::json!({
-            "url": "file:///nonexistent.parquet", "column": "x", "value": "1", "columns": [],
-        }))
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("non-empty"), "{body}");
     }
 
     #[test]
@@ -596,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_formats_are_rejected() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "s3://b/k.parquet", "column": "x", "value": "1", "format": "csv",
+            "url": "s3://b/k.parquet", "format": "csv",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -626,17 +605,17 @@ mod tests {
     /// makes that a choice rather than a rule to remember.
     #[test]
     fn printing_the_request_leaks_nothing() {
-        let params = SelectRequest {
+        let params = QueryRequest {
             url: "s3://b/k.parquet".to_owned().into(),
             storage: StorageOptions {
                 region: Some("us-west-2".to_owned()),
                 secret_access_key: Some(SECRET.to_owned().into()),
                 ..Default::default()
             },
-            column: "objectid".to_owned(),
-            value: "1".to_owned(),
-            columns: None,
+            select: None,
+            r#where: Some("objectid = 1".to_owned()),
             format: None,
+            limit: None,
         };
         let shown = format!("{params:?}");
         assert!(!shown.contains(SECRET), "leaked: {shown}");
@@ -879,8 +858,7 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_urls_are_rejected() {
-        let (status, body) =
-            select_with(serde_json::json!({"url": "not-a-url", "column": "x", "value": "1"})).await;
+        let (status, body) = select_with(serde_json::json!({"url": "not-a-url"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("invalid url"), "{body}");
     }

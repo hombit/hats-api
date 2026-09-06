@@ -40,4 +40,5 @@ pub mod mount;
 pub mod network;
 pub mod parquet_out;
 pub mod query;
+pub mod sql;
 pub mod storage;

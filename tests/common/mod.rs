@@ -230,6 +230,10 @@ pub fn transfers() -> Arc<Transfers> {
 }
 
 /// Open a url and run one point lookup through it: the whole path a request takes.
+///
+/// The column and the value are separate because that is how a target is configured —
+/// two environment variables — rather than because the service takes them that way; the
+/// predicate is assembled here, the way a caller would write it.
 pub async fn lookup(
     raw_url: &str,
     options: &StorageOptions,
@@ -238,17 +242,39 @@ pub async fn lookup(
     filter_value: &str,
     columns: Option<&[String]>,
 ) -> Result<QueryResult, ApiError> {
-    let url = storage::parse_url(raw_url)?;
-    let file = storage::open(&url, options, policy, &transfers())?;
-    hats_api::query::run(
-        &file,
+    let select = columns.map(|columns| columns.join(", "));
+    query(
+        raw_url,
+        options,
+        policy,
         &Selection {
-            filter_column,
-            filter_value,
-            columns,
+            select: select.as_deref(),
+            predicate: Some(&format!("{filter_column} = {}", sql_literal(filter_value))),
+            limit: None,
         },
     )
     .await
+}
+
+/// A value as SQL. A number is written as one so that it compares against a numeric
+/// column; anything else is a quoted string.
+fn sql_literal(value: &str) -> String {
+    match value.parse::<f64>() {
+        Ok(_) => value.to_owned(),
+        Err(_) => format!("'{}'", value.replace('\'', "''")),
+    }
+}
+
+/// Open a url and run an arbitrary selection through it.
+pub async fn query(
+    raw_url: &str,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+    selection: &Selection<'_>,
+) -> Result<QueryResult, ApiError> {
+    let url = storage::parse_url(raw_url)?;
+    let file = storage::open(&url, options, policy, &transfers())?;
+    hats_api::query::run(&file, selection).await
 }
 
 pub fn row_count(result: &QueryResult) -> usize {

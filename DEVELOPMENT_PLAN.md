@@ -23,12 +23,12 @@ thing to keep working while that is built.
 | 2.5 | Hugging Face | deferred | until after §4, and droppable |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
-| 3.3 | API request shape (`select`/`where`/`region`) | todo | needs DataFusion's `sql` feature. Only the query language is left: `POST` and the `storage` object are done |
+| 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
 | 3.4 | file-server request shape | todo | needs `docs/vizcat-compat.md` written from the live service first |
 | 4 | file-server interface | todo | |
 | 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
 | 5.1 | HATS catalog metadata | todo | |
-| 5.2 | spatial predicate | todo | order policy and range budget to be settled by measurement first |
+| 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -176,24 +176,11 @@ internal query representation and one execution path. `columns`/`filters` and
 
 ### 3.3 The API request shape
 
-**The API is `POST` only**; `GET` belongs to the file-server mode (§3.4). What this step
-still has to settle is the query language, not the transport.
-
-1. **Length.** A long `IN` list, a wide `select` and later a full ADQL statement run into
-   URL length limits — nginx's default header buffer is 8 KB.
-
-`POST` responses are uncacheable by intermediaries, which costs nothing here: §6.5 does
-not cache query results, and the caching that matters is service→store, keyed on the
-object.
-
-**The path names the target; the predicate never appears in it.** A spatial constraint is
-one clause of a query, so a `{target}/{predicate}` path set would grow as the product of
-the predicate kinds rather than their sum.
-
-```
-POST /api/v1/parquet     one parquet file
-POST /api/v1/hats        a HATS catalog
-```
+The transport, the target paths and the two expression fields are settled. What is left
+of this step is `region`, specified here and built in §5.2 — a region needs the catalog's
+own `ra`/`dec` column names to refine on, and those come from §5.1's properties file, so
+there is nothing it could execute against before then. `POST /api/v1/hats` arrives with
+it, for the same reason.
 
 ```json
 {
@@ -206,17 +193,10 @@ POST /api/v1/hats        a HATS catalog
 }
 ```
 
-- `select` — the projection, a SQL select list, so `mag - 0.1 AS mag_corr` works. Absent
-  means every column.
-- `where` — one boolean SQL expression over this target's columns. Not a statement: no
-  `FROM`, `JOIN`, subquery, aggregate or window function. DataFusion parses it to an
-  `Expr`; walk the tree to reject those forms, and allowlist scalar functions (`random()`
-  would break determinism and §6's caching).
-- `region` — a structured field, not part of the expression (§3.5). Drives partition
-  pruning in HATS mode (§5.2).
-- `format` — `json` or `parquet`. `limit` — maximum rows.
+`region` is a structured field rather than part of the `where` expression (§3.5), and
+drives partition pruning in HATS mode (§5.2).
 
-**`region` is always an array; each element is an object with a `type`.** One region is an
+**It is always an array; each element is an object with a `type`.** One region is an
 array of one. Every shape lowers to a MOC, which is what the planner needs anyway.
 
 ```json
@@ -237,15 +217,6 @@ Degrees throughout; a `frame` field defaults to `icrs`. Unknown fields are rejec
   from `where` may expect `AND`. Intersection and difference are cheap to add later as
   explicit combinators.
 - **`moc: {url: …}` is a caller-named fetch** and goes through §8.3 like any other.
-
-**Nested columns.** `lightcurve.mag` works in both `select` and `where` in DataFusion 55,
-including list-typed sub-fields; no quoting rule is needed and nested filters need not be
-forbidden. Two consequences:
-
-- **Auto-alias bare field accesses**, so the output column is the dotted path. Unaliased,
-  DataFusion names it `t.lightcurve[mag]`.
-- **DataFusion's `sql` feature is a prerequisite.** The current `default-features = false`
-  build has no `ctx.sql`.
 
 ### 3.4 The file-server request shape
 
@@ -778,9 +749,15 @@ Rules to preserve:
 - **A timeout is still missing on every one of these paths**, materialization included.
   At multi-GiB sizes it is what a slow origin hits first, well before any byte cap, and
   §7.2 is where it lands.
-- `POST` body size limit, and caps on `where` expression depth and node count, rejected at
-  parse time against the `Expr` tree. The projection needs no cap: it is bounded by the
-  schema, and the byte and time limits govern the data it moves.
+- **A response cap is missing, and every field of a request is now optional.** A `POST`
+  naming only a url reads a whole partition, and both writers buffer the result whole
+  before sending it, so a wide file is answered out of memory. `limit` is the caller's to
+  set and is no bound at all when they do not. What is needed is a row or byte ceiling on
+  the result the operator sets, and §7.2's streaming, which removes the buffering that
+  makes the size a memory question rather than a bandwidth one.
+- `POST` body size limit. The depth and node caps on the expressions are done, at parse
+  time. The projection needs no cap: it is bounded by the schema, and the byte and time
+  limits govern the data it moves.
 - Reject pathological parquet early — a footer claiming implausible row-group or column
   counts is a 400, not an allocation.
 

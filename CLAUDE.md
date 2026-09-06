@@ -157,6 +157,40 @@ Then follow the shape the existing ones set:
 - `access` decides which endpoint may be named; `network` decides which address may be
   reached. A new rule belongs in whichever of those it is actually about.
 
+## The caller's SQL
+
+`sql.rs` is the only way a caller's expression becomes something this service runs, and
+everything about what SQL means here is decided there.
+
+- **Expressions, never statements.** Each field is parsed on its own with `sqlparser`,
+  and the parser must reach the end of the string. That is what makes it an expression
+  rather than the head of something longer: without the end-of-input check, `1 UNION
+  SELECT …` parses as `1` and the rest is dropped in silence. Never assemble a caller's
+  text into a SQL statement and check the plan afterwards — the check would be the only
+  thing standing between a select list and a join.
+- **`allowed` is an allowlist over an exhaustive match**, not a list of what is refused.
+  A DataFusion upgrade that adds an expression kind is then a compile error, and someone
+  decides whether it belongs in a per-row expression rather than a caller discovering
+  that it already did. Add the variant to the arm it belongs in; do not add a wildcard.
+- **A function is judged by volatility, never by name.** Only `Immutable` passes: `now()`
+  is `Stable` and `random()` is `Volatile`, and both make one request's answer differ
+  from the next's for the same query, which is wrong to cache and wrong to reproduce from
+  a plan. The rule holds for functions this crate has never compiled in, which is why it
+  is not a list of names.
+- **Identifier normalization is off**, in `query::session_config`. Astronomy column names
+  are mixed-case as a matter of course — `Gmag`, `Norder`, `objectId` — and SQL's usual
+  lowercasing would report every one of them as missing. Unquoted identifiers therefore
+  mean exactly what the file calls them. A new session config must keep this, or the same
+  query answers differently depending on which one built it.
+- **The schema is what types a literal.** Plan against the file's `DFSchema` so that
+  `objectid = 1383212200036217` becomes an `Int64` literal, which row-group statistics,
+  the page index and a bloom filter can all prune on. Compared as a string it reads the
+  whole file and returns nothing — a slow wrong answer rather than an error.
+
+Adding a scalar function feature to the `datafusion` dependency adds everything it
+registers to what a caller may call. That is the decision being made; make it
+deliberately.
+
 ## Comments
 
 Focused and informative. Say what the code does and what a reader could not work out
