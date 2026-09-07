@@ -24,6 +24,21 @@ use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, NetworkConfig};
 use hats_api::storage::StorageOptions;
 use opendal::{HttpTransporter, OperationContext, Operator, services};
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
+
+/// Fixture writes go one at a time, process-wide.
+///
+/// The harness runs these tests concurrently and each one writes to the same server
+/// before reading, so without this it is several writers mutating one tree — and a
+/// write is three requests, since OpenDAL creates the parent by statting it and sending
+/// `MKCOL` when the stat says it is absent. How a server interleaves that is its own
+/// business, and the ways it can go wrong are not all statuses: a concurrent write can
+/// be answered by closing the connection with the body already sent, which arrives here
+/// as a transport error rather than as a response. Whether the server serializes writes
+/// well is not what these tests are for — the service under test has no write path at
+/// all — so the writes are serialized here instead, which at five files costs nothing.
+static FIXTURE_WRITES: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Where the WebDAV server under test is, and how to write to it.
 struct Webdav {
@@ -78,13 +93,11 @@ impl Webdav {
 
     /// Put the fixture at `key` and return the url a caller would send to read it.
     ///
-    /// Every test here writes under a directory of its own, and that is load-bearing
-    /// rather than tidiness. OpenDAL creates a parent by statting it and sending `MKCOL`
-    /// when the stat says it is absent, and it treats anything but `201` or `405` as a
-    /// failure. Two tests sharing a directory both see it absent and both create it, and
-    /// a real server serializes that and answers the loser `423 Locked` — so the shared
-    /// directory, not the object, is what fails.
+    /// Every test here writes under a directory of its own, so no test's tree is any
+    /// other's. That matters most for the missing-object test, which is only asking a
+    /// real question if the directory it reads from is one it put there itself.
     async fn put_fixture(&self, key: &str) -> String {
+        let _serialized = FIXTURE_WRITES.lock().await;
         self.writer()
             .write(key, parquet_fixture())
             .await
