@@ -27,7 +27,7 @@ thing to keep working while that is built.
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | |
 | 4.1 | write the README | done | |
-| 4.2 | row order, which differs by mode | todo | measured: only a single-partition scan holds file order. File-server must keep it, the API need not, and both belong in the README |
+| 4.2 | say the ordering guarantees in the user documentation | todo | the guarantees hold and `CLAUDE.md` has the rule; the README does not mention order at all |
 | 4.3 | what the engine costs | todo | measurement, not code. Its findings decide the rest of `query::session_config` |
 | 4.4 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
@@ -312,48 +312,31 @@ The static-serving path must not regress: an `lsdb` client pointed at a mount sh
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
 
-### 4.2 Row order, which differs by mode
+### 4.2 Say the ordering guarantees in the user documentation
 
-**The file-server mode returns rows in the source file's order. The API mode promises
-nothing about order.**
+The guarantees themselves hold and `CLAUDE.md` carries the rule; what is left is telling
+a caller. The README says nothing about order, and a difference in ordering between two
+interfaces over the same data is exactly what someone will not expect to have to ask
+about:
 
-That split is the requirement, and it is not what the engine does today. Measured against
-a 205 MiB file of 200 row groups on a 12-core machine, `query::run` as it stands:
+- The file-server mode returns rows in the file's order, so reading one partition twice
+  gives the same rows in the same places.
+- The API mode promises no order.
+- Both answer a `limit` reproducibly, and under the file-server's order a `limit` is the
+  *front* of the file rather than an arbitrary selection.
 
-| request | in file order |
-|---|---|
-| whole file, or any projection of it | no — 141 order breaks, and a different order each run |
-| a predicate matching rows across many row groups | no — ~100 breaks, different each run |
-| a predicate confined to one row group | yes |
-| `limit` with no predicate | yes |
-| `limit` after a scattered predicate | no, and a different set of rows each run |
+Worth stating plainly rather than burying, since the second point is the surprising one
+and the third is what stops a caller building a pager on the first.
 
-Three things this turned on:
+Two loose ends, neither blocking:
 
-- **Parallelism is the cause, and the only cause.** With `target_partitions` forced to 1
-  every shape above comes back in file order. Turning `pushdown_filters` and
-  `reorder_filters` off changes nothing, so filter reordering is not implicated.
-  DataFusion's default `target_partitions` is the core count, so row groups are handed
-  out to threads and the results interleave in whatever order they finish.
-- **It is not a stable wrong order, it is a different order each time.** Repeating the
-  same request gives a different interleaving, so a caller who observes order once cannot
-  rely on having observed anything.
-- **A one-row-group file cannot show any of it.** There is only one unit of work to hand
-  out, so order survives by accident. Small catalogs will therefore look correct
-  throughout, and this appears only on partitions large enough to hold several row
-  groups.
-
-`limit` is the sharpest case: `?limit=100` on a filtered read returns a *different 100
-rows* from one request to the next. That is not a missing order guarantee but an unstable
-result set, and it is reachable from the file-server mode today.
-
-What remains is to make the file-server mode keep file order, at a cost that is measured
-rather than assumed — a single-partition scan is the obvious lever and serialises the
-read, which is the trade to quantify. The API mode needs no change beyond saying so.
-
-Both guarantees belong in the README once they hold, since a difference in ordering
-between two interfaces over the same data is exactly what a caller will not expect to
-have to ask about.
+- **What turning work stealing off costs.** A partition that finishes early no longer
+  helps a slow sibling, so a file whose row groups decode unevenly is slower to read.
+  Measured with the rest of the engine's costs below.
+- **Streaming a parquet answer.** Partition 0 is complete and correct while later
+  partitions are still being read, so a parquet response could be written a partition at
+  a time instead of after the whole answer is in memory. Wants §6's shape first, since
+  what it saves is peak memory on a large answer.
 
 ### 4.3 What the engine costs
 

@@ -256,6 +256,7 @@ async fn read_one_row_with(
             ..Default::default()
         },
         limits.into(),
+        hats_api::query::Order::Unspecified,
     )
     .await
 }

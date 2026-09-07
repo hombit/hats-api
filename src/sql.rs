@@ -531,7 +531,9 @@ mod tests {
     /// A context configured the way a request's is, which is what decides whether an
     /// unquoted identifier keeps its case.
     fn state() -> SessionState {
-        SessionContext::new_with_config(crate::query::session_config()).state()
+        // Reproducibility decides how the scan is read back, and nothing about how an
+        // identifier is parsed, so either value gives the same answer here.
+        SessionContext::new_with_config(crate::query::session_config(false)).state()
     }
 
     /// The limits an operator who set none would get.

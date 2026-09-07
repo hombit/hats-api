@@ -8,7 +8,13 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::execution::TaskContext;
+use datafusion::physical_plan::{
+    ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned,
+    execute_stream_partitioned,
+};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use futures::StreamExt;
 
 use crate::error::ApiError;
 use crate::sql;
@@ -48,6 +54,39 @@ pub struct Selection<'a> {
     pub limit: Option<usize>,
 }
 
+/// What the interface carrying this request promises about the order of the rows.
+///
+/// Not a preference: the two interfaces promise different things, so this decides what a
+/// request is allowed to return.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    /// No promise about the order the rows arrive in.
+    ///
+    /// It says nothing about *which* rows: a `limit` is still answered reproducibly,
+    /// whichever interface asked.
+    #[default]
+    Unspecified,
+    /// The file's own row order.
+    ///
+    /// A file server hands over bytes, and a caller who asks a file for a subset of
+    /// itself is asking about that file rather than for a bag of rows — so the rows
+    /// arrive in the order they are stored, and the same request twice is the same answer
+    /// twice.
+    File,
+}
+
+/// Whether this request must be answered the same way twice.
+///
+/// A `limit` is the reason this is not simply [`Order`]. Without a fixed order, a limit
+/// turns "how many rows" into "which rows", and the same request returns a different
+/// subset each time — which a caller cannot distinguish from the data having changed. So
+/// a limited request is answered reproducibly whatever its interface promises about
+/// order, and an unlimited one under [`Order::Unspecified`] needs nothing, since every
+/// matching row comes back and the set cannot differ.
+fn reproducible(selection: &Selection<'_>, order: Order) -> bool {
+    order == Order::File || selection.limit.is_some()
+}
+
 /// The rows a [`Selection`] matched, plus the schema they have — which is the
 /// projection's schema, not the file's, and is the only thing left to describe the
 /// result when no row matched at all.
@@ -81,9 +120,19 @@ impl std::fmt::Debug for QueryResult {
 /// None of it assumes anything about the file: DataFusion uses a page index or a bloom
 /// filter when the file happens to have one, and falls back to row-group statistics
 /// when it does not.
-pub(crate) fn session_config() -> SessionConfig {
+pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     let mut config = SessionConfig::new();
     let options = config.options_mut();
+    // A file scan hands byte-range morsels out to whichever partition goes idle, so the
+    // partition holding the start of the file is not reliably partition 0 — and reading
+    // the partitions back in index order is the whole of how a stable order is kept. Each
+    // partition's own rows are contiguous and ascending either way, so with this left on
+    // the answer comes out *nearly* ordered, and often exactly ordered, which is worse
+    // than plainly wrong: it passes a spot check and fails in production.
+    //
+    // The cost is that a partition which finishes early no longer helps a slow sibling,
+    // so this is off only for the requests that need it.
+    options.execution.enable_file_stream_work_stealing = !reproducible;
     // `sql::resolve_identifiers` decides which spellings of a column name reach it, and
     // it can only do that if nothing else is folding case behind it: with normalization
     // on, DataFusion lowercases whatever the pass left alone, so a name the rule refuses
@@ -106,8 +155,26 @@ pub async fn run(
     file: &RemoteFile,
     selection: &Selection<'_>,
     limits: sql::Limits,
+    order: Order,
 ) -> Result<QueryResult, ApiError> {
-    let ctx = SessionContext::new_with_config(session_config());
+    execute(file, selection, limits, order)
+        .await
+        .map(|(result, _)| result)
+}
+
+/// The same, and how many partitions the scan was split into.
+///
+/// The count is what tells a test that a file was actually read in parallel. Without it a
+/// test of ordering passes on any file DataFusion decided not to split — which is any
+/// file below `repartition_file_min_size` — while checking nothing at all.
+pub(crate) async fn execute(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+    order: Order,
+) -> Result<(QueryResult, usize), ApiError> {
+    let reproducible = reproducible(selection, order);
+    let ctx = SessionContext::new_with_config(session_config(reproducible));
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
 
     // The url names one object, and it has already been decided that this is a parquet
@@ -146,16 +213,59 @@ pub async fn run(
             df.select(exprs)?
         }
     };
-    let df = match selection.limit {
-        Some(rows) => df.limit(0, Some(rows))?,
-        None => df,
+    // `DataFrame::limit` puts a `CoalescePartitionsExec` above the scan, which takes
+    // whichever rows arrive first. That is not a symptom of the unstable answer, it is
+    // the cause — so a request that has to be reproducible keeps the limit out of the
+    // plan and applies it while reading instead.
+    let df = match (selection.limit, reproducible) {
+        (Some(rows), false) => df.limit(0, Some(rows))?,
+        _ => df,
     };
 
     let schema = Arc::new(df.schema().as_arrow().clone());
-    Ok(QueryResult {
-        schema,
-        batches: df.collect().await?,
-    })
+    let plan = df.create_physical_plan().await?;
+    let partitions = plan.output_partitioning().partition_count();
+    let task = ctx.task_ctx();
+    let batches = match (reproducible, selection.limit) {
+        (false, _) => collect(plan, task).await?,
+        // Every partition at once, then put back in index order: the read is as parallel
+        // as it ever was, and nothing is merged on completion.
+        (true, None) => collect_partitioned(plan, task)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect(),
+        (true, Some(rows)) => first_rows_in_order(plan, task, rows).await?,
+    };
+    Ok((QueryResult { schema, batches }, partitions))
+}
+
+/// The first `limit` rows, reading partitions in index order and stopping there.
+///
+/// One partition at a time, on purpose. Reading them concurrently would be pointless
+/// work: the answer is the front of the file, so a partition covering the middle of it
+/// contributes nothing until everything before it is exhausted. A stream that is never
+/// polled never reads its byte range, which is what keeps `limit=100` cheap on a large
+/// file — and what a plan-level limit cannot do without also choosing arbitrary rows.
+async fn first_rows_in_order(
+    plan: Arc<dyn ExecutionPlan>,
+    task: Arc<TaskContext>,
+    limit: usize,
+) -> Result<Vec<RecordBatch>, ApiError> {
+    let mut collected = Vec::new();
+    let mut rows = 0;
+    for mut stream in execute_stream_partitioned(plan, task)? {
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            if rows + batch.num_rows() >= limit {
+                collected.push(batch.slice(0, limit - rows));
+                return Ok(collected);
+            }
+            rows += batch.num_rows();
+            collected.push(batch);
+        }
+    }
+    Ok(collected)
 }
 
 /// Serialize the result as a JSON array of row objects, nested columns included.
@@ -174,9 +284,12 @@ pub fn to_json(result: &QueryResult) -> Result<Vec<serde_json::Value>, ApiError>
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray};
+    use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, StringArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::basic::Compression;
+    use datafusion::parquet::file::properties::{EnabledStatistics, WriterProperties};
+    use datafusion::parquet::schema::types::ColumnPath;
 
     use super::*;
 
@@ -205,6 +318,291 @@ pub(crate) mod tests {
         writer.write(&batch).expect("write the batch");
         writer.close().expect("close the file");
         buffer
+    }
+
+    /// How a fixture is written, for the cases that care.
+    ///
+    /// Every field here changes what the engine has to work with rather than what the
+    /// answer should be, which is the point: the ordering guarantee cannot depend on how
+    /// a file was written, because a caller's file is written by whichever importer they
+    /// used.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct Shape {
+        pub rows: i64,
+        pub row_group_rows: usize,
+        /// `Page` writes the page index as well as row-group statistics, `Chunk` only the
+        /// latter, `None` neither.
+        pub statistics: EnabledStatistics,
+        pub bloom_filter: bool,
+    }
+
+    impl std::fmt::Display for Shape {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "{} rows in groups of {}, statistics {:?}, bloom filter {}",
+                self.rows, self.row_group_rows, self.statistics, self.bloom_filter
+            )
+        }
+    }
+
+    /// A file big enough to be read in parallel, with an ascending `objectid` so that
+    /// file order is checkable and a scattered `mag` so that ZSTD cannot shrink it below
+    /// the size at which DataFusion bothers to split a file.
+    pub(crate) fn shaped(shape: Shape) -> Vec<u8> {
+        let rows = shape.rows;
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..rows));
+        // A value that looks nothing like its neighbours, so a row group's min/max spans
+        // most of the range and prunes nothing — and so that ZSTD cannot shrink the file
+        // below the size DataFusion bothers to split. Every conversion here is exact: a
+        // `u32` is representable in an `f64`, which a `u64` is not.
+        let scattered = |i: i64| {
+            let mixed = i.cast_unsigned().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let bits = u32::try_from(mixed >> 32).expect("a u64 shifted by 32 fits a u32");
+            f64::from(bits) / f64::from(u32::MAX)
+        };
+        let mag: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..rows).map(|i| scattered(i) * 25.0),
+        ));
+        let noise: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..rows).map(|i| scattered(i + 7)),
+        ));
+        let band: ArrayRef = Arc::new(StringArray::from_iter_values(
+            (0..rows).map(|i| if i % 2 == 0 { "g" } else { "r" }),
+        ));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("mag", mag, true),
+            ("noise", noise, true),
+            ("band", band, true),
+        ])
+        .expect("the fixture batch");
+
+        let mut properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(shape.row_group_rows))
+            .set_statistics_enabled(shape.statistics)
+            .set_compression(Compression::ZSTD(Default::default()));
+        if shape.bloom_filter {
+            properties =
+                properties.set_column_bloom_filter_enabled(ColumnPath::from("objectid"), true);
+        }
+        let properties = properties.build();
+
+        let mut buffer = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut buffer, batch.schema(), Some(properties)).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
+
+    /// The shapes worth crossing with the requests below.
+    ///
+    /// Each row count is above `repartition_file_min_size`, which is 1 MiB and the size
+    /// below which DataFusion does not split a file at all — a smaller fixture would make
+    /// every case here pass while reading one partition and checking nothing.
+    /// The row count is the smallest that clears that threshold with room to spare —
+    /// writing these files is most of what this test costs, and a bigger one buys
+    /// nothing once the file is split.
+    fn shapes() -> Vec<Shape> {
+        let mut shapes = Vec::new();
+        // Few large groups and many small ones: how many there are is what decides how
+        // much there is to hand out to threads.
+        for row_group_rows in [2_000, 25_000] {
+            for statistics in [
+                EnabledStatistics::Page,
+                EnabledStatistics::Chunk,
+                EnabledStatistics::None,
+            ] {
+                shapes.push(Shape {
+                    rows: 120_000,
+                    row_group_rows,
+                    statistics,
+                    // Written only where the page index is, so that the two cases differ
+                    // in more than one structure and a file with everything is covered.
+                    bloom_filter: statistics == EnabledStatistics::Page,
+                });
+            }
+        }
+        shapes
+    }
+
+    /// The `objectid` column, in the order the rows came back.
+    fn ids(result: &QueryResult) -> Vec<i64> {
+        let mut ids = Vec::new();
+        for batch in &result.batches {
+            let column = batch.column_by_name("objectid").expect("objectid");
+            let values = column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("an i64 column");
+            ids.extend(values.values().iter().copied());
+        }
+        ids
+    }
+
+    /// A fixture on disk, and the way a mount opens one.
+    fn on_disk(bytes: &[u8]) -> (tempfile::TempDir, RemoteFile) {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("part0.parquet");
+        std::fs::write(&path, bytes).expect("write the fixture");
+        let file = crate::storage::open_mounted(&path).expect("open the fixture");
+        (dir, file)
+    }
+
+    /// The file-server mode's promise, across every shape: the rows arrive in the file's
+    /// own order.
+    ///
+    /// `objectid` ascends with the file, so file order is exactly an ascending result.
+    /// Each case also asserts the scan really was split, since the guarantee is only
+    /// interesting when there was more than one partition to put back together.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn file_order_holds_however_the_file_was_written() {
+        for shape in shapes() {
+            let bytes = shaped(shape);
+            assert!(
+                bytes.len() > 1024 * 1024,
+                "{shape} is below the size DataFusion splits, so this would check nothing"
+            );
+            let (_dir, file) = on_disk(&bytes);
+
+            for (what, selection) in [
+                (
+                    "every row",
+                    Selection {
+                        projection: Projection::All,
+                        predicate: Predicate::All,
+                        limit: None,
+                    },
+                ),
+                (
+                    "a projection",
+                    Selection {
+                        projection: Projection::Columns("objectid, mag"),
+                        predicate: Predicate::All,
+                        limit: None,
+                    },
+                ),
+                (
+                    "a predicate matching rows throughout",
+                    Selection {
+                        projection: Projection::All,
+                        predicate: Predicate::Where("mag < 0.5"),
+                        limit: None,
+                    },
+                ),
+                (
+                    "a predicate and a projection",
+                    Selection {
+                        projection: Projection::Columns("objectid"),
+                        predicate: Predicate::Where("mag < 0.5"),
+                        limit: None,
+                    },
+                ),
+            ] {
+                let (result, partitions) = execute(&file, &selection, limits(), Order::File)
+                    .await
+                    .unwrap_or_else(|error| panic!("{what} on {shape}: {error}"));
+                assert!(
+                    partitions > 1,
+                    "{what} on {shape} ran in {partitions} partition(s), so nothing was \
+                     put back together and this case proves nothing"
+                );
+                let ids = ids(&result);
+                assert!(!ids.is_empty(), "{what} on {shape} matched nothing");
+                let ordered = ids.windows(2).all(|pair| pair[0] < pair[1]);
+                assert!(
+                    ordered,
+                    "{what} on {shape} came back out of file order: {} of {} adjacent \
+                     pairs are descending",
+                    ids.windows(2).filter(|pair| pair[0] >= pair[1]).count(),
+                    ids.len() - 1
+                );
+            }
+        }
+    }
+
+    /// The same request twice is the same answer twice — which is the half of the
+    /// guarantee that a single ordered run cannot show.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_file_server_answers_the_same_way_twice() {
+        let shape = Shape {
+            rows: 120_000,
+            row_group_rows: 5_000,
+            statistics: EnabledStatistics::Page,
+            bloom_filter: false,
+        };
+        let (_dir, file) = on_disk(&shaped(shape));
+        let selection = Selection {
+            projection: Projection::Columns("objectid"),
+            predicate: Predicate::Where("mag < 1.0"),
+            limit: None,
+        };
+        let first = ids(&run(&file, &selection, limits(), Order::File).await.unwrap());
+        for again in 0..3 {
+            let repeated = ids(&run(&file, &selection, limits(), Order::File).await.unwrap());
+            assert_eq!(first, repeated, "run {again} differed");
+        }
+    }
+
+    /// A `limit` returns the same rows every time, in both modes.
+    ///
+    /// The API promises nothing about order, but which rows come back is a different
+    /// question: a limit over an unstable order is a different subset per request, and a
+    /// caller cannot tell that from the data having changed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_limit_returns_the_same_rows_every_time() {
+        let shape = Shape {
+            rows: 120_000,
+            row_group_rows: 5_000,
+            statistics: EnabledStatistics::Page,
+            bloom_filter: false,
+        };
+        let (_dir, file) = on_disk(&shaped(shape));
+
+        for order in [Order::File, Order::Unspecified] {
+            for predicate in [Predicate::All, Predicate::Where("mag < 1.0")] {
+                let selection = Selection {
+                    projection: Projection::Columns("objectid"),
+                    predicate,
+                    limit: Some(100),
+                };
+                let first = ids(&run(&file, &selection, limits(), order).await.unwrap());
+                assert_eq!(first.len(), 100, "{order:?} {predicate:?}");
+                for again in 0..3 {
+                    let repeated = ids(&run(&file, &selection, limits(), order).await.unwrap());
+                    assert_eq!(
+                        first, repeated,
+                        "{order:?} {predicate:?}: run {again} returned a different set of rows"
+                    );
+                }
+            }
+        }
+    }
+
+    /// And under the file-server's order, a limit is the *first* rows rather than an
+    /// arbitrary hundred of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_limit_in_file_order_takes_the_front_of_the_file() {
+        let shape = Shape {
+            rows: 120_000,
+            row_group_rows: 5_000,
+            statistics: EnabledStatistics::Chunk,
+            bloom_filter: false,
+        };
+        let (_dir, file) = on_disk(&shaped(shape));
+        let selection = Selection {
+            projection: Projection::Columns("objectid"),
+            predicate: Predicate::All,
+            limit: Some(100),
+        };
+        let result = run(&file, &selection, limits(), Order::File).await.unwrap();
+        assert_eq!(ids(&result), (0..100).collect::<Vec<i64>>());
+    }
+
+    /// Limits generous enough not to be what any of the above is measuring.
+    fn limits() -> sql::Limits {
+        (&crate::config::LimitsConfig::default()).into()
     }
 
     #[test]

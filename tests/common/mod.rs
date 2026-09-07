@@ -278,7 +278,14 @@ pub async fn query(
 ) -> Result<QueryResult, ApiError> {
     let url = storage::parse_url(raw_url)?;
     let file = storage::open(&url, options, policy, &transfers())?;
-    hats_api::query::run(&file, selection, (&LimitsConfig::default()).into()).await
+    // These read through a url the way the API does, so they take the API's order.
+    hats_api::query::run(
+        &file,
+        selection,
+        (&LimitsConfig::default()).into(),
+        hats_api::query::Order::Unspecified,
+    )
+    .await
 }
 
 pub fn row_count(result: &QueryResult) -> usize {

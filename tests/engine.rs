@@ -37,9 +37,11 @@ use datafusion::parquet::file::metadata::ParquetMetaDataReader;
 use datafusion::parquet::file::properties::{EnabledStatistics, WriterProperties};
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::physical_plan::metrics::MetricValue;
-use datafusion::physical_plan::{ExecutionPlan, collect};
+use datafusion::physical_plan::{
+    ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned, displayable,
+};
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
-use hats_api::query::{self, Predicate, Projection, Selection};
+use hats_api::query::{self, Order, Predicate, Projection, Selection};
 use hats_api::sql::Limits;
 use hats_api::storage::{self, RemoteFile};
 use tempfile::TempDir;
@@ -199,6 +201,10 @@ struct Knobs {
     target_partitions: Option<usize>,
     /// `None` leaves DataFusion's default of 8192.
     batch_size: Option<usize>,
+    /// DataFusion's `enable_file_stream_work_stealing`, on by default: an idle partition
+    /// reads byte-range morsels assigned to a sibling. That is what decides whether a
+    /// partition's *index* still corresponds to its place in the file.
+    work_stealing: bool,
 }
 
 impl Knobs {
@@ -211,6 +217,7 @@ impl Knobs {
         bloom_filter_on_read: true,
         target_partitions: None,
         batch_size: None,
+        work_stealing: true,
     };
 
     /// Every parquet switch off, as the floor to measure the others against. Not
@@ -241,6 +248,7 @@ impl Knobs {
         parquet.pruning = self.pruning;
         parquet.enable_page_index = self.enable_page_index;
         parquet.bloom_filter_on_read = self.bloom_filter_on_read;
+        options.execution.enable_file_stream_work_stealing = self.work_stealing;
         config
     }
 }
@@ -254,6 +262,10 @@ struct Observed {
     /// The `objectid` of every row, in the order it came back. Empty for a projection
     /// that did not ask for it.
     ids: Vec<i64>,
+    /// How many partitions the plan's last node produced, which is how many ways the
+    /// scan was actually split.
+    partitions: usize,
+    plan: String,
 }
 
 impl Observed {
@@ -284,9 +296,31 @@ impl Observed {
     }
 }
 
+/// How the partitions' results are put back together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Gather {
+    /// `collect`, which is what `query::run` does today. DataFusion coalesces the
+    /// partitions into one stream and takes whichever batch is ready, so the order the
+    /// rows arrive in is the order the threads happened to finish.
+    Coalesced,
+    /// `collect_partitioned`, concatenated by partition index. Order then depends on
+    /// whether DataFusion hands out the file's byte ranges to partitions in the file's
+    /// own order, which is what the case below is for.
+    ByPartition,
+}
+
+async fn observe(file: &RemoteFile, selection: &Selection<'_>, knobs: Knobs) -> Observed {
+    observe_with(file, selection, knobs, Gather::Coalesced).await
+}
+
 /// One request, mirroring `query::run` closely enough to measure it, with the physical
 /// plan kept so its metrics can be read.
-async fn observe(file: &RemoteFile, selection: &Selection<'_>, knobs: Knobs) -> Observed {
+async fn observe_with(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    knobs: Knobs,
+    gather_mode: Gather,
+) -> Observed {
     let ctx = SessionContext::new_with_config(knobs.config());
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
     let options = ParquetReadOptions {
@@ -329,9 +363,20 @@ async fn observe(file: &RemoteFile, selection: &Selection<'_>, knobs: Knobs) -> 
 
     let plan = df.create_physical_plan().await.expect("physical plan");
     let started = Instant::now();
-    let batches = collect(Arc::clone(&plan), ctx.task_ctx())
-        .await
-        .expect("collect");
+    let batches = match gather_mode {
+        Gather::Coalesced => collect(Arc::clone(&plan), ctx.task_ctx())
+            .await
+            .expect("collect"),
+        // Concatenated by partition index rather than by whichever finished first. That
+        // is the whole difference: the scan is just as parallel, and nothing here merges
+        // on completion.
+        Gather::ByPartition => collect_partitioned(Arc::clone(&plan), ctx.task_ctx())
+            .await
+            .expect("collect_partitioned")
+            .into_iter()
+            .flatten()
+            .collect(),
+    };
     let elapsed = started.elapsed();
 
     let mut metrics = BTreeMap::new();
@@ -341,7 +386,49 @@ async fn observe(file: &RemoteFile, selection: &Selection<'_>, knobs: Knobs) -> 
         elapsed,
         metrics,
         ids: ids_of(&batches),
+        partitions: plan.output_partitioning().partition_count(),
+        plan: displayable(plan.as_ref()).indent(false).to_string(),
     }
+}
+
+/// Per output partition: how many rows it produced, and the first and last `objectid` in
+/// it. Partitions are kept apart rather than concatenated, which is what makes it visible
+/// whether each one covers a contiguous, ascending stretch of the file.
+async fn partition_spans(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    knobs: Knobs,
+) -> Vec<(usize, i64, i64)> {
+    let ctx = SessionContext::new_with_config(knobs.config());
+    ctx.register_object_store(&file.base, Arc::clone(&file.store));
+    let options = ParquetReadOptions {
+        file_extension: "",
+        ..ParquetReadOptions::default()
+    };
+    let df = ctx
+        .read_parquet(file.url.as_str(), options)
+        .await
+        .expect("read the fixture");
+    let df = match selection.projection {
+        Projection::Columns(list) => {
+            let state = ctx.state();
+            let exprs = hats_api::sql::columns(&state, df.schema(), list, LIMITS).expect("columns");
+            df.select(exprs).expect("project")
+        }
+        _ => df,
+    };
+    let plan = df.create_physical_plan().await.expect("physical plan");
+    collect_partitioned(plan, ctx.task_ctx())
+        .await
+        .expect("collect_partitioned")
+        .iter()
+        .map(|batches| {
+            let ids = ids_of(batches);
+            let first = ids.first().copied().unwrap_or(-1);
+            let last = ids.last().copied().unwrap_or(-1);
+            (ids.len(), first, last)
+        })
+        .collect()
 }
 
 /// Every metric in the plan tree, summed by name across nodes and partitions.
@@ -535,6 +622,117 @@ async fn row_order() {
             observed.num_rows,
             observed.in_file_order()
         );
+    }
+}
+
+/// Whether file order survives a parallel scan when the partitions are concatenated by
+/// index instead of merged on completion.
+///
+/// This is the interesting question, because the alternative — one partition — serialises
+/// the read. If DataFusion hands the file's byte ranges out to partitions in the file's
+/// own order, then partition 0 holds the first rows, partition 1 the next, and
+/// concatenating them in order costs nothing and keeps every thread busy. If it does not,
+/// the whole approach is dead and the report should say so.
+#[tokio::test(flavor = "multi_thread")]
+async fn row_order_by_partition() {
+    if !enabled() {
+        eprintln!("engine: skipped, set HATS_ENGINE_MEASURE to run");
+        return;
+    }
+    let fixture = write_fixture();
+    println!(
+        "\n=== collect_partitioned, concatenated by index (available_parallelism = {}) ===",
+        std::thread::available_parallelism().map_or(0, |it| it.get())
+    );
+
+    for (name, selection) in shapes(rows()) {
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            runs.push(
+                observe_with(
+                    &fixture.file,
+                    &selection,
+                    Knobs::SHIPPED,
+                    Gather::ByPartition,
+                )
+                .await,
+            );
+        }
+        let first = &runs[0];
+        if first.ids.is_empty() {
+            continue;
+        }
+        let ordered = runs.iter().filter(|it| it.in_file_order()).count();
+        let stable = runs.iter().all(|it| it.ids == first.ids);
+        print!(
+            "{name:34} rows={:<8} partitions={:<3} in file order {ordered}/3, identical across runs: {stable}",
+            first.num_rows, first.partitions
+        );
+        if let Some((at, before, after)) = first.first_inversion() {
+            print!(
+                ", first break at row {at} ({before} then {after}), {} breaks",
+                first.inversions()
+            );
+        }
+        println!();
+    }
+
+    println!("\n--- the same, work stealing off ---");
+    let settled = Knobs {
+        work_stealing: false,
+        ..Knobs::SHIPPED
+    };
+    for (name, selection) in shapes(rows()) {
+        let mut runs = Vec::new();
+        for _ in 0..3 {
+            runs.push(observe_with(&fixture.file, &selection, settled, Gather::ByPartition).await);
+        }
+        let first = &runs[0];
+        if first.ids.is_empty() {
+            continue;
+        }
+        let ordered = runs.iter().filter(|it| it.in_file_order()).count();
+        let stable = runs.iter().all(|it| it.ids == first.ids);
+        println!(
+            "{name:34} rows={:<8} partitions={:<3} in file order {ordered}/3, identical across runs: {stable}",
+            first.num_rows, first.partitions
+        );
+    }
+
+    // Per partition, the span of ids it produced. Each partition's own contents are
+    // contiguous and ascending either way; what work stealing decides is whether the
+    // partition holding the file's first rows is partition 0.
+    println!("\n--- what each partition produced, whole file ---");
+    if let Some((_, selection)) = shapes(rows())
+        .into_iter()
+        .find(|(it, _)| *it == "whole file")
+    {
+        for (label, knobs) in [("stealing on ", Knobs::SHIPPED), ("stealing off", settled)] {
+            for run in 0..3 {
+                let spans = partition_spans(&fixture.file, &selection, knobs).await;
+                let described: Vec<String> = spans
+                    .iter()
+                    .map(|(rows, first, last)| format!("{first}..{last} ({rows})"))
+                    .collect();
+                println!("{label} run {run}: {}", described.join("  "));
+            }
+        }
+    }
+
+    // The plan for two shapes, since what decides the answer is which nodes are in it:
+    // a `RepartitionExec` that round-robins, or a `CoalescePartitionsExec` under a limit,
+    // would each defeat the index order regardless of how the scan was split.
+    for shape in ["whole file", "limit after a cut"] {
+        if let Some((name, selection)) = shapes(rows()).into_iter().find(|(it, _)| *it == shape) {
+            let observed = observe_with(
+                &fixture.file,
+                &selection,
+                Knobs::SHIPPED,
+                Gather::ByPartition,
+            )
+            .await;
+            println!("\n--- plan for {name} ---\n{}", observed.plan);
+        }
     }
 }
 
@@ -793,7 +991,7 @@ async fn round_trips_per_answer() {
 
     for (name, selection) in shapes(rows()) {
         counter.reset();
-        let result = query::run(&file, &selection, LIMITS)
+        let result = query::run(&file, &selection, LIMITS, Order::Unspecified)
             .await
             .expect("the shipped path");
         let scan = counter.requests();
@@ -917,7 +1115,7 @@ async fn the_mirror_agrees_with_the_shipped_path() {
     let fixture = write_fixture();
     println!("\n=== mirror against query::run ===");
     for (name, selection) in shapes(rows()) {
-        let shipped = query::run(&fixture.file, &selection, LIMITS)
+        let shipped = query::run(&fixture.file, &selection, LIMITS, Order::Unspecified)
             .await
             .expect("the shipped path");
         let mirrored = observe(&fixture.file, &selection, Knobs::SHIPPED).await;

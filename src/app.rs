@@ -25,7 +25,7 @@ use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
-use crate::query::{self, Predicate, Projection, QueryResult, Selection};
+use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -304,7 +304,10 @@ async fn query_mounted(
     let opened = storage::open_mounted(file)?;
     // Through `from_mount`, both of them: a store's own message about a local file names
     // the path it was reading, and that path is the operator's.
-    let result = query::run(&opened, &selection, service.sql_limits)
+    // The rows come back in the file's own order. The request named a file and asked for
+    // less of it, so the answer describes that file, and a client that reads a partition
+    // twice gets the same rows in the same places both times.
+    let result = query::run(&opened, &selection, service.sql_limits, Order::File)
         .await
         .map_err(ApiError::from_mount)?;
 
@@ -568,7 +571,11 @@ async fn query_parquet(
         )));
     }
     let file = storage::open(&url, &params.storage, &service.policy, &service.transfers)?;
-    let result = query::run(&file, &selection, service.sql_limits).await?;
+    // No order promised: the caller named a url and asked for rows, not for a view of a
+    // file's layout. A `limit` is still answered reproducibly — that is `query`'s own
+    // rule, since which rows come back is a different question from what order they are
+    // in.
+    let result = query::run(&file, &selection, service.sql_limits, Order::Unspecified).await?;
 
     let num_rows = result.num_rows();
     let response = answer(&result, &file, format, started).await?;

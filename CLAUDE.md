@@ -224,6 +224,47 @@ Adding a scalar function feature to the `datafusion` dependency adds everything 
 registers to what a caller may call. That is the decision being made; make it
 deliberately.
 
+## The order of the rows
+
+**The file-server mode returns rows in the source file's order. The API mode promises
+nothing about order. Both answer a `limit` reproducibly.** `query::Order` is how a request
+says which it is, and `query::reproducible` turns that plus the presence of a `limit` into
+the one decision the rest of the code reads.
+
+A `limit` is the part that is easy to get wrong. Under an unstable order it stops being
+"how many rows" and becomes "which rows", so the same request returns a different subset
+each time — and a caller cannot tell that from the data having changed. That is why
+reproducibility does not follow the mode.
+
+Three mechanisms, and all three are load-bearing:
+
+- **`enable_file_stream_work_stealing` must be off.** A file scan hands byte-range morsels
+  to whichever partition goes idle, so the partition holding the start of the file is not
+  reliably partition 0. Each partition's own rows stay contiguous and ascending either
+  way, which is what makes this dangerous: with stealing on the answer comes out *nearly*
+  ordered, and often exactly ordered, so it survives a spot check.
+- **`collect_partitioned`, not `collect`.** `collect` puts a `CoalescePartitionsExec` on
+  top, which takes whichever batch is ready. `collect_partitioned` sorts by partition
+  index, and with stealing off that index is the file's order. It keeps every partition
+  working, so this is not a serial read — do not reach for `target_partitions = 1`.
+- **A `limit` is applied while reading, never by the plan.** `DataFrame::limit` also
+  inserts a `CoalescePartitionsExec`, so a plan-level limit chooses arbitrary rows by
+  construction. `query::first_rows_in_order` walks the partitions in index order and
+  stops, which is both correct and cheap: a stream that is never polled never reads its
+  byte range.
+
+`query::tests` crosses these against row counts, row-group sizes, and files written with
+page statistics, chunk statistics and none — because the guarantee cannot depend on how a
+file was written, and which importer wrote a caller's file is not something this service
+gets to assume. Two things such a test needs to stay honest:
+
+- **Assert the scan was actually split.** DataFusion does not split a file below
+  `repartition_file_min_size`, which is 1 MiB, so a small fixture reads in one partition
+  and every ordering assertion passes while checking nothing. `query::execute` returns the
+  partition count for exactly this.
+- **Defeat compression.** An ascending column ZSTDs down to nothing, so a fixture needs a
+  scattered one to reach that 1 MiB at all.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it
