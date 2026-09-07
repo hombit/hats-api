@@ -100,6 +100,12 @@ fn reproducible(selection: &Selection<'_>, order: Order) -> bool {
 pub struct QueryResult {
     pub schema: SchemaRef,
     pub batches: Vec<RecordBatch>,
+    /// How many bytes of the source file the scan fetched to answer this.
+    ///
+    /// Next to the row count it says what the predicate and the projection were worth: a
+    /// point lookup that reads a megabyte of a gigabyte file pruned, and one that reads
+    /// the gigabyte did not.
+    pub data_bytes_read: u64,
 }
 
 impl QueryResult {
@@ -118,6 +124,7 @@ impl std::fmt::Debug for QueryResult {
             .field("schema", &self.schema)
             .field("num_batches", &self.batches.len())
             .field("num_rows", &self.num_rows())
+            .field("data_bytes_read", &self.data_bytes_read)
             .finish()
     }
 }
@@ -245,18 +252,52 @@ pub(crate) async fn execute(
     let plan = df.create_physical_plan().await?;
     let partitions = plan.output_partitioning().partition_count();
     let task = ctx.task_ctx();
+    // Every arm hands the plan on by clone rather than by value: the metrics are read off
+    // it once it has run, so it has to outlive the execution.
     let batches = match (reproducible, selection.limit) {
-        (false, _) => collect(plan, task).await?,
+        (false, _) => collect(Arc::clone(&plan), task).await?,
         // Every partition at once, then put back in index order: the read is as parallel
         // as it ever was, and nothing is merged on completion.
-        (true, None) => collect_partitioned(plan, task)
+        (true, None) => collect_partitioned(Arc::clone(&plan), task)
             .await?
             .into_iter()
             .flatten()
             .collect(),
-        (true, Some(rows)) => first_rows_in_order(plan, task, rows).await?,
+        (true, Some(rows)) => first_rows_in_order(Arc::clone(&plan), task, rows).await?,
     };
-    Ok((QueryResult { schema, batches }, partitions))
+    let data_bytes_read = data_bytes_read(plan.as_ref());
+    Ok((
+        QueryResult {
+            schema,
+            batches,
+            data_bytes_read,
+        },
+        partitions,
+    ))
+}
+
+/// How many bytes the scan fetched, read off the plan once it has finished running.
+///
+/// Free: DataFusion counts this whether or not anything asks for it, and the counter is
+/// final as soon as the last batch is in. Summed over the tree because it belongs to the
+/// scan node rather than to whatever sits above it.
+///
+/// What it counts is the ranges the parquet reader asked for — the data pages, and the
+/// bloom filters the predicate consulted. It does not count the footer or the page index:
+/// DataFusion fetches those from the store directly rather than through the reader that
+/// holds the counter, so no counter sits on them. Counting them too would mean wrapping
+/// the store in one of our own.
+fn data_bytes_read(plan: &dyn ExecutionPlan) -> u64 {
+    let own = plan
+        .metrics()
+        // DataFusion's own name for it.
+        .and_then(|metrics| metrics.sum_by_name("bytes_scanned"))
+        .map_or(0, |value| value.as_usize() as u64);
+    own + plan
+        .children()
+        .iter()
+        .map(|child| data_bytes_read(child.as_ref()))
+        .sum::<u64>()
 }
 
 /// The first `limit` rows, reading partitions in index order and stopping there.
@@ -626,6 +667,68 @@ pub(crate) mod tests {
         assert_eq!(ids(&result), (0..100).collect::<Vec<i64>>());
     }
 
+    /// A result says how much of the file it read, and the number moves with what was
+    /// asked.
+    ///
+    /// Both halves are the test. A counter wired to nothing reports zero, and one summed
+    /// off the wrong node — or read before the scan finished — reports the same number
+    /// for a point lookup as for reading every row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_says_how_much_of_the_file_it_read() {
+        let shape = Shape {
+            rows: 120_000,
+            row_group_rows: 5_000,
+            statistics: EnabledStatistics::Page,
+            bloom_filter: true,
+        };
+        let bytes = shaped(shape);
+        let (_dir, file) = on_disk(&bytes);
+
+        let everything = run(
+            &file,
+            &Selection {
+                projection: Projection::All,
+                predicate: Predicate::All,
+                spatial: None,
+                limit: None,
+            },
+            limits(),
+            Order::Unspecified,
+        )
+        .await
+        .unwrap();
+        assert!(
+            everything.data_bytes_read > 0,
+            "reading every row of a {} byte file scanned nothing",
+            bytes.len()
+        );
+
+        let lookup = run(
+            &file,
+            &Selection {
+                projection: Projection::Columns("objectid"),
+                predicate: Predicate::Where("objectid = 61234"),
+                spatial: None,
+                limit: None,
+            },
+            limits(),
+            Order::Unspecified,
+        )
+        .await
+        .unwrap();
+        assert_eq!(lookup.num_rows(), 1);
+        // A lookup that read nothing at all would satisfy the comparison below without
+        // the counter working.
+        assert!(lookup.data_bytes_read > 0, "a point lookup scanned nothing");
+        assert!(
+            lookup.data_bytes_read * 10 < everything.data_bytes_read,
+            "a point lookup scanned {} bytes against {} for the whole file, so the count \
+             is not following what was read",
+            lookup.data_bytes_read,
+            everything.data_bytes_read
+        );
+    }
+
     /// Limits generous enough not to be what any of the above is measuring.
     fn limits() -> sql::Limits {
         (&crate::config::LimitsConfig::default()).into()
@@ -640,6 +743,7 @@ pub(crate) mod tests {
                 false,
             )])),
             batches: Vec::new(),
+            data_bytes_read: 0,
         };
         assert_eq!(to_json(&empty).unwrap(), Vec::<serde_json::Value>::new());
     }

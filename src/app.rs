@@ -317,6 +317,7 @@ async fn query_mounted(
         .map_err(ApiError::from_mount)?;
 
     let num_rows = result.num_rows();
+    let data_bytes_read = result.data_bytes_read;
     let response = answer(&result, &opened, format, started)
         .await
         .map_err(ApiError::from_mount)?;
@@ -329,6 +330,9 @@ async fn query_mounted(
         filtered = query.filters.is_some(),
         format = format.name(),
         num_rows,
+        // What the pruning was worth, next to the time it took. Free to record and the
+        // one number that says whether a slow request was slow because it read the file.
+        data_bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
         "query"
     );
@@ -586,13 +590,18 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
 #[derive(Debug, Serialize)]
 struct SelectResponse {
     num_rows: usize,
+    /// How much of the source file was read to answer this. What it is for is telling a
+    /// caller whether their predicate pruned: the same query written two ways returns the
+    /// same rows, and this is where the difference between them shows.
+    data_bytes_read: u64,
     elapsed_ms: u128,
     rows: Vec<serde_json::Value>,
 }
 
-/// The count and the timing are part of the JSON body; a parquet body has no room for
+/// The counts and the timing are part of the JSON body; a parquet body has no room for
 /// them, so they travel as headers instead and both formats report the same numbers.
 const NUM_ROWS_HEADER: &str = "x-hats-num-rows";
+const DATA_BYTES_READ_HEADER: &str = "x-hats-data-bytes-read";
 const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
 async fn query_parquet(
@@ -622,6 +631,7 @@ async fn query_parquet(
     let result = query::run(&file, &selection, service.sql_limits, Order::Unspecified).await?;
 
     let num_rows = result.num_rows();
+    let data_bytes_read = result.data_bytes_read;
     let response = answer(&result, &file, format, started).await?;
     tracing::info!(
         // file.url, not the parameter: the parameter may carry credentials. The two
@@ -636,6 +646,9 @@ async fn query_parquet(
         regions = params.region.as_ref().map_or(0, Vec::len),
         format = format.name(),
         num_rows,
+        // Over a remote store this is also what the request cost the origin, which the
+        // elapsed time on its own does not distinguish from a slow network.
+        data_bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
         "query"
     );
@@ -660,6 +673,7 @@ fn json_response(result: &QueryResult, started: Instant) -> Result<Response, Api
     let rows = query::to_json(result)?;
     Ok(Json(SelectResponse {
         num_rows: rows.len(),
+        data_bytes_read: result.data_bytes_read,
         elapsed_ms: started.elapsed().as_millis(),
         rows,
     })
@@ -686,6 +700,7 @@ async fn parquet_response(
         ],
         [
             (NUM_ROWS_HEADER, num_rows.to_string()),
+            (DATA_BYTES_READ_HEADER, result.data_bytes_read.to_string()),
             (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
         ],
         body,
@@ -1372,6 +1387,14 @@ mod tests {
             PARQUET_CONTENT_TYPE
         );
         assert_eq!(response.headers()[NUM_ROWS_HEADER], "2");
+        // A parquet body has no room for the counts, so they are headers here and fields
+        // in the JSON below — the same numbers either way.
+        let scanned: u64 = response.headers()[DATA_BYTES_READ_HEADER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(scanned > 0);
 
         // And the same question answered as rows, for a client that wants them.
         let response = respond(
@@ -1382,6 +1405,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
         assert_eq!(body["num_rows"], 1);
+        assert!(body["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
         assert_eq!(body["rows"][0]["objectid"], 1);
     }
 

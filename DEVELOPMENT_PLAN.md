@@ -395,6 +395,13 @@ a real file and per option:
 - **what turning work stealing off costs.** A partition that finishes early no longer
   helps a slow sibling, so a file whose row groups decode unevenly is slower to read.
 
+Every answer already reports the bytes its scan read, so most of this is a request rather
+than a profiler. What that number leaves out is the footer and the page index, which
+DataFusion fetches from the store directly rather than through the reader that holds the
+counter — and the page index is exactly what `enable_page_index` pays for. So the one knob
+whose cost the counter cannot see needs a counting `ObjectStore` wrapper of our own, or the
+clock. A bloom filter read is counted, since that one goes through the reader.
+
 Measure over the shapes this service is for: a point lookup by id, a range over a sorted
 column, a predicate on a column with no statistics, and a wide projection versus a narrow
 one. The result wanted is a heuristic — which of these should depend on the request or the

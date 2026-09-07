@@ -108,9 +108,10 @@ curl -G http://localhost:8080/dataset/Norder=0/Dir=0/Npix=11.parquet \
 This interface is made to be compatible with
 [https://vizcat.cds.unistra.fr/hats/](https://vizcat.cds.unistra.fr/hats/).
 
-The response is a parquet file laid out like the one it came from, with the row count and
-the timing in `x-hats-num-rows` and `x-hats-elapsed-ms`. `format=json` returns the same
-body shape as API mode.
+The response is a parquet file laid out like the one it came from, with the row count, the
+bytes read out of the source file and the timing in `x-hats-num-rows`,
+`x-hats-data-bytes-read` and `x-hats-elapsed-ms`. `format=json` returns the same body shape
+as API mode.
 
 Rows come back in the source file's order, so the same request twice gives the same rows
 in the same places, and a `limit` is the front of the file rather than an arbitrary
@@ -155,6 +156,7 @@ GET  /api/v1/health
 ```json
 {
   "num_rows": 2,
+  "data_bytes_read": 41238,
   "elapsed_ms": 15,
   "rows": [{ "objectid": 1383212200036217, "ra": 307.4, "dec": -24.9, "mag_g_corr": 18.6 }]
 }

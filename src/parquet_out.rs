@@ -317,6 +317,7 @@ mod tests {
         QueryResult {
             schema: batch.schema(),
             batches: vec![batch],
+            data_bytes_read: 0,
         }
     }
 
@@ -442,6 +443,7 @@ mod tests {
             &QueryResult {
                 schema: Arc::clone(&schema),
                 batches: Vec::new(),
+                data_bytes_read: 0,
             },
             &layout,
         )
