@@ -10,6 +10,10 @@
    describe files nobody asked about. Nothing here builds an <a href>, because a client
    scraping this page for entries reads the markup and would take one for a file. */
 
+/* How many rows the table below the panel shows. It is a preview of the file, not the
+   answer to a question about it: the answer is what the download and the url give. */
+const PREVIEW = 10;
+
 document.body.classList.add('js');
 
 for (const stamp of document.querySelectorAll('time[datetime]')) {
@@ -48,19 +52,27 @@ function build(url) {
     '<div class="panel-body">' +
     '<div class="columns-of"><span class="count">reading the columns…</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
-    '<label>columns <input class="columns" placeholder="all of them"></label>' +
-    '<label>filters <input class="filters" placeholder="every row"></label>' +
-    '<label>limit <input class="limit" type="number" min="0" value="10"></label>' +
-    '<button class="run" data-format="json">Run</button>' +
-    '<button class="run" data-format="parquet">Parquet</button>' +
+    '<label>columns <textarea class="columns" rows="2" placeholder="all of them">' +
+    '</textarea></label>' +
+    '<label>filters <textarea class="filters" rows="2" placeholder="every row">' +
+    '</textarea></label>' +
+    '<span class="buttons">' +
+    '<button class="run" data-format="json">Preview ' + PREVIEW + ' rows</button>' +
+    '<button class="run" data-format="parquet">Download parquet</button></span>' +
     '<div class="asked"></div><div class="result"></div></div>';
   row.dataset.url = url;
   for (const button of cell.querySelectorAll('.run')) {
     button.addEventListener('click', () => run(row, button.dataset.format));
   }
-  for (const input of cell.querySelectorAll('input')) {
-    input.addEventListener('keydown', event => {
-      if (event.key === 'Enter') run(row, 'json');
+  /* A predicate over several columns is long enough to want more than a line, so Enter
+     writes one and the modifier runs the query — the shape every editor and console
+     already uses for a box you can type a newline into. */
+  for (const field of cell.querySelectorAll('textarea')) {
+    field.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        run(row, 'json');
+      }
     });
   }
   return row;
@@ -117,18 +129,23 @@ function chip(panel, column) {
 }
 
 function run(panel, format) {
-  const value = selector => panel.querySelector(selector).value.trim();
+  /* Written over several lines, sent as one: a newline is nothing to SQL but noise in a
+     url, and this is the url the panel shows and a caller copies. */
+  const value = selector => panel.querySelector(selector).value.replace(/\s+/g, ' ').trim();
   const parameters = {
     columns: value('.columns'),
     filters: value('.filters'),
-    limit: value('.limit'),
+    /* The table here is a preview, so it is the front of the file and stays that size
+       whatever the query. The download is the answer itself and takes no limit: the
+       point of asking for parquet is to have all the rows that matched. */
+    limit: format === 'json' ? String(PREVIEW) : '',
+    /* `format` says what comes back, and it is not the `Accept` header: the file server
+       answers a query in the format the url named, defaulting to parquet. Asking without
+       it and reading the body as JSON parses a parquet file. */
+    format: format,
   };
-  /* `format` says what comes back, and it is not the `Accept` header: the file server
-     answers a query in the format the url named, defaulting to parquet. Asking without
-     it and reading the body as JSON parses a parquet file. */
-  parameters.format = format;
   const asked = url(panel.dataset.url, parameters);
-  panel.querySelector('.asked').textContent = asked;
+  show(panel.querySelector('.asked'), asked);
   if (format === 'parquet') {
     /* The browser saves it: the response is an attachment, so this navigates nowhere. */
     location.href = asked;
@@ -139,6 +156,20 @@ function run(panel, format) {
   ask(panel.dataset.url, parameters)
     .then(answer => render(result, answer))
     .catch(error => fail(result, error));
+}
+
+/* The url this query is, as something to open, copy or send to someone. It is a link the
+   script makes rather than one the page was served with: an <a href> below this directory
+   in the markup would be scraped as an entry, and this one points at the same file with a
+   question on it. */
+function show(into, asked) {
+  into.textContent = '';
+  const link = document.createElement('a');
+  link.href = asked;
+  link.textContent = asked;
+  link.target = '_blank';
+  link.rel = 'noopener';
+  into.appendChild(link);
 }
 
 function url(path, parameters) {
@@ -175,9 +206,11 @@ function parse(text) {
 function render(into, answer) {
   into.textContent = '';
   const summary = document.createElement('p');
+  /* A full preview is the front of the file rather than the whole answer, and the two
+     read alike at a glance — so it says which it is. */
   summary.textContent =
-    answer.num_rows + ' rows, ' + bytes(answer.data_bytes_read) + ' read, ' +
-    answer.elapsed_ms + ' ms';
+    (answer.num_rows === PREVIEW ? 'first ' + PREVIEW + ' rows' : answer.num_rows + ' rows') +
+    ', ' + bytes(answer.data_bytes_read) + ' read, ' + answer.elapsed_ms + ' ms';
   into.appendChild(summary);
   if (answer.rows.length === 0) return;
 

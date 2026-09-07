@@ -338,9 +338,12 @@ const SCRIPT: &str = include_str!("listing/page.js");
 /// below the table rather than per row: a `Norder=` level is thousands of entries, and
 /// the sentence is the same for all of them.
 ///
-/// It describes the url rather than the panel, because the url is what the page offers
-/// when the script did not run.
-const QUERY_NOTE: &str = "<p>Files marked \u{25c6} answer a query on their own url: \
+/// It describes the url rather than the panel, since the url is what a caller writes into
+/// a client — and it is all the page has to offer where the script did not run. Which of
+/// the two openings is shown is the style sheet's, so that the sentence names something
+/// the reader can actually see: the mark, or the button that replaces it.
+const QUERY_NOTE: &str = "<p><span class=\"without-js\">Files marked \u{25c6}</span>\
+<span class=\"with-js\">Files with a query button</span> answer a query on their own url: \
 <code>?columns=ra,dec&amp;filters=ra&gt;10 AND dec&lt;20</code>, with \
 <code>&amp;format=parquet</code> and <code>&amp;limit=</code>.</p>\n";
 

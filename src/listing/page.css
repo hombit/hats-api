@@ -48,15 +48,20 @@ table.listing { border-collapse: collapse; margin: 1rem 0 0.6rem; }
 .listing tbody tr.entry:nth-of-type(even) { background: var(--stripe); }
 .listing tbody tr.entry:hover { background: var(--hover); }
 
-/* The marker on a name this service will answer a question about. It is the whole of
-   what the page says about querying when the script does not run, so it is markup the
-   page has anyway rather than something the panel adds. */
+/* The marker on a name this service will answer a question about, and the whole of what
+   the page says about querying when the script does not run. Where it did run the button
+   beside the name says the same thing better, so the mark goes: two of them is one too
+   many. The sentence below the table swaps with it, for the same reason. */
 a.data::after {
   content: " \25C6";
   color: var(--muted);
   font-size: 0.7em;
   vertical-align: 0.25em;
 }
+body.js a.data::after { content: none; }
+.with-js { display: none; }
+body.js .with-js { display: inline; }
+body.js .without-js { display: none; }
 
 /* Everything below is the query panel, which exists only where the script ran: the
    button is hidden until it says so, so nothing on the page offers what it cannot do. */
@@ -80,9 +85,18 @@ tr.panel > td {
   border-bottom: 1px solid var(--line);
   padding: 0.5rem 0.4rem 0.8rem;
 }
-.panel-body { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; }
+/* Capped, because a table cell grows to fit what is in it: a result of a hundred and
+   fifty columns would otherwise widen the listing itself and take the whole page
+   sideways, rather than scrolling inside the panel. */
+.panel-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.6rem;
+  align-items: center;
+  max-width: calc(100vw - 4rem);
+}
 .panel-body label { font-size: 0.75rem; color: var(--muted); }
-.panel-body input {
+.panel-body input, .panel-body textarea {
   font: 0.8rem var(--mono);
   padding: 0.2rem 0.35rem;
   border: 1px solid var(--line);
@@ -90,8 +104,9 @@ tr.panel > td {
   background: var(--bg);
   color: var(--fg);
 }
-input.columns, input.filters { min-width: 18rem; }
-input.limit { width: 4.5rem; }
+/* Both take as much as someone wants to write — a projection of thirty columns, a
+   predicate over several — so they wrap, and they can be dragged bigger. */
+.panel-body textarea { width: 22rem; resize: both; vertical-align: middle; }
 .run {
   padding: 0.2rem 0.7rem;
   border: 1px solid var(--line);
@@ -121,8 +136,13 @@ input.limit { width: 4.5rem; }
   border-radius: 0.6rem;
   font: 0.72rem var(--mono);
 }
-.asked { font: 0.72rem var(--mono); color: var(--muted); word-break: break-all; }
-.result { overflow-x: auto; }
+/* The two run together or wrap together, rather than one of them dropping to a line of
+   its own when the fields beside them are wide. */
+.buttons { display: flex; gap: 0.5rem; }
+.asked { font: 0.72rem var(--mono); word-break: break-all; }
+/* `min-width` because a flex item is otherwise as wide as its content, which would put
+   the scrollbar on the page rather than on the table. */
+.result { min-width: 0; overflow-x: auto; }
 .result table { border-collapse: collapse; margin-top: 0.3rem; }
 .result th, .result td {
   font: 0.75rem var(--mono);
