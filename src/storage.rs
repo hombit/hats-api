@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 use std::sync::Arc;
 
+use base64::Engine;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use object_store::{ObjectStore, local::LocalFileSystem};
 use object_store_opendal::OpendalStore;
@@ -100,6 +101,32 @@ pub struct StorageOptions {
     /// whatever the caller puts in it, since that is what it is for.
     #[serde(default)]
     pub headers: Headers,
+    /// The HTTP transport under a `webdav://` URL. HTTPS is the default.
+    #[serde(default)]
+    pub transport: Option<WebdavTransport>,
+    /// A WebDAV Basic credential, which is the only kind this backend takes. Both halves
+    /// or neither: a username alone would authenticate as nobody, which a server answers
+    /// the same way it answers an anonymous request.
+    pub username: Option<SecretString>,
+    pub password: Option<SecretString>,
+}
+
+/// The transport a WebDAV server speaks. An HTTP transport must be named exactly in
+/// `api.access.webdav.endpoints`; HTTPS is used when this option is absent.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebdavTransport {
+    Http,
+    Https,
+}
+
+impl WebdavTransport {
+    fn scheme(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
 }
 
 /// Caller-supplied request headers.
@@ -215,6 +242,7 @@ const CLEARTEXT_OPTION: &[&str] = &["allow_http"];
 /// provider can do.
 const ENDPOINT_OPTION: &[&str] = &["endpoint"];
 const HTTP_OPTIONS: &[&str] = &["headers"];
+const WEBDAV_OPTIONS: &[&str] = &["transport", "username", "password"];
 const S3_OPTIONS: &[&str] = &[
     "region",
     "access_key_id",
@@ -246,6 +274,7 @@ struct Named {
 /// [`allow_cleartext`] wave a credential through.
 trait NotACredential {}
 impl NotACredential for String {}
+impl NotACredential for WebdavTransport {}
 
 impl Named {
     /// An option that says something about where to go, not about who is asking.
@@ -302,7 +331,7 @@ impl StorageOptions {
     /// Two things keep the list honest, both at compile time: the destructuring means a
     /// field added to the struct and not listed here does not compile, and the
     /// constructors mean a field listed under the wrong [`Kind`] does not either.
-    fn named(&self) -> [Named; 12] {
+    fn named(&self) -> [Named; 15] {
         let Self {
             endpoint,
             allow_http,
@@ -316,6 +345,9 @@ impl StorageOptions {
             access_key,
             sas_token,
             headers,
+            transport,
+            username,
+            password,
         } = self;
         [
             Named::plain("endpoint", endpoint),
@@ -332,6 +364,9 @@ impl StorageOptions {
             Named::credential("access_key", access_key),
             Named::credential("sas_token", sas_token),
             Named::credentials("headers", headers),
+            Named::plain("transport", transport),
+            Named::credential("username", username),
+            Named::credential("password", password),
         ]
     }
 
@@ -388,6 +423,7 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
         Backend::Gcs => GCS_OPTIONS,
         Backend::Azure => AZURE_OPTIONS,
         Backend::Http => HTTP_OPTIONS,
+        Backend::Webdav => WEBDAV_OPTIONS,
     };
     // A url that is its own endpoint has nothing for `endpoint` to point elsewhere at.
     // `allow_http` is a different question and every backend has it, because every
@@ -458,7 +494,10 @@ pub fn open(
             // Each arm produces a configured builder and nothing more; `remote_store` is
             // the single place a builder becomes something that can make a request.
             // Every backend takes these; only the http one has anything to put in them.
-            let headers = options.headers.to_header_map()?;
+            let headers = match backend {
+                Backend::Webdav => webdav_headers(options)?,
+                _ => options.headers.to_header_map()?,
+            };
             let store: Arc<dyn ObjectStore> = match backend {
                 Backend::S3 => Arc::new(remote_store(
                     s3_builder(url, options, policy)?,
@@ -489,6 +528,17 @@ pub fn open(
                     // store, so it needs the headers handed to it separately — a server
                     // that authenticates would answer it 401 otherwise, and the object
                     // would look unreadable rather than unauthenticated.
+                    headers,
+                    Arc::clone(transfers),
+                )),
+                Backend::Webdav => Arc::new(MaterializingStore::new(
+                    Arc::new(remote_store(
+                        webdav_builder(url, options, policy)?,
+                        policy,
+                        &headers,
+                    )?),
+                    webdav_endpoint(url, options)?,
+                    policy.network().client(),
                     headers,
                     Arc::clone(transfers),
                 )),
@@ -1011,6 +1061,93 @@ fn http_builder(
     // `Url` prints an empty path as a trailing `/`, and OpenDAL joins the endpoint to a
     // key that already starts with one. Left in, every request would go to `//key`.
     Ok(services::Http::default().endpoint(origin.as_str().trim_end_matches('/')))
+}
+
+/// Turn WebDAV's Basic authentication into request headers. The materialization probe
+/// and the WebDAV operator share this map, so they authenticate identically.
+fn webdav_headers(options: &StorageOptions) -> Result<HeaderMap, ApiError> {
+    let mut headers = HeaderMap::new();
+    match (&options.username, &options.password) {
+        (Some(username), Some(password)) => {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(format!(
+                "{}:{}",
+                username.expose_secret(),
+                password.expose_secret()
+            ));
+            let mut value =
+                HeaderValue::from_str(&format!("Basic {encoded}")).map_err(|error| {
+                    ApiError::bad_request(format!(
+                        "WebDAV basic authentication is not a valid header: {error}"
+                    ))
+                })?;
+            value.set_sensitive(true);
+            headers.insert(http::header::AUTHORIZATION, value);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "username and password must be given together",
+            ));
+        }
+    }
+    Ok(headers)
+}
+
+/// A WebDAV server, addressed by its own url the way [`http_builder`]'s is.
+///
+/// Like the http service, this one has no identity of its own: OpenDAL's WebDAV config
+/// holds an endpoint, a username, a password and a token, and reads no environment
+/// variable, no config file and no metadata service on its way to deciding it has none.
+/// So the two switches `CLAUDE.md` requires of a backend are satisfied by construction
+/// rather than by a call, and there is nothing here for an ambient credential to be
+/// picked up from.
+///
+/// The credential is not given to the builder. It goes out as a header instead, from
+/// [`webdav_headers`], so that the materialization probe — which is this crate's own
+/// request rather than OpenDAL's — authenticates as the operator does. Setting both
+/// would be one credential in two places to keep in step.
+fn webdav_builder(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+) -> Result<services::Webdav, ApiError> {
+    let endpoint = webdav_endpoint(url, options)?;
+    // The url is the endpoint here, as it is for http, so this is the same gate the
+    // provider-backed backends reach through their `endpoint` option.
+    policy.authorize_endpoint(Backend::Webdav, Some(&endpoint))?;
+    // The caller's half of the cleartext decision: a username and password over `http`
+    // are Basic authentication in the clear, which is the credential itself and not
+    // merely a token derived from it.
+    allow_cleartext(
+        &endpoint,
+        require_endpoint_scheme(&endpoint)?,
+        options.allow_http,
+        options.has_credentials(),
+    )?;
+    // As in `http_builder`: OpenDAL joins this to a key that already starts with `/`.
+    Ok(services::Webdav::default().endpoint(endpoint.as_str().trim_end_matches('/')))
+}
+
+/// The server a `webdav://` url names, under the transport the request chose.
+///
+/// `webdav` is a scheme for the protocol and says nothing about what carries it, so the
+/// transport is named rather than guessed — and defaults to TLS, since a default of
+/// cleartext would be one that silently costs the caller their password. The path is not
+/// part of this: it names the object, which is what OpenDAL joins to the endpoint, so a
+/// server rooted under a prefix like `/remote.php/dav` is reached by writing that prefix
+/// into the url.
+fn webdav_endpoint(url: &Url, options: &StorageOptions) -> Result<Url, ApiError> {
+    Url::parse(&format!(
+        "{}://{}",
+        options.transport.unwrap_or(WebdavTransport::Https).scheme(),
+        authority(url)?
+    ))
+    .map_err(|error| {
+        ApiError::bad_request(format!(
+            "cannot derive the WebDAV server from {}: {error}",
+            file_url(url)
+        ))
+    })
 }
 
 /// `scheme://host[:port]` — the url with the object taken off it.
@@ -1835,6 +1972,68 @@ mod tests {
             file.url.as_str(),
             "https://data.example.com/hats/part0.parquet"
         );
+    }
+
+    #[test]
+    fn a_webdav_url_defaults_to_https() {
+        let url = parse_url("webdav://data.example.com/hats/part0.parquet").unwrap();
+        let file = open(&url, &no_options()).unwrap();
+        assert_eq!(store_key(&file), "webdav://data.example.com");
+        assert_eq!(
+            webdav_endpoint(&url, &no_options()).unwrap().as_str(),
+            "https://data.example.com/"
+        );
+    }
+
+    #[test]
+    fn webdav_http_is_explicit_and_needs_a_matching_endpoint_rule() {
+        let url = parse_url("webdav://data.example.com/hats/part0.parquet").unwrap();
+        let cleartext = options(serde_json::json!({"transport": "http"}));
+        let error = open(&url, &cleartext).unwrap_err();
+        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        assert!(
+            error.to_string().contains("access.webdav.endpoints"),
+            "{error}"
+        );
+
+        let policy = AccessPolicy::new(
+            &crate::config::AccessConfig {
+                webdav: crate::config::EndpointConfig {
+                    endpoints: Some(vec!["http://data.example.com".to_owned()]),
+                },
+                ..Default::default()
+            },
+            &crate::mount::Mounts::default(),
+        )
+        .unwrap();
+        assert!(super::open(&url, &cleartext, &policy, &transfers()).is_ok());
+        assert_eq!(
+            webdav_endpoint(&url, &cleartext).unwrap().as_str(),
+            "http://data.example.com/"
+        );
+    }
+
+    #[test]
+    fn webdav_basic_auth_requires_both_values_and_uses_no_generic_headers() {
+        let url = parse_url("webdav://data.example.com/hats/part0.parquet").unwrap();
+        let username_only = options(serde_json::json!({"username": "reader"}));
+        let error = open(&url, &username_only).unwrap_err();
+        assert!(
+            error.to_string().contains("username and password"),
+            "{error}"
+        );
+
+        let with_headers = options(serde_json::json!({"headers": {"X-Test": "no"}}));
+        let error = open(&url, &with_headers).unwrap_err();
+        assert!(error.to_string().contains("they take"), "{error}");
+
+        let basic = options(serde_json::json!({
+            "username": "reader",
+            "password": SECRET,
+        }));
+        let headers = webdav_headers(&basic).unwrap();
+        assert!(headers.contains_key(http::header::AUTHORIZATION));
+        assert!(!format!("{headers:?}").contains(SECRET));
     }
 
     /// The port is part of which server this is, and DataFusion files a store under

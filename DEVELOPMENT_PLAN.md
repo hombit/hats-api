@@ -19,7 +19,7 @@ thing to keep working while that is built.
 | 2.2 | GCS and Azure | done | |
 | 8.3 | network policy | done | |
 | 2.3 | HTTP/HTTPS, range probe, materialization | done | |
-| 2.4 | WebDAV | deferred | until after §4. Blocked on the scheme question below, which decides whether a test server is reachable at all |
+| 2.4 | WebDAV | done | |
 | 2.5 | Hugging Face | deferred | until after §4, and droppable |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
@@ -105,26 +105,9 @@ the pattern the remaining backends follow — see `CLAUDE.md` for what one has t
 which is the listing operation the http backend lacks, so a WebDAV-hosted catalog gets all
 three of §5.1's discovery tiers and can be served through §4's directory pages.
 
-**Settle the scheme before writing any of it.** `webdav://` names a protocol and a server
-but not the transport underneath, and everything else here depends on what fills that gap:
-
-- `http`/`https` are one backend reached two ways, so the caller's url states the
-  transport and `allow_plain_http` is only the operator's half of a decision the caller
-  also makes with `allow_http`. A single `webdav://` scheme has no caller half, so
-  `[access.webdav]` cannot carry an `allow_plain_http` that means the same thing.
-- If `webdav://` is always TLS, no server in this repository's tests can be reached
-  through it — they are all plain http on loopback, and the resolver will not reach a
-  cert-less host. The range probe, the credential on the wire and materialization would
-  then be verified for this backend only by reading them, which §8.5 and `CLAUDE.md`
-  both refuse.
-
-So the choice is between a second scheme for the cleartext case, an operator-listed
-endpoint whose own scheme decides the transport for that host, and accepting an untested
-backend. Whichever is picked, the endpoint list must not be able to hold an entry that
-nothing could ever match.
-
 | option | meaning |
 |---|---|
+| `transport` | `https` (the default) or `http`, since the scheme names the protocol |
 | `username`, `password` | credentials, given together, and subject to §8.1 |
 
 Policy: `[api.access.webdav]`, three-state `endpoints` as elsewhere. Separate from
@@ -920,24 +903,16 @@ Run `cargo deny` (advisories + licences) in CI.
    not what it may reach. It takes §3.4's `columns`/`filters`, which by then every other
    shape speaks. One thing left to settle when it is built: where it sits in the url
    space, given a url nested in a url needs encoding either way.
-3. **WebDAV over cleartext.** §2.4 serves TLS only. A WebDAV server on an internal
-   network without a certificate is an ordinary deployment, so there needs to be a way to
-   say so — a second scheme the caller writes, an operator-listed `http://` endpoint that
-   decides the transport for that host, or both. It is deferred rather than dropped
-   because the shape has to match `[access.http]`'s two halves: the operator agreeing
-   cleartext is acceptable on this network, and the caller agreeing to put *their*
-   `username` and `password` on it. Getting one half and calling it done is how a
-   credential ends up in the open.
-4. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
+3. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
    already executes (§3.5), rather than opening a second execution path. ADQL's `CONTAINS`,
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
    settles the lowering and the rejection messages before the IVOA grammar.
-5. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
+4. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
    `VOTable` output, the UWS job model. `/async` is a real job system with state, and is
    where §5.3's and §7.2's no-job-queue decision is revisited.
-6. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
+5. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.
-7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
+6. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today.
 
    The obstacle is not the expression rules: an operation over one row's list is a scalar
@@ -956,7 +931,7 @@ Run `cargo deny` (advisories + licences) in CI.
    refuses as expression kinds. Either they stay refused — leaving a feature registered
    but unreachable, which needs saying in the error rather than a bare "not supported" —
    or the lambda arms are reconsidered, which is a wider decision than this item.
-8. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap` so each is usable without the others.
 
    `hats` is the catalog itself, not this service's use of it: the properties file, the

@@ -189,6 +189,7 @@ pub struct AccessConfig {
     pub gcs: EndpointConfig,
     pub azure: EndpointConfig,
     pub http: HttpConfig,
+    pub webdav: EndpointConfig,
     pub local: LocalConfig,
 }
 

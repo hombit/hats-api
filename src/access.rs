@@ -83,11 +83,18 @@ pub enum Backend {
     Gcs,
     Azure,
     Http,
+    Webdav,
 }
 
 /// Every remote backend, so that a caller listing or looping over them cannot miss one
 /// a later phase adds.
-pub const BACKENDS: &[Backend] = &[Backend::S3, Backend::Gcs, Backend::Azure, Backend::Http];
+pub const BACKENDS: &[Backend] = &[
+    Backend::S3,
+    Backend::Gcs,
+    Backend::Azure,
+    Backend::Http,
+    Backend::Webdav,
+];
 
 /// The one scheme with no [`Backend`] behind it, named here because it is the other half
 /// of that enum rather than a string three places happen to agree on.
@@ -104,6 +111,7 @@ impl Backend {
             Self::Gcs => &["gs"],
             Self::Azure => &["az"],
             Self::Http => &["http", "https"],
+            Self::Webdav => &["webdav"],
         }
     }
 
@@ -129,6 +137,7 @@ impl Backend {
             // `https://data.example.com/x.parquet` says which server as plainly as a url
             // can. There is nothing left for an option to name.
             Self::Http => None,
+            Self::Webdav => None,
         }
     }
 
@@ -153,6 +162,7 @@ impl Backend {
             Self::Gcs => "access.gcs",
             Self::Azure => "access.azure",
             Self::Http => "access.http",
+            Self::Webdav => "access.webdav",
         }
     }
 }
@@ -163,6 +173,7 @@ pub struct AccessPolicy {
     gcs: EndpointRules,
     azure: EndpointRules,
     http: EndpointRules,
+    webdav: EndpointRules,
     /// Whether an `http://` url may be read when the http rules name no endpoints. A
     /// decision of the operator's rather than the caller's: the caller sends no
     /// credential to an `http(s)://` url, so what cleartext costs here is not a secret
@@ -286,6 +297,7 @@ impl AccessPolicy {
         let gcs = build(&config.gcs.endpoints, Backend::Gcs)?;
         let azure = build(&config.azure.endpoints, Backend::Azure)?;
         let http = build(&config.http.endpoints, Backend::Http)?;
+        let webdav = build(&config.webdav.endpoints, Backend::Webdav)?;
 
         let network = NetworkPolicy::new(&config.network, &named)?;
         let mut local = config
@@ -314,6 +326,7 @@ impl AccessPolicy {
             gcs,
             azure,
             http,
+            webdav,
             allow_plain_http: config.http.allow_plain_http,
             local,
             network,
@@ -367,6 +380,7 @@ impl AccessPolicy {
             Backend::Gcs => &self.gcs,
             Backend::Azure => &self.azure,
             Backend::Http => &self.http,
+            Backend::Webdav => &self.webdav,
         }
     }
 
@@ -442,15 +456,24 @@ impl AccessPolicy {
     fn refuse_unwanted_cleartext(&self, backend: Backend, endpoint: &Url) -> Result<(), ApiError> {
         let cleartext =
             EndpointScheme::parse(endpoint.scheme()).is_some_and(EndpointScheme::is_cleartext);
-        if backend.provider().is_some() || !cleartext || self.allow_plain_http {
+        if backend.provider().is_some() || !cleartext {
             return Ok(());
         }
+        if backend == Backend::Http && self.allow_plain_http {
+            return Ok(());
+        }
+        let change = match backend {
+            Backend::Http => format!(
+                "set {}.allow_plain_http, or name the server in {}.endpoints",
+                backend.section(),
+                backend.section()
+            ),
+            Backend::Webdav => format!("name the server in {}.endpoints", backend.section()),
+            _ => unreachable!("provider-backed backends returned above"),
+        };
         Err(ApiError::forbidden(format!(
             "{endpoint} is cleartext http, so nothing guarantees the bytes came from \
-             the host it names; set {}.allow_plain_http, or name the server in \
-             {}.endpoints, to change that",
-            backend.section(),
-            backend.section()
+             the host it names; {change}, to change that"
         )))
     }
 
@@ -796,6 +819,7 @@ mod tests {
                 endpoints: entries(list).endpoints,
                 allow_plain_http: false,
             },
+            webdav: entries(list),
             ..Default::default()
         })
     }
@@ -824,6 +848,10 @@ mod tests {
                     // there is no list.
                     allow_plain_http: false,
                 },
+                ..Default::default()
+            },
+            Backend::Webdav => AccessConfig {
+                webdav: list,
                 ..Default::default()
             },
         })
@@ -958,7 +986,7 @@ mod tests {
         let no_s3 = with_endpoints(&[]);
         let error = no_s3.authorize(&url("s3://bucket/k.parquet")).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-        assert_eq!(no_s3.allowed_schemes(), ["gs", "az", "https"]);
+        assert_eq!(no_s3.allowed_schemes(), ["gs", "az", "https", "webdav"]);
 
         assert!(everywhere(&[]).allowed_schemes().is_empty());
     }
@@ -973,7 +1001,7 @@ mod tests {
             azure: entries(&["https://azurite.example.com"]),
             ..Default::default()
         });
-        assert_eq!(policy.allowed_schemes(), ["s3", "az", "https"]);
+        assert_eq!(policy.allowed_schemes(), ["s3", "az", "https", "webdav"]);
 
         assert!(policy.authorize(&url("s3://b/k.parquet")).is_ok());
         assert!(policy.authorize(&url("gs://b/k.parquet")).is_err());
@@ -1481,9 +1509,13 @@ mod tests {
                 // The narrowest thing that should allow it. For a backend with a
                 // provider that is the provider's own name; for one whose url is its own
                 // address it is that address, there being nothing else to write.
-                let entry = backend
-                    .provider()
-                    .map_or_else(|| format!("{scheme}://container"), str::to_owned);
+                let entry = backend.provider().map_or_else(
+                    || match backend {
+                        Backend::Webdav => "https://container".to_owned(),
+                        _ => format!("{scheme}://container"),
+                    },
+                    str::to_owned,
+                );
                 let narrowest = under(backend, &[&entry]);
                 assert!(narrowest.authorize(&object).is_ok(), "{scheme}");
                 assert!(
@@ -1524,11 +1556,11 @@ mod tests {
         // its cleartext half is the one thing an operator has to ask for.
         assert_eq!(
             AccessPolicy::default().allowed_schemes(),
-            ["s3", "gs", "az", "https"]
+            ["s3", "gs", "az", "https", "webdav"]
         );
         assert_eq!(
             with_paths(&[&root], false).allowed_schemes(),
-            ["s3", "gs", "az", "https", "file"]
+            ["s3", "gs", "az", "https", "webdav", "file"]
         );
         assert_eq!(everywhere(&[]).allowed_schemes(), Vec::<&str>::new());
     }

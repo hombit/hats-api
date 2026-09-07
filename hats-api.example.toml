@@ -99,6 +99,27 @@ allow_local_names = false
 # and does not need this as well.
 allow_plain_http = false
 
+[api.access.webdav]
+# Which WebDAV servers a request may read from, for webdav:// urls. Like http(s) above,
+# a webdav:// url names its own server, so every entry here is a url — and it is written
+# with the transport underneath it, "https://dav.example.com", not "webdav://".
+#
+# The same three states: leave the key out for any server (the default, still subject to
+# [api.access.network]), give an empty list to turn the scheme off, or list servers for
+# exactly those.
+# endpoints = ["https://dav.example.com"]
+
+# "webdav" names the protocol and not what carries it, so a request picks the transport
+# with a "transport" storage option — "https" (the default) or "http". There is no
+# allow_plain_http here the way there is for http above: cleartext WebDAV is reached only
+# by naming the "http://" server in `endpoints`. The credential a WebDAV server takes is
+# a password rather than a token issued for one service, so putting it in the clear is a
+# decision worth making per server rather than once for all of them.
+#
+# A request authenticates with "username" and "password" options, sent as Basic — both
+# together or neither. They are the caller's own credentials and are never logged.
+# Sending them over cleartext needs the caller's own allow_http as well.
+
 [api.access.local]
 # Directories a request may read parquet files from, written as absolute paths or
 # file:// urls. Empty by default, so the service reads no local files until one is

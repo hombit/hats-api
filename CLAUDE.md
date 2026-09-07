@@ -124,6 +124,12 @@ Then follow the shape the existing ones set:
 - `object_store` is trait-only here — the `ObjectStore` trait DataFusion consumes, plus
   `LocalFileSystem` for `file://`. Put a new backend on OpenDAL's side; never re-enable
   an `object_store` backend feature.
+- **A credential that the probe also needs goes out as a header, not into the builder.**
+  `MaterializingStore`'s probe is this crate's own request rather than OpenDAL's, so a
+  credential configured on the builder reaches the reads and not the probe. The probe
+  then gets a `401`, reads it as "not a `206`", concludes the server ranges, and hands
+  the reader the head of the file at every offset — a wrong answer rather than an error.
+  `webdav_builder` is the worked example, and `tests/webdav.rs` is what catches it.
 - **Ask whether its servers honour `Range`.** A provider's does. A server the caller
   named may not, and OpenDAL accepts a `200` to a ranged read without complaint, so the
   reader gets the head of the file where it asked for the tail — a wrong answer, not an

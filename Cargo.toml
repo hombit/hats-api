@@ -12,6 +12,8 @@ lto = "thin"
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
+# WebDAV authenticates with Basic, which is a base64 of the caller's two options.
+base64 = "0.22"
 bytes = "1"
 # Keep in sync with object_store
 chrono = { version = "0.4", default-features = false, features = ["std"] }
@@ -24,7 +26,7 @@ ipnet = "2"
 # Keep in sync with datafusion
 object_store = "0.13"
 object_store_opendal = "0.58"
-opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
+opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "services-webdav", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
 # `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
 # needs both the transport adapter and reqwest by name. Both versions must match what
 # `opendal` resolves to: a `reqwest::Client` from another copy is a different type.

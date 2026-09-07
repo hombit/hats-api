@@ -36,10 +36,10 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings
 
-      # Everything here is hermetic: the S3 tests run against an in-process server,
-      # and `tests/s3_remote.rs` skips because no target is configured in this job.
-      # Nothing in this workflow reaches the network or needs a credential, so it
-      # runs on pull requests from forks.
+      # Everything here is hermetic: the S3 and WebDAV tests run against in-process
+      # servers, and `tests/s3_remote.rs` and `tests/webdav_real.rs` skip because no
+      # target is configured in this job. Nothing in this workflow reaches the network
+      # or needs a credential, so it runs on pull requests from forks.
       - name: cargo test
         run: cargo test --all-targets
 
@@ -111,6 +111,53 @@ jobs:
       - name: MinIO logs
         if: failure()
         run: docker logs minio
+
+  # A real WebDAV server, for the same reason the MinIO job exists: an object's size
+  # arrives as a PROPFIND XML body, and servers disagree about namespace prefixes, href
+  # spelling and which properties they return at all. The in-process server in
+  # `tests/webdav.rs` can only prove OpenDAL parses the XML this repository writes.
+  #
+  # `rclone serve webdav` rather than a container: it is a real implementation, it is one
+  # binary, and there is nothing to pull or wait for. The credentials are made up here
+  # and the server is destroyed with the runner, so this runs on forks too.
+  webdav:
+    name: real WebDAV
+    runs-on: ubuntu-latest
+    env:
+      HATS_API_TEST_WEBDAV_ENDPOINT: http://127.0.0.1:8788
+      HATS_API_TEST_WEBDAV_USERNAME: hats
+      HATS_API_TEST_WEBDAV_PASSWORD: hats-test
+      # Without this the tests would skip, and a job that skipped everything would
+      # still be green.
+      HATS_API_TEST_REQUIRE_REMOTE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: start a WebDAV server
+        run: |
+          sudo apt-get update && sudo apt-get install -y rclone
+          mkdir -p /tmp/davroot
+          rclone serve webdav --addr 127.0.0.1:8788 \
+            --user "$HATS_API_TEST_WEBDAV_USERNAME" \
+            --pass "$HATS_API_TEST_WEBDAV_PASSWORD" \
+            /tmp/davroot > /tmp/rclone.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS -u "$HATS_API_TEST_WEBDAV_USERNAME:$HATS_API_TEST_WEBDAV_PASSWORD" \
+                 "$HATS_API_TEST_WEBDAV_ENDPOINT/" >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the WebDAV server did not come up"; cat /tmp/rclone.log; exit 1
+
+      - name: cargo test --test webdav_real
+        run: cargo test --test webdav_real
+
+      - name: WebDAV server logs
+        if: failure()
+        run: cat /tmp/rclone.log
 
   deny:
     name: cargo-deny
