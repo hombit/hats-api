@@ -19,8 +19,8 @@
 use std::ops::ControlFlow;
 
 use datafusion::arrow::datatypes::{DataType, Fields};
-use datafusion::common::DFSchema;
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::{Column, DFSchema};
 use datafusion::execution::context::SessionState;
 use datafusion::logical_expr::{Expr, UNNAMED_TABLE, Volatility};
 use datafusion::sql::sqlparser::ast::{
@@ -172,6 +172,33 @@ pub fn filters(
 
     let tokens = ands_written_as_ampersands(tokenize(text, FIELD)?);
     plan_predicate(state, schema, tokens, FIELD, limits)
+}
+
+/// The column a structured field names, in the file's own spelling of it.
+///
+/// `region` names the two columns it refines against, and a name there is a column name
+/// rather than SQL: no quoting, no expression, no dotted path. So it resolves by the same
+/// rule `resolve_identifiers` applies — the file's spelling, or that spelling in
+/// lowercase, and nothing else — without going through a parser that would give a caller
+/// somewhere else to put an expression.
+///
+/// The type is checked here because the alternative is worse. A coordinate column that
+/// holds strings reaches the planner as a subtraction of a number from text, and what
+/// comes back is DataFusion's account of a coercion rather than anything naming the field
+/// the caller filled in.
+pub fn coordinate_column(schema: &DFSchema, name: &str, field: &str) -> Result<Expr, ApiError> {
+    let mut ident = Ident::new(name);
+    let Some(data_type) = resolve_segment(&mut ident, schema.fields()) else {
+        return Err(ApiError::bad_request(format!(
+            "{field}: this file has no column named {name:?}"
+        )));
+    };
+    if !data_type.is_numeric() {
+        return Err(ApiError::bad_request(format!(
+            "{field}: {name:?} holds {data_type:?}, and a coordinate is a number of degrees"
+        )));
+    }
+    Ok(Expr::Column(Column::new_unqualified(ident.value)))
 }
 
 /// One boolean expression, however it was spelled: no alias, and nothing after it.

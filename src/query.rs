@@ -17,6 +17,7 @@ use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use futures::StreamExt;
 
 use crate::error::ApiError;
+use crate::region::{self, Spatial};
 use crate::sql;
 use crate::storage::RemoteFile;
 
@@ -44,12 +45,18 @@ pub enum Predicate<'a> {
     Filters(&'a str),
 }
 
-/// What to read. The two fields are each one of two spellings, and the request shape is
-/// what refuses a caller who sent both — by the time it is here, one has been chosen.
+/// What to read. The two expression fields are each one of two spellings, and the request
+/// shape is what refuses a caller who sent both — by the time it is here, one has been
+/// chosen.
 #[derive(Debug, Default)]
 pub struct Selection<'a> {
     pub projection: Projection<'a>,
     pub predicate: Predicate<'a>,
+    /// A shape on the sky, and the columns to test it against. Separate from
+    /// [`Self::predicate`] rather than folded into it because a spatial constraint has to
+    /// be recognisable to be planned on, and the two are conjoined: a row must be inside
+    /// the region *and* satisfy the predicate.
+    pub spatial: Option<Spatial<'a>>,
     /// Most rows to return. `None` is however many match.
     pub limit: Option<usize>,
 }
@@ -189,7 +196,19 @@ pub(crate) async fn execute(
     let df = ctx.read_parquet(file.url.as_str(), options).await?;
     let state = ctx.state();
 
-    // The predicate first, so it may name a column the projection does not return —
+    // The region ahead of the caller's predicate, which is the order the two are cheapest
+    // in: a region lowers to comparisons against the coordinate columns that row-group
+    // statistics can prune on, so it decides what there is for the predicate to run over.
+    // Both are pushed into the scan, and `reorder_filters` is what settles the order they
+    // actually run in.
+    let df = match &selection.spatial {
+        None => df,
+        Some(spatial) => {
+            let expr = region::predicate(df.schema(), spatial)?;
+            df.filter(expr)?
+        }
+    };
+    // The predicate next, so it may name a column the projection does not return —
     // filtering on `filterid` while asking only for `mag` is the ordinary case.
     let df = match selection.predicate {
         Predicate::All => df,
@@ -472,6 +491,7 @@ pub(crate) mod tests {
                     Selection {
                         projection: Projection::All,
                         predicate: Predicate::All,
+                        spatial: None,
                         limit: None,
                     },
                 ),
@@ -480,6 +500,7 @@ pub(crate) mod tests {
                     Selection {
                         projection: Projection::Columns("objectid, mag"),
                         predicate: Predicate::All,
+                        spatial: None,
                         limit: None,
                     },
                 ),
@@ -488,6 +509,7 @@ pub(crate) mod tests {
                     Selection {
                         projection: Projection::All,
                         predicate: Predicate::Where("mag < 0.5"),
+                        spatial: None,
                         limit: None,
                     },
                 ),
@@ -496,6 +518,7 @@ pub(crate) mod tests {
                     Selection {
                         projection: Projection::Columns("objectid"),
                         predicate: Predicate::Where("mag < 0.5"),
+                        spatial: None,
                         limit: None,
                     },
                 ),
@@ -536,6 +559,7 @@ pub(crate) mod tests {
         let selection = Selection {
             projection: Projection::Columns("objectid"),
             predicate: Predicate::Where("mag < 1.0"),
+            spatial: None,
             limit: None,
         };
         let first = ids(&run(&file, &selection, limits(), Order::File).await.unwrap());
@@ -565,6 +589,7 @@ pub(crate) mod tests {
                 let selection = Selection {
                     projection: Projection::Columns("objectid"),
                     predicate,
+                    spatial: None,
                     limit: Some(100),
                 };
                 let first = ids(&run(&file, &selection, limits(), order).await.unwrap());
@@ -594,6 +619,7 @@ pub(crate) mod tests {
         let selection = Selection {
             projection: Projection::Columns("objectid"),
             predicate: Predicate::All,
+            spatial: None,
             limit: Some(100),
         };
         let result = run(&file, &selection, limits(), Order::File).await.unwrap();

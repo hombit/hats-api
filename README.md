@@ -156,6 +156,9 @@ GET  /api/v1/health
   "storage": { "region": "us-east-1" },
   "select": "objectid, ra, dec, mag_g - 0.1 AS mag_g_corr",
   "where": "mag_g < 20 AND dec BETWEEN -30 AND -20",
+  "region": [{ "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_deg": 0.01 }],
+  "ra_column": "ra",
+  "dec_column": "dec",
   "limit": 1000,
   "format": "json"
 }
@@ -174,6 +177,9 @@ written to every proxy's access log and to the caller's shell history on the way
 also has no url-length limit, and a list of ten thousand object ids is an ordinary
 request here.
 
+`region` and its two column names are the API's alone; a mounted file takes no spatial
+parameter, since a request there selects a region by naming `Norder=k/Npix=p` in the path.
+
 `select` and `where` take SQL expressions. `columns` and `filters` are also accepted and
 mean exactly what they mean in file-server mode, so client code can move between the two
 interfaces; a request may use either pair and not both. `format` is `json` here and
@@ -182,6 +188,54 @@ what media type it answers with.
 
 An error is a status code and a one-field body, `{"error": "…"}`, and it never quotes a
 value out of the request back at you — the request is where the credentials are.
+
+### Selecting a region of the sky
+
+`region` is a structured field rather than part of `where`, because a spatial constraint
+has to be *recognised* to be planned on — which is what will let it choose partitions
+rather than scan them. It is always an array, and **the array is a union**: a row inside
+any of its shapes qualifies. The whole field is then `AND`ed with `where`.
+
+`ra_column` and `dec_column` say which columns of the file hold the position, and are
+required alongside `region`. A parquet file carries nothing that says which of its columns
+are coordinates, and guessing from names would answer a different question than the one
+asked without saying so. They resolve the same way any column name does — the file's own
+spelling, or that spelling in lowercase.
+
+Degrees throughout, ICRS, and both ends of every range inclusive.
+
+| `type` | fields |
+|---|---|
+| `circle` | `ra`, `dec`, and exactly one of `radius_deg` or `radius_arcsec` — the cone search, under ADQL's name for it |
+| `box` | `ra: [from, to]`, `dec: [from, to]` |
+
+```json
+"region": [
+  { "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_arcsec": 36 },
+  { "type": "box", "ra": [349.5, 10.5], "dec": [-20, -10] }
+]
+```
+
+A radius names its unit because a bare `radius` cannot: `0.01` is a plausible cone in
+either degrees or arcseconds, the two differ by a factor of 3600, and nothing in the
+answer would say which reading you got. Positions need no such suffix — they are always
+degrees.
+
+**A `box` takes a range in each coordinate, not a centre and a size.** It is the product of
+two scalar ranges — what `ra BETWEEN … AND dec BETWEEN …` already says — so its north and
+south edges are parallels rather than great circles. This is `hats`'s and `lsdb`'s `box`,
+so the numbers carry across from `box_search` unchanged. It is *not* ADQL's `BOX`, which
+takes a centre with a width and a height, and which ADQL 2.1 deprecates.
+
+`ra` in a box **runs eastward from the first value to the second**, so `[350, 10]` is
+twenty degrees across the origin and `[10, 350]` is the three hundred and forty the other
+way — both legal, and different boxes. There is no ordering on a circle for a `min`/`max`
+pair to have meant. A whole turn, `[0, 360]`, is every right ascension; the two values
+naming the *same* point is refused, since it reads equally as an empty box or as the whole
+sky. `dec` does have an ordering, so its first value may not be the greater one.
+
+Which numbers your file writes for a right ascension does not matter: `[0, 360)` and
+`[-180, 180)` both work, and so does a shape crossing the origin under either.
 
 ### The SQL
 

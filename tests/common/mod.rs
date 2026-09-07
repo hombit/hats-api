@@ -254,6 +254,7 @@ pub async fn lookup(
                 None => Projection::All,
             },
             predicate: Predicate::Where(&predicate),
+            spatial: None,
             limit: None,
         },
     )

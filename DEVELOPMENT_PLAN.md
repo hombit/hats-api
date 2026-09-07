@@ -23,7 +23,7 @@ thing to keep working while that is built.
 | 2.5 | Hugging Face | deferred | until after §4, and droppable |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
-| 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
+| 3.3 | API request shape (`select`/`where`, `region`) | done | |
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | |
 | 4.1 | write the README | done | |
@@ -31,7 +31,7 @@ thing to keep working while that is built.
 | 4.3 | what the engine costs | todo | measurement, not code. Its findings decide the rest of `query::session_config` |
 | 4.4 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
-| 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
+| 5.2 | spatial predicate | part | `circle` and `box` refine per row against a parquet target. What is left is the HATS target — partition pruning, the `_healpix_29` prefilter, `polygon`/`moc` — and `POST /api/v1/hats`. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
@@ -163,16 +163,14 @@ internal query representation and one execution path. `columns`/`filters` and
 
 ### 3.3 The API request shape
 
-The transport, the target paths and the two expression fields are settled. What is left
-of this step is `region`, specified here and built in §5.2 — a region needs the catalog's
-own `ra`/`dec` column names to refine on, and those come from §5.1's properties file, so
-there is nothing it could execute against before then. `POST /api/v1/hats` arrives with
-it, for the same reason.
+Settled, `region` included.
 
 ```json
 {
   "url": "s3://bucket/hats/ztf_dr24",
-  "region": [{"type": "circle", "ra": 320.65747, "dec": -12.35315, "radius": 0.01}],
+  "region": [{"type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_arcsec": 36}],
+  "ra_column": "objra",
+  "dec_column": "objdec",
   "select": "objectid, lightcurve.mag AS mag, objra, objdec",
   "where": "filterid = 2 AND mag < 20 AND objectid IN (1383212200036217, 1383212200036218)",
   "format": "parquet",
@@ -180,30 +178,25 @@ it, for the same reason.
 }
 ```
 
-`region` is a structured field rather than part of the `where` expression (§3.5), and
-drives partition pruning in HATS mode (§5.2).
+`region` is a structured field rather than part of the `where` expression (§3.5), so that
+it can drive partition pruning in HATS mode (§5.2).
 
-**It is always an array; each element is an object with a `type`.** One region is an
-array of one. Every shape lowers to a MOC, which is what the planner needs anyway.
+**It is always an array; each element is an object with a `type`.** One region is an array
+of one, and the array is a union. `ra_column` and `dec_column` are required alongside it:
+a lone parquet file says nothing about which of its columns are a position. A catalog's
+`properties` (§5.1) does, which is what will make them optional for a HATS target.
 
-```json
-"region": [{"type": "circle", "ra": 320.65747, "dec": -12.35315, "radius": 0.01}]
-"region": [{"type": "circle", …}, {"type": "moc", …}]
-```
+The two shapes still to add:
 
 | `type` | fields |
 |---|---|
-| `circle` | `ra`, `dec`, `radius` — the cone search, under ADQL's name for it |
-| `box` | `ra`, `dec`, `width`, `height` |
 | `polygon` | `vertices: [[ra, dec], …]` |
 | `moc` | `ascii`, or `url` — an IVOA MOC given directly |
 
-Degrees throughout; a `frame` field defaults to `icrs`. Unknown fields are rejected.
-
-- **The array is a union.** State it in the docs and in error text, since a reader coming
-  from `where` may expect `AND`. Intersection and difference are cheap to add later as
-  explicit combinators.
 - **`moc: {url: …}` is a caller-named fetch** and goes through §8.3 like any other.
+- **Every shape has to lower to a MOC** for §5.2's partition pruning. `circle` and `box`
+  today lower only to a per-row predicate, which is all a single-file target needs.
+- **Intersection and difference** are cheap to add as explicit combinators over the array.
 
 ### 3.4 The file-server request shape
 
@@ -499,12 +492,17 @@ policy and the range budget are to be settled by measurement before implementing
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
 still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.
 
-**Parquet target:** the same, with step 1 skipped. Today's `column == value` behaviour is
-`where` with no `region`.
+**Parquet target:** steps 1 and 3's prefilter do not apply — there is one file and no
+`_healpix_29` to lean on — leaving the geometric test against the two columns the request
+names. That part is built: `circle` compares haversines and `box` is a range in each
+coordinate, each carrying whatever coordinate bounds can be pruned on.
 
-`box` and `polygon` are the same machinery with a different covering step. Nearest-object
-lookup is a `circle` plus ordering and `limit: 1`, not a predicate, and waits for ordering.
-`crossmatch` is out of scope — `lsdb`'s job.
+What the HATS target adds over it: the covering step every shape needs, the partition
+intersection, the interior/boundary split, and the `_healpix_29` range sets. `polygon` and
+`moc` arrive with the covering step, since that is the half they are missing.
+
+Nearest-object lookup is a `circle` plus ordering and `limit: 1`, not a predicate, and
+waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.
 
 ### 5.3 Small queries and large queries
 
@@ -817,9 +815,9 @@ from the router side but is an order of magnitude less used and still pre-1.0.
   to enumerate: every url under a mount is a data path. The listing response and the
   query parameters are describable, "any path below this prefix" is not, so the README
   stays the document for that half rather than OpenAPI pretending to cover it.
-- **Not before §5.** §5.2 adds `region` and `POST /api/v1/hats`, §5.3 adds the sync /
-  plan / auto modes. Describing the API before those land describes a shape that then
-  changes — the reason §4.1 waits, applied to the document that is harder to correct
+- **Not before §5.** §5.2 still adds `polygon` and `moc` to `region` and brings
+  `POST /api/v1/hats`, and §5.3 adds the sync / plan / auto modes. Describing the API
+  before those land describes a shape that then changes — the reason §4.1 waits, applied to the document that is harder to correct
   because clients will have generated code from it.
 - IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
   `/availability`, arriving with TAP in §9.5. Nothing here should make serving both

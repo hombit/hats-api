@@ -26,6 +26,7 @@ use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
+use crate::region::{Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -271,6 +272,10 @@ impl FileQuery {
                 Some(text) => Predicate::Filters(text),
                 None => Predicate::All,
             },
+            // Spatial selection here is by path — a request names `Norder=k/Npix=p`
+            // itself. A caller who wants the catalog to choose partitions uses the API
+            // against the same data.
+            spatial: None,
             limit: match self.limit.as_deref() {
                 // Said as a number rather than left to mean "no limit": a caller who
                 // wrote one and got every row would have no way to notice.
@@ -425,6 +430,13 @@ struct QueryRequest {
     /// The row predicate in the same vocabulary, which additionally spells `AND` as
     /// `&&`.
     filters: Option<String>,
+    /// A shape on the sky, or several. A row inside any of them qualifies — the array is
+    /// a union — and the whole field is conjoined with the predicate.
+    region: Option<Vec<Region>>,
+    /// Which columns hold the position a `region` is tested against. Required alongside
+    /// one: a parquet file carries nothing that says which of its columns are a position.
+    ra_column: Option<String>,
+    dec_column: Option<String>,
     /// `json` (the default) or `parquet`.
     format: Option<String>,
     /// Most rows to return.
@@ -452,8 +464,39 @@ impl QueryRequest {
                 (None, Some(text)) => Predicate::Filters(text),
                 (None, None) => Predicate::All,
             },
+            spatial: self.spatial()?,
             limit: self.limit,
         })
+    }
+
+    /// The region and the two columns it is tested against, which travel together or not
+    /// at all.
+    ///
+    /// No part of this is dropped for want of another. A `region` with no columns named has
+    /// nothing to test and would return every row in the file, which a caller cannot tell
+    /// from a region that contained them all; a column named with no region does nothing,
+    /// so a request carrying one is a caller who believes otherwise.
+    fn spatial(&self) -> Result<Option<Spatial<'_>>, ApiError> {
+        match (
+            self.region.as_deref(),
+            self.ra_column.as_deref(),
+            self.dec_column.as_deref(),
+        ) {
+            (None, None, None) => Ok(None),
+            (Some(regions), Some(ra_column), Some(dec_column)) => Ok(Some(Spatial {
+                regions,
+                ra_column,
+                dec_column,
+            })),
+            (Some(_), _, _) => Err(ApiError::bad_request(
+                "region is tested against two columns of the file, so a request carrying \
+                 one must also name ra_column and dec_column",
+            )),
+            (None, _, _) => Err(ApiError::bad_request(
+                "ra_column and dec_column say which columns a region is tested against, \
+                 and this request carries no region",
+            )),
+        }
     }
 }
 
@@ -516,7 +559,8 @@ impl Format {
 /// fails towards the safe message, and the two tests below are what notice.
 fn body_error(rejection: &JsonRejection) -> ApiError {
     const SHAPE: &str = "expected a JSON object with url, and optionally storage, \
-                         select or columns, where or filters, format, limit";
+                         select or columns, where or filters, region with ra_column and \
+                         dec_column, format, limit";
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -586,6 +630,10 @@ async fn query_parquet(
         url = %file.url,
         selected = params.select.is_some(),
         filtered = params.r#where.is_some(),
+        // How many shapes, not what they were: a region is small, but logging the
+        // numbers would be logging the caller's own coordinates for no purpose the
+        // count does not already serve.
+        regions = params.region.as_ref().map_or(0, Vec::len),
         format = format.name(),
         num_rows,
         elapsed_ms = started.elapsed().as_millis(),
@@ -749,17 +797,67 @@ mod tests {
         assert!(body.contains("regoin"), "{body}");
     }
 
-    /// `region` is specified but not built, and the shape is closed, so a caller who
-    /// sends one is told rather than quietly served every row in the file.
+    /// A `region` and the two columns it is tested against travel together. Any of the
+    /// three on its own is refused rather than dropped: a region with nothing to test
+    /// would return every row in the file, which a caller cannot tell from a region that
+    /// held them all, and a column named with no region does nothing at all.
     #[tokio::test]
-    async fn a_field_that_does_not_exist_yet_is_not_ignored() {
+    async fn a_region_and_its_coordinate_columns_travel_together() {
+        let circle = serde_json::json!([
+            {"type": "circle", "ra": 320.6, "dec": -12.4, "radius_deg": 0.01}
+        ]);
+        for (what, body) in [
+            (
+                "no columns",
+                serde_json::json!({"url": "s3://b/k.parquet", "region": circle}),
+            ),
+            (
+                "one column",
+                serde_json::json!({
+                    "url": "s3://b/k.parquet", "region": circle, "ra_column": "objra",
+                }),
+            ),
+            (
+                "columns and no region",
+                serde_json::json!({
+                    "url": "s3://b/k.parquet", "ra_column": "objra", "dec_column": "objdec",
+                }),
+            ),
+        ] {
+            let (status, body) = select_with(body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {body}");
+            assert!(body.contains("region"), "{what}: {body}");
+        }
+    }
+
+    /// A radius with no unit in its name is refused rather than read as either one: both
+    /// readings are legal radii, differing by a factor of 3600, and no answer would say
+    /// which one it had used.
+    #[tokio::test]
+    async fn a_radius_says_its_unit() {
         let (status, body) = select_with(serde_json::json!({
             "url": "s3://b/k.parquet",
             "region": [{"type": "circle", "ra": 320.6, "dec": -12.4, "radius": 0.01}],
+            "ra_column": "objra",
+            "dec_column": "objdec",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body.contains("region"), "{body}");
+        assert!(body.contains("radius"), "{body}");
+    }
+
+    /// The shapes are part of the request's closed shape, so a misspelled field inside
+    /// one is named rather than defaulted — a `radus` that became a `radius` of zero
+    /// would be a region matching nothing.
+    #[tokio::test]
+    async fn a_misspelled_field_inside_a_region_is_named() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet",
+            "region": [{"type": "circle", "ra": 320.6, "dec": -12.4, "radus": 0.01}],
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("radus"), "{body}");
     }
 
     /// A body that does not fit is described, never quoted: a mistyped `storage` is
@@ -875,6 +973,9 @@ mod tests {
             r#where: Some("objectid = 1".to_owned()),
             columns: None,
             filters: None,
+            region: None,
+            ra_column: None,
+            dec_column: None,
             format: None,
             limit: None,
         };

@@ -265,6 +265,45 @@ gets to assume. Two things such a test needs to stay honest:
 - **Defeat compression.** An ascending column ZSTDs down to nothing, so a fixture needs a
   scattered one to reach that 1 MiB at all.
 
+## The region on the sky
+
+`region.rs` is the only place a shape becomes a predicate. It is a structured field rather
+than an expression because the constraint has to be *recognised* to be planned on, and it
+lowers to a `datafusion` `Expr` directly rather than to SQL text — there is nothing to
+quote and no second parser.
+
+- **Positions are degrees and unsuffixed; an extent names its unit.** `radius_deg` and
+  `radius_arcsec`, exactly one of them. A bare `radius` is a plausible cone under either
+  reading, the two differ by 3600, and no validation can tell them apart — so the field
+  name is the only thing that can.
+- **Compare haversines, never angles.** Haversine is monotone in the separation over the
+  whole range one can take, so an `asin` on the way out is one more function per row and
+  one more rounding for the same rows. It also makes the right ascension need no wrapping:
+  the difference enters as `sin²(Δ/2)`, which a whole turn leaves alone, so a file writing
+  `[0, 360)` and one writing `[-180, 180)` both work with no arithmetic on the column.
+- **A bound around the exact test may only ever be too wide.** The coordinate ranges beside
+  the haversine exist to let statistics prune row groups; they are `AND`ed onto the answer,
+  so one that is too tight does not fail — it drops rows near the edge and returns fewer
+  than the formula asked for. Hence the pad, and hence giving the right-ascension bound up
+  entirely where `asin` gets too steep to trust: near a pole its own rounding exceeds the
+  pad. `the_ra_reach_of_a_disk_contains_its_boundary` is what holds this, and it has to
+  evaluate the extreme at the position angle it is known to be at — `cos θ = tan dec₀ tan
+  r`. A scan over position angle walks past the peak near a pole and then passes with the
+  guard removed.
+- **Which columns hold a position comes from the request, never from the column names.**
+  `ra_column` and `dec_column` are required alongside `region`. A file says nothing about
+  which of its columns are coordinates, and a guess from conventional names would answer a
+  different question than the one asked without saying so. A catalog's `properties` is the
+  one thing allowed to supply them.
+- **A shape that reads two ways is refused, not resolved.** A `box`'s `ra` runs eastward
+  from the first value to the second, so `[350, 10]` and `[10, 350]` are different boxes
+  and both are legal; the two values naming the *same* point is refused, because it reads
+  equally as an empty box and as the whole sky. `hats` reads that case as the whole sky —
+  a deliberate divergence, since nothing in the answer would say which reading was used.
+- Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
+  widened before the arithmetic rather than the trigonometry running at single precision.
+  `region::tests` crosses both column types against both right-ascension conventions.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it

@@ -478,6 +478,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::All,
+                spatial: None,
                 limit: None,
             },
         ),
@@ -486,6 +487,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::Columns("objectid, objra, objdec"),
                 predicate: Predicate::All,
+                spatial: None,
                 limit: None,
             },
         ),
@@ -494,6 +496,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::Where(point),
+                spatial: None,
                 limit: None,
             },
         ),
@@ -502,6 +505,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::Where(range),
+                spatial: None,
                 limit: None,
             },
         ),
@@ -510,6 +514,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::Where("mag < 0.05"),
+                spatial: None,
                 limit: None,
             },
         ),
@@ -518,6 +523,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::Where("mag_nostats < 0.05"),
+                spatial: None,
                 limit: None,
             },
         ),
@@ -526,6 +532,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::Columns("objectid, mag"),
                 predicate: Predicate::Where("mag < 0.05"),
+                spatial: None,
                 limit: None,
             },
         ),
@@ -534,6 +541,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::All,
+                spatial: None,
                 limit: Some(100),
             },
         ),
@@ -542,6 +550,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             Selection {
                 projection: Projection::All,
                 predicate: Predicate::Where("mag < 0.05"),
+                spatial: None,
                 limit: Some(100),
             },
         ),

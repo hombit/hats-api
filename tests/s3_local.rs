@@ -74,6 +74,7 @@ async fn a_select_list_and_a_predicate_run_against_a_real_file() {
         &Selection {
             projection: Projection::Select("objectid, objra - 0.5 AS ra_corr"),
             predicate: Predicate::Where("band = 'g' AND objectid < 100"),
+            spatial: None,
             limit: Some(10),
         },
     )
@@ -112,6 +113,7 @@ async fn a_parquet_object_is_read_whatever_its_key_ends_in() {
             &permissive_policy(),
             &Selection {
                 predicate: Predicate::Where("objectid = 42"),
+                spatial: None,
                 ..Default::default()
             },
         )
