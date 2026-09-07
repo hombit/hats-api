@@ -15,18 +15,23 @@ updates:
       # One PR for the patch noise, so the individual ones are the interesting ones.
       patch-updates:
         update-types: [patch]
-      # These move together or not at all.
+      # These move together or not at all. `reqwest` and the transport adapter are in
+      # here for the same reason `object_store` is: `network` builds the client that
+      # OpenDAL then uses, so a bump that splits them is a type error rather than a
+      # version bump, and a lone PR for one of them can never be green.
       datafusion-stack:
         patterns:
           - datafusion
           - object_store
           - object_store_opendal
           - opendal
+          - opendal-http-transport-reqwest
+          - reqwest
       test-only:
         dependency-type: development
         patterns:
           - "*"
-    labels: [dependencies, rust]
+    labels: []
 
   # The actions used by the workflows in .github/workflows.
   - package-ecosystem: github-actions
@@ -37,4 +42,4 @@ updates:
       actions:
         patterns:
           - "*"
-    labels: [dependencies, github-actions]
+    labels: []
