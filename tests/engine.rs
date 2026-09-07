@@ -444,6 +444,19 @@ fn gather(plan: &Arc<dyn ExecutionPlan>, out: &mut BTreeMap<String, usize>) {
             ) {
                 continue;
             }
+            // `as_usize` returns 0 for a `PruningMetrics` by construction — DataFusion
+            // aggregates those inside `MetricsSet` instead — so summing it would report
+            // "nothing was pruned" for every file and every setting, which reads exactly
+            // like a real finding.
+            if let MetricValue::PruningMetrics {
+                name,
+                pruning_metrics,
+            } = value
+            {
+                *out.entry(format!("{name}.pruned")).or_default() += pruning_metrics.pruned();
+                *out.entry(format!("{name}.matched")).or_default() += pruning_metrics.matched();
+                continue;
+            }
             *out.entry(value.name().to_owned()).or_default() += value.as_usize();
         }
     }
@@ -811,8 +824,8 @@ async fn settings() {
                 observed.elapsed.as_secs_f64() * 1e3,
                 observed.num_rows,
                 observed.metric("bytes_scanned"),
-                observed.metric("row_groups_pruned_statistics"),
-                observed.metric("row_groups_pruned_bloom_filter"),
+                observed.metric("row_groups_pruned_statistics.pruned"),
+                observed.metric("row_groups_pruned_bloom_filter.pruned"),
                 observed.metric("pushdown_rows_pruned"),
             );
         }
@@ -863,6 +876,130 @@ async fn unset_settings() {
                 observed.elapsed.as_secs_f64() * 1e3,
                 observed.num_rows
             );
+        }
+    }
+}
+
+/// What a bloom filter is worth, on the only file shape where it can be worth anything.
+///
+/// The main fixture cannot answer this and reads as though it had. Its `objectid` ascends,
+/// so min/max statistics localise `objectid = x` to one row group and one page before a
+/// bloom filter is consulted; there is nothing left for one to prune, and "the bloom filter
+/// pruned nothing" is a fact about the fixture rather than about the setting.
+///
+/// So: `objectid` scattered, which makes every row group's min/max span the whole range and
+/// prune nothing, and `Chunk` statistics, which is a file with no page index — between them
+/// the shape of a partition this service is actually pointed at. Written twice, with the
+/// bloom filter and without, and read twice, with `bloom_filter_on_read` and without, since
+/// the setting can only pay on a file whose writer wrote one.
+///
+/// Both a hit and a miss. The miss is the case a bloom filter exists for: a row group it
+/// rules out is one whose data pages are never fetched, and a lookup for an id that is not
+/// in the file is what a client walking a catalog does at every partition but one.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_bloom_filter_is_worth() {
+    if !enabled() {
+        return;
+    }
+    let rows = rows();
+
+    // Scattered so that a row group's min/max spans the range and prunes nothing, and
+    // every value even so that an odd id is a miss no statistic can rule out. Held here
+    // rather than rebuilt per file so the hit below is an id the file actually contains —
+    // a "hit" that is really a miss measures the miss twice and says so nowhere.
+    let ids: Vec<i64> = (0..rows).map(|i| (scattered(i) * 2e9) as i64 * 2).collect();
+    let hit = ids[ids.len() / 2];
+    // Odd, so it is in no row group, and inside the range so no min/max excludes it.
+    let miss = hit + 1;
+
+    let write = |bloom: bool, groups: usize| {
+        let ids: ArrayRef = Arc::new(Int64Array::from_iter_values(ids.iter().copied()));
+        let mag: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..rows).map(|i| scattered(i + 3)),
+        ));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", ids, false),
+            ("mag", mag, true),
+        ])
+        .expect("fixture batch");
+        let mut properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(rows as usize / groups))
+            // No page index: what `parquet-cpp-arrow` writes for a HATS partition today.
+            .set_statistics_enabled(EnabledStatistics::Chunk)
+            .set_compression(Compression::ZSTD(Default::default()));
+        if bloom {
+            properties =
+                properties.set_column_bloom_filter_enabled(ColumnPath::from("objectid"), true);
+        }
+        let mut buffer = Vec::new();
+        let mut writer =
+            ArrowWriter::try_new(&mut buffer, batch.schema(), Some(properties.build()))
+                .expect("writer");
+        writer.write(&batch).expect("write batch");
+        writer.close().expect("close");
+        buffer
+    };
+
+    println!("\n=== what a bloom filter is worth (no page index, scattered id) ===");
+    for groups in [1, 20] {
+        println!(
+            "\none row group per {} rows — {groups} group(s)",
+            rows as usize / groups
+        );
+        for (written, bytes) in [
+            ("no bloom filter", write(false, groups)),
+            ("bloom filter", write(true, groups)),
+        ] {
+            let dir = TempDir::new().expect("temp dir");
+            let path = dir.path().join("part0.parquet");
+            std::fs::write(&path, &bytes).expect("write fixture");
+            let file = storage::open_mounted(&path).expect("open the fixture");
+            println!(
+                "  {written}, {:.1} MiB",
+                bytes.len() as f64 / (1 << 20) as f64
+            );
+
+            for (what, id) in [("a hit ", hit), ("a miss", miss)] {
+                let predicate: &'static str =
+                    Box::leak(format!("objectid = {id}").into_boxed_str());
+                let selection = Selection {
+                    projection: Projection::All,
+                    predicate: Predicate::Where(predicate),
+                    spatial: None,
+                    limit: None,
+                };
+                for (label, knobs) in [
+                    (
+                        "bloom off, index off",
+                        Knobs {
+                            bloom_filter_on_read: false,
+                            enable_page_index: false,
+                            ..Knobs::SHIPPED
+                        },
+                    ),
+                    // Against the row above, this is what `enable_page_index` costs on a
+                    // file that carries no page index — which is every HATS file walked.
+                    (
+                        "bloom off, index on ",
+                        Knobs {
+                            bloom_filter_on_read: false,
+                            ..Knobs::SHIPPED
+                        },
+                    ),
+                    ("shipped             ", Knobs::SHIPPED),
+                ] {
+                    let _ = observe(&file, &selection, knobs).await;
+                    let observed = observe(&file, &selection, knobs).await;
+                    println!(
+                        "    {what} {label} {:>7.1}ms rows={:<4} scanned={:>9} groups pruned: stats={} bloom={}",
+                        observed.elapsed.as_secs_f64() * 1e3,
+                        observed.num_rows,
+                        observed.metric("bytes_scanned"),
+                        observed.metric("row_groups_pruned_statistics.pruned"),
+                        observed.metric("row_groups_pruned_bloom_filter.pruned"),
+                    );
+                }
+            }
         }
     }
 }

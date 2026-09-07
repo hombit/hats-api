@@ -166,12 +166,18 @@ pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     // `pruning` is the one that matters: it is the difference between reading a hundred
     // megabytes for a point lookup and reading five.
     parquet.pruning = true;
-    // Both of these can only pay off on a file whose writer wrote the structure. Neither
-    // is measurably slower on a file that carries none, which is what makes leaving them
-    // on the cheap side of the trade — and today's HATS files, written by
-    // `parquet-cpp-arrow`, carry neither. So this is insurance for the files that do:
-    // the page index saved a further sixth of the bytes of a range scan where it existed,
-    // and the bloom filter pruned no row group in any shape measured here.
+    // Both of these can only pay off on a file whose writer wrote the structure, and
+    // neither is measurably slower on a file that carries none — same bytes, same time —
+    // which is what makes leaving them on the cheap side of the trade. Today's HATS files,
+    // written by `parquet-cpp-arrow`, carry neither, so this is insurance for the files
+    // that do.
+    //
+    // The insurance is worth more than it looks. A bloom filter is nearly worthless on a
+    // file sorted by the column being looked up, since min/max has already found the row
+    // group — but on one row group of unsorted ids, which is the shape a HATS partition
+    // actually has, it took a lookup for an absent id from 6 MB and 7 ms to 1 MB and
+    // 0.4 ms. It is the largest single win available on a realistic file, and it arrives
+    // the day an importer starts writing one.
     parquet.enable_page_index = true;
     parquet.bloom_filter_on_read = true;
     // `target_partitions` and `batch_size` are deliberately left at DataFusion's defaults.
