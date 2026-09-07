@@ -27,8 +27,9 @@ thing to keep working while that is built.
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | |
 | 4.1 | write the README | done | |
-| 4.2 | what the engine actually does | todo | measurement, not code. Its findings decide `query::session_config` and what §5.3 may promise about row order |
-| 4.3 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
+| 4.2 | row order, which differs by mode | todo | measured: only a single-partition scan holds file order. File-server must keep it, the API need not, and both belong in the README |
+| 4.3 | what the engine costs | todo | measurement, not code. Its findings decide the rest of `query::session_config` |
+| 4.4 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
@@ -311,27 +312,52 @@ The static-serving path must not regress: an `lsdb` client pointed at a mount sh
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
 
-### 4.2 What the engine actually does
+### 4.2 Row order, which differs by mode
 
-Both interfaces now execute through one `query::run`, so what DataFusion does with a
-request is the same question for both, and it is a question that has been answered by
-reading rather than by measuring. Two things to establish, in that order. Neither is a
-change to make: this step produces findings, and what to do about them is decided after.
+**The file-server mode returns rows in the source file's order. The API mode promises
+nothing about order.**
 
-**1. Row order.** Whether the rows that come back are in the file's order, and under what
-this stops being true. The interesting cases are the ones the service actually builds:
-a projection alone, a predicate alone, both together, a `limit`, and pushdown on and off
-(`pushdown_filters` and `reorder_filters` are both set, and filter reordering is a
-per-row-group decision). A file of several row groups is what makes the difference
-visible; one row group cannot show it.
+That split is the requirement, and it is not what the engine does today. Measured against
+a 205 MiB file of 200 row groups on a 12-core machine, `query::run` as it stands:
 
-Order is not currently promised anywhere, which is exactly why this matters now: a caller
-who observes it will depend on it, §5.3's plan mode concatenates per-partition answers,
-and `parquet_out` copies the source layout. Establish what is true, write it down, and
-decide separately whether to promise it, sort for it, or say plainly that there is no
-order.
+| request | in file order |
+|---|---|
+| whole file, or any projection of it | no — 141 order breaks, and a different order each run |
+| a predicate matching rows across many row groups | no — ~100 breaks, different each run |
+| a predicate confined to one row group | yes |
+| `limit` with no predicate | yes |
+| `limit` after a scattered predicate | no, and a different set of rows each run |
 
-**2. The settings.** `query::session_config` sets seven options from what each is
+Three things this turned on:
+
+- **Parallelism is the cause, and the only cause.** With `target_partitions` forced to 1
+  every shape above comes back in file order. Turning `pushdown_filters` and
+  `reorder_filters` off changes nothing, so filter reordering is not implicated.
+  DataFusion's default `target_partitions` is the core count, so row groups are handed
+  out to threads and the results interleave in whatever order they finish.
+- **It is not a stable wrong order, it is a different order each time.** Repeating the
+  same request gives a different interleaving, so a caller who observes order once cannot
+  rely on having observed anything.
+- **A one-row-group file cannot show any of it.** There is only one unit of work to hand
+  out, so order survives by accident. Small catalogs will therefore look correct
+  throughout, and this appears only on partitions large enough to hold several row
+  groups.
+
+`limit` is the sharpest case: `?limit=100` on a filtered read returns a *different 100
+rows* from one request to the next. That is not a missing order guarantee but an unstable
+result set, and it is reachable from the file-server mode today.
+
+What remains is to make the file-server mode keep file order, at a cost that is measured
+rather than assumed — a single-partition scan is the obvious lever and serialises the
+read, which is the trade to quantify. The API mode needs no change beyond saying so.
+
+Both guarantees belong in the README once they hold, since a difference in ordering
+between two interfaces over the same data is exactly what a caller will not expect to
+have to ask about.
+
+### 4.3 What the engine costs
+
+`query::session_config` sets seven options from what each is
 documented to do; none has been measured here. What that costs and what it buys, against
 a real file and per option:
 
@@ -339,8 +365,13 @@ a real file and per option:
   and the two claimed to be worth the most.
 - `enable_page_index`, `bloom_filter_on_read`, `pruning` — each pays a metadata read
   before it can save a data read, which is a different trade over a slow origin than over
-  a local mount.
-- the batch size and the target partition count, which are not set at all today.
+  a local mount. The question for the first two is what they cost against a file that
+  carries neither structure, since that decides whether leaving them on is free
+  insurance. It is not "do today's files have them": which importer wrote a file is not
+  something this service gets to assume, and page statistics are coming.
+- the batch size and the target partition count, which are not set at all today. §4.2 has
+  since made `target_partitions` a correctness question for one of the two modes, so what
+  is left here is its cost.
 
 Measure over the shapes this service is for: a point lookup by id, a range over a sorted
 column, a predicate on a column with no statistics, and a wide projection versus a narrow
@@ -351,7 +382,7 @@ This is not §6.8. That one ranks the caching layers by where a request's time g
 one is about the engine's own knobs, and it comes first because a cache measured against
 a badly configured engine ranks the wrong layer.
 
-### 4.3 A directory page worth looking at
+### 4.4 A directory page worth looking at
 
 The generated listing is a bare table and reads worse than what `apache` and `nginx`
 serve, which is the comparison a person browsing a catalog actually makes. Presentation
@@ -570,9 +601,27 @@ No job queue, job ids or polling: the plan is a list of stateless requests. See 
 | **Negative results** | 404 for a missing object | url | entries | on, very short TTL |
 | Query results | — | — | — | not cached, §6.5 |
 
-The first two are the ones worth building. Parquet footers are read **twice per
-`format=parquet` request** — once by `query.rs` to plan, once by `parquet_out.rs` to copy
-the source layout; fix that directly as well as caching it.
+The first two are the ones worth building. A `format=parquet` request reads the source
+footer **three times**, and two of those are this crate's own: DataFusion fetches it once
+while inferring the schema and its own `FileMetadataCache` serves the scan from that,
+while `parquet_out::read_layout` goes straight to the store and pays two requests — the
+parquet reader's default prefetch is 8 bytes, enough for the footer tail and never enough
+for the footer, so the second fetch is unconditional. Counted, not read off the code:
+every shape measured came to `+2` requests for the layout.
+
+**Nothing here should be reading metadata itself.** The read belongs to DataFusion, which
+has already done it, so the layout should come out of what the session already holds
+rather than off the wire again. The obstacle is reach, not design: the entry in
+DataFusion's cache is an `Arc<dyn FileMetadata>` whose only accessor is `as_any`, and the
+concrete `CachedParquetMetaData` lives in `datafusion-datasource-parquet`, which the
+`datafusion` facade does not re-export — so getting at it means taking that crate as a
+direct dependency, version-locked to DataFusion the way `object_store` already is. Decide
+that here, where the metadata cache is being built anyway, rather than paying it for one
+call site.
+
+Two smaller things fall out of the same measurement, neither of them a cache: DataFusion's
+own `metadata_size_hint` defaults to 512 KiB and ours defaults to 8 bytes, and the layout
+read is sequenced after the query when it does not depend on it.
 
 Negative caching applies to absence only. A 403 is recomputed every time, since the policy
 behind it can be reloaded.
