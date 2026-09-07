@@ -239,7 +239,7 @@ directly. A caller who wants the catalog to choose partitions uses the API (§5.
 the same data, which the mount's derived grant permits.
 
 **What has a query surface at all is one configured list**, `[data] filenames`, of globs
-matched against a file's own name — `["*.parq", "*.parquet", "_metadata",
+matched against a file's own name — `["*.parq", "*.parquet", "*.pq", "_metadata",
 "_common_metadata"]` by default, which is what a HATS catalog contains. The two modes
 differ only in what they do with a name that is not on it: the file server has bytes to
 send, so it sends them and ignores the parameters; the API has nothing else to do with an

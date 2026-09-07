@@ -47,9 +47,15 @@ pub struct DataConfig {
 impl Default for DataConfig {
     fn default() -> Self {
         Self {
-            filenames: ["*.parq", "*.parquet", "_metadata", "_common_metadata"]
-                .map(str::to_owned)
-                .to_vec(),
+            filenames: [
+                "*.parq",
+                "*.parquet",
+                "*.pq",
+                "_metadata",
+                "_common_metadata",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
         }
     }
 }

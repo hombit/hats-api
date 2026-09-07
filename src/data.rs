@@ -129,8 +129,12 @@ mod tests {
         for name in [
             "part0.parquet",
             "part0.parq",
+            "part0.pq",
             "_metadata",
             "_common_metadata",
+            // Spark and dask put the codec in the middle of the name, so nothing has to
+            // be written for it.
+            "part-00000-8f2c.snappy.parquet",
         ] {
             assert!(files.matches(name), "{name}");
         }
