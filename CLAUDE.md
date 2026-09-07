@@ -304,6 +304,25 @@ quote and no second parser.
   widened before the arithmetic rather than the trigonometry running at single precision.
   `region::tests` crosses both column types against both right-ascension conventions.
 
+## What a caller's file is like
+
+**Nothing here may rely on how a HATS catalog happens to be written today.** Not the row
+group size, not one row group per file, not which of column statistics, the page index and
+a bloom filter it carries, not the compression, not the column order, not the writer.
+`hats-import` is not the only importer, importers change, and a caller's file may predate
+or postdate anything measured here.
+
+That applies to code and to conclusions equally. A setting kept because "today's files
+have no page index" is a setting that breaks quietly the week an importer starts writing
+one — and one dropped for the same reason is worse, because nothing in the answer would
+say the query got slower. A measurement over one file shape is a measurement of that
+shape: `query::tests` and `tests/engine.rs` both cross their cases over how the file was
+written for this reason, and a finding that holds on one shape and not another is a
+finding about the shape.
+
+What a file is observed to carry is worth writing down — it says what is worth asking an
+importer for. It is never worth depending on.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it

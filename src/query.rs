@@ -166,20 +166,18 @@ pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     //
     // - Many row groups: `pruning` does the work. A point lookup over twenty of them reads
     //   5 MB of a 100 MB file rather than all of it, and the page index trims 5% more.
-    // - One row group, which is the shape of every HATS partition looked at: `pruning`
-    //   does nothing whatever, since there is no second row group to rule out. The page
-    //   index is then the only thing between a lookup and a full scan, and it is worth on
-    //   its own what `pruning` is worth on the other shape — 84 MB and 102 ms become 16 MB
-    //   and 18 ms.
+    // - One row group: `pruning` does nothing whatever, since there is no second row group
+    //   to rule out. The page index is then the only thing between a lookup and a full
+    //   scan, and it is worth on its own what `pruning` is worth on the other shape —
+    //   84 MB and 102 ms become 16 MB and 18 ms.
     // - A bloom filter is worthless wherever min/max has already found the rows, and on
     //   one row group of unsorted ids it takes a lookup for an absent id from 6 MB and
     //   7 ms to 1 MB and 0.4 ms.
     //
     // The two read-side switches cost nothing on a file whose writer wrote neither
     // structure — same bytes, same time — so leaving them on is insurance with no premium.
-    // Today's HATS files carry column statistics and neither of the other two, which in
-    // one row group means nothing here can prune them at all. That is a fact about the
-    // writer; the only thing this side can do about it is be ready for the file that does.
+    // Which structures a file carries is the writer's decision and changes without notice,
+    // so the only thing this side can do is be ready for each of them.
     parquet.pruning = true;
     parquet.enable_page_index = true;
     parquet.bloom_filter_on_read = true;

@@ -87,7 +87,11 @@ fn scattered(i: i64) -> f64 {
     (mixed >> 11) as f64 / (1u64 << 53) as f64 * 25.0
 }
 
-/// A file shaped like a HATS partition, with a column for each thing worth asking about.
+/// A catalog-shaped file, with a column for each thing worth asking about.
+///
+/// The columns are chosen for the questions below; how the file is *written* is one choice
+/// among several and every finding is contingent on it, so `HATS_ENGINE_ROW_GROUP` varies
+/// the part that matters most and the report prints what was actually produced.
 ///
 /// - `objectid` ascending, which makes it both the point-lookup target and the witness
 ///   for row order: the fixture's file order is its sorted order, so a result that comes
@@ -142,9 +146,9 @@ fn fixture(rows: i64) -> Vec<u8> {
         // reads have them is a separate question, and one only their writer answers.
         .set_column_bloom_filter_enabled(ColumnPath::from("objectid"), true)
         .set_column_statistics_enabled(ColumnPath::from("mag_nostats"), EnabledStatistics::None)
-        // What a real HATS partition is compressed with — `parquet-cpp-arrow` writing
-        // ZSTD, read off one of `lsdb`'s catalogs. Snappy would understate the decode
-        // cost, which is part of every number here.
+        // ZSTD, which a partition in hand was written with. Snappy would understate the
+        // decode cost, which is part of every number here — the point is to measure with
+        // compression that costs something, not to predict what a caller's file uses.
         .set_compression(Compression::ZSTD(Default::default()))
         .build();
 
@@ -914,9 +918,9 @@ async fn unset_settings() {
 ///
 /// So: `objectid` scattered, which makes every row group's min/max span the whole range and
 /// prune nothing, and `Chunk` statistics, which is a file with no page index — between them
-/// the shape of a partition this service is actually pointed at. Written twice, with the
-/// bloom filter and without, and read twice, with `bloom_filter_on_read` and without, since
-/// the setting can only pay on a file whose writer wrote one.
+/// the one shape on which a bloom filter is the only structure left that can prune. Written
+/// twice, with the filter and without, and read twice, with `bloom_filter_on_read` and
+/// without, since the setting can only pay on a file whose writer wrote one.
 ///
 /// Both a hit and a miss. The miss is the case a bloom filter exists for: a row group it
 /// rules out is one whose data pages are never fetched, and a lookup for an id that is not
@@ -949,7 +953,8 @@ async fn what_a_bloom_filter_is_worth() {
         .expect("fixture batch");
         let mut properties = WriterProperties::builder()
             .set_max_row_group_row_count(Some(rows as usize / groups))
-            // No page index: what `parquet-cpp-arrow` writes for a HATS partition today.
+            // Chunk statistics and no page index, which is one of the shapes a writer may
+            // produce and the one this case is about.
             .set_statistics_enabled(EnabledStatistics::Chunk)
             .set_compression(Compression::ZSTD(Default::default()));
         if bloom {
@@ -1003,7 +1008,7 @@ async fn what_a_bloom_filter_is_worth() {
                         },
                     ),
                     // Against the row above, this is what `enable_page_index` costs on a
-                    // file that carries no page index — which is every HATS file walked.
+                    // file that carries no page index.
                     (
                         "bloom off, index on ",
                         Knobs {
