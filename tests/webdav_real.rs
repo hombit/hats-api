@@ -77,6 +77,13 @@ impl Webdav {
     }
 
     /// Put the fixture at `key` and return the url a caller would send to read it.
+    ///
+    /// Every test here writes under a directory of its own, and that is load-bearing
+    /// rather than tidiness. OpenDAL creates a parent by statting it and sending `MKCOL`
+    /// when the stat says it is absent, and it treats anything but `201` or `405` as a
+    /// failure. Two tests sharing a directory both see it absent and both create it, and
+    /// a real server serializes that and answers the loser `423 Locked` — so the shared
+    /// directory, not the object, is what fails.
     async fn put_fixture(&self, key: &str) -> String {
         self.writer()
             .write(key, parquet_fixture())
@@ -142,7 +149,7 @@ async fn reads_a_partition_over_real_webdav() {
     let Some(server) = Webdav::from_env() else {
         return skip_or_fail("HATS_API_TEST_WEBDAV");
     };
-    let url = server.put_fixture("catalog/part0.parquet").await;
+    let url = server.put_fixture("partition/part0.parquet").await;
 
     let result = lookup(
         &url,
@@ -187,7 +194,7 @@ async fn honours_a_projection_over_real_webdav() {
     let Some(server) = Webdav::from_env() else {
         return skip_or_fail("HATS_API_TEST_WEBDAV");
     };
-    let url = server.put_fixture("catalog/projected.parquet").await;
+    let url = server.put_fixture("projection/part0.parquet").await;
 
     let columns = ["objectid".to_owned(), "objra".to_owned()];
     let result = lookup(
@@ -211,11 +218,11 @@ async fn an_anonymous_request_cannot_read_a_protected_webdav_server() {
     let Some(server) = Webdav::from_env() else {
         return skip_or_fail("HATS_API_TEST_WEBDAV");
     };
-    server.put_fixture("catalog/private.parquet").await;
+    server.put_fixture("anonymous/private.parquet").await;
 
     let error = expect_error(
         lookup(
-            &server.url("catalog/private.parquet"),
+            &server.url("anonymous/private.parquet"),
             &server.options(),
             &server.policy(),
             "objectid",
@@ -239,10 +246,15 @@ async fn a_missing_object_over_real_webdav_is_not_a_policy_refusal() {
     let Some(server) = Webdav::from_env() else {
         return skip_or_fail("HATS_API_TEST_WEBDAV");
     };
+    // A sibling, so the directory exists and the object alone is missing — otherwise
+    // this asks about a tree that was never there. It also makes the test say something
+    // when the server is unreachable: a refused connection is neither a `Forbidden` nor
+    // an echoed password, so both assertions below would hold against nothing at all.
+    server.put_fixture("missing/present.parquet").await;
 
     let error = expect_error(
         lookup(
-            &server.url("catalog/absent.parquet"),
+            &server.url("missing/absent.parquet"),
             &server.credentialed_options(),
             &server.policy(),
             "objectid",
