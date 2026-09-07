@@ -26,7 +26,7 @@ thing to keep working while that is built.
 | 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | |
-| 4.1 | write the README | todo | both interfaces are settled now, so one document can describe them together |
+| 4.1 | write the README | done | |
 | 4.2 | what the engine actually does | todo | measurement, not code. Its findings decide `query::session_config` and what §5.3 may promise about row order |
 | 4.3 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
@@ -310,13 +310,6 @@ Modelled on <https://vizcat.cds.unistra.fr/hats/> and
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
-
-### 4.1 Write the README
-
-Both interfaces exist by this point and neither is still moving, so one document can
-describe them together: what the service is for, the two request shapes, the storage
-options, the configuration file, and how to run it. Written earlier it would document a
-shape that then changed, which is worse than the stub that is there now.
 
 ### 4.2 What the engine actually does
 
