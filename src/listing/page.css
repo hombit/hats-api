@@ -53,9 +53,15 @@ table.listing { border-collapse: collapse; margin: 1rem 0 0.6rem; }
 .listing th, .listing td { padding: 0.15rem 2rem 0.15rem 0.4rem; text-align: left; }
 .listing th { border-bottom: 2px solid var(--edge); font-size: 0.8rem; color: var(--fg); font-weight: 600; }
 .listing th.size, .listing td.size { text-align: right; padding-right: 2.5rem; }
-.listing td.name, .listing td.size { font-family: var(--mono); }
-.listing td.size, .listing td.modified { white-space: nowrap; }
-.listing td.modified { color: var(--muted); font-size: 0.85rem; }
+/* A row is a name and then two facts about it, so the two facts are written alike —
+   same family, same size, same colour. Three different treatments across three columns
+   made a row look like three unrelated things. */
+.listing td.name { font-family: var(--mono); }
+.listing td.size, .listing td.modified {
+  font: 0.8rem var(--mono);
+  color: var(--fg);
+  white-space: nowrap;
+}
 .listing tbody tr.entry:nth-of-type(even) { background: var(--stripe); }
 .listing tbody tr.entry:hover { background: var(--hover); }
 
@@ -107,7 +113,11 @@ tr.panel > td {
   align-items: center;
   max-width: calc(100vw - 4rem);
 }
-.panel-body label { font-size: 0.75rem; color: var(--fg); }
+/* The label sits against the first line of its box rather than in the middle of it: the
+   box grows downwards as someone types or drags it, and a label that follows is a label
+   that moves. */
+.panel-body label { display: inline-flex; align-items: flex-start; gap: 0.35rem; font-size: 0.75rem; color: var(--fg); }
+.panel-body label span { padding-top: 0.35rem; }
 .panel-body input, .panel-body textarea {
   font: 0.8rem var(--mono);
   padding: 0.2rem 0.35rem;

@@ -1,14 +1,11 @@
 /* What this page does beyond being markup, and none of it is load-bearing: the listing
-   is complete and correct with the script removed. Two things happen here.
+   is complete and correct with the script removed.
 
-   One, a timestamp is rewritten into the reader's own timezone, keeping the spelling the
-   markup carries in the attribute and in the tooltip.
-
-   Two, a file this service reads as data gets a panel that asks it a question. The
-   columns come from the file when the panel is opened rather than with the listing: a
-   directory of ten thousand partitions would otherwise pay a footer read per entry to
-   describe files nobody asked about. Nothing here builds an <a href>, because a client
-   scraping this page for entries reads the markup and would take one for a file. */
+   A file this service reads as data gets a panel that asks it a question. The columns
+   come from the file when the panel is opened rather than with the listing: a directory
+   of ten thousand partitions would otherwise pay a footer read per entry to describe
+   files nobody asked about. Nothing here builds an <a href>, because a client scraping
+   this page for entries reads the markup and would take one for a file. */
 
 /* How many rows the table below the panel shows. It is a preview of the file, not the
    answer to a question about it: the answer is what the download and the url give. */
@@ -29,14 +26,6 @@ function cut(text, limit) {
 }
 
 document.body.classList.add('js');
-
-for (const stamp of document.querySelectorAll('time[datetime]')) {
-  const at = new Date(stamp.dateTime);
-  if (!isNaN(at.getTime())) {
-    stamp.title = stamp.textContent;
-    stamp.textContent = at.toLocaleString();
-  }
-}
 
 for (const button of document.querySelectorAll('.ask')) {
   button.addEventListener('click', () => toggle(button));
@@ -66,10 +55,10 @@ function build(url) {
     '<div class="panel-body">' +
     '<div class="columns-of"><span class="count">reading the columns…</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
-    '<label>columns <textarea class="columns" rows="2" placeholder="all of them">' +
-    '</textarea></label>' +
-    '<label>filters <textarea class="filters" rows="2" placeholder="every row">' +
-    '</textarea></label>' +
+    '<label><span>columns</span><textarea class="columns" rows="1" ' +
+    'placeholder="all of them"></textarea></label>' +
+    '<label><span>filters</span><textarea class="filters" rows="1" ' +
+    'placeholder="every row"></textarea></label>' +
     '<span class="buttons">' +
     '<button class="run" data-format="json">Preview ' + PREVIEW + ' rows</button>' +
     '<button class="run" data-format="parquet">Download parquet</button></span>' +

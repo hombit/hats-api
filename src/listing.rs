@@ -260,12 +260,15 @@ impl Listing {
                     .size
                     .map(|size| ByteSize(size).to_string())
                     .unwrap_or_default(),
-                // The machine-readable spelling stays in the attribute, so what the page
-                // says is unchanged whether or not the script below runs.
+                // UTC, said in the text rather than left to be worked out. A local time
+                // is a different instant for every reader and the same string for all of
+                // them, which for a timestamp on a data file is worse than a `Z` to read
+                // past. The attribute keeps the machine-readable spelling.
                 modified = match &entry.modified {
                     Some(modified) => format!(
-                        "<time datetime=\"{modified}\">{modified}</time>",
-                        modified = html_escape::encode_double_quoted_attribute(modified)
+                        "<time datetime=\"{attribute}\">{shown}</time>",
+                        attribute = html_escape::encode_double_quoted_attribute(modified),
+                        shown = html_escape::encode_text(&readable(modified)),
                     ),
                     None => String::new(),
                 },
@@ -420,6 +423,20 @@ fn timestamp(time: SystemTime) -> String {
     DateTime::<Utc>::from(time).to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+/// The same instant for a person to read, still UTC and saying so. Parsed back from the
+/// answer's own spelling rather than formatted again from the clock, so the page and the
+/// JSON cannot come to differ; a timestamp this crate did not write is left as it is.
+fn readable(timestamp: &str) -> String {
+    DateTime::parse_from_rfc3339(timestamp).map_or_else(
+        |_| timestamp.to_owned(),
+        |at| {
+            at.with_timezone(&Utc)
+                .format("%Y-%m-%d %H:%M:%S UTC")
+                .to_string()
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -490,6 +507,13 @@ mod tests {
         fs::write(dir.path().join("b.parquet"), b"0123456789").unwrap();
         fs::write(dir.path().join("a.parquet"), b"01").unwrap();
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
+
+        // A time is UTC in the answer and UTC on the page, and the page says which:
+        // a local time is a different instant for every reader and the same text for
+        // all of them.
+        let html = listing(&dir).to_html(&DataFiles::default());
+        assert!(html.contains(" UTC</time>"), "{html}");
+        assert!(!html.contains("toLocaleString"), "{html}");
 
         let listing = listing(&dir);
         let names: Vec<_> = listing.entries.iter().map(|entry| &*entry.name).collect();
