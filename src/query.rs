@@ -153,15 +153,30 @@ pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     // would find its column anyway.
     options.sql_parser.enable_ident_normalization = false;
     let parquet = &mut options.execution.parquet;
-    // Off by default, and worth more than everything else combined: it evaluates the
-    // predicate during decoding, so the data columns of non-matching row groups and
-    // pages are never fetched.
+    // Off by default. Evaluates the predicate during decoding, so the data columns of
+    // non-matching row groups and pages are never fetched. Worth a fifth of the bytes on a
+    // limited scan and nothing at all where statistics already ruled the row groups out;
+    // it never cost anything measurable. `reorder_filters` is what keeps that true — with
+    // it off, a limited scan read *more* than with no pushdown at all.
     parquet.pushdown_filters = true;
     parquet.reorder_filters = true;
-    // On by default; set explicitly because the whole service depends on them.
+    // On by default; set explicitly because the whole service depends on them, and because
+    // each one's cost is the reason to leave it on rather than an argument against it.
+    //
+    // `pruning` is the one that matters: it is the difference between reading a hundred
+    // megabytes for a point lookup and reading five.
     parquet.pruning = true;
+    // Both of these can only pay off on a file whose writer wrote the structure. Neither
+    // is measurably slower on a file that carries none, which is what makes leaving them
+    // on the cheap side of the trade — and today's HATS files, written by
+    // `parquet-cpp-arrow`, carry neither. So this is insurance for the files that do:
+    // the page index saved a further sixth of the bytes of a range scan where it existed,
+    // and the bloom filter pruned no row group in any shape measured here.
     parquet.enable_page_index = true;
     parquet.bloom_filter_on_read = true;
+    // `target_partitions` and `batch_size` are deliberately left at DataFusion's defaults.
+    // The default partition count is the core count, and a full scan is six times slower
+    // at one; batch size made no difference at any size tried.
     config
 }
 

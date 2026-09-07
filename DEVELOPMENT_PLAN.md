@@ -27,7 +27,7 @@ which.
 | 4 | file-server interface | done | |
 | 4.1 | write the README | done | |
 | 4.2 | say the ordering guarantees in the user documentation | done | |
-| 4.3 | what the engine costs | todo | measurement, not code. Its findings decide the rest of `query::session_config` |
+| 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | part | `circle` and `box` refine per row against a parquet target. What is left is the HATS target — partition pruning, the `_healpix_29` prefilter, `polygon`/`moc` — and `POST /api/v1/hats`. Order policy and range budget to be settled by measurement first |
@@ -374,42 +374,6 @@ Modelled on <https://vizcat.cds.unistra.fr/hats/> and
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
-
-### 4.3 What the engine costs
-
-`query::session_config` sets seven options from what each is
-documented to do; none has been measured here. What that costs and what it buys, against
-a real file and per option:
-
-- `pushdown_filters` and `reorder_filters` — the two that are off by default upstream,
-  and the two claimed to be worth the most.
-- `enable_page_index`, `bloom_filter_on_read`, `pruning` — each pays a metadata read
-  before it can save a data read, which is a different trade over a slow origin than over
-  a local mount. The question for the first two is what they cost against a file that
-  carries neither structure, since that decides whether leaving them on is free
-  insurance. It is not "do today's files have them": which importer wrote a file is not
-  something this service gets to assume, and page statistics are coming.
-- the batch size and the target partition count, which are not set at all today.
-  `target_partitions` is already a correctness question for the file-server's order, so
-  what is left here is its cost.
-- **what turning work stealing off costs.** A partition that finishes early no longer
-  helps a slow sibling, so a file whose row groups decode unevenly is slower to read.
-
-Every answer already reports the bytes its scan read, so most of this is a request rather
-than a profiler. What that number leaves out is the footer and the page index, which
-DataFusion fetches from the store directly rather than through the reader that holds the
-counter — and the page index is exactly what `enable_page_index` pays for. So the one knob
-whose cost the counter cannot see needs a counting `ObjectStore` wrapper of our own, or the
-clock. A bloom filter read is counted, since that one goes through the reader.
-
-Measure over the shapes this service is for: a point lookup by id, a range over a sorted
-column, a predicate on a column with no statistics, and a wide projection versus a narrow
-one. The result wanted is a heuristic — which of these should depend on the request or the
-file rather than being fixed at startup — not a table of numbers.
-
-This is not §6.8. That one ranks the caching layers by where a request's time goes; this
-one is about the engine's own knobs, and it comes first because a cache measured against
-a badly configured engine ranks the wrong layer.
 
 ### 4.4 A directory page worth looking at
 
@@ -799,10 +763,17 @@ For local mounts, two levels:
 
 ### 6.8 Prerequisite
 
-Add a benchmark measuring the cost breakdown of a request — footer read, metadata parse,
-data read, and the second footer read for `format=parquet` — against a real file. Build the
-layers it justifies, in the order it ranks them. If the numbers are transfer-bound, as the
-README's "Known costs" suggests, the duplicate footer read in §6.1 is the cheaper fix.
+Measure the cost breakdown of a request — footer read, metadata parse, data read, and the
+second footer read for `format=parquet` — against a real file. Build the layers it
+justifies, in the order it ranks them. If the numbers are transfer-bound, as the README's
+"Known costs" suggests, the duplicate footer read in §6.1 is the cheaper fix.
+
+`tests/engine.rs` is the harness and already counts the requests one answer costs, which
+settles the duplicate footer: a `format=parquet` answer is two requests dearer than the
+same query as JSON, always, for a footer already parsed and in memory. What it does not do
+is attribute *time* to each stage, which is what ranks the layers. Both the timings and the
+counts there are against a local file, so they are the floor: the ranking this step wants
+needs an origin with latency in it.
 
 ## 7. Phase 6 — operational surface
 
