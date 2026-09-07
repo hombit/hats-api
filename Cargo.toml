@@ -20,6 +20,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytesize = { version = "2", features = ["serde"] }
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection", "sql"] }
 futures = "0.3"
+# Compiles the whole list of data-file patterns into one matcher.
+globset = "0.4"
 html-escape = "0.2"
 http = "1"
 ipnet = "2"

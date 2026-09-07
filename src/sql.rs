@@ -1,5 +1,11 @@
 //! The caller's SQL: a projection list and a row predicate.
 //!
+//! Each is sayable two ways. `select` and `where` take expressions; `columns` and
+//! `filters` are the narrower pair a file-server client writes in a query string. Both
+//! pairs lower to the same planned expression and meet the same allowlist below, so
+//! which one a request used changes the wording and nothing else — a divergence in what
+//! they mean would be a bug rather than a feature.
+//!
 //! Expressions, never statements. Each piece is parsed on its own — one select item, one
 //! boolean expression — and the parser must reach the end of the string, so there is no
 //! `FROM` to hang a join off and no way to write a second query into either field. The
@@ -22,7 +28,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
-use datafusion::sql::sqlparser::tokenizer::Token;
+use datafusion::sql::sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
 use crate::config::LimitsConfig;
 use crate::error::ApiError;
@@ -69,7 +75,7 @@ pub fn projection(
             "omit select rather than writing *: absent means every column",
         ));
     }
-    let items = parse(sql, FIELD, limits, |parser| {
+    let items = parse(tokenize(sql, FIELD)?, FIELD, limits, |parser| {
         parser.parse_comma_separated(Parser::parse_expr_with_alias)
     })?;
     items
@@ -100,19 +106,124 @@ pub fn predicate(
 ) -> Result<Expr, ApiError> {
     const FIELD: &str = "where";
 
-    let expr = parse(sql, FIELD, limits, Parser::parse_expr)?;
+    plan_predicate(state, schema, tokenize(sql, FIELD)?, FIELD, limits)
+}
+
+/// The projection as a list of column names — `columns`, the other of the two ways to
+/// say one.
+///
+/// A name, and nothing else. `Gmag` and `lightcurve.mag` are the whole language here;
+/// `mag - 0.1 AS corrected` is [`projection`]'s to accept. Widening this one to
+/// expressions would leave two spellings for one thing with nothing to choose between
+/// them, and a caller who wants an expression already has the field for it.
+///
+/// A name that is not an ordinary identifier is quoted, the way SQL quotes one:
+/// `"E(BP-RP)"`. Unquoted it parses as a call to a function named `E`, which is a
+/// refusal rather than a wrong column.
+pub fn columns(
+    state: &SessionState,
+    schema: &DFSchema,
+    list: &str,
+    limits: Limits,
+) -> Result<Vec<Expr>, ApiError> {
+    const FIELD: &str = "columns";
+
+    let items = parse(tokenize(list, FIELD)?, FIELD, limits, |parser| {
+        parser.parse_comma_separated(Parser::parse_expr)
+    })?;
+    items
+        .into_iter()
+        .map(|mut item| {
+            resolve_identifiers(&mut item, schema);
+            // After resolving, so the output key is the file's spelling of the name
+            // rather than the caller's.
+            let Some(name) = column_path(&item) else {
+                return Err(ApiError::bad_request(format!(
+                    "{FIELD} takes column names; write select for an expression"
+                )));
+            };
+            let expr = plan(
+                state,
+                schema,
+                ExprWithAlias {
+                    expr: item,
+                    alias: None,
+                },
+                FIELD,
+                limits,
+            )?;
+            Ok(expr.alias(name))
+        })
+        .collect()
+}
+
+/// The row predicate as the file-server vocabulary spells it — [`predicate`]'s language,
+/// with `&&` accepted for `AND`.
+///
+/// The two fields mean the same thing, so they parse and plan through the same code and
+/// reach the same allowlist. All that differs is the one spelling.
+pub fn filters(
+    state: &SessionState,
+    schema: &DFSchema,
+    text: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    const FIELD: &str = "filters";
+
+    let tokens = ands_written_as_ampersands(tokenize(text, FIELD)?);
+    plan_predicate(state, schema, tokens, FIELD, limits)
+}
+
+/// One boolean expression, however it was spelled: no alias, and nothing after it.
+fn plan_predicate(
+    state: &SessionState,
+    schema: &DFSchema,
+    tokens: Vec<TokenWithSpan>,
+    field: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    let expr = parse(tokens, field, limits, Parser::parse_expr)?;
     plan(
         state,
         schema,
         ExprWithAlias { expr, alias: None },
-        FIELD,
+        field,
         limits,
     )
 }
 
-/// The dotted path a caller wrote, for a select item that is only a path.
-fn dotted_name(expr: &SqlExpr) -> Option<String> {
+/// Rewrite `&&` into `AND`, on the tokens rather than on the text.
+///
+/// Rewriting the text would be a parser written by accident: inside a string literal
+/// `&&` is two characters of data, and nothing working on the characters can tell that
+/// from the operator. The tokenizer has already made the distinction — a literal is one
+/// token by the time this runs — so the rewrite is exact.
+///
+/// `&&` already has a meaning to the tokenizer — it is PostgreSQL's array-overlap
+/// operator, `Token::Overlap` — so the rewrite is that one token becoming a keyword.
+/// Left alone it plans as an overlap and fails as an unsupported operator, which is a
+/// confusing way to be told that a spelling is not understood.
+///
+/// `||` gets no such treatment. It is SQL's string concatenation, and reading it as `OR`
+/// would leave one spelling with two meanings and no way to ask for the other. `OR` is
+/// written out.
+fn ands_written_as_ampersands(tokens: Vec<TokenWithSpan>) -> Vec<TokenWithSpan> {
+    tokens
+        .into_iter()
+        .map(|token| match token.token {
+            Token::Overlap => TokenWithSpan {
+                token: Token::make_keyword("AND"),
+                span: token.span,
+            },
+            _ => token,
+        })
+        .collect()
+}
+
+/// The column a caller named, when what they wrote is a name and nothing else.
+fn column_path(expr: &SqlExpr) -> Option<String> {
     match expr {
+        SqlExpr::Identifier(ident) => Some(ident.value.clone()),
         SqlExpr::CompoundIdentifier(parts) => Some(
             parts
                 .iter()
@@ -124,13 +235,32 @@ fn dotted_name(expr: &SqlExpr) -> Option<String> {
     }
 }
 
-/// Run one of `sqlparser`'s own parsers over the whole string.
+/// The dotted path a caller wrote, for a select item that is only a path.
+///
+/// A plain column is left out: DataFusion names it after itself already, and an alias to
+/// the name it has would be a node to count for nothing.
+fn dotted_name(expr: &SqlExpr) -> Option<String> {
+    match expr {
+        SqlExpr::CompoundIdentifier(_) => column_path(expr),
+        _ => None,
+    }
+}
+
+/// The caller's text as tokens, which is as far as anything gets before the grammar has
+/// a say.
+fn tokenize(sql: &str, field: &str) -> Result<Vec<TokenWithSpan>, ApiError> {
+    Tokenizer::new(&DIALECT, sql)
+        .tokenize_with_location()
+        .map_err(|error| ApiError::bad_request(format!("{field} is not a SQL expression: {error}")))
+}
+
+/// Run one of `sqlparser`'s own parsers over the whole token stream.
 ///
 /// The end-of-input check is what makes this a parser for an expression rather than for
 /// the first expression in something longer: without it, `1 UNION SELECT …` parses as
 /// `1` and the rest is silently dropped.
 fn parse<T>(
-    sql: &str,
+    tokens: Vec<TokenWithSpan>,
     field: &str,
     limits: Limits,
     parse: impl FnOnce(&mut Parser<'static>) -> Result<T, ParserError>,
@@ -140,8 +270,7 @@ fn parse<T>(
     };
     let mut parser = Parser::new(&DIALECT)
         .with_recursion_limit(limits.max_depth)
-        .try_with_sql(sql)
-        .map_err(|error| refuse(&error))?;
+        .with_tokens_with_locations(tokens);
     let parsed = parse(&mut parser).map_err(|error| refuse(&error))?;
     if parser.peek_token().token != Token::EOF {
         return Err(ApiError::bad_request(format!(
@@ -419,6 +548,61 @@ mod tests {
 
     fn filter(sql: &str) -> Result<String, ApiError> {
         Ok(predicate(&state(), &schema(), sql, limits())?.to_string())
+    }
+
+    fn column_names(list: &str) -> Result<Vec<String>, ApiError> {
+        Ok(columns(&state(), &schema(), list, limits())?
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect())
+    }
+
+    fn filters_of(text: &str) -> Result<String, ApiError> {
+        Ok(filters(&state(), &schema(), text, limits())?.to_string())
+    }
+
+    /// The narrower vocabulary: names, in the file's own spelling of them.
+    #[test]
+    fn columns_takes_names() {
+        assert_eq!(
+            column_names("objectid, lightcurve.mag, gmag").unwrap(),
+            ["objectid", "lightcurve.mag", "Gmag"]
+        );
+        // A name SQL will not take unquoted is written the way SQL writes one.
+        assert_eq!(column_names("\"Gmag\"").unwrap(), ["Gmag"]);
+    }
+
+    /// Narrower, and staying narrower: the field for an expression is `select`, and the
+    /// refusal says so rather than leaving the caller to guess which half was wrong.
+    #[test]
+    fn columns_refuses_an_expression() {
+        for list in ["objra - 0.1", "count(objectid)", "1"] {
+            let error = column_names(list).unwrap_err().to_string();
+            assert!(error.contains("column names"), "{list}: {error}");
+        }
+        // An alias is refused by the grammar rather than by the check above: `columns`
+        // parses one expression per item and `AS` is not part of one.
+        assert!(column_names("objra AS ra").is_err());
+    }
+
+    /// The one spelling the two predicate fields do not share, and the only difference
+    /// between them.
+    #[test]
+    fn filters_spells_and_with_ampersands() {
+        let expected = filter("objectid > 1 AND objra < 2").unwrap();
+        assert_eq!(filters_of("objectid > 1 && objra < 2").unwrap(), expected);
+        assert_eq!(filters_of("objectid > 1 AND objra < 2").unwrap(), expected);
+    }
+
+    /// The rewrite is on the tokens, so `&&` inside a string is data and stays data.
+    /// On the text it would become the literal `'a AND b'`, and the caller would be
+    /// comparing against something they never wrote.
+    #[test]
+    fn ampersands_inside_a_literal_are_not_an_operator() {
+        let text = "cast(objectid AS VARCHAR) = 'a && b'";
+        let planned = filters_of(text).unwrap();
+        assert_eq!(planned, filter(text).unwrap());
+        assert!(planned.contains("a && b"), "{planned}");
     }
 
     #[test]

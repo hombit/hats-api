@@ -13,15 +13,19 @@ use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
+// The query-string reading of percent encoding, which is not the path's: `+` is a space
+// here and is a literal `+` in a path segment.
+use url::form_urlencoded;
 
 use crate::access::{self, AccessPolicy};
-use crate::config::{ApiConfig, ConfigError, LimitsConfig};
+use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig};
+use crate::data::DataFiles;
 use crate::error::ApiError;
 use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
-use crate::query::{self, QueryResult, Selection};
+use crate::query::{self, Predicate, Projection, QueryResult, Selection};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -33,6 +37,8 @@ pub struct Service {
     pub policy: Arc<AccessPolicy>,
     pub transfers: Arc<Transfers>,
     pub mounts: Arc<Mounts>,
+    /// Which files either mode will read as data.
+    pub data_files: Arc<DataFiles>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -47,7 +53,9 @@ impl Service {
         limits: &LimitsConfig,
         mounts: Mounts,
         api: &ApiConfig,
+        data: &DataConfig,
     ) -> Result<Self, ConfigError> {
+        let data_files = DataFiles::new(data)?;
         let api_prefix = match api.enabled {
             true => Some(mount::normalize_prefix(&api.prefix).map_err(|reason| {
                 ConfigError::Route(format!("api.prefix {:?}: {reason}", api.prefix))
@@ -79,6 +87,7 @@ impl Service {
             policy: Arc::new(policy),
             transfers: Arc::new(Transfers::new(limits)),
             mounts: Arc::new(mounts),
+            data_files: Arc::new(data_files),
             sql_limits: limits.into(),
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -180,6 +189,14 @@ async fn serve_mounted(
             _ => return list_directory(mount, &segments, &file, &parts).await,
         }
     }
+    // A query string turns a data file into a question about itself. Anything else keeps
+    // going out verbatim, parameters and all: a file server that has no use for a
+    // parameter ignores it, and `index.html?v=3` is a request for `index.html`.
+    if service.data_files.matches_path(&file)
+        && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default())?
+    {
+        return query_mounted(&service, &file, &query, &parts).await;
+    }
     let mut response = ServeFile::new(&file)
         .try_call(Request::from_parts(parts, body))
         .await
@@ -190,15 +207,117 @@ async fn serve_mounted(
         .into_response();
     // mime_guess has no answer for `.parquet`, and the clients that read these files
     // look at the content type.
-    if file
-        .extension()
-        .is_some_and(|extension| extension == "parquet")
-    {
+    if service.data_files.matches_path(&file) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static(PARQUET_CONTENT_TYPE),
         );
     }
+    Ok(response)
+}
+
+/// The question a file-server request asks about a file, if it asks one.
+///
+/// The names are vizcat's, so a client written against that service reads a mount here
+/// without changing anything but the host. What they mean is this service's own: a
+/// `filters` that does not parse, or that names a column the file does not have, is
+/// refused rather than dropped — a request whose predicate went missing returns every
+/// row, and the caller cannot tell that from a predicate that matched them all.
+///
+/// `format` and `limit` have no vizcat equivalent and so take names of our own, which is
+/// what keeps a name from meaning two things depending on which service answered.
+#[derive(Debug, Default)]
+struct FileQuery {
+    columns: Option<String>,
+    filters: Option<String>,
+    format: Option<String>,
+    limit: Option<String>,
+}
+
+impl FileQuery {
+    /// `None` when the query string asks nothing this service answers, which is what
+    /// keeps a file with a cache-buster on its url an ordinary download.
+    ///
+    /// Anything unrecognised is ignored rather than refused, the way an ordinary HTTP
+    /// server ignores what it has no use for. The last of a repeated parameter wins,
+    /// which is what a browser and a form both produce.
+    fn parse(raw: &str) -> Result<Option<Self>, ApiError> {
+        let mut query = Self::default();
+        let mut asked = false;
+        for (name, value) in form_urlencoded::parse(raw.as_bytes()) {
+            let field = match name.as_ref() {
+                "columns" => &mut query.columns,
+                "filters" => &mut query.filters,
+                "format" => &mut query.format,
+                "limit" => &mut query.limit,
+                _ => continue,
+            };
+            *field = Some(value.into_owned());
+            asked = true;
+        }
+        match asked {
+            true => Ok(Some(query)),
+            false => Ok(None),
+        }
+    }
+
+    fn selection(&self) -> Result<Selection<'_>, ApiError> {
+        Ok(Selection {
+            projection: match self.columns.as_deref() {
+                Some(list) => Projection::Columns(list),
+                None => Projection::All,
+            },
+            predicate: match self.filters.as_deref() {
+                Some(text) => Predicate::Filters(text),
+                None => Predicate::All,
+            },
+            limit: match self.limit.as_deref() {
+                // Said as a number rather than left to mean "no limit": a caller who
+                // wrote one and got every row would have no way to notice.
+                Some(raw) => Some(raw.parse().map_err(|_| {
+                    ApiError::bad_request("limit takes a number of rows".to_owned())
+                })?),
+                None => None,
+            },
+        })
+    }
+}
+
+/// A parquet file under a mount, asked for less of itself.
+///
+/// The file was authorized by the mount before it got here, and the caller named no
+/// store and supplied no credential — that is the whole difference from the API mode,
+/// which is why this reads through [`storage::open_mounted`] rather than through the
+/// url-judging path.
+async fn query_mounted(
+    service: &Service,
+    file: &Path,
+    query: &FileQuery,
+    request: &Parts,
+) -> Result<Response, ApiError> {
+    if !matches!(request.method, Method::GET | Method::HEAD) {
+        return Err(ApiError::method_not_allowed("a query is read, not written"));
+    }
+    let started = Instant::now();
+    let format = Format::parse(query.format.as_deref(), Format::Parquet)?;
+    let selection = query.selection()?;
+    let opened = storage::open_mounted(file)?;
+    let result = query::run(&opened, &selection, service.sql_limits).await?;
+
+    let num_rows = result.num_rows();
+    let response = answer(&result, &opened, format, started).await?;
+    tracing::info!(
+        // The url path, not the local path: what is on disk is the operator's business.
+        // Both parameters are the caller's own text and can be megabytes of `IN` list,
+        // so what is logged is that they were there.
+        path = request.uri.path(),
+        projected = query.columns.is_some(),
+        filtered = query.filters.is_some(),
+        format = format.name(),
+        num_rows,
+        elapsed_ms = started.elapsed().as_millis(),
+        "query"
+    );
     Ok(response)
 }
 
@@ -291,10 +410,48 @@ struct QueryRequest {
     select: Option<String>,
     /// One boolean SQL expression over this file's columns. Absent returns every row.
     r#where: Option<String>,
+    /// The projection as plain column names, which is what a file-server client writes.
+    /// The narrower of the two: it takes names, never expressions.
+    columns: Option<String>,
+    /// The row predicate in the same vocabulary, which additionally spells `AND` as
+    /// `&&`.
+    filters: Option<String>,
     /// `json` (the default) or `parquet`.
     format: Option<String>,
     /// Most rows to return.
     limit: Option<usize>,
+}
+
+impl QueryRequest {
+    /// The one pair of fields this request actually used.
+    ///
+    /// Both pairs say the same thing, so a caller may write either. Not both: a body
+    /// carrying `select` and `columns` together is one written by someone who thinks
+    /// they differ, and quietly picking either would be answering the question they got
+    /// wrong.
+    fn selection(&self) -> Result<Selection<'_>, ApiError> {
+        Ok(Selection {
+            projection: match (self.select.as_deref(), self.columns.as_deref()) {
+                (Some(_), Some(_)) => return Err(one_of_two("select", "columns")),
+                (Some(sql), None) => Projection::Select(sql),
+                (None, Some(list)) => Projection::Columns(list),
+                (None, None) => Projection::All,
+            },
+            predicate: match (self.r#where.as_deref(), self.filters.as_deref()) {
+                (Some(_), Some(_)) => return Err(one_of_two("where", "filters")),
+                (Some(sql), None) => Predicate::Where(sql),
+                (None, Some(text)) => Predicate::Filters(text),
+                (None, None) => Predicate::All,
+            },
+            limit: self.limit,
+        })
+    }
+}
+
+fn one_of_two(one: &str, other: &str) -> ApiError {
+    ApiError::bad_request(format!(
+        "{one} and {other} are two ways of saying the same thing; send one of them"
+    ))
 }
 
 /// What the caller wants back.
@@ -318,9 +475,13 @@ impl Format {
         }
     }
 
-    fn parse(raw: Option<&str>) -> Result<Self, ApiError> {
+    /// The default is the caller's mode, not this type's: an API request asks for rows
+    /// and gets JSON, while a file-server request asks a parquet file for less of itself
+    /// and gets a parquet file back. Adding a query string should not change what media
+    /// type a path answers with.
+    fn parse(raw: Option<&str>, default: Self) -> Result<Self, ApiError> {
         let Some(raw) = raw else {
-            return Ok(Self::Json);
+            return Ok(default);
         };
         Self::ALL
             .into_iter()
@@ -346,7 +507,7 @@ impl Format {
 /// fails towards the safe message, and the two tests below are what notice.
 fn body_error(rejection: &JsonRejection) -> ApiError {
     const SHAPE: &str = "expected a JSON object with url, and optionally storage, \
-                         select, where, format, limit";
+                         select or columns, where or filters, format, limit";
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -388,29 +549,23 @@ async fn query_parquet(
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
     // Everything decidable from the request alone, before anything is opened.
-    let format = Format::parse(params.format.as_deref())?;
-    let file = storage::open(
-        &parse_url(params.url.as_str())?,
-        &params.storage,
-        &service.policy,
-        &service.transfers,
-    )?;
-    let result = query::run(
-        &file,
-        &Selection {
-            select: params.select.as_deref(),
-            predicate: params.r#where.as_deref(),
-            limit: params.limit,
-        },
-        service.sql_limits,
-    )
-    .await?;
+    let format = Format::parse(params.format.as_deref(), Format::Json)?;
+    let selection = params.selection()?;
+    let url = parse_url(params.url.as_str())?;
+    // The API has only one thing to do with an object, so a url naming something it does
+    // not read as data names nothing this route serves. Answered before the store is
+    // built, so a request for the wrong object costs no connection.
+    if !service.data_files.matches_url(&url) {
+        return Err(ApiError::not_found(format!(
+            "this url does not name a data file; url must end in a name matching {}",
+            service.data_files.describe()
+        )));
+    }
+    let file = storage::open(&url, &params.storage, &service.policy, &service.transfers)?;
+    let result = query::run(&file, &selection, service.sql_limits).await?;
 
     let num_rows = result.num_rows();
-    let response = match format {
-        Format::Json => json_response(&result, started)?,
-        Format::Parquet => parquet_response(&result, &file, num_rows, started).await?,
-    };
+    let response = answer(&result, &file, format, started).await?;
     tracing::info!(
         // file.url, not the parameter: the parameter may carry credentials. The two
         // expressions are the caller's own text and can be megabytes of `IN` list, so
@@ -424,6 +579,20 @@ async fn query_parquet(
         "query"
     );
     Ok(response)
+}
+
+/// The result, in whichever encoding was asked for. Both modes answer through here, so
+/// the same query returns the same bytes whichever one carried it.
+async fn answer(
+    result: &QueryResult,
+    file: &RemoteFile,
+    format: Format,
+    started: Instant,
+) -> Result<Response, ApiError> {
+    match format {
+        Format::Json => json_response(result, started),
+        Format::Parquet => parquet_response(result, file, result.num_rows(), started).await,
+    }
 }
 
 fn json_response(result: &QueryResult, started: Instant) -> Result<Response, ApiError> {
@@ -497,6 +666,7 @@ mod tests {
             &LimitsConfig::default(),
             Mounts::default(),
             &ApiConfig::default(),
+            &DataConfig::default(),
         )
         .unwrap()
     }
@@ -632,9 +802,20 @@ mod tests {
 
     #[test]
     fn parses_the_format_parameter() {
-        assert_eq!(Format::parse(None).unwrap(), Format::Json);
-        assert_eq!(Format::parse(Some("json")).unwrap(), Format::Json);
-        assert_eq!(Format::parse(Some("parquet")).unwrap(), Format::Parquet);
+        assert_eq!(
+            Format::parse(Some("json"), Format::Parquet).unwrap(),
+            Format::Json
+        );
+        assert_eq!(
+            Format::parse(Some("parquet"), Format::Json).unwrap(),
+            Format::Parquet
+        );
+        // Absent is the mode's own default, which is why it is passed in.
+        assert_eq!(Format::parse(None, Format::Json).unwrap(), Format::Json);
+        assert_eq!(
+            Format::parse(None, Format::Parquet).unwrap(),
+            Format::Parquet
+        );
     }
 
     #[tokio::test]
@@ -679,6 +860,8 @@ mod tests {
             },
             select: None,
             r#where: Some("objectid = 1".to_owned()),
+            columns: None,
+            filters: None,
             format: None,
             limit: None,
         };
@@ -698,7 +881,14 @@ mod tests {
         }])
         .unwrap();
         let policy = AccessPolicy::new(&crate::config::AccessConfig::default(), &mounts).unwrap();
-        Service::new(policy, &LimitsConfig::default(), mounts, api).unwrap()
+        Service::new(
+            policy,
+            &LimitsConfig::default(),
+            mounts,
+            api,
+            &DataConfig::default(),
+        )
+        .unwrap()
     }
 
     async fn respond(service: Service, request: http::request::Builder) -> Response {
@@ -996,6 +1186,7 @@ mod tests {
                 &LimitsConfig::default(),
                 mounts,
                 &api,
+                &DataConfig::default(),
             )
         };
 
@@ -1022,10 +1213,249 @@ mod tests {
                 enabled: false,
                 ..Default::default()
             },
+            &DataConfig::default(),
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("nothing to serve"), "{error}");
+    }
+
+    /// The two vocabularies are two ways of saying one thing, so a body carrying both
+    /// halves of one pair is a caller who thinks otherwise.
+    #[tokio::test]
+    async fn the_api_body_refuses_both_spellings_at_once() {
+        for (one, other) in [("select", "columns"), ("where", "filters")] {
+            let (status, body) = select_with(serde_json::json!({
+                "url": "s3://b/k.parquet",
+                one: "objectid",
+                other: "objectid",
+            }))
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{one}/{other}");
+            assert!(body.contains(one) && body.contains(other), "{body}");
+        }
+    }
+
+    /// A query string on a mounted parquet file is a question about it, and the answer
+    /// is a parquet file — the same media type the path serves without one.
+    #[tokio::test]
+    async fn a_mounted_parquet_file_answers_a_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        // vizcat's two parameter names, with `&&` sent the way a query string requires.
+        let response = respond(
+            service(),
+            Request::builder().uri(
+                "/part0.parquet?columns=objectid,band&filters=objectid%3C3%20%26%26%20band%3D'g'",
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            PARQUET_CONTENT_TYPE
+        );
+        assert_eq!(response.headers()[NUM_ROWS_HEADER], "2");
+
+        // And the same question answered as rows, for a client that wants them.
+        let response = respond(
+            service(),
+            Request::builder().uri("/part0.parquet?filters=objectid=1&format=json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+        assert_eq!(body["num_rows"], 1);
+        assert_eq!(body["rows"][0]["objectid"], 1);
+    }
+
+    /// The point of taking the parameter names rather than the behaviour: a predicate
+    /// that cannot run is refused, never dropped. A caller cannot tell an ignored filter
+    /// from one that matched every row.
+    #[tokio::test]
+    async fn a_filter_that_cannot_run_is_refused_rather_than_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for uri in [
+            "/part0.parquet?filters=nosuchcolumn%3E0",
+            "/part0.parquet?filters=this%20is%20not%20sql",
+            "/part0.parquet?columns=nosuchcolumn",
+            // A name, not an expression: that is what `select` is for.
+            "/part0.parquet?columns=objectid%20-%201",
+            "/part0.parquet?limit=lots",
+        ] {
+            let response = respond(service(), Request::builder().uri(uri)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    /// A file server ignores a parameter it has no use for, and a file with nothing but
+    /// such parameters on its url is still a download.
+    #[tokio::test]
+    async fn an_unrecognised_parameter_is_ignored() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            // Not a parquet file at all, so anything that read it as one would fail.
+            Request::builder().uri("/part0.parquet?v=3&_=1712345678"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "0123456789");
+    }
+
+    /// A file that is not a data file has no query surface, and a file server that has
+    /// no use for a parameter still has the bytes: it goes out whole, parameters and
+    /// all. A directory is the same case — a listing takes no parameters of its own.
+    #[tokio::test]
+    async fn a_file_that_is_not_data_is_served_rather_than_queried() {
+        let dir = tree();
+        std::fs::write(dir.path().join("notes.txt"), b"plain").unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let response = respond(
+            service(),
+            Request::builder().uri("/notes.txt?columns=objectid&filters=x%3E1"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "plain");
+
+        // `properties` sits beside a catalog's partitions and is not one of them.
+        let response = respond(service(), Request::builder().uri("/properties?columns=x")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = respond(service(), Request::builder().uri("/?columns=objectid")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_of(response).await.contains("Norder=5"));
+    }
+
+    /// The names a HATS catalog actually uses, which is why the list is names rather
+    /// than suffixes: `_metadata` and `_common_metadata` have no extension at all, and
+    /// DataFusion's own reader filters on `.parquet` unless told otherwise.
+    #[tokio::test]
+    async fn every_name_on_the_list_answers_a_query() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let names = [
+            "_metadata",
+            "_common_metadata",
+            "part0.parq",
+            "part0.parquet",
+        ];
+        for name in names {
+            std::fs::write(dir.path().join(name), query::tests::fixture()).unwrap();
+        }
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for name in names {
+            let response = respond(
+                service(),
+                Request::builder().uri(format!("/{name}?columns=objectid&format=json")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{name}");
+            let body: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+            assert_eq!(body["num_rows"], 10, "{name}");
+        }
+    }
+
+    /// The list is the operator's, so a mount of something else is served by naming it.
+    #[tokio::test]
+    async fn the_list_of_data_files_is_configurable() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.pq"), query::tests::fixture()).unwrap();
+        let mounts = Mounts::new(&[crate::config::MountConfig {
+            path: "/".to_owned(),
+            source: dir.path().display().to_string(),
+            follow_symlinks: false,
+            immutable: false,
+        }])
+        .unwrap();
+        let policy = AccessPolicy::new(&crate::config::AccessConfig::default(), &mounts).unwrap();
+        let service = Service::new(
+            policy,
+            &LimitsConfig::default(),
+            mounts,
+            &ApiConfig::default(),
+            &DataConfig {
+                filenames: vec!["*.pq".to_owned()],
+            },
+        )
+        .unwrap();
+
+        let response = respond(
+            service,
+            Request::builder().uri("/part0.pq?columns=objectid&format=json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&body_of(response).await).unwrap()["num_rows"],
+            10
+        );
+    }
+
+    /// A name on the list whose bytes are not parquet: the reader is what decides, so
+    /// this is the caller's file being wrong rather than this service failing.
+    #[tokio::test]
+    async fn a_data_file_that_is_not_parquet_is_the_callers_mistake() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("liar.parquet"), b"not parquet at all").unwrap();
+        std::fs::write(dir.path().join("empty.parquet"), b"").unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for uri in ["/liar.parquet?columns=objectid", "/empty.parquet?limit=1"] {
+            let response = respond(service(), Request::builder().uri(uri)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            // Whatever is on disk is the operator's business, and a refusal is where a
+            // path would otherwise get written into a message.
+            let body = body_of(response).await;
+            assert!(
+                !body.contains(&dir.path().display().to_string()),
+                "{uri} leaked a local path: {body}"
+            );
+        }
+        // And without a query they are still ordinary files.
+        let response = respond(service(), Request::builder().uri("/liar.parquet")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The API has only one thing to do with an object, so a url naming something it
+    /// does not read as data names nothing this route serves.
+    #[tokio::test]
+    async fn the_api_refuses_a_url_that_is_not_a_data_file() {
+        for url in [
+            "s3://b/hats/properties",
+            "s3://b/hats/part0.csv",
+            "s3://b/hats/",
+        ] {
+            let (status, body) = select_with(serde_json::json!({"url": url})).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{url}");
+            // The refusal says what would have been read, so a caller can see why.
+            assert!(body.contains("*.parquet"), "{url}: {body}");
+        }
+    }
+
+    /// Nothing here is written, whichever shape the request took.
+    #[tokio::test]
+    async fn a_query_is_not_written_to() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .method("POST")
+                .uri("/part0.parquet?columns=objectid"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[tokio::test]

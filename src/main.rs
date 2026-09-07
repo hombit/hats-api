@@ -78,7 +78,7 @@ fn startup() -> Result<(Config, app::Service), NotServing> {
     // Before the policy, which is built from these as well as from `[api.access]`.
     let mounts = Mounts::new(&config.mounts).map_err(|error| invalid(&error))?;
     let policy = AccessPolicy::new(&config.api.access, &mounts).map_err(|error| invalid(&error))?;
-    let service = app::Service::new(policy, &config.limits, mounts, &config.api)
+    let service = app::Service::new(policy, &config.limits, mounts, &config.api, &config.data)
         .map_err(|error| invalid(&error))?;
     Ok((config, service))
 }

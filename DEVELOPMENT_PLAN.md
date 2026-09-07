@@ -24,9 +24,10 @@ thing to keep working while that is built.
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`) | done | `region` is specified below and built in §5.2, which is where it can first be executed |
-| 3.4 | file-server request shape | todo | the `filters` grammar has to be probed off the live service first. Brings `columns`/`filters` to the API body too |
-| 4 | file-server interface | in progress | listings done; the query surface is what is left, and waits on §3.4 |
-| 4.1 | write the README | todo | after §4: both interfaces are then settled, and one document can describe them together. It is a stub until then |
+| 3.4 | file-server request shape | done | |
+| 4 | file-server interface | done | |
+| 4.1 | write the README | todo | both interfaces are settled now, so one document can describe them together |
+| 4.2 | what the engine actually does | todo | measurement, not code. Its findings decide `query::session_config` and what §5.3 may promise about row order |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
@@ -210,16 +211,25 @@ Degrees throughout; a `frame` field defaults to `icrs`. Unknown fields are rejec
 **We adopt vizcat's query syntax — not more, not less.** Parameter names and the grammar
 inside them; not their URL structure, not their limits.
 
-| vizcat parameter | meaning | ours |
-|---|---|---|
-| `columns` | comma-separated column names, projection (`${X}` escapes awkward names). Their own limit is eight | same name, same meaning, no count limit |
-| `filters` | a SQL-`WHERE`-like row constraint, e.g. `Gmag>8.0 && o_Gmag>100` | same name, same meaning; accept `AND` as well as `&&` |
+| parameter | ours |
+|---|---|
+| `columns` | comma-separated column names, projection. No count limit, and a name SQL will not take bare is quoted: `"E(BP-RP)"` |
+| `filters` | one boolean SQL expression, the same language `where` takes, with `&&` accepted for `AND` |
+
+**We take their parameter names, not their limits and not their behaviour.** The point is
+that one client can read both services; nothing about matching them is a reason to serve a
+worse answer. So the eight-column cap is not adopted, and neither is the silence: a
+`filters` that does not parse, or that names a column the file has not got, is a 400 here.
+A predicate that goes missing returns every row, and a caller cannot tell that from a
+predicate that matched them all.
 
 `AND` is not a convenience alias. `&` ends a query parameter, so `&&` has to reach the
 server percent-encoded, and a caller writing the documented spelling by hand gets a
-request that parses as `filters=Gmag>8.0` and a silently unfiltered second clause.
-Accepting `AND` gives that caller something they can type. Whether vizcat itself accepts
-`AND` is one of the things to establish below.
+request that parses as `filters=Gmag>8.0` and a second clause that never arrives.
+Accepting `AND` gives that caller something they can type.
+
+`||` is not accepted for `OR`. It is SQL's string concatenation, so honouring it would
+leave one spelling with two meanings and no way to write the other.
 
 Never reuse one of their parameter names for different semantics. Extensions with no
 vizcat equivalent — `format`, `limit` — take names of our own.
@@ -228,32 +238,22 @@ vizcat equivalent — `format`, `limit` — take names of our own.
 directly. A caller who wants the catalog to choose partitions uses the API (§5.2) against
 the same data, which the mount's derived grant permits.
 
-Before implementing, probe the live service and fill the table above from what it does,
-not from what its page claims — "a SQL WHERE like constraint" is not a grammar.
-`https://vizcat.cds.unistra.fr/hats/` answers, serves `application/vnd.apache.parquet`,
-and takes both parameters on a partition's own url; `2020aj_159_84b` is a catalog whose
-columns (`Source`, `RA_ICRS`, `E(BP-RP)`) cover both the ordinary and the awkward case.
-Probe with a filter that matches almost nothing, so the survey is a grammar question
-rather than a download — their page asks not to be harvested.
+**What has a query surface at all is one configured list**, `[data] filenames`, of globs
+matched against a file's own name — `["*.parq", "*.parquet", "_metadata",
+"_common_metadata"]` by default, which is what a HATS catalog contains. The two modes
+differ only in what they do with a name that is not on it: the file server has bytes to
+send, so it sends them and ignores the parameters; the API has nothing else to do with an
+object, so it answers 404. Being on the list is a claim about the name and not about the
+contents — a `part0.parquet` that is not one is refused by the parquet reader, as the
+caller's mistake rather than a fault here.
 
-The findings belong in the table above and in the tests, which are where this repository
-keeps behaviour. The one thing a test cannot hold is vizcat's own behaviour — `cargo
-test` runs without a network — so a claim about *them* rather than about us is written
-as the reason beside our rule, in the commit that establishes it.
-
-What the probing has to answer, because each one changes what the lowering can be:
-
-- The operator set: `=`, `!=`/`<>`, `<`, `>`, `<=`, `>=`, `IN`, `BETWEEN`, `IS NULL`,
-  `LIKE`, arithmetic, function calls.
-- Which connectives work: `&&`, `AND`, `||`, `OR`, `!`, `NOT`, and parentheses.
-- `${X}` — what it escapes, and whether `E(BP-RP)` is reachable without it.
-- Whether a name is matched case-sensitively, which decides whether their rule and the
-  one in `CLAUDE.md` agree.
-- What a bad filter answers with: a status, and whether the message quotes the input
-  back.
-- Whether anything in it has no SQL spelling at all. That is the finding that decides
-  whether `filters` can lower by rewriting text before `sqlparser`, or needs its own
-  parser — and if it needs one, whether the compatibility is worth it.
+What the live service turned out to do, which is why the table above is short: **`filters`
+is not implemented there.** Every value — a valid predicate, a nonsense string, a name no
+column has — returns byte-identical output, including one filter matching every row and one
+matching none. `columns` does work, is matched case-sensitively against the file's own
+spelling, is not percent-decoded, and has no `${X}` escape: `E(BP-RP)` is written literally.
+So there is no deployed grammar to copy, and `filters` is ours to define. It is defined as
+the language `where` already speaks, which is the one that needs no second parser.
 
 #### The same two languages in the API body
 
@@ -271,12 +271,11 @@ question and stays where it is (§9.2), for the reason §3.3 is a `POST` at all.
   `columns` takes names. Accepting `columns` in the API body does not widen it to
   expressions — a caller who wants one writes `select`.
 - **One parser, one allowlist.** `filters` lowers to the expression `sql.rs` already
-  checks, rather than executing down a path of its own. The lowering is a rewrite of the
-  caller's text before it reaches `sqlparser`, and rewriting SQL-ish text is the thing
-  §3.5 says not to do by hand: `&&` inside a string literal is not an operator, and a
-  substitution that cannot tell the difference is a parser written by accident. Whether
-  the rewrite is even expressible that way depends on what `filters` turns out to
-  accept, which the probing above settles first.
+  checks, rather than executing down a path of its own. The one difference between the
+  two is `&&`, and it is rewritten on the token stream rather than on the text: `&&`
+  inside a string literal is not an operator, and a substitution over characters that
+  cannot tell the difference is a parser written by accident, which is what §3.5 says not
+  to do.
 
 ### 3.5 How much SQL
 
@@ -307,17 +306,6 @@ constraint can move into the expression.
 Modelled on <https://vizcat.cds.unistra.fr/hats/> and
 <https://github.com/astronomy-commons/lsdb-server>, with the query surface from §3.4.
 
-Serving a file's bytes is done: §3.2 resolves the path and `tower_http`'s `ServeFile`
-answers with the ranges, the validators and the conditional requests. Directories answer
-with a listing. What is left:
-
-1. **A parquet file with query parameters** → a query through `query.rs` +
-   `parquet_out.rs`, with the file taken from the mount. The parameters are §3.4's. A
-   file with no query parameters keeps going out verbatim, whatever its extension.
-
-A listing takes no query parameters of its own, so the ones §3.4 settles are a file's
-alone and the two cannot collide.
-
 The static-serving path must not regress: an `lsdb` client pointed at a mount should work
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
@@ -328,6 +316,46 @@ Both interfaces exist by this point and neither is still moving, so one document
 describe them together: what the service is for, the two request shapes, the storage
 options, the configuration file, and how to run it. Written earlier it would document a
 shape that then changed, which is worse than the stub that is there now.
+
+### 4.2 What the engine actually does
+
+Both interfaces now execute through one `query::run`, so what DataFusion does with a
+request is the same question for both, and it is a question that has been answered by
+reading rather than by measuring. Two things to establish, in that order. Neither is a
+change to make: this step produces findings, and what to do about them is decided after.
+
+**1. Row order.** Whether the rows that come back are in the file's order, and under what
+this stops being true. The interesting cases are the ones the service actually builds:
+a projection alone, a predicate alone, both together, a `limit`, and pushdown on and off
+(`pushdown_filters` and `reorder_filters` are both set, and filter reordering is a
+per-row-group decision). A file of several row groups is what makes the difference
+visible; one row group cannot show it.
+
+Order is not currently promised anywhere, which is exactly why this matters now: a caller
+who observes it will depend on it, §5.3's plan mode concatenates per-partition answers,
+and `parquet_out` copies the source layout. Establish what is true, write it down, and
+decide separately whether to promise it, sort for it, or say plainly that there is no
+order.
+
+**2. The settings.** `query::session_config` sets seven options from what each is
+documented to do; none has been measured here. What that costs and what it buys, against
+a real file and per option:
+
+- `pushdown_filters` and `reorder_filters` — the two that are off by default upstream,
+  and the two claimed to be worth the most.
+- `enable_page_index`, `bloom_filter_on_read`, `pruning` — each pays a metadata read
+  before it can save a data read, which is a different trade over a slow origin than over
+  a local mount.
+- the batch size and the target partition count, which are not set at all today.
+
+Measure over the shapes this service is for: a point lookup by id, a range over a sorted
+column, a predicate on a column with no statistics, and a wide projection versus a narrow
+one. The result wanted is a heuristic — which of these should depend on the request or the
+file rather than being fixed at startup — not a table of numbers.
+
+This is not §6.8. That one ranks the caching layers by where a request's time goes; this
+one is about the engine's own knobs, and it comes first because a cache measured against
+a badly configured engine ranks the wrong layer.
 
 ## 5. Phase 4 — the HATS interface
 

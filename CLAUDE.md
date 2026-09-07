@@ -200,6 +200,26 @@ everything about what SQL means here is decided there.
   the page index and a bloom filter can all prune on. Compared as a string it reads the
   whole file and returns nothing — a slow wrong answer rather than an error.
 
+- **Two vocabularies, one meaning.** `select`/`where` take expressions and
+  `columns`/`filters` take the narrower forms a query string can carry, but both lower to
+  the same planned expression and meet the same allowlist, and a request may use either
+  pair and not both. A difference in what they mean is a bug, not a feature — so a change
+  to one is a change to `sql.rs`, where they share the code, rather than a second path
+  beside it. `columns` stays narrower: it takes names, and a caller who wants an
+  expression writes `select`.
+- **A parameter this service acts on is honoured or refused, never dropped.** A `filters`
+  that does not parse, or that names a column the file has not got, is a 400. Ignoring it
+  returns every row, which the caller cannot tell from a predicate that matched every row
+  — a wrong answer rather than an error, and the same failure shape as a server that
+  ignores `Range`. The service whose parameter names these are does exactly this, which is
+  why the names were taken and the behaviour was not.
+
+  A parameter on a path that has no query surface is a different thing and is ignored, the
+  way any HTTP server ignores what it has no use for. `data::DataFiles` is what draws that
+  line — one configured list of filename globs, consulted by both modes — so whether a
+  request is a query at all is decided before any parameter is read, rather than by each
+  parameter deciding for itself.
+
 Adding a scalar function feature to the `datafusion` dependency adds everything it
 registers to what a caller may call. That is the decision being made; make it
 deliberately.

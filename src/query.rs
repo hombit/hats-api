@@ -14,13 +14,36 @@ use crate::error::ApiError;
 use crate::sql;
 use crate::storage::RemoteFile;
 
-/// What to read, in the caller's own SQL.
+/// Which columns come back, and in whose vocabulary the caller asked.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum Projection<'a> {
+    /// Every column the file has.
+    #[default]
+    All,
+    /// A SQL select list — `objectid, lightcurve.mag AS mag`.
+    Select(&'a str),
+    /// Comma-separated column names, and no expressions.
+    Columns(&'a str),
+}
+
+/// Which rows come back, and in whose vocabulary the caller asked.
+#[derive(Debug, Default, Clone, Copy)]
+pub enum Predicate<'a> {
+    /// Every row.
+    #[default]
+    All,
+    /// One boolean SQL expression over this file's columns.
+    Where(&'a str),
+    /// The same, with `&&` accepted for `AND`.
+    Filters(&'a str),
+}
+
+/// What to read. The two fields are each one of two spellings, and the request shape is
+/// what refuses a caller who sent both — by the time it is here, one has been chosen.
 #[derive(Debug, Default)]
 pub struct Selection<'a> {
-    /// A SQL select list — `objectid, lightcurve.mag AS mag`. `None` is every column.
-    pub select: Option<&'a str>,
-    /// One boolean SQL expression over this file's columns. `None` is every row.
-    pub predicate: Option<&'a str>,
+    pub projection: Projection<'a>,
+    pub predicate: Predicate<'a>,
     /// Most rows to return. `None` is however many match.
     pub limit: Option<usize>,
 }
@@ -87,26 +110,41 @@ pub async fn run(
     let ctx = SessionContext::new_with_config(session_config());
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
 
-    let df = ctx
-        .read_parquet(file.url.as_str(), ParquetReadOptions::default())
-        .await?;
+    // The url names one object, and it has already been decided that this is a parquet
+    // file — by the magic bytes under a mount, and by the caller naming it in API mode.
+    // `ParquetReadOptions` otherwise filters on the name ending in `.parquet` and reports
+    // anything else as an execution failure, which would put a HATS catalog's `_metadata`
+    // and `_common_metadata` out of reach: both are parquet files with no extension.
+    let options = ParquetReadOptions {
+        file_extension: "",
+        ..ParquetReadOptions::default()
+    };
+    let df = ctx.read_parquet(file.url.as_str(), options).await?;
     let state = ctx.state();
 
     // The predicate first, so it may name a column the projection does not return —
     // filtering on `filterid` while asking only for `mag` is the ordinary case.
     let df = match selection.predicate {
-        Some(sql) => {
+        Predicate::All => df,
+        Predicate::Where(sql) => {
             let expr = sql::predicate(&state, df.schema(), sql, limits)?;
             df.filter(expr)?
         }
-        None => df,
+        Predicate::Filters(text) => {
+            let expr = sql::filters(&state, df.schema(), text, limits)?;
+            df.filter(expr)?
+        }
     };
-    let df = match selection.select {
-        Some(sql) => {
+    let df = match selection.projection {
+        Projection::All => df,
+        Projection::Select(sql) => {
             let exprs = sql::projection(&state, df.schema(), sql, limits)?;
             df.select(exprs)?
         }
-        None => df,
+        Projection::Columns(list) => {
+            let exprs = sql::columns(&state, df.schema(), list, limits)?;
+            df.select(exprs)?
+        }
     };
     let df = match selection.limit {
         Some(rows) => df.limit(0, Some(rows))?,
@@ -135,10 +173,33 @@ pub fn to_json(result: &QueryResult) -> Result<Vec<serde_json::Value>, ApiError>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray};
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::parquet::arrow::ArrowWriter;
 
     use super::*;
+
+    /// Ten rows with an id and a band, as a parquet file. Small on purpose: what the
+    /// tests using it are about is which rows and columns came back, not how they were
+    /// fetched.
+    pub(crate) fn fixture() -> Vec<u8> {
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+        let band: ArrayRef = Arc::new(StringArray::from_iter_values(
+            (0..10).map(|i| if i % 2 == 0 { "g" } else { "r" }),
+        ));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("band", band, true),
+        ])
+        .expect("the fixture batch");
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
 
     #[test]
     fn empty_result_serializes_as_an_empty_array() {

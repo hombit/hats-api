@@ -20,7 +20,7 @@ use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, N
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
 use hats_api::mount::Mounts;
-use hats_api::query::{QueryResult, Selection};
+use hats_api::query::{Predicate, Projection, QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -243,13 +243,17 @@ pub async fn lookup(
     columns: Option<&[String]>,
 ) -> Result<QueryResult, ApiError> {
     let select = columns.map(|columns| columns.join(", "));
+    let predicate = format!("{filter_column} = {}", sql_literal(filter_value));
     query(
         raw_url,
         options,
         policy,
         &Selection {
-            select: select.as_deref(),
-            predicate: Some(&format!("{filter_column} = {}", sql_literal(filter_value))),
+            projection: match select.as_deref() {
+                Some(list) => Projection::Select(list),
+                None => Projection::All,
+            },
+            predicate: Predicate::Where(&predicate),
             limit: None,
         },
     )

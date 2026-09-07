@@ -158,6 +158,29 @@ follow_symlinks = false
 # source = "/data/hats"
 # immutable = true
 
+[data]
+# Which files this service reads as data, as glob patterns. Both modes consult this one
+# list, and it is the whole of what makes a file queryable.
+#
+# Matched against a file's own name, never against the path it sits in: a directory
+# called "catalog.parquet" does not make what is under it data, and a name means the same
+# thing wherever it was found.
+#
+# The default is what a HATS catalog contains. "_metadata" and "_common_metadata" are
+# parquet files with no extension at all, which is why this is a list of names rather
+# than a list of suffixes.
+#
+# What each mode does with a file that is not on the list differs, because what they have
+# to offer differs. The file server still has the bytes, so it serves them whole and
+# ignores the query parameters — the way any HTTP server ignores a parameter it has no
+# use for. The API has nothing else to do with an object, so it answers 404.
+#
+# Being on the list is a claim about the name, not about the contents: a file called
+# "part0.parquet" that is not one is refused by the parquet reader, as the caller's
+# mistake rather than a fault here. An empty list turns every query surface off and
+# leaves the file server serving bytes.
+filenames = ["*.parq", "*.parquet", "_metadata", "_common_metadata"]
+
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. A
 # parquet read is tens of ranged reads, so passing that through would transfer the file

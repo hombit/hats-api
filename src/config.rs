@@ -25,8 +25,33 @@ pub struct Config {
     /// prefix; with none, the service is the API alone.
     #[serde(rename = "mount")]
     pub mounts: Vec<MountConfig>,
+    pub data: DataConfig,
     pub limits: LimitsConfig,
     pub log: LogConfig,
+}
+
+/// Which files this service will read as data, in both modes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct DataConfig {
+    /// Glob patterns, matched against a file's own name and never against the path it
+    /// sits in — a directory called `catalog.parquet` does not make the files under it
+    /// data, and a name is the same name wherever it was found.
+    ///
+    /// The default is what a HATS catalog contains. `_metadata` and `_common_metadata`
+    /// have no extension at all, which is why this is a list of names rather than a list
+    /// of suffixes.
+    pub filenames: Vec<String>,
+}
+
+impl Default for DataConfig {
+    fn default() -> Self {
+        Self {
+            filenames: ["*.parq", "*.parquet", "_metadata", "_common_metadata"]
+                .map(str::to_owned)
+                .to_vec(),
+        }
+    }
 }
 
 /// The mode where the caller names the location of the data.
@@ -275,6 +300,8 @@ pub enum ConfigError {
     /// not a prefix, a mount inside it where no request could reach it, or a
     /// configuration that would serve nothing at all.
     Route(String),
+    /// A `[data]` pattern that is not a glob, named as the operator wrote it.
+    Data(String, String),
 }
 
 impl fmt::Display for ConfigError {
@@ -287,6 +314,9 @@ impl fmt::Display for ConfigError {
             }
             Self::Mount(path, reason) => write!(f, "invalid [[mount]] {path:?}: {reason}"),
             Self::Route(reason) => write!(f, "invalid routing: {reason}"),
+            Self::Data(pattern, reason) => {
+                write!(f, "invalid [data] filenames entry {pattern:?}: {reason}")
+            }
         }
     }
 }

@@ -94,6 +94,16 @@ impl ApiError {
             // problem with it, not with us.
             Self::SourceMetadata(ParquetError::External(_)) => StatusCode::BAD_GATEWAY,
             Self::SourceMetadata(_) => StatusCode::BAD_REQUEST,
+            // The same judgement for the read that planning does, and for the same
+            // reason: the object the caller named is not a parquet file, or is one that
+            // has been truncated. Nothing decides that from the key — an object is not
+            // parquet because of what is in it — so this is where a caller who pointed
+            // at the wrong thing finds out, and it is their mistake rather than a fault
+            // of this service.
+            Self::DataFusion(DataFusionError::ParquetError(error)) => match error.as_ref() {
+                ParquetError::External(_) => StatusCode::BAD_GATEWAY,
+                _ => StatusCode::BAD_REQUEST,
+            },
             Self::DataFusion(_) | Self::Json(_) | Self::Arrow(_) | Self::ParquetWrite(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

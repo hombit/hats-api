@@ -33,6 +33,7 @@
 pub mod access;
 pub mod app;
 pub mod config;
+pub mod data;
 pub mod error;
 pub mod listing;
 pub mod logging;

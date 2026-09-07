@@ -552,6 +552,20 @@ pub fn open(
     }
 }
 
+/// A file the file-server mode has already resolved, as something the query layer can
+/// read.
+///
+/// This does not go through [`open`], and there is nothing here for it to decide. `open`
+/// exists to judge a url a caller wrote — the scheme, the options, the endpoint, the
+/// address behind it — and in file-server mode the caller wrote none of that: they named
+/// a path under a mount, and [`crate::access::authorize_mounted`] has already answered
+/// the only question there was, against the mount, returning the canonical path taken
+/// here. Routing it back through a `file://` url would ask the API mode's local-access
+/// rules about a file the API mode is not serving.
+pub fn open_mounted(path: &FilePath) -> Result<RemoteFile, ApiError> {
+    local_file(path)
+}
+
 /// A file on this machine, already resolved and allowed by the policy. The url is
 /// rebuilt from the canonical path, so what the rest of the service reads and logs is
 /// the file that was actually opened, not the way the caller spelled it.

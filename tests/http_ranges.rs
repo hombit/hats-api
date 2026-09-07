@@ -252,7 +252,7 @@ async fn read_one_row_with(
     hats_api::query::run(
         &file,
         &hats_api::query::Selection {
-            predicate: Some("objectid = 42"),
+            predicate: hats_api::query::Predicate::Where("objectid = 42"),
             ..Default::default()
         },
         limits.into(),

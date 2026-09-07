@@ -9,7 +9,7 @@ mod common;
 
 use common::{FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
 use hats_api::error::ApiError;
-use hats_api::query::Selection;
+use hats_api::query::{Predicate, Projection, Selection};
 use hats_api::storage::StorageOptions;
 
 /// The baseline: a file put in a bucket comes back through the whole path, and the
@@ -72,8 +72,8 @@ async fn a_select_list_and_a_predicate_run_against_a_real_file() {
         &server.options(),
         &permissive_policy(),
         &Selection {
-            select: Some("objectid, objra - 0.5 AS ra_corr"),
-            predicate: Some("band = 'g' AND objectid < 100"),
+            projection: Projection::Select("objectid, objra - 0.5 AS ra_corr"),
+            predicate: Predicate::Where("band = 'g' AND objectid < 100"),
             limit: Some(10),
         },
     )
@@ -89,6 +89,72 @@ async fn a_select_list_and_a_predicate_run_against_a_real_file() {
         .map(|field| field.name().as_str())
         .collect();
     assert_eq!(names, ["objectid", "ra_corr"]);
+}
+
+/// A key that does not end in `.parquet`, which a HATS catalog's own metadata files do
+/// not: `_metadata` and `_common_metadata` are parquet with no extension at all.
+///
+/// Nothing about this is local. DataFusion decides whether to read a path by testing the
+/// url string it was handed for that suffix, before any object store is asked anything,
+/// so the key here is judged the same way a file under a mount is.
+#[tokio::test]
+async fn a_parquet_object_is_read_whatever_its_key_ends_in() {
+    let server = TestS3::anonymous().await;
+    for key in [
+        "catalog/_metadata",
+        "catalog/_common_metadata",
+        "catalog/p0",
+    ] {
+        server.put_parquet(key);
+        let result = common::query(
+            &server.url(key),
+            &server.options(),
+            &permissive_policy(),
+            &Selection {
+                predicate: Predicate::Where("objectid = 42"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{key} should be readable: {error}"));
+        assert_eq!(row_count(&result), 1, "{key}");
+    }
+}
+
+/// The other half of the same rule: not filtering on the key does not mean accepting
+/// anything. The parquet reader is what decides, and it decides by the footer, so an
+/// object that is not one is refused whatever it is called — including under a name that
+/// a filter on the key would have let through.
+#[tokio::test]
+async fn an_object_that_is_not_parquet_is_refused_whatever_its_key() {
+    let server = TestS3::anonymous().await;
+    for key in [
+        "catalog/notes.txt",
+        "catalog/_metadata",
+        "catalog/junk.parquet",
+    ] {
+        server.put_bytes(key, b"this is not a parquet file");
+        let error = common::expect_error(
+            lookup(
+                &server.url(key),
+                &server.options(),
+                &permissive_policy(),
+                "objectid",
+                "1",
+                None,
+            )
+            .await,
+            "a non-parquet object should fail",
+        );
+        // The caller's object, so the caller's problem — never a policy refusal and
+        // never this service reporting a fault of its own.
+        assert!(!matches!(error, ApiError::Forbidden(_)), "{key}: {error}");
+        assert!(
+            error.status().is_client_error(),
+            "{key}: {} {error}",
+            error.status()
+        );
+    }
 }
 
 /// A HATS partition key has `=` in it. It survives url parsing (a unit test covers
