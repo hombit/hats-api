@@ -13,7 +13,7 @@ lto = "thin"
 async-trait = "0.1"
 axum = "0.8"
 # WebDAV authenticates with Basic, which is a base64 of the caller's two options.
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 # Keep in sync with object_store
 chrono = { version = "0.4", default-features = false, features = ["std"] }
