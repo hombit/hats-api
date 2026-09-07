@@ -336,6 +336,17 @@ has one, otherwise every entry, ordered by name. No paging, no cap, no sort para
   and the delimiters must not survive literally, and `=` must, because HATS directories
   are called `Norder=5` — and into HTML, where a name is markup until it is escaped.
   Both encodings live in `listing.rs`; nothing outside it builds a url out of a name.
+- **The page is scraped, so every link on it is a claim about the directory.** `fsspec`'s
+  HTTP filesystem — and the `lsdb` clients above it — reads a directory by pulling every
+  `href` out of the markup and keeping the ones below the url it asked for. So each entry
+  stays a plain `<a href>` an expression can find, rather than a link a script assembles;
+  and nothing else on the page may point below the directory. The breadcrumb and the
+  parent row point upwards and are dropped, but a link offering a query on an entry would
+  arrive at a client as a file that does not exist. Say such a thing in prose.
+- **The page carries everything it needs.** No CDN, no webfont, no framework: a page that
+  is blank on the network this service is built for is worse than a plain one. Inline the
+  CSS, and let any script be small enough to inline and optional enough that the markup is
+  complete without it.
 - **A listing describes only what the same mount would serve.** A mount that does not
   follow symlinks does not list them either, since listing one would only advertise a
   404. `DirEntry::metadata` is an `lstat` and answers "a symlink" a second time; a mount

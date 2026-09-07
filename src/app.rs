@@ -187,7 +187,7 @@ async fn serve_mounted(
         // either.
         match access::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)) {
             Ok(index) if index.is_file() => file = index,
-            _ => return list_directory(mount, &segments, &file, &parts).await,
+            _ => return list_directory(&service, mount, &segments, &file, &parts).await,
         }
     }
     // A query string turns a data file into a question about itself. Anything else keeps
@@ -341,6 +341,7 @@ async fn query_mounted(
 
 /// A directory, as a page or as JSON. Which one is [`listing::wants_html`]'s decision.
 async fn list_directory(
+    service: &Service,
     mount: &Mount,
     segments: &[String],
     dir: &Path,
@@ -355,16 +356,13 @@ async fn list_directory(
     // from the request path, so every entry's url has one spelling whatever the request
     // used to get here.
     let path = listing::url(mount.prefix(), segments);
-    // A listing goes no higher than the top of the mount, whatever is above it on disk.
-    let parent = segments
-        .split_last()
-        .map(|(_, above)| listing::url(mount.prefix(), above));
+    let root = mount.prefix().to_owned();
 
     let (dir, follow_symlinks) = (dir.to_owned(), mount.follow_symlinks());
     // `read_dir` and a `stat` per entry are blocking calls, and a HATS `Dir=` level is
     // ten thousand of them.
     let listing =
-        tokio::task::spawn_blocking(move || Listing::read(&dir, &path, parent, follow_symlinks))
+        tokio::task::spawn_blocking(move || Listing::read(&dir, &root, &path, follow_symlinks))
             .await
             .map_err(|error| {
                 tracing::error!(%error, "listing a directory panicked");
@@ -378,7 +376,7 @@ async fn list_directory(
             })?;
 
     Ok(match listing::wants_html(&request.headers) {
-        true => Html(listing.to_html()).into_response(),
+        true => Html(listing.to_html(&service.data_files)).into_response(),
         false => Json(listing).into_response(),
     })
 }
