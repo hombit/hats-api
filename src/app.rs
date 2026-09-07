@@ -585,9 +585,25 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
     }
 }
 
+/// One column of the answer, as the schema describes it.
+///
+/// What it is for is that rows do not describe themselves. An answer that matched
+/// nothing, and one asked for with `limit=0`, are the same shape as a file that has not
+/// got the column — so a caller reading column names off the first row learns nothing
+/// from either. The type is arrow's own spelling, which is what says whether a value
+/// needs quoting in a predicate.
+#[derive(Debug, Serialize)]
+struct Column {
+    name: String,
+    r#type: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SelectResponse {
     num_rows: usize,
+    /// The columns of the answer, which is the projection where the request made one and
+    /// the file's own schema where it did not.
+    schema: Vec<Column>,
     /// How much of the source file was read to answer this. What it is for is telling a
     /// caller whether their predicate pruned: the same query written two ways returns the
     /// same rows, and this is where the difference between them shows.
@@ -669,8 +685,18 @@ async fn answer(
 
 fn json_response(result: &QueryResult, started: Instant) -> Result<Response, ApiError> {
     let rows = query::to_json(result)?;
+    let schema = result
+        .schema
+        .fields()
+        .iter()
+        .map(|field| Column {
+            name: field.name().clone(),
+            r#type: field.data_type().to_string(),
+        })
+        .collect();
     Ok(Json(SelectResponse {
         num_rows: rows.len(),
+        schema,
         data_bytes_read: result.data_bytes_read,
         elapsed_ms: started.elapsed().as_millis(),
         rows,
@@ -1405,6 +1431,36 @@ mod tests {
         assert_eq!(body["num_rows"], 1);
         assert!(body["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
         assert_eq!(body["rows"][0]["objectid"], 1);
+    }
+
+    /// Rows do not describe themselves, so the answer says what its columns are — which
+    /// is the only thing a request matching no row has to say, and what makes `limit=0`
+    /// a description of a file rather than an empty answer.
+    #[tokio::test]
+    async fn an_answer_says_what_its_columns_are() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let asked = |uri: &'static str| {
+            let service = mounted(dir.path(), &ApiConfig::default());
+            async move {
+                let response = respond(service, Request::builder().uri(uri)).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                serde_json::from_str::<serde_json::Value>(&body_of(response).await).unwrap()
+            }
+        };
+
+        let described = asked("/part0.parquet?limit=0&format=json").await;
+        assert_eq!(described["num_rows"], 0);
+        // And it costs no data: asking what a file holds is not reading it.
+        assert_eq!(described["data_bytes_read"], 0);
+        assert_eq!(described["schema"][0]["name"], "objectid");
+        assert_eq!(described["schema"][0]["type"], "Int64");
+
+        // A projection narrows it, so what comes back describes the answer rather than
+        // the file.
+        let projected = asked("/part0.parquet?columns=band&limit=1&format=json").await;
+        assert_eq!(projected["schema"].as_array().unwrap().len(), 1);
+        assert_eq!(projected["schema"][0]["name"], "band");
     }
 
     /// The point of taking the parameter names rather than the behaviour: a predicate

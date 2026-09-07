@@ -334,6 +334,12 @@ async fn first_rows_in_order(
     task: Arc<TaskContext>,
     limit: usize,
 ) -> Result<Vec<RecordBatch>, ApiError> {
+    // No rows wanted, so no partition is polled and no byte of the file is read. The
+    // answer is then the schema alone, which is what asks a file what columns it has.
+    // Without this the first batch is fetched and sliced away to nothing.
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut collected = Vec::new();
     let mut rows = 0;
     for mut stream in execute_stream_partitioned(plan, task)? {

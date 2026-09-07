@@ -197,24 +197,32 @@ impl Listing {
     ///
     /// Everything the page needs is in it. A style sheet or a font from elsewhere would
     /// leave the page unstyled on exactly the networks this service is built for, and the
-    /// one script is an improvement on markup that is already complete without it.
+    /// script is an improvement on markup that is already complete without it — which is
+    /// why the button it wires up is hidden until it runs, while the prose that says the
+    /// same thing about the url is served either way.
     pub fn to_html(&self, data_files: &DataFiles) -> String {
         let title = html_escape::encode_text(&self.path);
         let mut html = format!(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
              <title>Index of {title}</title>\n<style>\n{STYLE}</style>\n</head>\n<body>\n\
-             <h1>Index of {breadcrumb}</h1>\n<p class=\"summary\">{summary}</p>\n<table>\n\
+             <h1>Index of {breadcrumb}</h1>\n<p class=\"summary\">{summary}</p>\n\
+             <table class=\"listing\">\n\
              <thead><tr><th>Name</th><th class=\"size\">Size</th>\
              <th>Last modified</th></tr></thead>\n<tbody>\n",
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
         );
+        // The stripe is a class rather than `nth-child`, since the script inserts a row
+        // of its own between two entries and every row below it would change colour.
+        let mut stripe = ["", " odd"].into_iter().cycle();
         if let Some(parent) = &self.parent {
             let _ = writeln!(
                 html,
-                "<tr><td class=\"name\"><a href=\"{}\">../</a></td><td></td><td></td></tr>",
-                html_escape::encode_double_quoted_attribute(parent)
+                "<tr class=\"entry{stripe}\"><td class=\"name\"><a href=\"{parent}\">../</a>\
+                 </td><td></td><td></td></tr>",
+                stripe = stripe.next().unwrap_or_default(),
+                parent = html_escape::encode_double_quoted_attribute(parent)
             );
         }
         let mut queryable = false;
@@ -225,16 +233,26 @@ impl Listing {
             };
             // A name on the configured list is one this service will answer a question
             // about. Marking it is the only place a caller browsing a partition could
-            // learn that the file's own url takes parameters.
+            // learn that the file's own url takes parameters, and the button beside it is
+            // where the script puts the panel that writes one.
             let data = entry.kind == Kind::File && data_files.matches(&entry.name);
             queryable |= data;
             let _ = writeln!(
                 html,
-                "<tr><td class=\"name\"><a{class} href=\"{href}\">{name}{slash}</a></td>\
+                "<tr class=\"entry{stripe}\"><td class=\"name\">\
+                 <a{class} href=\"{href}\">{name}{slash}</a>{ask}</td>\
                  <td class=\"size\">{size}</td><td class=\"modified\">{modified}</td></tr>",
+                stripe = stripe.next().unwrap_or_default(),
                 class = match data {
                     true => " class=\"data\"",
                     false => "",
+                },
+                ask = match data {
+                    true => format!(
+                        "<button class=\"ask\" data-url=\"{href}\">query</button>",
+                        href = html_escape::encode_double_quoted_attribute(&entry.url)
+                    ),
+                    false => String::new(),
                 },
                 href = html_escape::encode_double_quoted_attribute(&entry.url),
                 name = html_escape::encode_text(&entry.name),
@@ -257,7 +275,7 @@ impl Listing {
         if queryable {
             html.push_str(QUERY_NOTE);
         }
-        html.push_str(LOCAL_TIME);
+        let _ = write!(html, "<script>\n{SCRIPT}</script>\n");
         html.push_str("</body>\n</html>\n");
         html
     }
@@ -310,51 +328,21 @@ impl Listing {
     }
 }
 
-/// Enough of a style sheet to read a long listing: a monospace column so names and sizes
-/// line up, striping and a hover row to follow one across, and both colour schemes,
-/// since a catalog gets browsed at night.
-const STYLE: &str = "\
-:root { color-scheme: light dark; --bg: #fff; --fg: #1b1b1b; --muted: #666; \
---stripe: #f5f5f5; --hover: #e8eef7; --line: #ddd; --link: #0b5fbf }
-@media (prefers-color-scheme: dark) { :root { --bg: #16191c; --fg: #e4e4e4; \
---muted: #9aa0a6; --stripe: #1d2125; --hover: #27313b; --line: #2d3339; --link: #7fb2ff } }
-body { background: var(--bg); color: var(--fg); margin: 2rem 1.5rem; \
-font-family: system-ui, -apple-system, sans-serif; }
-a { color: var(--link); text-decoration: none; }
-a:hover { text-decoration: underline; }
-h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.2rem; }
-p { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
-table { border-collapse: collapse; margin: 1rem 0 0.6rem; }
-th, td { padding: 0.15rem 2rem 0.15rem 0.4rem; text-align: left; }
-th { border-bottom: 1px solid var(--line); font-size: 0.8rem; color: var(--muted); }
-th.size, td.size { text-align: right; padding-right: 2.5rem; }
-td.name, td.size { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-td.size, td.modified { white-space: nowrap; }
-td.modified { color: var(--muted); font-size: 0.85rem; }
-tbody tr:nth-child(even) { background: var(--stripe); }
-tbody tr:hover { background: var(--hover); }
-a.data::after { content: \" \\25C6\"; color: var(--muted); font-size: 0.7em; \
-vertical-align: 0.25em; }
-code { font-size: 0.85em; }
-";
+/// The page's own style sheet and its own script, inlined into every listing. Kept as
+/// files so that they are read as what they are; neither is written from anything in a
+/// request, so both are constants from this side.
+const STYLE: &str = include_str!("listing/page.css");
+const SCRIPT: &str = include_str!("listing/page.js");
 
 /// What a caller browsing to a partition has no other way to find out. Written once
 /// below the table rather than per row: a `Norder=` level is thousands of entries, and
 /// the sentence is the same for all of them.
+///
+/// It describes the url rather than the panel, because the url is what the page offers
+/// when the script did not run.
 const QUERY_NOTE: &str = "<p>Files marked \u{25c6} answer a query on their own url: \
 <code>?columns=ra,dec&amp;filters=ra&gt;10 AND dec&lt;20</code>, with \
 <code>&amp;format=parquet</code> and <code>&amp;limit=</code>.</p>\n";
-
-/// The one script, and the page is complete without it: it rewrites a timestamp the
-/// markup already carries into the reader's own timezone, leaving the machine-readable
-/// spelling in the attribute and in the tooltip.
-const LOCAL_TIME: &str = "<script>\n\
-for (const cell of document.querySelectorAll(\"time[datetime]\")) {\n\
-  const at = new Date(cell.dateTime);\n\
-  if (!isNaN(at.getTime())) { cell.title = cell.textContent; \
-cell.textContent = at.toLocaleString(); }\n\
-}\n\
-</script>\n";
 
 /// The directory above, or `None` at the top of the mount — which is as far up as a
 /// listing goes, whatever is above it on disk. Derived from the two urls rather than
@@ -590,6 +578,13 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<a href=\"/properties\""), "{html}");
+        // The panel is offered for the one file it can ask a question about, and the
+        // button is not a link: a client scraping this page would read one as an entry.
+        assert_eq!(html.matches("class=\"ask\"").count(), 1, "{html}");
+        assert!(
+            html.contains("<button class=\"ask\" data-url=\"/part0.parquet\">"),
+            "{html}"
+        );
     }
 
     /// `fsspec` reads this page by keeping every href below the url it asked for, so a

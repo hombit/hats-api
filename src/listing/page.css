@@ -1,0 +1,135 @@
+/* Enough of a style sheet to read a long listing, and no more: a monospace column so
+   names and sizes line up, striping and a hover row to follow one across, and both
+   colour schemes, since a catalog gets browsed at night. Inlined into the page, because
+   a stylesheet fetched from elsewhere is one this service's networks may not reach. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --fg: #1b1b1b;
+  --muted: #666;
+  --stripe: #f5f5f5;
+  --hover: #e8eef7;
+  --line: #ddd;
+  --link: #0b5fbf;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16191c;
+    --fg: #e4e4e4;
+    --muted: #9aa0a6;
+    --stripe: #1d2125;
+    --hover: #27313b;
+    --line: #2d3339;
+    --link: #7fb2ff;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  margin: 2rem 1.5rem;
+  font-family: system-ui, -apple-system, sans-serif;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.2rem; }
+p { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
+code { font-family: var(--mono); font-size: 0.85em; }
+
+table.listing { border-collapse: collapse; margin: 1rem 0 0.6rem; }
+.listing th, .listing td { padding: 0.15rem 2rem 0.15rem 0.4rem; text-align: left; }
+.listing th { border-bottom: 1px solid var(--line); font-size: 0.8rem; color: var(--muted); }
+.listing th.size, .listing td.size { text-align: right; padding-right: 2.5rem; }
+.listing td.name, .listing td.size { font-family: var(--mono); }
+.listing td.size, .listing td.modified { white-space: nowrap; }
+.listing td.modified { color: var(--muted); font-size: 0.85rem; }
+.listing tbody tr.entry:nth-of-type(even) { background: var(--stripe); }
+.listing tbody tr.entry:hover { background: var(--hover); }
+
+/* The marker on a name this service will answer a question about. It is the whole of
+   what the page says about querying when the script does not run, so it is markup the
+   page has anyway rather than something the panel adds. */
+a.data::after {
+  content: " \25C6";
+  color: var(--muted);
+  font-size: 0.7em;
+  vertical-align: 0.25em;
+}
+
+/* Everything below is the query panel, which exists only where the script ran: the
+   button is hidden until it says so, so nothing on the page offers what it cannot do. */
+button { font: inherit; color: var(--link); background: none; cursor: pointer; }
+.ask {
+  display: none;
+  margin-left: 0.6rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  font-size: 0.7rem;
+}
+body.js .ask { display: inline; }
+.ask:hover, .chip:hover, .run:hover { background: var(--hover); }
+
+/* Bordered, because a striped row below it would otherwise run into the panel and the
+   two would read as one block. */
+tr.panel > td {
+  background: var(--stripe);
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.4rem 0.8rem;
+}
+.panel-body { display: flex; flex-wrap: wrap; gap: 0.4rem 0.6rem; align-items: center; }
+.panel-body label { font-size: 0.75rem; color: var(--muted); }
+.panel-body input {
+  font: 0.8rem var(--mono);
+  padding: 0.2rem 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  background: var(--bg);
+  color: var(--fg);
+}
+input.columns, input.filters { min-width: 18rem; }
+input.limit { width: 4.5rem; }
+.run {
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  font-size: 0.8rem;
+}
+
+/* Each of these takes the whole width: the column list is long, a url wraps, and a
+   result table scrolls sideways rather than widening the page. */
+.columns-of, .asked, .result { flex-basis: 100%; }
+.columns-of { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; font-size: 0.75rem; color: var(--muted); }
+/* A survey catalog is a couple of hundred columns, so the list gets a bounded box to
+   scroll in rather than pushing the query fields off the screen. */
+.chips {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  max-height: 7.5rem;
+  overflow-y: auto;
+  resize: vertical;
+}
+.find { font: 0.75rem var(--mono); padding: 0.1rem 0.3rem; border: 1px solid var(--line); border-radius: 0.3rem; background: var(--bg); color: var(--fg); width: 10rem; }
+.chip {
+  padding: 0 0.35rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+  font: 0.72rem var(--mono);
+}
+.asked { font: 0.72rem var(--mono); color: var(--muted); word-break: break-all; }
+.result { overflow-x: auto; }
+.result table { border-collapse: collapse; margin-top: 0.3rem; }
+.result th, .result td {
+  font: 0.75rem var(--mono);
+  padding: 0.1rem 0.9rem 0.1rem 0;
+  text-align: left;
+  white-space: nowrap;
+}
+.result th { color: var(--muted); border-bottom: 1px solid var(--line); }
+.failed { color: #c0392b; }
+@media (prefers-color-scheme: dark) { .failed { color: #ff8a7a; } }

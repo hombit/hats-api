@@ -117,6 +117,19 @@ Rows come back in the source file's order, so the same request twice gives the s
 in the same places, and a `limit` is the front of the file rather than an arbitrary
 selection of rows.
 
+**A `limit` bounds the rows, never the bytes.** Parquet is fetched a column chunk at a
+time, so a query reads every chunk holding a row it returns, however few rows that is —
+and where a partition was written as a single row group, that is the whole of every column
+named. Naming the columns is the thing that makes a query cheap: on a 335 MiB, 153-column
+Gaia partition, ten rows of everything read 335 MiB and ten rows of one column read 3.8
+MiB. `x-hats-data-bytes-read`, and `data_bytes_read` in a JSON answer, is where that shows.
+
+A browser gets a page for a directory, and a file this service reads as data gets a query
+panel on it: the columns are fetched from the file when the panel is opened, and the query
+runs against the same url a client would write by hand. It is an addition to the markup
+rather than a replacement for it — with the script blocked, the listing and its links are
+exactly what they were.
+
 Which files are data is one configured list of filename globs, `[data] filenames`,
 defaulting to what a HATS catalog contains:
 
@@ -156,11 +169,22 @@ GET  /api/v1/health
 ```json
 {
   "num_rows": 2,
+  "schema": [
+    { "name": "objectid", "type": "Int64" },
+    { "name": "ra", "type": "Float64" },
+    { "name": "dec", "type": "Float64" },
+    { "name": "mag_g_corr", "type": "Float64" }
+  ],
   "data_bytes_read": 41238,
   "elapsed_ms": 15,
   "rows": [{ "objectid": 1383212200036217, "ra": 307.4, "dec": -24.9, "mag_g_corr": 18.6 }]
 }
 ```
+
+`schema` describes the answer — the projection where the request made one, the file's own
+columns where it did not. It is there because rows do not describe themselves: an answer
+that matched nothing looks like a file without the column, so `limit=0` is how to ask what
+a file holds, and it reads no data at all.
 
 `POST` rather than `GET`: the request carries credentials, which a query string would
 write to every proxy's access log, and a body has no url-length limit.
