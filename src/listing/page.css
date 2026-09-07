@@ -3,26 +3,37 @@
    colour schemes, since a catalog gets browsed at night. Inlined into the page, because
    a stylesheet fetched from elsewhere is one this service's networks may not reach. */
 
+/* Two greys are all this page has, so they have to be told apart: `stripe` marks a row
+   and `surface` is the panel, which sits on top of striped rows and must not read as one
+   of them. Text is either `fg` or `muted`, and `muted` is dark enough to be read rather
+   than merely present — it is what the sizes, the times and the summary are written in,
+   which is most of what anyone comes here for. */
 :root {
   color-scheme: light dark;
   --bg: #fff;
-  --fg: #1b1b1b;
-  --muted: #666;
-  --stripe: #f5f5f5;
-  --hover: #e8eef7;
-  --line: #ddd;
-  --link: #0b5fbf;
+  --surface: #eef2f8;
+  --stripe: #f4f6f8;
+  --fg: #16181b;
+  --muted: #4e545c;
+  --hover: #dde7f6;
+  --line: #c2c9d2;
+  --edge: #97a1ad;
+  --link: #0a53b5;
+  --failed: #a3121b;
   --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16191c;
-    --fg: #e4e4e4;
-    --muted: #9aa0a6;
-    --stripe: #1d2125;
-    --hover: #27313b;
-    --line: #2d3339;
-    --link: #7fb2ff;
+    --bg: #121517;
+    --surface: #1d232a;
+    --stripe: #191d21;
+    --fg: #eef1f4;
+    --muted: #aab3bd;
+    --hover: #27333f;
+    --line: #39424c;
+    --edge: #5a6672;
+    --link: #82b8ff;
+    --failed: #ff9a8f;
   }
 }
 
@@ -40,7 +51,7 @@ code { font-family: var(--mono); font-size: 0.85em; }
 
 table.listing { border-collapse: collapse; margin: 1rem 0 0.6rem; }
 .listing th, .listing td { padding: 0.15rem 2rem 0.15rem 0.4rem; text-align: left; }
-.listing th { border-bottom: 1px solid var(--line); font-size: 0.8rem; color: var(--muted); }
+.listing th { border-bottom: 2px solid var(--edge); font-size: 0.8rem; color: var(--fg); font-weight: 600; }
 .listing th.size, .listing td.size { text-align: right; padding-right: 2.5rem; }
 .listing td.name, .listing td.size { font-family: var(--mono); }
 .listing td.size, .listing td.modified { white-space: nowrap; }
@@ -65,25 +76,26 @@ body.js .without-js { display: none; }
 
 /* Everything below is the query panel, which exists only where the script ran: the
    button is hidden until it says so, so nothing on the page offers what it cannot do. */
-button { font: inherit; color: var(--link); background: none; cursor: pointer; }
+button { font: inherit; color: var(--link); background: var(--bg); cursor: pointer; }
 .ask {
   display: none;
   margin-left: 0.6rem;
-  padding: 0 0.4rem;
-  border: 1px solid var(--line);
+  padding: 0 0.45rem;
+  border: 1px solid var(--edge);
   border-radius: 0.6rem;
   font-size: 0.7rem;
 }
 body.js .ask { display: inline; }
-.ask:hover, .chip:hover, .run:hover { background: var(--hover); }
+.ask:hover, .chip:hover, .run:hover { background: var(--hover); border-color: var(--link); }
 
-/* Bordered, because a striped row below it would otherwise run into the panel and the
-   two would read as one block. */
+/* The panel sits between striped rows, so it takes a surface of its own and an edge down
+   the side: a second shade of the same grey would read as one more row. */
 tr.panel > td {
-  background: var(--stripe);
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  padding: 0.5rem 0.4rem 0.8rem;
+  background: var(--surface);
+  border-top: 1px solid var(--edge);
+  border-bottom: 1px solid var(--edge);
+  border-left: 3px solid var(--link);
+  padding: 0.5rem 0.4rem 0.8rem 0.7rem;
 }
 /* Capped, because a table cell grows to fit what is in it: a result of a hundred and
    fifty columns would otherwise widen the listing itself and take the whole page
@@ -95,29 +107,34 @@ tr.panel > td {
   align-items: center;
   max-width: calc(100vw - 4rem);
 }
-.panel-body label { font-size: 0.75rem; color: var(--muted); }
+.panel-body label { font-size: 0.75rem; color: var(--fg); }
 .panel-body input, .panel-body textarea {
   font: 0.8rem var(--mono);
   padding: 0.2rem 0.35rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--edge);
   border-radius: 0.3rem;
   background: var(--bg);
   color: var(--fg);
+}
+.panel-body input:focus, .panel-body textarea:focus {
+  outline: 2px solid var(--link);
+  outline-offset: -1px;
 }
 /* Both take as much as someone wants to write — a projection of thirty columns, a
    predicate over several — so they wrap, and they can be dragged bigger. */
 .panel-body textarea { width: 22rem; resize: both; vertical-align: middle; }
 .run {
-  padding: 0.2rem 0.7rem;
-  border: 1px solid var(--line);
+  padding: 0.25rem 0.8rem;
+  border: 1px solid var(--edge);
   border-radius: 0.3rem;
   font-size: 0.8rem;
+  font-weight: 600;
 }
 
 /* Each of these takes the whole width: the column list is long, a url wraps, and a
    result table scrolls sideways rather than widening the page. */
 .columns-of, .asked, .result { flex-basis: 100%; }
-.columns-of { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; font-size: 0.75rem; color: var(--muted); }
+.columns-of { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; font-size: 0.75rem; color: var(--fg); }
 /* A survey catalog is a couple of hundred columns, so the list gets a bounded box to
    scroll in rather than pushing the query fields off the screen. */
 .chips {
@@ -129,10 +146,10 @@ tr.panel > td {
   overflow-y: auto;
   resize: vertical;
 }
-.find { font: 0.75rem var(--mono); padding: 0.1rem 0.3rem; border: 1px solid var(--line); border-radius: 0.3rem; background: var(--bg); color: var(--fg); width: 10rem; }
+.find { font: 0.75rem var(--mono); padding: 0.15rem 0.35rem; border: 1px solid var(--edge); border-radius: 0.3rem; background: var(--bg); color: var(--fg); width: 10rem; }
 .chip {
-  padding: 0 0.35rem;
-  border: 1px solid var(--line);
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--edge);
   border-radius: 0.6rem;
   font: 0.72rem var(--mono);
 }
@@ -146,10 +163,16 @@ tr.panel > td {
 .result table { border-collapse: collapse; margin-top: 0.3rem; }
 .result th, .result td {
   font: 0.75rem var(--mono);
-  padding: 0.1rem 0.9rem 0.1rem 0;
+  padding: 0.15rem 0.9rem 0.15rem 0;
   text-align: left;
   white-space: nowrap;
+  /* A cell holds whatever the file holds, and a four-thousand-character string is a
+     column thirty thousand pixels wide with everything after it out of reach. Cut it to
+     something readable and leave the value in the tooltip. */
+  max-width: 24rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.result th { color: var(--muted); border-bottom: 1px solid var(--line); }
-.failed { color: #c0392b; }
-@media (prefers-color-scheme: dark) { .failed { color: #ff8a7a; } }
+.result th { color: var(--fg); font-weight: 600; border-bottom: 1px solid var(--edge); }
+.result tbody tr:nth-child(even) { background: var(--bg); }
+.failed { color: var(--failed); font-weight: 600; }

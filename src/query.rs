@@ -223,6 +223,16 @@ pub(crate) async fn execute(
         ..ParquetReadOptions::default()
     };
     let df = ctx.read_parquet(file.url.as_str(), options).await?;
+    // A file of no bytes at all is not a parquet file, but schema inference reads it as a
+    // table of no columns rather than failing, and every query against it then answers
+    // "no rows" — which a caller cannot tell from a file that really is empty. The
+    // parquet output path already refuses it, when it goes to read the footer to copy the
+    // layout, so without this the status depends on the format that was asked for.
+    if df.schema().fields().is_empty() {
+        return Err(ApiError::bad_request(
+            "this file describes no columns; it is empty, or not a parquet file",
+        ));
+    }
     let state = ctx.state();
 
     // The region ahead of the caller's predicate, which is the order the two are cheapest

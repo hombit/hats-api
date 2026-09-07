@@ -1642,6 +1642,14 @@ mod tests {
             "/liar.parquet?columns=objectid",
             "/empty.parquet?limit=1",
             "/metadata_only.parquet?limit=1",
+            // The same three as rows rather than as parquet. The refusal belongs to the
+            // file and not to what was asked of it: reading a file's footer to copy its
+            // layout is what catches an empty one on the parquet path, and a JSON answer
+            // never does that — so this is where that path would quietly answer "no
+            // rows" for a file that is not a parquet file at all.
+            "/liar.parquet?columns=objectid&format=json",
+            "/empty.parquet?limit=1&format=json",
+            "/metadata_only.parquet?limit=1&format=json",
         ] {
             let response = respond(service(), Request::builder().uri(uri)).await;
             // A mount has no origin behind it, so `502` would be this service blaming a

@@ -116,16 +116,48 @@ function chip(panel, column) {
   button.title = column.type;
   button.addEventListener('click', () => {
     const columns = panel.querySelector('.columns');
-    const named = columns.value.split(',').map(name => name.trim()).filter(Boolean);
-    const at = named.indexOf(column.name);
+    const names = listed(columns.value);
+    const spelled = written(column.name);
+    const at = names.indexOf(spelled);
     if (at === -1) {
-      named.push(column.name);
+      names.push(spelled);
     } else {
-      named.splice(at, 1);
+      names.splice(at, 1);
     }
-    columns.value = named.join(', ');
+    columns.value = names.join(', ');
   });
   return button;
+}
+
+/* A name only stands for itself in SQL when SQL would read it as a name, and a file's
+   columns are whatever the file calls them: `E(BP-RP)`, `column with spaces`, `μ_α*`.
+   The one that matters is a name with a comma in it — written bare it does not fail, it
+   silently asks for two other columns, which may well both exist. */
+const BARE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function written(name) {
+  return BARE.test(name) ? name : '"' + name.replace(/"/g, '""') + '"';
+}
+
+/* The projection as it currently reads, split on the commas that separate names rather
+   than on the ones inside them. */
+function listed(value) {
+  const names = [];
+  let name = '';
+  let quoted = false;
+  for (const character of value) {
+    if (character === '"') {
+      quoted = !quoted;
+      name += character;
+    } else if (character === ',' && !quoted) {
+      names.push(name.trim());
+      name = '';
+    } else {
+      name += character;
+    }
+  }
+  names.push(name.trim());
+  return names.filter(Boolean);
 }
 
 function run(panel, format) {
@@ -228,9 +260,14 @@ function render(into, answer) {
       const value = row[column.name];
       /* A HATS row can hold a whole light curve in one column, so a value that is not
          scalar is shown as what it is rather than as [object Object]. */
-      line.insertCell().textContent =
+      const shown =
         value === undefined || value === null ? '' :
-        typeof value === 'object' ? JSON.stringify(value) : value;
+        typeof value === 'object' ? JSON.stringify(value) : String(value);
+      const cell = line.insertCell();
+      cell.textContent = shown;
+      /* The cell is cut to a readable width, so the whole of a long value has to be
+         somewhere: hovering is that somewhere. */
+      cell.title = shown;
     }
   }
   into.appendChild(table);
