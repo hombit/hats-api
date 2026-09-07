@@ -31,7 +31,10 @@ updates:
         dependency-type: development
         patterns:
           - "*"
-    labels: []
+    # Every label named here must exist in the repository already: Dependabot cannot
+    # create one, and it reports the whole config as an error rather than skipping the
+    # label it could not find.
+    labels: [dependencies]
 
   # The actions used by the workflows in .github/workflows.
   - package-ecosystem: github-actions
@@ -42,4 +45,4 @@ updates:
       actions:
         patterns:
           - "*"
-    labels: []
+    labels: [dependencies]
