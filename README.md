@@ -112,6 +112,10 @@ The response is a parquet file laid out like the one it came from, with the row 
 the timing in `x-hats-num-rows` and `x-hats-elapsed-ms`. `format=json` returns the same
 body shape as API mode.
 
+Rows come back in the source file's order, so the same request twice gives the same rows
+in the same places, and a `limit` is the front of the file rather than an arbitrary
+selection of rows.
+
 Which files are data is one configured list of filename globs, `[data] filenames`,
 defaulting to what a HATS catalog contains:
 
@@ -165,6 +169,10 @@ parameter, since a request there selects a region by naming `Norder=k/Npix=p` in
 `select` and `where` take SQL expressions. `columns` and `filters` are also accepted and
 mean what they mean in file-server mode; a request may use either pair and not both.
 `format` defaults to `json` here and to `parquet` in file-server mode.
+
+Rows come back in no particular order — unlike file-server mode, which preserves the
+file's. A `limit` is still reproducible: the same request against the same file returns
+the same rows, in whatever order they arrive.
 
 An error is a status code and a one-field body, `{"error": "…"}`.
 

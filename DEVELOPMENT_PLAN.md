@@ -9,9 +9,8 @@ Status values: `todo`, `in progress`, `done`, `deferred` (with what it waits for
 `dropped` (with the reason). See `CLAUDE.md` for what goes in this file and what does
 not.
 
-The two deferred backends wait on §3 and §4 rather than on each other: the file-server
-interface is what the service is for, and every backend added before it is one more
-thing to keep working while that is built.
+The one deferred backend waits on a decision of its own rather than on a phase; §2.5 says
+which.
 
 | § | step | status | notes |
 |---|---|---|---|
@@ -20,14 +19,14 @@ thing to keep working while that is built.
 | 8.3 | network policy | done | |
 | 2.3 | HTTP/HTTPS, range probe, materialization | done | |
 | 2.4 | WebDAV | done | |
-| 2.5 | Hugging Face | deferred | until after §4, and droppable |
+| 2.5 | Hugging Face | deferred | until the redirect hop is decided: `services-hf` reads objects over xet, which is not below the transport, or over plain HTTP, which needs `/resolve`'s `302` followed. Still droppable |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`select`/`where`, `region`) | done | |
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | |
 | 4.1 | write the README | done | |
-| 4.2 | say the ordering guarantees in the user documentation | todo | the guarantees hold and `CLAUDE.md` has the rule; the README does not mention order at all |
+| 4.2 | say the ordering guarantees in the user documentation | done | |
 | 4.3 | what the engine costs | todo | measurement, not code. Its findings decide the rest of `query::session_config` |
 | 4.4 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
@@ -137,14 +136,85 @@ whether the http service does the same before assuming this one is new.
 
 ### 2.5 Hugging Face
 
-`opendal`'s `services-hf`, as `hf://namespace/name/path`. Lists through the repo tree API,
-so §4's directory pages and §5.1's tier 3 work.
+`opendal`'s `services-hf`, as `hf://datasets/<owner>/<repo>[@revision]/<path>` — the
+spelling DuckDB and `fsspec` already use, rather than `hf://namespace/name/path`, so the
+repo type is written rather than defaulted (the builder's own default is `model`).
+`revision` stays available as an option too, and `token` is a credential for a gated
+dataset, handled as §8.1 requires. Listing is the repo tree API, so §4's directory pages
+and §5.1's tier 3 work.
 
-Options: `revision` (default `main`), and `token` for gated datasets — a credential,
-handled as §8.1 requires.
+Not decided yet, and one thing decides it: **the redirect**. Everything below was checked
+against `services-hf` 0.58.2 and `hf-xet` 1.6.0.
 
-**Drop this backend** if it will not fit the shape the others set: it has the least
-astronomy data behind it and its absence costs nothing structural.
+The service reads an object two ways, and the choice is per store:
+
+- **`xet`, its default.** The `/resolve` metadata request goes out through the operator's
+  transport, but the object does not: it comes over `hf-xet`'s own session, with its own
+  `reqwest` client, its own thread pool and a content cache on disk. So the resolver would
+  not see the addresses the bytes come from and `materialize::Transfers` would not see the
+  bytes. `HfCore::build` constructs a `XetSession` unconditionally, so choosing the other
+  mode avoids using it but not building it. Reads are said to be several times faster this
+  way, which is the reason to revisit if the session ever takes an `HttpTransport`.
+- **`http`.** Everything is on the operator's transport, which is what §8.3 needs, except
+  that `GET …/resolve/<rev>/<path>` answers `302` towards a CDN host for anything
+  LFS-backed — every parquet file in a dataset — and the service leaves the follow to the
+  transport, where `redirect::Policy::none()` is deliberate.
+
+So `http` mode needs a redirect hop that does not exist yet: re-authorize the target
+through the same resolver, and drop the caller's credentials before following, since that
+hop is presigned and `huggingface_hub` strips the token for it. That hop is worth having
+independently of this backend — it is also what a `https://huggingface.co/datasets/…` url
+needs to be readable through the http backend, and what any CDN-fronted origin needs — so
+it should be decided as its own piece of work rather than as part of this one.
+
+Discovery does not depend on the choice: `list` and `stat` are the repo tree API on the
+operator's transport, with no xet and no redirect either way.
+
+**The credential is settled, and not by an environment variable.** `HfBuilder` does
+discover a token — `HF_TOKEN`, then `$HF_TOKEN_PATH`, `$HF_HOME/token`,
+`~/.cache/huggingface/token` — but a configured token is checked first, and an *empty* one
+short-circuits all of it: `HfCore::request` builds the header with
+`format_authorization_by_bearer`, which errors on an empty token, and the call site drops
+the header rather than failing. So an empty token is an anonymous request, per store, with
+no `unsafe` and nothing set in the process environment. Verified on the wire: with
+`HF_TOKEN` set, a configured `""` sends no `authorization` header and no token means
+`authorization: Bearer <the ambient one>`. This is the backend's `skip_signature`, and
+where a caller sends no token it is what must be configured.
+
+Three consequences it carries:
+
+- Setting it needs serde. `HfBuilder::token("")` is ignored, and `HfConfig`'s public
+  fields are typed with `HfRepoType` and `HfDownloadMode`, which are not exported — so the
+  config has to be deserialized rather than built. It is `#[serde(default)]` with no
+  `deny_unknown_fields`, so an upstream rename of `token` would silently drop the empty
+  string and put the ambient token back on the wire. That failure is invisible from this
+  side, which makes the case in `tests/ambient_credentials.rs` the guarantee itself rather
+  than a check on one.
+- The empty token is safe only in `http` mode. `xet_token_refresh_headers` formats
+  `Bearer {token}` directly with no empty check, so in `xet` mode it would send a bare
+  `Authorization: Bearer ` to the CAS token endpoint.
+- `Capability::write` and `delete` are `token.is_some()`, so an empty token makes them
+  read `true`. Harmless under §0's first invariant, but the capability stops describing
+  what the store can do.
+
+**The xet cache is configurable, but only through the environment.** `xet_cache_root()`
+reads `HF_XET_CACHE`, else `$HF_HOME/xet`, else `$XDG_CACHE_HOME/huggingface/xet`, else
+`~/.cache/huggingface/xet`. There is no API for it: opendal calls
+`XetSessionBuilder::new().build()`, and `new_with_config(XetConfig)` — which takes the
+cache directory — is not reachable through it. A `.toml` knob is therefore possible only
+by writing `HF_XET_CACHE` in `main` before the first store is built, which is an `unsafe`
+environment write in production code, today allowed nowhere but
+`tests/ambient_credentials.rs`. Two further costs if that is done: the directory is
+process-wide, so it cannot vary per mount, and it is a second scratch area §7's limits
+would have to budget separately from `Transfers`. Independently, the `xet-*` crates read
+`HF_TOKEN` and `HF_ENDPOINT` themselves, below opendal, where the empty-token fix does not
+reach — so `xet` mode reopens the ambient-credential question by a different door.
+
+`HF_ENDPOINT` is ambient in the same way one level up, in `HfBuilder::hf_endpoint`, and
+closes by always passing an endpoint explicitly.
+
+**Drop this backend** if the redirect hop is not wanted: it has the least astronomy data
+behind it and its absence costs nothing structural.
 
 **Deliverable.** `SUPPORTED_SCHEMES = ["s3", "gs", "az", "http", "https", "webdav", "hf", "file"]`,
 one policy section per backend, a matrix test that every scheme is allowed by the
@@ -305,32 +375,6 @@ The static-serving path must not regress: an `lsdb` client pointed at a mount sh
 with no knowledge of anything else this service does. Nothing here has been tried against
 a real one yet, which is the one check this phase cannot do by reading.
 
-### 4.2 Say the ordering guarantees in the user documentation
-
-The guarantees themselves hold and `CLAUDE.md` carries the rule; what is left is telling
-a caller. The README says nothing about order, and a difference in ordering between two
-interfaces over the same data is exactly what someone will not expect to have to ask
-about:
-
-- The file-server mode returns rows in the file's order, so reading one partition twice
-  gives the same rows in the same places.
-- The API mode promises no order.
-- Both answer a `limit` reproducibly, and under the file-server's order a `limit` is the
-  *front* of the file rather than an arbitrary selection.
-
-Worth stating plainly rather than burying, since the second point is the surprising one
-and the third is what stops a caller building a pager on the first.
-
-Two loose ends, neither blocking:
-
-- **What turning work stealing off costs.** A partition that finishes early no longer
-  helps a slow sibling, so a file whose row groups decode unevenly is slower to read.
-  Measured with the rest of the engine's costs below.
-- **Streaming a parquet answer.** Partition 0 is complete and correct while later
-  partitions are still being read, so a parquet response could be written a partition at
-  a time instead of after the whole answer is in memory. Wants §6's shape first, since
-  what it saves is peak memory on a large answer.
-
 ### 4.3 What the engine costs
 
 `query::session_config` sets seven options from what each is
@@ -345,9 +389,11 @@ a real file and per option:
   carries neither structure, since that decides whether leaving them on is free
   insurance. It is not "do today's files have them": which importer wrote a file is not
   something this service gets to assume, and page statistics are coming.
-- the batch size and the target partition count, which are not set at all today. §4.2 has
-  since made `target_partitions` a correctness question for one of the two modes, so what
-  is left here is its cost.
+- the batch size and the target partition count, which are not set at all today.
+  `target_partitions` is already a correctness question for the file-server's order, so
+  what is left here is its cost.
+- **what turning work stealing off costs.** A partition that finishes early no longer
+  helps a slow sibling, so a file whose row groups decode unevenly is slower to read.
 
 Measure over the shapes this service is for: a point lookup by id, a range over a sorted
 column, a predicate on a column with no statistics, and a wide projection versus a narrow
@@ -779,7 +825,9 @@ defaults to 60 seconds. Two things to build instead:
 
 1. **Stream the response** — parquet in row-group chunks, JSON element by element. Keeps
    time-to-first-byte short, keeps bytes flowing so intermediaries do not drop the
-   connection, and caps memory on large results.
+   connection, and caps memory on large results. Under the file-server's order this is
+   also available a partition at a time: partition 0 is complete and correct while later
+   partitions are still being read.
 2. **A prefetch primitive.** `POST /api/v1/prefetch` with a url returns `202` and warms
    `[cache.object]` in the background; `GET` on it reports residency. This is a cache
    operation, not a job: no result to store, no per-user state, nothing to expire beyond
