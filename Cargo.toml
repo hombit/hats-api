@@ -32,7 +32,7 @@ opendal = { version = "0.58", default-features = false, features = ["services-s3
 # `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
 # needs both the transport adapter and reqwest by name. Both versions must match what
 # `opendal` resolves to: a `reqwest::Client` from another copy is a different type.
-opendal-http-transport-reqwest = "0.58.2"
+opendal-http-transport-reqwest = "0.59.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 secrecy = { version = "0.10.3", features = ["serde"] }
 tempfile = "3"
