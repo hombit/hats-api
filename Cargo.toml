@@ -26,9 +26,9 @@ html-escape = "0.2"
 http = "1"
 ipnet = "2"
 # Keep in sync with datafusion
-object_store = "0.13"
-object_store_opendal = "0.58"
-opendal = { version = "0.58", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "services-webdav", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
+object_store = "0.14"
+object_store_opendal = "0.60"
+opendal = { version = "0.59", default-features = false, features = ["services-s3", "services-gcs", "services-azblob", "services-http", "services-webdav", "http-transport-reqwest", "executors-tokio", "layers-retry"] }
 # `network` builds the HTTP client itself, to put its own DNS resolver in it, so it
 # needs both the transport adapter and reqwest by name. Both versions must match what
 # `opendal` resolves to: a `reqwest::Client` from another copy is a different type.
