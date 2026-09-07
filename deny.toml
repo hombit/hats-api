@@ -76,6 +76,18 @@ deny-multiple-versions = true
 name = "opendal"
 deny-multiple-versions = true
 
+# The transport adapter and the service crates both link against `opendal-core`, and
+# `opendal` is a facade over it — so a bump to either that leaves the other behind splits
+# the core rather than the facade, and `opendal` above stays single while every OpenDAL
+# type goes double.
+[[bans.deny]]
+name = "opendal-http-transport-reqwest"
+deny-multiple-versions = true
+
+[[bans.deny]]
+name = "opendal-core"
+deny-multiple-versions = true
+
 [[bans.skip-tree]]
 # Dev-only: the test S3 server brings its own tree, and duplicate versions inside it
 # do not ship.
