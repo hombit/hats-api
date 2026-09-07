@@ -425,6 +425,12 @@ every catalog open.
 
 - `_common_metadata` cannot substitute: schema only, no row groups, no `file_path`
   entries. It is useful for validating a projection before reading data.
+- Reading `_metadata` here is what makes it answerable at all. It is on `[data] filenames`
+  by default, so a caller can already put a query on its url — and gets a 400, because the
+  rows its footer describes are in the files beside it and the ranged read for them runs
+  off the end of `_metadata` itself. Once this tier exists, that request has a real answer
+  available: the partition list, or the statistics per partition. Decide then whether it
+  gets one, since the answer is metadata rather than the rows the caller asked for.
 - `_metadata` can reach hundreds of MB for a wide schema over many partitions. Cap it,
   and fall through to tier 3 rather than blocking on a large download. Against a
   non-ranging server it has already been copied whole by the time it is read, so the cap

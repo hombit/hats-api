@@ -243,6 +243,34 @@ has one, otherwise every entry, ordered by name. No paging, no cap, no sort para
   that does follow them needs `fs::metadata` on the resolved path to learn what is
   behind one.
 
+## What a mount tells a caller
+
+A mount publishes a directory, not the machine it is on. What is on disk — the source
+path, the layout above it, whether a name exists outside what the mount serves — is the
+operator's business, and none of it may appear in an answer.
+
+- **A local path never reaches a caller, and an error message is where one gets out.** A
+  store names the path it was reading, so the message a store or a reader raises about a
+  mounted file is not repeatable as-is. `ApiError::from_mount` is where that is turned
+  into a message of this crate's own; the original goes to the log. Anything reading a
+  mounted file goes through it, and it is not needed in API mode — there the path in the
+  message is the caller's own url.
+- **No status may describe a store the caller never named.** A mount has no origin behind
+  it, so `502` blames a gateway that does not exist. Neither is it a `500`: the bytes of
+  that same file are served without complaint when the url carries no query, so a failure
+  to read it *as parquet* is a statement about the file. It is a `400`.
+- **A refusal says the same thing whether or not the file exists.** A directory that
+  cannot be listed and one that is not published answer alike, since the difference is
+  itself something about the disk.
+
+Proving any of this needs a case that reaches the arm in question, and the arms are not
+obvious: a file whose footer will not parse, one that is empty, and one whose footer
+describes rows that are not in it are three different errors with three different
+statuses. `a_data_file_that_is_not_parquet_is_the_callers_mistake` carries all three, and
+the last one has to be built from a file with more data than footer — strip a ten-row
+fixture and the offsets still land inside what is left, so nothing reads past the end and
+the test passes without the guarantee.
+
 ## Comments
 
 Focused and informative. Say what the code does and what a reader could not work out

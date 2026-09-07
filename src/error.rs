@@ -72,6 +72,51 @@ impl ApiError {
         Self::Internal(message.into())
     }
 
+    /// The same failure, told to a caller who named a path in a mount rather than a url
+    /// of their own.
+    ///
+    /// Two things are wrong with a store's own account of itself here. Its message names
+    /// the path it was reading, which for a mount is the operator's absolute local path
+    /// and no part of what the caller asked for; and its status describes a store that
+    /// the caller never named. A mount has no origin behind it, so `502` blames a gateway
+    /// that does not exist, and `500` blames this service for a file whose bytes it will
+    /// hand over quite happily without a query on the url.
+    ///
+    /// So every failure a store or a reader raises against a mounted file is the caller
+    /// having asked a file that is not queryable data for rows, which is what the parquet
+    /// reader is there to decide and what `[data] filenames` cannot: `_metadata` is on
+    /// that list by default and holds no rows of its own. The cost is that a genuine
+    /// local I/O error reads to the caller as a bad request. The log is where those stay
+    /// distinguishable, and a disk that cannot be read will fail the plain byte-serving
+    /// path too, where nothing dresses it up.
+    ///
+    /// Only for a mount. In API mode the path in such a message is the caller's own url,
+    /// which they already have, and `502` is the truth about a store that really is one.
+    pub fn from_mount(self) -> Self {
+        match self {
+            // Written here rather than by a store, which is what makes them safe to
+            // repeat. The planner's account of a misspelled column arrives this way, and
+            // it is the most useful message a caller gets.
+            ours @ (Self::BadRequest(_)
+            | Self::Forbidden(_)
+            | Self::NotFound(_)
+            | Self::MethodNotAllowed(_)
+            | Self::Internal(_)) => ours,
+            foreign => {
+                tracing::warn!(
+                    error = %foreign,
+                    status = %foreign.status(),
+                    "cannot read a mounted file as data"
+                );
+                Self::BadRequest(
+                    "this file cannot be read as parquet data; it is not a parquet file, \
+                     or it holds no rows of its own"
+                        .to_owned(),
+                )
+            }
+        }
+    }
+
     /// The status this error answers with. Public so that a test can check the status a
     /// caller sees rather than the message, which is the part that has to be right.
     pub fn status(&self) -> StatusCode {

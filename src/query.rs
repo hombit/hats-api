@@ -184,9 +184,15 @@ pub(crate) mod tests {
     /// tests using it are about is which rows and columns came back, not how they were
     /// fetched.
     pub(crate) fn fixture() -> Vec<u8> {
-        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+        fixture_of(10)
+    }
+
+    /// The same file with a chosen number of rows, for a test that needs the data to be
+    /// large next to the footer rather than the other way round.
+    pub(crate) fn fixture_of(rows: i64) -> Vec<u8> {
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..rows));
         let band: ArrayRef = Arc::new(StringArray::from_iter_values(
-            (0..10).map(|i| if i % 2 == 0 { "g" } else { "r" }),
+            (0..rows).map(|i| if i % 2 == 0 { "g" } else { "r" }),
         ));
         let batch = RecordBatch::try_from_iter_with_nullable([
             ("objectid", objectid, false),

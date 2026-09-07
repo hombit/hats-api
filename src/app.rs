@@ -302,10 +302,16 @@ async fn query_mounted(
     let format = Format::parse(query.format.as_deref(), Format::Parquet)?;
     let selection = query.selection()?;
     let opened = storage::open_mounted(file)?;
-    let result = query::run(&opened, &selection, service.sql_limits).await?;
+    // Through `from_mount`, both of them: a store's own message about a local file names
+    // the path it was reading, and that path is the operator's.
+    let result = query::run(&opened, &selection, service.sql_limits)
+        .await
+        .map_err(ApiError::from_mount)?;
 
     let num_rows = result.num_rows();
-    let response = answer(&result, &opened, format, started).await?;
+    let response = answer(&result, &opened, format, started)
+        .await
+        .map_err(ApiError::from_mount)?;
     tracing::info!(
         // The url path, not the local path: what is on disk is the operator's business.
         // Both parameters are the caller's own text and can be megabytes of `IN` list,
@@ -1401,6 +1407,37 @@ mod tests {
         );
     }
 
+    /// A parquet footer describing data that is not in this file, which is the shape of a
+    /// HATS `_metadata`: its row groups are the ones in the partition files beside it.
+    ///
+    /// A file with the shape of a HATS `_metadata`: a valid footer whose row groups
+    /// describe data that is not in this file, because there the data is in the partition
+    /// files beside it.
+    ///
+    /// Built by keeping a file's footer and dropping the data it points at, so the reader
+    /// parses the metadata, believes there are rows, and asks the store for a range past
+    /// the end. That comes back wrapped in the store's own error, which is a different
+    /// arm of the status match from a footer that will not parse at all — and the arm
+    /// that answered `502` with the store's path in it.
+    ///
+    /// The source has to have more data than footer: the recorded offsets are what must
+    /// end up beyond the stripped file's length, and a ten-row file's footer is bigger
+    /// than its data.
+    fn metadata_only(file: &[u8]) -> Vec<u8> {
+        const MAGIC: &[u8] = b"PAR1";
+        // `… metadata | u32 length | PAR1`, so the length sits in the four bytes before
+        // the trailing magic, and the metadata is that many bytes before those.
+        let length_at = file.len() - MAGIC.len() - size_of::<u32>();
+        let length = u32::from_le_bytes(
+            file[length_at..length_at + size_of::<u32>()]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let mut stripped = MAGIC.to_vec();
+        stripped.extend_from_slice(&file[length_at - length..]);
+        stripped
+    }
+
     /// A name on the list whose bytes are not parquet: the reader is what decides, so
     /// this is the caller's file being wrong rather than this service failing.
     #[tokio::test]
@@ -1408,14 +1445,26 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("liar.parquet"), b"not parquet at all").unwrap();
         std::fs::write(dir.path().join("empty.parquet"), b"").unwrap();
+        std::fs::write(
+            dir.path().join("metadata_only.parquet"),
+            metadata_only(&query::tests::fixture_of(5000)),
+        )
+        .unwrap();
         let service = || mounted(dir.path(), &ApiConfig::default());
 
-        for uri in ["/liar.parquet?columns=objectid", "/empty.parquet?limit=1"] {
+        for uri in [
+            "/liar.parquet?columns=objectid",
+            "/empty.parquet?limit=1",
+            "/metadata_only.parquet?limit=1",
+        ] {
             let response = respond(service(), Request::builder().uri(uri)).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            // A mount has no origin behind it, so `502` would be this service blaming a
+            // gateway that does not exist for a file it published itself.
+            let status = response.status();
             // Whatever is on disk is the operator's business, and a refusal is where a
             // path would otherwise get written into a message.
             let body = body_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
             assert!(
                 !body.contains(&dir.path().display().to_string()),
                 "{uri} leaked a local path: {body}"
