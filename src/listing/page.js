@@ -14,6 +14,20 @@
    answer to a question about it: the answer is what the download and the url give. */
 const PREVIEW = 10;
 
+/* How much of one value the table keeps. A nested column holds a whole light curve, and
+   one row of five thousand points is two hundred kilobytes of text — ten of those is a
+   table the browser lays out for a second and nobody reads. The cell keeps a glance, the
+   tooltip keeps enough to tell two of them apart, and the file keeps the rest: the url
+   beside the button is where the whole value is. A type is cut for the same reason —
+   twelve levels of nesting spell out to a paragraph. */
+const CELL = 120;
+const TOOLTIP = 1000;
+const TYPE = 200;
+
+function cut(text, limit) {
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
+}
+
 document.body.classList.add('js');
 
 for (const stamp of document.querySelectorAll('time[datetime]')) {
@@ -113,7 +127,7 @@ function chip(panel, column) {
   const button = document.createElement('button');
   button.className = 'chip';
   button.textContent = column.name;
-  button.title = column.type;
+  button.title = cut(column.type, TYPE);
   button.addEventListener('click', () => {
     const columns = panel.querySelector('.columns');
     const names = listed(columns.value);
@@ -251,7 +265,7 @@ function render(into, answer) {
   for (const column of answer.schema) {
     const cell = document.createElement('th');
     cell.textContent = column.name;
-    cell.title = column.type;
+    cell.title = cut(column.type, TYPE);
     head.appendChild(cell);
   }
   for (const row of answer.rows) {
@@ -264,10 +278,10 @@ function render(into, answer) {
         value === undefined || value === null ? '' :
         typeof value === 'object' ? JSON.stringify(value) : String(value);
       const cell = line.insertCell();
-      cell.textContent = shown;
-      /* The cell is cut to a readable width, so the whole of a long value has to be
-         somewhere: hovering is that somewhere. */
-      cell.title = shown;
+      cell.textContent = cut(shown, CELL);
+      if (shown.length > CELL) {
+        cell.title = cut(shown, TOOLTIP) + '\n\n' + shown.length + ' characters';
+      }
     }
   }
   into.appendChild(table);
