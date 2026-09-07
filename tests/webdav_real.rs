@@ -7,9 +7,9 @@
 //! namespace prefixes, their `href` spelling and which properties they return at all. A
 //! hand-written `207` proves that OpenDAL parses *our* XML.
 //!
-//! CI runs `rclone serve webdav`, which is a real WebDAV implementation and needs no
-//! container — so unlike the MinIO job this one has nothing to pull or wait for. Any
-//! other server can be pointed at instead through the same variables.
+//! CI runs `rclone serve webdav` from a pinned image, so what these tests are held
+//! against is a server someone chose rather than whatever the runner's distribution
+//! packaged. Any other server can be pointed at instead through the same variables.
 //!
 //! The fixture is written here rather than uploaded by CI, through OpenDAL, so the file
 //! read back is the same one `tests/common` defines and there is no upload step to

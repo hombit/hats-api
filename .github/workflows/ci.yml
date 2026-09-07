@@ -117,9 +117,15 @@ jobs:
   # spelling and which properties they return at all. The in-process server in
   # `tests/webdav.rs` can only prove OpenDAL parses the XML this repository writes.
   #
-  # `rclone serve webdav` rather than a container: it is a real implementation, it is one
-  # binary, and there is nothing to pull or wait for. The credentials are made up here
-  # and the server is destroyed with the runner, so this runs on forks too.
+  # `rclone serve webdav`, from a pinned image rather than from apt. What the runner's
+  # apt offers is whatever the distribution froze — a 2022 build on ubuntu-24.04 — and it
+  # re-rolls whenever `ubuntu-latest` moves, which makes the one job meant to be
+  # representative of a real server the one job whose server nobody chose. The credentials
+  # are made up here and the container is destroyed with the runner, so this runs on
+  # forks too.
+  #
+  # `docker run` rather than a service container, as with MinIO above: `serve webdav` and
+  # its flags are the image's command, and `jobs.<id>.services` has no way to set one.
   webdav:
     name: real WebDAV
     runs-on: ubuntu-latest
@@ -137,27 +143,39 @@ jobs:
 
       - name: start a WebDAV server
         run: |
-          sudo apt-get update && sudo apt-get install -y rclone
-          mkdir -p /tmp/davroot
-          rclone serve webdav --addr 127.0.0.1:8788 \
+          # The image's user is not the runner's, so the served directory has to be
+          # writable by whichever one rclone turns out to run as.
+          mkdir -p /tmp/davroot && chmod 0777 /tmp/davroot
+          # Published to loopback only: the endpoint above is the only address that has
+          # to reach it. The `--user`/`--pass` after the image name are rclone's flags,
+          # not docker's.
+          docker run -d --name rclone -p 127.0.0.1:8788:8788 \
+            -v /tmp/davroot:/data \
+            rclone/rclone:1.75.1 \
+            serve webdav --addr :8788 \
             --user "$HATS_API_TEST_WEBDAV_USERNAME" \
             --pass "$HATS_API_TEST_WEBDAV_PASSWORD" \
-            /tmp/davroot > /tmp/rclone.log 2>&1 &
+            /data
+
+      - name: wait for the WebDAV server
+        run: |
           for _ in $(seq 1 30); do
             if curl -fsS -u "$HATS_API_TEST_WEBDAV_USERNAME:$HATS_API_TEST_WEBDAV_PASSWORD" \
                  "$HATS_API_TEST_WEBDAV_ENDPOINT/" >/dev/null; then
-              exit 0
+              break
             fi
             sleep 1
           done
-          echo "the WebDAV server did not come up"; cat /tmp/rclone.log; exit 1
+          curl -fsS -u "$HATS_API_TEST_WEBDAV_USERNAME:$HATS_API_TEST_WEBDAV_PASSWORD" \
+            "$HATS_API_TEST_WEBDAV_ENDPOINT/" >/dev/null \
+            || { echo "the WebDAV server did not come up"; docker logs rclone; exit 1; }
 
       - name: cargo test --test webdav_real
         run: cargo test --test webdav_real
 
       - name: WebDAV server logs
         if: failure()
-        run: cat /tmp/rclone.log
+        run: docker logs rclone
 
   deny:
     name: cargo-deny
