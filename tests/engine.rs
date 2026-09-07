@@ -33,7 +33,7 @@ use object_store::ObjectStore;
 use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray};
 use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::basic::Compression;
-use datafusion::parquet::file::metadata::ParquetMetaDataReader;
+use datafusion::parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
 use datafusion::parquet::file::properties::{EnabledStatistics, WriterProperties};
 use datafusion::parquet::schema::types::ColumnPath;
 use datafusion::physical_plan::metrics::MetricValue;
@@ -156,6 +156,30 @@ fn fixture(rows: i64) -> Vec<u8> {
     buffer
 }
 
+/// Pages per row group in the first column, or `"?"` if the file carries no offset index.
+///
+/// The number every page-index finding depends on. A row group holding one page has a page
+/// index that cannot prune anything, so `enable_page_index` measured against such a file
+/// reports "no benefit" about the writer rather than about the setting. `parquet`'s
+/// defaults split a page every 20,000 rows or 1 MiB, whichever comes first, so a row group
+/// size below that silently produces exactly that case.
+fn pages_per_row_group(bytes: &[u8]) -> String {
+    let Ok(metadata) = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Required)
+        .parse_and_finish(&bytes::Bytes::copy_from_slice(bytes))
+    else {
+        return "?".to_owned();
+    };
+    metadata
+        .offset_index()
+        .and_then(|groups| groups.first())
+        .and_then(|columns| columns.first())
+        .map_or_else(
+            || "?".to_owned(),
+            |column| column.page_locations().len().to_string(),
+        )
+}
+
 /// The fixture on disk, opened the way a file-server request opens one.
 struct Fixture {
     _dir: TempDir,
@@ -171,8 +195,9 @@ fn write_fixture() -> Fixture {
     let path = dir.path().join("part0.parquet");
     std::fs::write(&path, &bytes).expect("write fixture");
     println!(
-        "fixture: {rows} rows, {} row groups, {:.1} MiB, written in {:.1}s",
+        "fixture: {rows} rows, {} row groups, {} pages per row group, {:.1} MiB, written in {:.1}s",
         rows as usize / row_group_rows(),
+        pages_per_row_group(&bytes),
         bytes.len() as f64 / (1 << 20) as f64,
         started.elapsed().as_secs_f64()
     );
