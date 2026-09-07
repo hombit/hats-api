@@ -28,6 +28,7 @@ thing to keep working while that is built.
 | 4 | file-server interface | done | |
 | 4.1 | write the README | todo | both interfaces are settled now, so one document can describe them together |
 | 4.2 | what the engine actually does | todo | measurement, not code. Its findings decide `query::session_config` and what §5.3 may promise about row order |
+| 4.3 | a directory page worth looking at | todo | presentation only, and constrained: the markup is scraped by `fsspec` |
 | 5.1 | HATS catalog metadata | todo | |
 | 5.2 | spatial predicate | todo | brings `region` (§3.3) and `POST /api/v1/hats` with it. Order policy and range budget to be settled by measurement first |
 | 5.3 | sync / plan / auto | todo | |
@@ -356,6 +357,47 @@ file rather than being fixed at startup — not a table of numbers.
 This is not §6.8. That one ranks the caching layers by where a request's time goes; this
 one is about the engine's own knobs, and it comes first because a cache measured against
 a badly configured engine ranks the wrong layer.
+
+### 4.3 A directory page worth looking at
+
+The generated listing is a bare table and reads worse than what `apache` and `nginx`
+serve, which is the comparison a person browsing a catalog actually makes. Presentation
+only: what is listed and in what order is settled, and none of it changes here.
+
+Four constraints, because each rules out the obvious way to do this:
+
+- **The page is scraped.** `fsspec`'s HTTP filesystem and the `lsdb` clients above it
+  find entries by reading `href` attributes out of the markup. So every entry keeps a
+  plain `<a href="…">` that a regex can find, and a redesign that moves the link into a
+  script or builds the url out of a data attribute breaks a client that never asked for
+  a page at all. `a_browser_gets_a_page_and_a_client_does_not` is what notices.
+- **Nothing is fetched from anywhere.** No CDN, no webfont, no framework — the same
+  reason §7.3 bundles its renderer rather than linking one. A page that is blank on the
+  network this service is built for is worse than a plain one. Inline CSS, and any script
+  small enough to inline and optional enough that the page is complete without it.
+- **No parameters.** `CLAUDE.md` settles that a listing takes none, and §3.4 has since
+  given query parameters a meaning on a file's own url. Sorting and filtering, if they
+  arrive, are client-side over markup that is already correct without them.
+- **Built per request.** There is no listing cache until §6.1 and a HATS `Dir=` level is
+  ten thousand entries, so this stays string formatting rather than a template engine.
+
+What to do, roughly in the order a person notices it:
+
+- **A breadcrumb heading.** `Index of /hats/ztf_dr24/dataset/Norder=5` is a dead string;
+  each component a link makes climbing two levels one click rather than two.
+- **Alignment.** A monospace column for names and sizes is most of why the `apache` page
+  is readable at a glance, against a proportional font and ragged columns here.
+- **A summary line** — how many directories, how many files, the total size. A `Dir=`
+  level is where the page is longest and where this matters most.
+- **Legibility**: row striping, a hover row, and `prefers-color-scheme`, so it is not a
+  white rectangle at night.
+- **Times a person can read.** `2026-01-27T22:26:43Z` is right for a machine; rendering
+  it in the reader's own timezone is a few lines of optional script over a `datetime`
+  attribute that stays the machine-readable one.
+- **Say that a data file can be queried.** A caller who browsed to a partition has no way
+  to discover §3.4's parameters, and this page is the only thing that could tell them.
+  One line naming `columns` and `filters` beside an entry matching `[data] filenames` is
+  the whole feature's discoverability.
 
 ## 5. Phase 4 — the HATS interface
 
