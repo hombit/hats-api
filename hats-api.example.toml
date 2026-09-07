@@ -1,155 +1,88 @@
-# Every key here is optional, and every value shown is the default. Run without a
-# config file at all and this is what you get.
+# Every key is optional and every value shown is the default. An unknown key is a
+# startup error.
 #
 #   hats-api --config hats-api.toml
 #   HATS_API_CONFIG=hats-api.toml hats-api
-#
-# An unknown key is a startup error rather than a silent default: this file decides
-# what the service will read, and a typo in it must not quietly widen or narrow that.
 
 [server]
-# Every interface, which is what a container needs. Use "127.0.0.1" on a laptop.
+# Every interface; use "127.0.0.1" to listen locally only.
 address = "0.0.0.0"
 port = 80
 
 [api]
-# API mode: the caller names the location of the data in the request, and [api.access]
-# below decides what it may name. Turn it off for a pure file server, which then serves
-# nothing but the mounts below.
+# API mode: the caller names the data in the request, and [api.access] decides what it
+# may name. Off serves nothing but the mounts.
 enabled = true
-
-# The url subtree the API answers under. It wins over a mount that would cover the same
-# paths, so a mount at "/" alongside the API here is the ordinary arrangement.
+# The url subtree the API answers under. It wins over a mount covering the same paths.
 prefix = "/api/v1"
 
 [api.access.network]
-# Which addresses a request may reach, whatever backend it goes through — the question
-# is a property of the destination rather than of the protocol. Everything here is off
-# by default: the service sits somewhere its callers do not, and can reach a great deal
-# from there that they are not meant to reach through it.
-#
-# Names and addresses are both checked. A name is judged before it is resolved, and
-# every address it resolves to is judged afterwards, inside the HTTP client's own
-# resolver — so a name that answers differently the second time round does not help.
+# Which addresses a request may reach, whatever backend it goes through. A name is
+# judged before it is resolved, and every address it resolves to is judged again inside
+# the HTTP client's own resolver.
 
-# 127.0.0.0/8, ::1, and localhost. Turn it on to work against a local MinIO without
-# naming its endpoint below.
+# 127.0.0.0/8, ::1, localhost.
 allow_loopback = false
-
-# Everything else that is not the public internet: RFC1918, unique-local, and
-# link-local — which is where EC2 and GCE serve this machine's own IAM credentials.
+# RFC1918, unique-local, and link-local — cloud instance metadata.
 allow_private = false
-
-# Names that only mean something inside a network. A name has to end in a top-level
-# domain that IANA has actually delegated, so .internal, .local, .lan, .cluster.local
-# and whatever suffix your own network uses are all refused, without any of them having
-# to be listed. Single-label names — "minio", "metadata" — are refused too.
+# Names that only mean something inside a network. A name must end in a TLD IANA has
+# delegated; .internal, .local, .lan and single-label names are refused.
 allow_local_names = false
-
-# Networks and hosts to allow whatever the three switches above say. A host named here
-# is allowed along with whatever it resolves to, which is the point of naming one.
+# Allowed whatever the three switches say. A host named here is allowed along with
+# whatever it resolves to.
 # allow_cidrs = ["10.1.2.0/24"]
 # allow_hosts = ["minio.internal"]
 
+# Each [api.access.<backend>] below has three states: no `endpoints` key for any
+# endpoint (the default, still subject to [api.access.network]), an empty list to turn
+# the scheme off, or a list for exactly those. Naming an endpoint is permission on its
+# own — [api.access.network] is not consulted for it. Any bucket at an allowed endpoint
+# is readable.
+
 [api.access.s3]
-# Which S3 servers a request may point this service at. For an object store the
-# endpoint is the thing worth deciding, not the bucket: a bucket name says nothing
-# about the host, because the request carries its own `endpoint` option and can aim
-# anywhere. Any bucket at an allowed endpoint is readable.
-#
-#   "aws"                        AWS S3 itself: a url with no `endpoint` option
-#   "https://minio.example.com"  one S3-compatible server
-#
-# Three states, and the first two differ: leave the key out for any endpoint (the
-# default, still subject to [api.access.network]), give an empty list to turn s3 off
-# entirely, or list endpoints for exactly those. Naming an endpoint here is permission
-# enough on its own — [api.access.network] is not consulted for it, at either layer.
-# endpoints = ["aws"]
+# "aws" is S3 itself — a url with no `endpoint` option. Anything else is a url.
+# endpoints = ["aws", "https://minio.example.com"]
 
 [api.access.gcs]
-# The same three states for gs:// urls. "gcp" is Google Cloud Storage itself.
+# "gcp" is Google Cloud Storage itself.
 # endpoints = ["gcp"]
 
 [api.access.azure]
-# The same three states for az:// urls. "azure" is Azure Blob Storage itself; a named
-# endpoint is an Azurite or a compatible server.
+# "azure" is Azure Blob Storage itself; a named endpoint is Azurite or a compatible.
 # endpoints = ["azure"]
 
 [api.access.http]
-# Which plain HTTP servers a request may read from, for http:// and https:// urls. An
-# http(s) url names its own server, so there is no provider name here the way "aws" is
-# one for s3 — every entry is a url.
-#
-# The same three states: leave the key out for any server (the default, still subject to
-# [api.access.network]), give an empty list to turn both schemes off, or list servers for
-# exactly those.
+# For http:// and https:// urls. Every entry is a url; there is no provider name here.
 # endpoints = ["https://data.example.com"]
 
-# A request may carry a "headers" storage option for these urls — a bearer token or an
-# API key for a server that authenticates. Those are the caller's own credentials and
-# are never logged, not even their names. Sending them over cleartext http needs the
-# caller's own allow_http as well as the switch below: this one is the operator saying
-# cleartext is acceptable on this network, which is not the same as a caller agreeing to
-# put their token on it.
-
-# Whether an http:// url may be read when no endpoint list names one. Off by default:
-# over cleartext nothing says the bytes came from the host the url names, and a parquet
-# file something on the path rewrote is a wrong answer rather than a failed request.
-# Naming an http:// server in `endpoints` above is the same decision made deliberately,
-# and does not need this as well.
+# Whether an http:// url may be read when no endpoint list names one. A request carrying
+# a credential also needs its own `allow_http` option. Naming an http:// server in
+# `endpoints` does not need this as well.
 allow_plain_http = false
 
 [api.access.webdav]
-# Which WebDAV servers a request may read from, for webdav:// urls. Like http(s) above,
-# a webdav:// url names its own server, so every entry here is a url — and it is written
-# with the transport underneath it, "https://dav.example.com", not "webdav://".
-#
-# The same three states: leave the key out for any server (the default, still subject to
-# [api.access.network]), give an empty list to turn the scheme off, or list servers for
-# exactly those.
+# For webdav:// urls, written with the transport underneath rather than "webdav://". A
+# request picks the transport with a `transport` option, "https" (the default) or
+# "http"; there is no allow_plain_http here, so cleartext WebDAV is reached only by
+# naming the "http://" server.
 # endpoints = ["https://dav.example.com"]
 
-# "webdav" names the protocol and not what carries it, so a request picks the transport
-# with a "transport" storage option — "https" (the default) or "http". There is no
-# allow_plain_http here the way there is for http above: cleartext WebDAV is reached only
-# by naming the "http://" server in `endpoints`. The credential a WebDAV server takes is
-# a password rather than a token issued for one service, so putting it in the clear is a
-# decision worth making per server rather than once for all of them.
-#
-# A request authenticates with "username" and "password" options, sent as Basic — both
-# together or neither. They are the caller's own credentials and are never logged.
-# Sending them over cleartext needs the caller's own allow_http as well.
-
 [api.access.local]
-# Directories a request may read parquet files from, written as absolute paths or
-# file:// urls. Empty by default, so the service reads no local files until one is
-# listed. A directory that does not exist is a startup error rather than a rule that
-# silently never matches.
+# Directories a request may read parquet files from, as absolute paths or file:// urls.
+# A directory that does not exist is a startup error. Mounts are readable too, scoped to
+# themselves; this key says nothing about what the mounts publish.
 paths = []
-
-# Whether a local path may go through a symlink. Off by default. Turning it on does
-# not widen which files can be read: a path is resolved before it is matched, so a
-# link inside an allowed directory still cannot lead out of one.
+# Whether a local path may go through a symlink. A path is resolved before it is
+# matched, so a link inside an allowed directory cannot lead out of one.
 follow_symlinks = false
 
 # File-server mode: zero or more mounts, each publishing one local directory under a url
-# prefix. There are none by default, so the service is the API alone until one is added.
-# Both keys are required — a mount is a place and a directory, and neither half has a
-# default that could stand in for the other.
-#
-# Two mounts may not claim the same subtree: overlapping prefixes are a startup error
-# rather than a rule about which one wins.
-#
-# Mounting a directory also lets the API read it, scoped to that directory and under the
-# mount's own follow_symlinks. The bytes are already served whole over the file-server
-# route, so refusing to query them through the API would withhold nothing. The grant is
-# one way: [api.access.local] says nothing about what the mounts publish.
+# prefix. Both keys are required, and two mounts may not claim the same subtree.
 #
 # [[mount]]
 # path = "/"                   # the url prefix
 # source = "/srv/data"         # an absolute path or a file:// url, and a directory
-# follow_symlinks = false      # per mount, so one mount of links decides nothing for
-#                              # the others or for the API
+# follow_symlinks = false      # per mount
 # immutable = false            # never changes once published, so a cached copy needs no
 #                              # revalidating
 #
@@ -159,64 +92,37 @@ follow_symlinks = false
 # immutable = true
 
 [data]
-# Which files this service reads as data, as glob patterns. Both modes consult this one
-# list, and it is the whole of what makes a file queryable.
+# Which files are read as data, as glob patterns; both modes consult this one list.
+# Matched against a file's own name, never the path above it. The default is what a HATS
+# catalog contains; "_metadata" and "_common_metadata" are parquet files with no
+# extension.
 #
-# Matched against a file's own name, never against the path it sits in: a directory
-# called "catalog.parquet" does not make what is under it data, and a name means the same
-# thing wherever it was found.
-#
-# The default is what a HATS catalog contains. "_metadata" and "_common_metadata" are
-# parquet files with no extension at all, which is why this is a list of names rather
-# than a list of suffixes.
-#
-# What each mode does with a file that is not on the list differs, because what they have
-# to offer differs. The file server still has the bytes, so it serves them whole and
-# ignores the query parameters — the way any HTTP server ignores a parameter it has no
-# use for. The API has nothing else to do with an object, so it answers 404.
-#
-# Being on the list is a claim about the name, not about the contents: a file called
-# "part0.parquet" that is not one is refused by the parquet reader, as the caller's
-# mistake rather than a fault here. An empty list turns every query surface off and
-# leaves the file server serving bytes.
+# Off the list, the file server still serves the bytes and ignores the query parameters;
+# the API answers 404.
 filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 
 [limits]
-# A plain HTTP server may ignore a Range request and answer with the whole object. A
-# parquet read is tens of ranged reads, so passing that through would transfer the file
-# tens of times over — and the reader would get the wrong bytes at every offset. Such an
-# object is copied to scratch once instead, and read from local disk after that.
-#
-# Only http:// and https:// urls can reach this: every other backend serves ranges.
+# A plain HTTP server may ignore a Range request and answer with the whole object. Such
+# an object is copied to scratch once and read from local disk after that. Only http(s)
+# urls can reach this.
 
-# The most that will be copied for one object. Multi-GiB HATS partitions are ordinary,
-# so a smaller cap refuses ordinary data. "0" refuses to copy at all, which makes a
-# server that will not serve ranges unreadable rather than expensive.
+# The most that will be copied for one object. "0" refuses to copy at all.
 max_materialize_bytes = "2GiB"
-
-# The same across every copy resident at once, which is what stops many requests
-# together from filling the disk.
+# The same across every copy resident at once.
 max_materialize_total_bytes = "8GiB"
-
 # How many copies may be in flight at once. Beyond this a request waits.
 max_concurrent_materializations = 4
-
 # Where the copies go. Absent is the system temporary directory. Each is deleted when
 # the request that made it ends, cancelled or not.
 # scratch_dir = "/var/tmp/hats-api"
 
-# How much SQL one API request may carry, in "select" and "where". Both bound the text
-# the caller wrote, not the answer they get back: how many rows come out is a different
-# question, and neither of these limits it.
+# How much SQL one request may carry, in "select" and "where". Both bound the text the
+# caller wrote, not how many rows come back.
 
-# How deeply an expression may nest — "((((a = 1))))" is four. The parser enforces it, so
-# something pathological is refused while it is still text.
+# How deeply an expression may nest — "((((a = 1))))" is four.
 max_expression_depth = 50
-
-# How many terms an expression may have. Depth does not bound this: an IN list is one
-# term wide and arbitrarily long, and a chain of ORs is shallow. The default is generous
-# because a list of ten thousand object ids is an ordinary request here; it is set to
-# refuse the absurd, not to be a budget.
+# How many terms it may have, which depth does not bound: an IN list is one term wide
+# and arbitrarily long.
 max_expression_nodes = 50000
 
 [log]
