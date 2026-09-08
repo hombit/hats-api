@@ -180,16 +180,22 @@ pub enum Partitioned {
 }
 
 impl Partitioned {
-    /// The files to read, which for a directory means listing it.
+    /// The files to read.
     ///
-    /// Which names in that directory are data is the configured list's answer and not this
-    /// module's, so a partition directory holding a `_success` marker or a checksum reads
-    /// like the rest of the service reads a directory.
+    /// **Where `hats_npix_suffix` names a file, that name is the answer.** The path is
+    /// constructed from the cell and the suffix, and nothing filters it — no listing, no
+    /// `data`. A catalog writing its partitions as `.parq`, or as anything else it cares to
+    /// name, reads on the strength of what it said about itself, whether or not that suffix
+    /// is one the file server would answer a query on.
     ///
-    /// **A directory partition needs a listing, and not every backend has one.** An
-    /// `http(s)://` catalog written this way cannot be read at all — the names of the files
-    /// inside a partition are nowhere in the catalog's own metadata, so there is nothing to
-    /// derive them from.
+    /// A suffix of `/` is the only case with a question in it: the partition is a directory
+    /// and the names inside it are the catalog's business rather than the format's. Those
+    /// are matched against `data`, so a `_SUCCESS` marker or a checksum beside the parts is
+    /// passed over the way the rest of this service passes over a name it does not read.
+    ///
+    /// **That case needs a listing, and not every backend has one.** An `http(s)://`
+    /// catalog written this way cannot be read at all: the names inside a partition appear
+    /// in none of the catalog's metadata, so there is nothing to derive them from.
     pub async fn files(&self, data: &DataFiles) -> Result<Vec<RemoteFile>, ApiError> {
         match self {
             Self::One(file) => Ok(vec![file.clone_handle()]),
