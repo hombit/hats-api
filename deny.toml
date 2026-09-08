@@ -23,6 +23,20 @@ ignore = [
     # Revisit when `rsa` releases a fix, or if an operator-configured credential source
     # ever lands — a key the *deployment* owns would change this reading entirely.
     "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0141: `bincode` 1.3.3 is unmaintained. Not a vulnerability — its
+    # authors stopped work and call 1.3.3 finished — and there is no fixed release,
+    # since 2.x is a different crate with a different API.
+    #
+    # It arrives with `cdshealpix`, which is not optional there and has no feature that
+    # turns it off, so the only way out of the tree is to drop HEALPix coverings.
+    # `cdshealpix` uses it in one module, `nested::sort`, an external-memory sort that
+    # spills rows to temporary files; nothing here calls it, so the format is never
+    # parsed and no caller's bytes reach it.
+    #
+    # Revisit when `cdshealpix` moves to a maintained encoder or puts the sort behind a
+    # feature.
+    "RUSTSEC-2025-0141",
 ]
 
 [licenses]
