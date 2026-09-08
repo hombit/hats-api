@@ -275,13 +275,30 @@ function render(into, answer) {
   for (const row of answer.rows) {
     const line = table.insertRow();
     for (const column of answer.schema) {
+      const cell = line.insertCell();
       const value = row[column.name];
+      /* The values that are not a measurement are set apart from the ones that are, so a
+         column of numbers does not have a blank in it that reads as nothing much. `null`
+         is the file saying it has no value here, whatever the column holds. `NaN` and the
+         infinities are values the file does hold, and arrive as strings because JSON has
+         no number for them — so they count only in a float column, where a string cannot
+         be anything else. A `Utf8` column whose value really is the text "NaN" is a
+         string like any other. */
+      const special =
+        value === null || value === undefined ? 'null'
+        : column.type.startsWith('Float') &&
+          (value === 'NaN' || value === 'Infinity' || value === '-Infinity') ? value
+        : null;
+      if (special !== null) {
+        cell.textContent = special;
+        cell.className = 'special';
+        continue;
+      }
       /* A HATS row can hold a whole light curve in one column, so a value that is not
          scalar is shown as what it is rather than as [object Object]. */
       const shown =
         value === undefined || value === null ? '' :
         typeof value === 'object' ? JSON.stringify(value) : String(value);
-      const cell = line.insertCell();
       cell.textContent = cut(shown, CELL);
       if (shown.length > CELL) {
         cell.title = cut(shown, TOOLTIP) + '\n\n' + shown.length + ' characters';

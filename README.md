@@ -186,6 +186,15 @@ columns where it did not. It is there because rows do not describe themselves: a
 that matched nothing looks like a file without the column, so `limit=0` is how to ask what
 a file holds, and it reads no data at all.
 
+**Every row carries every column, and a value JSON cannot spell is a string.** A null is
+written as `null` rather than left out, so a row's keys are the answer's columns and not
+whatever that row happened to have. `NaN`, `Infinity` and `-Infinity` come back as those
+three strings, which `float()` in Python and `Number()` in JavaScript both read back — JSON
+has no number for them, and writing `null` instead would report three values a file really
+holds as a fourth it does not. In a photometric column they are ordinary, so a caller
+reading `NaN` as "no measurement" would have a wrong answer rather than an error. The
+`parquet` format carries all of them as themselves and needs none of this.
+
 `POST` rather than `GET`: the request carries credentials, which a query string would
 write to every proxy's access log, and a body has no url-length limit.
 

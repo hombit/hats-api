@@ -348,12 +348,7 @@ const SCRIPT: &str = include_str!("listing/page.js");
 /// what someone reporting that a listing looks wrong has to be able to say. Nothing about
 /// the machine: the name and the version are this build's, and the host is the caller's
 /// own url.
-const SERVER: &str = concat!(
-    env!("CARGO_PKG_NAME"),
-    " ",
-    env!("CARGO_PKG_VERSION"),
-    " \u{2014} generated listing"
-);
+const SERVER: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
 
 /// What a caller browsing to a partition has no other way to find out. Written once
 /// below the table rather than per row: a `Norder=` level is thousands of entries, and

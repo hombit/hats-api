@@ -196,5 +196,8 @@ a.run:hover { text-decoration: none; }
   text-overflow: ellipsis;
 }
 .result th { color: var(--fg); font-weight: 600; border-bottom: 1px solid var(--edge); }
+/* A value that is not a measurement, italic and muted so a column of numbers reads as
+   numbers and these read as what they are rather than as a gap in the data. */
+.result td.special { font-style: italic; color: var(--muted); }
 .result tbody tr:nth-child(even) { background: var(--bg); }
 .failed { color: var(--failed); font-weight: 600; }

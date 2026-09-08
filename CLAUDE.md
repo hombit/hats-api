@@ -323,6 +323,28 @@ finding about the shape.
 What a file is observed to carry is worth writing down — it says what is worth asking an
 importer for. It is never worth depending on.
 
+## What an answer can say
+
+A value the caller cannot tell apart from a different value is the failure this service
+keeps finding, in a new place each time. It reads like data rather than like a fault, so
+nothing downstream reports it.
+
+- **JSON has no number for `NaN` or either infinity, and arrow's writer spells all three
+  `null`.** Three values a file holds, reported as a fourth it does not — and in a
+  photometric column all three are ordinary. `query::to_json` installs an `EncoderFactory`
+  that writes them as the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, which `float()`
+  and `Number()` both read back. It takes over only a column that actually holds one, so
+  ordinary data keeps the writer's own faster formatting; the cost of the check is a pass
+  over the values, and of the formatting about 3% on a column that needs it.
+- **A null is written rather than omitted.** `explicit_nulls` is off by default, which
+  makes a row's keys depend on that row's own values and a null indistinguishable from a
+  column the projection never asked for.
+- **A float is formatted at its own width.** Widening an `f32` to an `f64` first prints
+  `1.1` as `1.100000023841858` — the same value, and not the same answer.
+- **The page sets these apart from the numbers**, italic and muted, rather than leaving a
+  blank cell that reads as nothing much. `null` is marked in any column; the three strings
+  count only in a float column, since elsewhere a string is just a string.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it
