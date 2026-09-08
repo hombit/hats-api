@@ -324,6 +324,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
             hats_api::mount::Mounts::default(),
             &hats_api::config::ApiConfig::default(),
             &hats_api::config::DataConfig::default(),
+            &hats_api::config::ServerConfig::default(),
         )
         .expect("the API alone is a service"),
     );

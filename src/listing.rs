@@ -200,7 +200,7 @@ impl Listing {
     /// script is an improvement on markup that is already complete without it — which is
     /// why the button it wires up is hidden until it runs, while the prose that says the
     /// same thing about the url is served either way.
-    pub fn to_html(&self, data_files: &DataFiles) -> String {
+    pub fn to_html(&self, data_files: &DataFiles, show_version: bool) -> String {
         let title = html_escape::encode_text(&self.path);
         let mut html = format!(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
@@ -278,6 +278,9 @@ impl Listing {
         if queryable {
             html.push_str(QUERY_NOTE);
         }
+        if show_version {
+            let _ = writeln!(html, "<p class=\"footer\">{SERVER}</p>");
+        }
         let _ = write!(html, "<script>\n{SCRIPT}</script>\n");
         html.push_str("</body>\n</html>\n");
         html
@@ -336,6 +339,18 @@ impl Listing {
 /// request, so both are constants from this side.
 const STYLE: &str = include_str!("listing/page.css");
 const SCRIPT: &str = include_str!("listing/page.js");
+
+/// What answered, at the foot of the page, the way `apache` and `nginx` sign a listing
+/// they generated. It says which software and which version a page came from, which is
+/// what someone reporting that a listing looks wrong has to be able to say. Nothing about
+/// the machine: the name and the version are this build's, and the host is the caller's
+/// own url.
+const SERVER: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    " ",
+    env!("CARGO_PKG_VERSION"),
+    " \u{2014} generated listing"
+);
 
 /// What a caller browsing to a partition has no other way to find out. Written once
 /// below the table rather than per row: a `Norder=` level is thousands of entries, and
@@ -511,7 +526,7 @@ mod tests {
         // A time is UTC in the answer and UTC on the page, and the page says which:
         // a local time is a different instant for every reader and the same text for
         // all of them.
-        let html = listing(&dir).to_html(&DataFiles::default());
+        let html = listing(&dir).to_html(&DataFiles::default(), true);
         assert!(html.contains(" UTC</time>"), "{html}");
         assert!(!html.contains("toLocaleString"), "{html}");
 
@@ -594,11 +609,11 @@ mod tests {
     fn a_file_that_can_be_queried_says_so() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("properties"), b"x").unwrap();
-        let plain = listing(&dir).to_html(&DataFiles::default());
+        let plain = listing(&dir).to_html(&DataFiles::default(), true);
         assert!(!plain.contains("columns="), "{plain}");
 
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default());
+        let html = listing(&dir).to_html(&DataFiles::default(), true);
         assert!(html.contains("columns="), "{html}");
         assert!(
             html.contains("<a class=\"data\" href=\"/part0.parquet\""),
@@ -608,6 +623,10 @@ mod tests {
         // The panel is offered for the one file it can ask a question about, and the
         // button is not a link: a client scraping this page would read one as an entry.
         assert_eq!(html.matches("class=\"ask\"").count(), 1, "{html}");
+        // The page says what generated it, unless the operator would rather it did not.
+        assert!(html.contains(env!("CARGO_PKG_VERSION")), "{html}");
+        let unsigned = listing(&dir).to_html(&DataFiles::default(), false);
+        assert!(!unsigned.contains(env!("CARGO_PKG_VERSION")), "{unsigned}");
         assert!(
             html.contains("<button class=\"ask\" data-url=\"/part0.parquet\">"),
             "{html}"
@@ -624,7 +643,7 @@ mod tests {
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1", false).unwrap();
 
-        let html = listing.to_html(&DataFiles::default());
+        let html = listing.to_html(&DataFiles::default(), true);
         let scraped: Vec<&str> = html
             .split("<a")
             .skip(1)
@@ -645,7 +664,7 @@ mod tests {
         fs::write(dir.path().join("<script>alert(1)<script>"), b"x").unwrap();
         fs::write(dir.path().join("a\"b.parquet"), b"x").unwrap();
 
-        let html = listing(&dir).to_html(&DataFiles::default());
+        let html = listing(&dir).to_html(&DataFiles::default(), true);
         // The page has a `<script>` of its own, so what says the name did not become
         // markup is that no tag opened where the name is.
         assert!(!html.contains("<script>alert"), "{html}");

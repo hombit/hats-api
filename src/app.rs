@@ -18,7 +18,7 @@ use tower_http::trace::TraceLayer;
 use url::form_urlencoded;
 
 use crate::access::{self, AccessPolicy};
-use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig};
+use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
 use crate::error::ApiError;
 use crate::listing::{self, Listing};
@@ -42,6 +42,8 @@ pub struct Service {
     pub data_files: Arc<DataFiles>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
+    /// Whether a generated listing says which software and version produced it.
+    show_version: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     api_prefix: Option<Arc<str>>,
 }
@@ -55,6 +57,7 @@ impl Service {
         mounts: Mounts,
         api: &ApiConfig,
         data: &DataConfig,
+        server: &ServerConfig,
     ) -> Result<Self, ConfigError> {
         let data_files = DataFiles::new(data)?;
         let api_prefix = match api.enabled {
@@ -90,6 +93,7 @@ impl Service {
             mounts: Arc::new(mounts),
             data_files: Arc::new(data_files),
             sql_limits: limits.into(),
+            show_version: server.show_version,
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -376,7 +380,7 @@ async fn list_directory(
             })?;
 
     Ok(match listing::wants_html(&request.headers) {
-        true => Html(listing.to_html(&service.data_files)).into_response(),
+        true => Html(listing.to_html(&service.data_files, service.show_version)).into_response(),
         false => Json(listing).into_response(),
     })
 }
@@ -767,6 +771,7 @@ mod tests {
             Mounts::default(),
             &ApiConfig::default(),
             &DataConfig::default(),
+            &ServerConfig::default(),
         )
         .unwrap()
     }
@@ -1040,6 +1045,7 @@ mod tests {
             mounts,
             api,
             &DataConfig::default(),
+            &ServerConfig::default(),
         )
         .unwrap()
     }
@@ -1340,6 +1346,7 @@ mod tests {
                 mounts,
                 &api,
                 &DataConfig::default(),
+                &ServerConfig::default(),
             )
         };
 
@@ -1367,6 +1374,7 @@ mod tests {
                 ..Default::default()
             },
             &DataConfig::default(),
+            &ServerConfig::default(),
         )
         .unwrap_err()
         .to_string();
@@ -1578,6 +1586,7 @@ mod tests {
             &DataConfig {
                 filenames: vec!["*.pq".to_owned()],
             },
+            &ServerConfig::default(),
         )
         .unwrap();
 

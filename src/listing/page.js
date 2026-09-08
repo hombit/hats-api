@@ -25,6 +25,12 @@ function cut(text, limit) {
   return text.length > limit ? text.slice(0, limit) + '…' : text;
 }
 
+/* One of a thing is one column, one row: a count is written out with the word that goes
+   with it rather than with an `s` that is wrong as often as it is right. */
+function counted(count, one, many) {
+  return count + ' ' + (count === 1 ? one : many);
+}
+
 document.body.classList.add('js');
 
 for (const button of document.querySelectorAll('.ask')) {
@@ -60,13 +66,11 @@ function build(url) {
     '<label><span>filters</span><textarea class="filters" rows="1" ' +
     'placeholder="every row"></textarea></label>' +
     '<span class="buttons">' +
-    '<button class="run" data-format="json">Preview ' + PREVIEW + ' rows</button>' +
-    '<button class="run" data-format="parquet">Download parquet</button></span>' +
+    '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
+    '<a class="run download">Download parquet</a></span>' +
     '<div class="asked"></div><div class="result"></div></div>';
   row.dataset.url = url;
-  for (const button of cell.querySelectorAll('.run')) {
-    button.addEventListener('click', () => run(row, button.dataset.format));
-  }
+  cell.querySelector('.preview').addEventListener('click', () => run(row));
   /* A predicate over several columns is long enough to want more than a line, so Enter
      writes one and the modifier runs the query — the shape every editor and console
      already uses for a box you can type a newline into. */
@@ -74,11 +78,22 @@ function build(url) {
     field.addEventListener('keydown', event => {
       if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
-        run(row, 'json');
+        run(row);
       }
     });
+    /* The download is a link, so its address has to be right before it is clicked
+       rather than worked out on the way. */
+    field.addEventListener('input', () => address(row));
   }
+  address(row);
   return row;
+}
+
+/* Where the download link points, from the fields as they read now. It takes no limit:
+   asking for parquet is asking for the rows that matched. */
+function address(panel) {
+  panel.querySelector('.download').href =
+    url(panel.dataset.url, {...asked(panel), format: 'parquet'});
 }
 
 /* What columns the file has, which is one query with no rows in it. The answer's schema
@@ -88,7 +103,7 @@ function describe(panel) {
   const chips = panel.querySelector('.chips');
   ask(panel.dataset.url, {limit: '0', format: 'json'})
     .then(answer => {
-      count.textContent = answer.schema.length + ' columns:';
+      count.textContent = counted(answer.schema.length, 'column', 'columns') + ':';
       for (const column of answer.schema) {
         chips.appendChild(chip(panel, column));
       }
@@ -163,29 +178,26 @@ function listed(value) {
   return names.filter(Boolean);
 }
 
-function run(panel, format) {
-  /* Written over several lines, sent as one: a newline is nothing to SQL but noise in a
-     url, and this is the url the panel shows and a caller copies. */
+/* What the fields say, as query parameters. Written over several lines and sent as one:
+   a newline is nothing to SQL but noise in a url, and this url is shown, copied and
+   linked to. */
+function asked(panel) {
   const value = selector => panel.querySelector(selector).value.replace(/\s+/g, ' ').trim();
+  return {columns: value('.columns'), filters: value('.filters')};
+}
+
+function run(panel) {
   const parameters = {
-    columns: value('.columns'),
-    filters: value('.filters'),
+    ...asked(panel),
     /* The table here is a preview, so it is the front of the file and stays that size
-       whatever the query. The download is the answer itself and takes no limit: the
-       point of asking for parquet is to have all the rows that matched. */
-    limit: format === 'json' ? String(PREVIEW) : '',
+       whatever the query. */
+    limit: String(PREVIEW),
     /* `format` says what comes back, and it is not the `Accept` header: the file server
        answers a query in the format the url named, defaulting to parquet. Asking without
        it and reading the body as JSON parses a parquet file. */
-    format: format,
+    format: 'json',
   };
-  const asked = url(panel.dataset.url, parameters);
-  show(panel.querySelector('.asked'), asked);
-  if (format === 'parquet') {
-    /* The browser saves it: the response is an attachment, so this navigates nowhere. */
-    location.href = asked;
-    return;
-  }
+  show(panel.querySelector('.asked'), url(panel.dataset.url, parameters));
   const result = panel.querySelector('.result');
   result.textContent = 'running…';
   ask(panel.dataset.url, parameters)
@@ -244,7 +256,9 @@ function render(into, answer) {
   /* A full preview is the front of the file rather than the whole answer, and the two
      read alike at a glance — so it says which it is. */
   summary.textContent =
-    (answer.num_rows === PREVIEW ? 'first ' + PREVIEW + ' rows' : answer.num_rows + ' rows') +
+    (answer.num_rows === PREVIEW
+      ? 'first ' + counted(PREVIEW, 'row', 'rows')
+      : counted(answer.num_rows, 'row', 'rows')) +
     ', ' + bytes(answer.data_bytes_read) + ' read, ' + answer.elapsed_ms + ' ms';
   into.appendChild(summary);
   if (answer.rows.length === 0) return;

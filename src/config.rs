@@ -158,6 +158,15 @@ pub struct ServerConfig {
     /// needs; `127.0.0.1` keeps it on the machine.
     pub address: IpAddr,
     pub port: u16,
+    /// Whether a generated directory page says which software and version produced it,
+    /// the way `apache` and `nginx` sign theirs.
+    ///
+    /// On by default, because it is what someone reporting that a page looks wrong needs
+    /// to be able to say. An operator who would rather not publish which version is
+    /// running turns it off — the same call as nginx's `server_tokens`, and worth as
+    /// much: it hides the number from a reader, not from anyone fingerprinting the
+    /// service.
+    pub show_version: bool,
 }
 
 impl Default for ServerConfig {
@@ -165,6 +174,7 @@ impl Default for ServerConfig {
         Self {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 80,
+            show_version: true,
         }
     }
 }

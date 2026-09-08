@@ -8,6 +8,9 @@
 # Every interface; use "127.0.0.1" to listen locally only.
 address = "0.0.0.0"
 port = 80
+# Say which software and version produced a generated directory page, the way apache
+# and nginx sign theirs. Turn it off not to publish which version is running.
+show_version = true
 
 [api]
 # API mode: the caller names the data in the request, and [api.access] decides what it

@@ -48,20 +48,19 @@ a:hover { text-decoration: underline; }
 h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.2rem; }
 p { color: var(--muted); font-size: 0.85rem; margin: 0.2rem 0; }
 code { font-family: var(--mono); font-size: 0.85em; }
+.footer { margin-top: 1.2rem; padding-top: 0.4rem; border-top: 1px solid var(--line); font-size: 0.75rem; }
 
 table.listing { border-collapse: collapse; margin: 1rem 0 0.6rem; }
 .listing th, .listing td { padding: 0.15rem 2rem 0.15rem 0.4rem; text-align: left; }
 .listing th { border-bottom: 2px solid var(--edge); font-size: 0.8rem; color: var(--fg); font-weight: 600; }
 .listing th.size, .listing td.size { text-align: right; padding-right: 2.5rem; }
-/* A row is a name and then two facts about it, so the two facts are written alike —
-   same family, same size, same colour. Three different treatments across three columns
-   made a row look like three unrelated things. */
-.listing td.name { font-family: var(--mono); }
-.listing td.size, .listing td.modified {
-  font: 0.8rem var(--mono);
-  color: var(--fg);
-  white-space: nowrap;
-}
+/* One row, one treatment: the name, the size and the time are the same family at the
+   same size, and what sets the name apart is that it is a link. Three different
+   treatments across three columns made a row look like three unrelated things. */
+/* An entry's cells, not every cell in the table: the panel is a cell too, and it is not
+   a listing row. */
+.listing tr.entry td { font: 0.85rem var(--mono); color: var(--fg); }
+.listing td.size, .listing td.modified { white-space: nowrap; }
 .listing tbody tr.entry:nth-of-type(even) { background: var(--stripe); }
 .listing tbody tr.entry:hover { background: var(--hover); }
 
@@ -82,21 +81,26 @@ body.js .without-js { display: none; }
 
 /* Everything below is the query panel, which exists only where the script ran: the
    button is hidden until it says so, so nothing on the page offers what it cannot do. */
-button { font: inherit; color: var(--link); background: var(--bg); cursor: pointer; }
+/* `font: inherit` would put a button in the monospace of the cell it sits in, on the
+   cell's line height, which leaves the word sitting low in its own box. Each of these
+   carries its own font and line height instead. */
+button { color: var(--link); background: var(--bg); cursor: pointer; }
 .ask {
   display: none;
   margin-left: 0.6rem;
-  padding: 0 0.45rem;
+  padding: 0.1rem 0.5rem;
   border: 1px solid var(--edge);
-  border-radius: 0.6rem;
-  font-size: 0.7rem;
+  border-radius: 0.25rem;
+  font: 0.72rem/1.4 system-ui, -apple-system, sans-serif;
+  vertical-align: middle;
 }
-body.js .ask { display: inline; }
+body.js .ask { display: inline-block; }
 .ask:hover, .chip:hover, .run:hover { background: var(--hover); border-color: var(--link); }
 
 /* The panel sits between striped rows, so it takes a surface of its own and an edge down
    the side: a second shade of the same grey would read as one more row. */
 tr.panel > td {
+  font: 0.85rem system-ui, -apple-system, sans-serif;
   background: var(--surface);
   border-top: 1px solid var(--edge);
   border-bottom: 1px solid var(--edge);
@@ -133,13 +137,20 @@ tr.panel > td {
 /* Both take as much as someone wants to write — a projection of thirty columns, a
    predicate over several — so they wrap, and they can be dragged bigger. */
 .panel-body textarea { width: 22rem; resize: both; vertical-align: middle; }
+/* The download is an anchor rather than a button, so it can be copied, opened in a tab
+   of its own, or saved the way any other link is — and it still looks like what it sits
+   beside. */
 .run {
   padding: 0.25rem 0.8rem;
   border: 1px solid var(--edge);
   border-radius: 0.3rem;
-  font-size: 0.8rem;
-  font-weight: 600;
+  font: 600 0.8rem/1.5 system-ui, -apple-system, sans-serif;
+  color: var(--link);
+  background: var(--bg);
+  cursor: pointer;
 }
+a.run { display: inline-block; text-decoration: none; }
+a.run:hover { text-decoration: none; }
 
 /* Each of these takes the whole width: the column list is long, a url wraps, and a
    result table scrolls sideways rather than widening the page. */
