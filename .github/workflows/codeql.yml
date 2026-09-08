@@ -1,0 +1,67 @@
+name: CodeQL
+
+# Two languages, because the service is written in one and serves the other: the
+# directory page's script is `src/listing/page.js`, a file of its own rather than a string
+# inside a Rust literal, so the JavaScript extractor finds it the way it finds any script.
+# Writing it inline would have put it out of reach of this workflow entirely.
+#
+# What this adds over `cargo clippy` and `cargo deny` in ci.yml is a third question. Clippy
+# reads one function at a time and cargo-deny reads the dependency list; CodeQL follows a
+# value from where it enters to where it is used, which is the shape of the things this
+# repository actually worries about — a caller's string reaching a path or a url, a
+# credential reaching a log line.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # New queries ship with each CodeQL release, so a weekly run finds things in code that
+  # has not changed since the last one. Nothing else here has that property, which is why
+  # this workflow has a schedule and ci.yml does not.
+  schedule:
+    - cron: "23 3 * * 2"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      # Uploading the results is the whole point; the other two are what the action reads
+      # to attribute them to a commit and a workflow run.
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      # One language failing says nothing about the other, and finding out about both in
+      # one run is the difference between one round trip and two.
+      fail-fast: false
+      matrix:
+        # `rust` has been generally available since CodeQL 2.23.3.
+        # `javascript-typescript` is the identifier for both, whichever the repository has.
+        language: [rust, javascript-typescript]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          # Neither language needs a build to be extracted. For Rust that is a deliberate
+          # choice rather than the only option: building would analyse this crate's
+          # dependencies as well, which `cargo deny` already watches for advisories, and
+          # would spend the runner's time compiling DataFusion to say so.
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
