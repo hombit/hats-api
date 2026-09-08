@@ -26,7 +26,7 @@ use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{Region, Spatial};
+use crate::region::{Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -443,6 +443,11 @@ struct QueryRequest {
     /// one: a parquet file carries nothing that says which of its columns are a position.
     ra_column: Option<String>,
     dec_column: Option<String>,
+    /// The file's HEALPix index column, and the order its values are at — `_healpix_29`
+    /// and 29 for a HATS catalog that took the recommendation. Optional, and an
+    /// accelerator only: they change what a query costs and never which rows come back.
+    healpix_column: Option<String>,
+    healpix_order: Option<u8>,
     /// `json` (the default) or `parquet`.
     format: Option<String>,
     /// Most rows to return.
@@ -482,7 +487,30 @@ impl QueryRequest {
     /// nothing to test and would return every row in the file, which a caller cannot tell
     /// from a region that contained them all; a column named with no region does nothing,
     /// so a request carrying one is a caller who believes otherwise.
+    ///
+    /// The index column is the part that may be left out of a region search, since a file
+    /// need not have one and a query is answered the same either way. What it may not be is
+    /// half-given: the column without the order, or the order without the column, is a
+    /// request that means nothing until both are known. Named with no region at all it is
+    /// refused like the coordinates are — it would accelerate nothing.
     fn spatial(&self) -> Result<Option<Spatial<'_>>, ApiError> {
+        let healpix = match (self.healpix_column.as_deref(), self.healpix_order) {
+            (None, None) => None,
+            (Some(column), Some(order)) => Some(Healpix { column, order }),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "healpix_column and healpix_order travel together: a HEALPix index \
+                     column may be called anything and be written at any order, so the \
+                     order is what says which cell a value is",
+                ));
+            }
+        };
+        if self.region.is_none() && healpix.is_some() {
+            return Err(ApiError::bad_request(
+                "healpix_column speeds up a region search, and this request carries no \
+                 region; a query on that column alone is a filters or where expression",
+            ));
+        }
         match (
             self.region.as_deref(),
             self.ra_column.as_deref(),
@@ -493,6 +521,7 @@ impl QueryRequest {
                 regions,
                 ra_column,
                 dec_column,
+                healpix,
             })),
             (Some(_), _, _) => Err(ApiError::bad_request(
                 "region is tested against two columns of the file, so a request carrying \
@@ -1020,6 +1049,8 @@ mod tests {
             region: None,
             ra_column: None,
             dec_column: None,
+            healpix_column: None,
+            healpix_order: None,
             format: None,
             limit: None,
         };

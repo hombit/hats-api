@@ -303,6 +303,101 @@ quote and no second parser.
 - Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
   widened before the arithmetic rather than the trigonometry running at single precision.
   `region::tests` crosses both column types against both right-ascension conventions.
+- A caller's shape is validated once, into a `region::Shape`, and everything downstream
+  reads that. Two readings of one field — the predicate's and the covering's — is how the
+  two come to disagree about what `dec: [10, 10]` meant.
+
+## The HEALPix covering
+
+`healpix.rs` turns a shape into cells: which partitions of a catalog it can touch, and
+which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds them.
+
+- **Two sets, and each may only be wrong one way.** The outer set contains the shape, so a
+  row outside it really is outside; the inner set is contained by it, so a row inside it
+  really is inside. Every widening is allowed on the outer set and every loss on the inner
+  one; the reverse of either is a wrong row. `a_covering_brackets_its_shape` asks both
+  questions of a lattice over the whole sky, which is what catches a covering that drifted.
+- **Only the outer set is about being right.** It contains the region, so nothing it
+  rejects was wanted, and `outer AND exact` alone would be a complete and correct filter.
+  The inner set never removes a row — it says which rows need no geometry. Keep that
+  distinction when changing either: a bug in the outer set loses rows, a bug in the inner
+  set returns rows that are not in the region, and only the first of those is a question
+  about correctness of the *filter*.
+- The row predicate is `inner OR (outer AND exact)` and the partition test uses both. What
+  the inner half is worth per row is **not measured**: it costs two comparisons per inner
+  range on every row and saves the geometry only where DataFusion's `OR` short-circuits,
+  which needs the left side true for four rows in five. A batch well inside the region, in a
+  file sorted by the column, is that lopsided — which is the case it is kept for. If it is
+  ever dropped or defended further, do it with a benchmark.
+- **Never a covering at the order the column is written at.** A covering fine enough to be
+  exact along a boundary is of order 10⁷ cells for a one-degree circle at order 29, and a
+  row tested against thousands of ranges costs more than the trigonometry that was being
+  saved. Every depth here is capped well short of 29.
+- **Choosing partitions and testing rows are two coverings, not one at two scales.**
+  `Detail` is which. Choosing partitions is answered once per partition, so the range count
+  is free and the depth follows the *catalog's* order — at the catalog's own order a
+  partition the region merely touches is one cell and can only come back as a boundary, so
+  it is taken a couple of orders finer. Testing rows puts every range into an expression
+  every row meets, so the count is budgeted and the depth follows the *shape* — with a
+  floor at the partition's own order, since `Norder` and `Npix` give a partition's exact
+  span of cells without reading anything. Without the floor a region far larger than a
+  partition is covered at a scale that cannot tell one part of that partition from another,
+  and what survives `within` is a single range no row can fail. A change that makes one of
+  these better at the other's expense has made something worse.
+- **A range set is not a cheap membership test.** It lowers to `h BETWEEN … OR h BETWEEN …`,
+  which DataFusion evaluates as two comparison kernels and an `OR` per range over every
+  batch — linear in the ranges, no tree and no search. Sixty of them are more arithmetic per
+  row than the haversine they were meant to spare it. So the row-level ranges exist to
+  **skip row groups**, and are sized to that: a partition holds tens of groups and no set of
+  ranges can skip more than exist. Measured, the bytes read were identical at budgets of 8,
+  64 and 256 — only the expression's length differed.
+- **The covering goes on the left of the `AND`.** DataFusion's `AND` inspects the left side
+  first: all false skips the right entirely, and under a fifth true switches to evaluating
+  the right on the selected rows alone. That is the mechanism by which the covering spares
+  the trigonometry — not the covering's mere presence. Reversed, every row pays the sines.
+  The optimizer would put it back, classing `BETWEEN` as cheap and `sin` as expensive, but
+  an expression that depends on being corrected is one nobody can read.
+- What the alternatives to a range set cost, checked against DataFusion 55 rather than
+  assumed, since the answer is the library's and not ours:
+  - **A hash set exists and is blind to statistics.** `h >> shift IN (cells…)` becomes an
+    `Int64StaticFilter` — constant time per row. But `PruningPredicate` needs a column, and
+    a shifted column is not one, so it prunes nothing. It could only ever be an addition
+    beside a small range set, and it needs measuring first.
+  - **Nothing searches, and sortedness is used only for I/O.** There is no tree or binary
+    search in the expression layer. A sorted column pays off through the page index, which
+    the ranges already drive. A merge against a table of ranges would be the asymptotically
+    right shape, but `PiecewiseMergeJoinExec` takes a single inequality, is experimental,
+    and would mean giving up the one-scan-with-a-filter plan.
+  - **`ScalarUDFImpl::preimage` is the sanctioned way to say this.** A UDF that declares
+    the interval `f(x) = v` inverts to has `f(col) = v` rewritten into `col >= lo AND
+    col < hi`, which prunes. It covers comparisons and not `IN`, so a set of cells lands
+    back on the range expression — by the optimizer's hand rather than ours.
+- **Budget the boundary, not the area.** The interior of a shape merges into few ranges
+  whatever the depth — the whole sky is one — so the range count follows the boundary's
+  length. Sizing by area instead is the same thing up to a constant for a round shape and
+  wrong for a thin one, and a strip of declination is an ordinary request.
+- **No cone wider than a quarter turn.** `cone_coverage_approx` stops being a superset as
+  the radius approaches a half turn: at 179 degrees it comes back missing a tenth of the
+  cells. A disk larger than a hemisphere is the complement of the disk opposite it, and a
+  declination band is cut at the equator so each half is measured from its nearer pole.
+- **`zone_coverage` is the inner covering's, never the outer's.** Its walk along an edge
+  drops wedges of the cell beyond it when the edge lies on a seam between base cells and
+  the box reaches into a polar cap — and a box's edges are exactly where a caller writes a
+  round number. Dropping cells is what an inner covering is allowed to do. For the outer
+  one a box is the intersection of two supersets built from cones: its declination band,
+  and the cones enclosing the pieces of its arc.
+- **A HEALPix column is a name *and* an order.** HATS recommends `_healpix_29` and
+  recommends nothing else about it, so the column may be called anything and be written at
+  any order, in any integer type wide enough for it — an order-13 catalog fits `Int32`. The
+  order is what says which cell a value is, so it is never inferred from the name: read at
+  the wrong order every bound is one no row satisfies, which returns nothing rather than
+  failing. `SpatialIndex::resolve` refuses a type too narrow for the order it was given.
+- **The column is an accelerator, and that is a claim about every answer.** Naming it
+  changes what a query costs and never which rows come back, which is why
+  `region::tests` runs every case both ways over one fixture and asserts they agree —
+  and why one test measures `data_bytes_read` to show the prefilter ran at all. A file
+  sorted by the column skips row groups; one that is not gets the same rows, having only
+  saved the trigonometry. Nothing checks for the sorting, because nothing depends on it.
 
 ## What a caller's file is like
 

@@ -6,11 +6,12 @@
 //! a pattern match against whatever phrasing the caller happened to use, and an
 //! unrecognised one degrades to reading every partition without saying so.
 //!
-//! Each shape lowers to one boolean expression over two columns of the file, and the array
-//! of them is a union: a row inside any shape qualifies. Nothing here prunes partitions —
-//! a request names one file today — but the expression is built so that the parts of it
-//! that *can* prune are plain comparisons against the coordinate columns, which row-group
-//! statistics and the page index both understand.
+//! Each shape lowers to one boolean expression over the file's columns, and the array of
+//! them is a union: a row inside any shape qualifies. The expression is built so that the
+//! parts of it that *can* prune are plain comparisons against a column, which row-group
+//! statistics and the page index both understand — the coordinate bounds around the exact
+//! test here, and the HEALPix ranges [`crate::healpix`] puts in front of it where the file
+//! has an index column to compare.
 //!
 //! Degrees for every position, and ICRS throughout. Only an extent carries its unit in its
 //! name, because only an extent has a second unit anyone would write: a bare `radius`
@@ -27,7 +28,7 @@ use datafusion::prelude::lit;
 use serde::Deserialize;
 
 use crate::error::ApiError;
-use crate::sql;
+use crate::{healpix, sql};
 
 /// The field these refusals name, which is what the caller wrote in their body.
 const FIELD: &str = "region";
@@ -90,6 +91,27 @@ pub enum Region {
     Box { ra: [f64; 2], dec: [f64; 2] },
 }
 
+/// One shape with every field checked and in the one form the rest of the code reads.
+///
+/// [`Region`] is what a caller writes and carries their spellings: two ways to give a
+/// radius, a declination range that might be the wrong way round, a right ascension pair
+/// that has to be read as a direction rather than as a range. This is what that means once,
+/// so the predicate and the HEALPix covering ([`crate::healpix`]) are two readings of the
+/// same numbers rather than two validations that can drift apart.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shape {
+    /// Centre and radius, both in degrees; the radius is in `(0, 180]`.
+    Circle { ra: f64, dec: f64, radius: f64 },
+    /// The eastward arc from `ra_from` through `ra_span` degrees, `ra_span` in `(0, 360]`,
+    /// and the declination range, `dec_from <= dec_to`.
+    Box {
+        ra_from: f64,
+        ra_span: f64,
+        dec_from: f64,
+        dec_to: f64,
+    },
+}
+
 /// A spatial constraint, and the two columns of the file it is tested against.
 ///
 /// The columns are named by the request rather than looked for. A parquet file carries
@@ -107,12 +129,34 @@ pub struct Spatial<'a> {
     pub regions: &'a [Region],
     pub ra_column: &'a str,
     pub dec_column: &'a str,
+    /// The file's HEALPix index column, where it has one.
+    ///
+    /// Optional, and named rather than looked for, for the same reason the coordinates are:
+    /// a file that happens to have a column of that name says nothing about what is in it.
+    /// Absent means every row reaches the trigonometry.
+    pub healpix: Option<Healpix<'a>>,
 }
 
-/// The union of every shape, as one predicate over the file's coordinate columns.
+/// A HEALPix index column: which column, and what order its values are at.
+///
+/// Both, because neither is fixed. HATS recommends the column be called `_healpix_29` and
+/// recommends no more than that, so a catalog may name it anything and write it at any
+/// order — and the order is what a value means. Taken from a caller's request, or from a
+/// catalog's `properties`, but never from the column's name: a name is not a promise, and
+/// the wrong order turns every bound into one no row can satisfy.
+#[derive(Debug, Clone, Copy)]
+pub struct Healpix<'a> {
+    pub column: &'a str,
+    pub order: u8,
+}
+
+/// The union of every shape, as one predicate over the file's columns.
 ///
 /// The array is a union rather than an intersection, which is worth saying in a refusal
 /// too: a caller coming from `where` reads a list as something joined by `AND`.
+///
+/// The geometric test is the answer; a named HEALPix column only puts cheaper tests in
+/// front of it, and [`crate::healpix`] is where that happens.
 pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiError> {
     if spatial.regions.is_empty() {
         return Err(ApiError::bad_request(format!(
@@ -121,17 +165,34 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
     }
     let ra = sql::coordinate_column(schema, spatial.ra_column, "ra_column")?;
     let dec = sql::coordinate_column(schema, spatial.dec_column, "dec_column")?;
-    spatial
+    let shapes = spatial
         .regions
         .iter()
-        .map(|region| region.predicate(&ra, &dec))
-        .reduce(|left, right| Ok(left?.or(right?)))
-        .unwrap_or_else(|| unreachable!("the array was checked to be non-empty"))
+        .map(Region::shape)
+        .collect::<Result<Vec<_>, _>>()?;
+    let exact = shapes
+        .iter()
+        .map(|shape| shape.predicate(&ra, &dec))
+        .reduce(Expr::or)
+        .unwrap_or_else(|| unreachable!("the array was checked to be non-empty"));
+    match spatial.healpix {
+        None => Ok(exact),
+        Some(Healpix { column, order }) => {
+            let index = healpix::SpatialIndex::resolve(schema, column, order, "healpix_order")?;
+            // A request names one file and says nothing about a catalog above it, so there
+            // is no partition order to put a floor under the covering.
+            let detail = healpix::Detail::Rows {
+                partition_order: None,
+            };
+            let coverage = healpix::Coverage::of(&shapes, detail);
+            Ok(coverage.prefilter(None, &index, exact))
+        }
+    }
 }
 
 impl Region {
-    /// One shape, as a predicate over the two coordinate expressions.
-    fn predicate(&self, ra_column: &Expr, dec_column: &Expr) -> Result<Expr, ApiError> {
+    /// This shape with every field checked, in the one form the rest of the code reads.
+    pub fn shape(&self) -> Result<Shape, ApiError> {
         match *self {
             Self::Circle {
                 ra,
@@ -142,7 +203,7 @@ impl Region {
                 finite("ra", ra)?;
                 declination("dec", dec)?;
                 let radius = radius(radius_deg, radius_arcsec)?;
-                Ok(circle(ra_column, dec_column, ra, dec, radius))
+                Ok(Shape::Circle { ra, dec, radius })
             }
             Self::Box {
                 ra: [ra_from, ra_to],
@@ -158,11 +219,29 @@ impl Region {
                          first cannot be the greater of the two"
                     )));
                 }
-                let span = eastward_span(ra_from, ra_to)?;
-                Ok(sky_box(
-                    ra_column, dec_column, ra_from, span, dec_from, dec_to,
-                ))
+                let ra_span = eastward_span(ra_from, ra_to)?;
+                Ok(Shape::Box {
+                    ra_from,
+                    ra_span,
+                    dec_from,
+                    dec_to,
+                })
             }
+        }
+    }
+}
+
+impl Shape {
+    /// This shape, as a predicate over the two coordinate expressions.
+    pub(crate) fn predicate(&self, ra_column: &Expr, dec_column: &Expr) -> Expr {
+        match *self {
+            Self::Circle { ra, dec, radius } => circle(ra_column, dec_column, ra, dec, radius),
+            Self::Box {
+                ra_from,
+                ra_span,
+                dec_from,
+                dec_to,
+            } => sky_box(ra_column, dec_column, ra_from, ra_span, dec_from, dec_to),
         }
     }
 }
@@ -367,12 +446,14 @@ fn declination(name: &str, value: f64) -> Result<(), ApiError> {
 
 #[cfg(test)]
 mod tests {
+    use std::f64::consts::FRAC_PI_2;
     use std::sync::Arc;
 
     use datafusion::arrow::array::{ArrayRef, Float32Array, Float64Array, Int64Array, RecordBatch};
     use datafusion::parquet::arrow::ArrowWriter;
 
     use super::*;
+    use crate::healpix::DEFAULT_HEALPIX_COLUMN_NAME;
     use crate::query::{self, Order, Predicate, Projection, Selection};
     use crate::storage::RemoteFile;
 
@@ -401,31 +482,67 @@ mod tests {
         F32,
     }
 
+    /// Whether the file carries a HEALPix column, and whether the request names it.
+    ///
+    /// A HATS partition has one and a lone parquet file need not, so both are ordinary. It
+    /// is an accelerator and nothing else, which is a claim about every answer rather than
+    /// about one: every case below is run both ways and has to agree.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum HealpixColumn {
+        Absent,
+        Present,
+    }
+
     /// A fixture: where the points are written and how.
     #[derive(Debug, Clone, Copy)]
     struct Fixture {
         convention: Convention,
         precision: Precision,
+        index: HealpixColumn,
     }
 
     impl Fixture {
         /// Every combination, since a region has to answer the same way over all of them.
-        const ALL: [Self; 4] = [
+        const ALL: [Self; 8] = [
             Self {
                 convention: Convention::Positive,
                 precision: Precision::F64,
+                index: HealpixColumn::Absent,
             },
             Self {
                 convention: Convention::Positive,
                 precision: Precision::F32,
+                index: HealpixColumn::Absent,
             },
             Self {
                 convention: Convention::Signed,
                 precision: Precision::F64,
+                index: HealpixColumn::Absent,
             },
             Self {
                 convention: Convention::Signed,
                 precision: Precision::F32,
+                index: HealpixColumn::Absent,
+            },
+            Self {
+                convention: Convention::Positive,
+                precision: Precision::F64,
+                index: HealpixColumn::Present,
+            },
+            Self {
+                convention: Convention::Positive,
+                precision: Precision::F32,
+                index: HealpixColumn::Present,
+            },
+            Self {
+                convention: Convention::Signed,
+                precision: Precision::F64,
+                index: HealpixColumn::Present,
+            },
+            Self {
+                convention: Convention::Signed,
+                precision: Precision::F32,
+                index: HealpixColumn::Present,
             },
         ];
 
@@ -483,7 +600,7 @@ mod tests {
                     )),
                 }
             };
-            let batch = RecordBatch::try_from_iter_with_nullable([
+            let mut columns = vec![
                 (
                     "objectid",
                     Arc::new(Int64Array::from_iter_values(
@@ -501,8 +618,21 @@ mod tests {
                     column(points.iter().map(|(_, _, dec)| *dec).collect()),
                     true,
                 ),
-            ])
-            .unwrap();
+            ];
+            if self.index == HealpixColumn::Present {
+                // From the coordinates the file holds rather than from the ones it was
+                // given: at single precision the two differ, and an index computed from the
+                // unrounded position would place a row in a cell its own columns say it is
+                // not in — which is a disagreement invented by the fixture.
+                columns.push((
+                    DEFAULT_HEALPIX_COLUMN_NAME,
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|(_, ra, dec)| healpix_cell(*ra, *dec)),
+                    )) as ArrayRef,
+                    false,
+                ));
+            }
+            let batch = RecordBatch::try_from_iter_with_nullable(columns).unwrap();
 
             let dir = tempfile::TempDir::new().unwrap();
             let path = dir.path().join("part0.parquet");
@@ -516,7 +646,15 @@ mod tests {
         /// The ids these regions select, according to the service.
         async fn selected(self, regions: &[Region]) -> Vec<i64> {
             let (_dir, file) = self.on_disk();
-            ids(&file, regions, "objRA", "objDec").await.unwrap()
+            ids(&file, regions, "objRA", "objDec", self.healpix_column())
+                .await
+                .unwrap()
+        }
+
+        /// What a request would name as the HEALPix column, which is nothing unless the file
+        /// has one.
+        fn healpix_column(self) -> Option<&'static str> {
+            (self.index == HealpixColumn::Present).then_some(DEFAULT_HEALPIX_COLUMN_NAME)
         }
 
         /// The same question answered here, in a few lines of arithmetic per point, so that
@@ -534,6 +672,21 @@ mod tests {
                 .map(|(id, _, _)| id)
                 .collect()
         }
+    }
+
+    /// The order the fixture writes its HEALPix column at, which is the one HATS
+    /// recommends — and the only thing about it that is a recommendation rather than a
+    /// choice, which is why the request has to say it.
+    const FIXTURE_ORDER: u8 = 29;
+
+    /// The HEALPix cell of a position at [`FIXTURE_ORDER`], as the column holds it.
+    fn healpix_cell(ra: f64, dec: f64) -> i64 {
+        let hash = cdshealpix::nested::hash(
+            FIXTURE_ORDER,
+            ra.rem_euclid(360.0).to_radians(),
+            dec.to_radians().clamp(-FRAC_PI_2, FRAC_PI_2),
+        );
+        i64::try_from(hash).unwrap()
     }
 
     /// Whether a point is in a region, worked out here rather than shared with the code
@@ -618,6 +771,7 @@ mod tests {
         regions: &[Region],
         ra_column: &str,
         dec_column: &str,
+        healpix_column: Option<&str>,
     ) -> Result<Vec<i64>, ApiError> {
         let selection = Selection {
             projection: Projection::Columns("objectid"),
@@ -626,6 +780,10 @@ mod tests {
                 regions,
                 ra_column,
                 dec_column,
+                healpix: healpix_column.map(|column| Healpix {
+                    column,
+                    order: FIXTURE_ORDER,
+                }),
             }),
             limit: None,
         };
@@ -638,6 +796,132 @@ mod tests {
         }
         ids.sort_unstable();
         Ok(ids)
+    }
+
+    /// The HEALPix column is worth naming: it reads less of the file for the same rows.
+    ///
+    /// The other tests above prove the answer does not change, which a prefilter that never
+    /// ran would also pass — so this is the half that says it ran. A file sorted by the
+    /// column with row groups small enough to be skipped is what lets it show: the bounds go
+    /// into the row-group statistics, and a query over a small circle then fetches the few
+    /// groups whose cells reach it instead of every group in the file.
+    ///
+    /// A file that is *not* sorted that way is where the same query reads everything and
+    /// still answers correctly. That is the case the fixtures above cover, and it is why
+    /// this test writes its own file rather than making the fixtures larger: how a catalog
+    /// was written is not something this service gets to require.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn naming_the_healpix_column_reads_less_of_the_file() {
+        use datafusion::parquet::file::properties::WriterProperties;
+
+        // Enough rows over enough row groups for statistics to have something to say, and
+        // scattered over the whole sky so the groups are far apart on it.
+        const ROWS: i64 = 60_000;
+        const ROWS_PER_GROUP: usize = 2_000;
+
+        let mut points: Vec<(i64, f64, f64)> = (0..ROWS)
+            .map(|id| {
+                let mixed = id.cast_unsigned().wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let unit = |shift: u32| {
+                    let bits = u32::try_from((mixed >> shift) & 0xFFFF_FFFF).unwrap();
+                    f64::from(bits) / f64::from(u32::MAX)
+                };
+                let dec = (unit(0) * 2.0 - 1.0).asin().to_degrees();
+                (id, unit(32) * 360.0, dec)
+            })
+            .collect();
+        // Sorted by the column, which is what a HATS importer writes and what makes the
+        // statistics of one row group say something the next one's do not.
+        points.sort_by_key(|&(_, ra, dec)| healpix_cell(ra, dec));
+
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            (
+                "objectid",
+                Arc::new(Int64Array::from_iter_values(
+                    points.iter().map(|(id, _, _)| *id),
+                )) as ArrayRef,
+                false,
+            ),
+            (
+                "objRA",
+                Arc::new(Float64Array::from_iter_values(
+                    points.iter().map(|(_, ra, _)| *ra),
+                )) as ArrayRef,
+                false,
+            ),
+            (
+                "objDec",
+                Arc::new(Float64Array::from_iter_values(
+                    points.iter().map(|(_, _, dec)| *dec),
+                )) as ArrayRef,
+                false,
+            ),
+            (
+                DEFAULT_HEALPIX_COLUMN_NAME,
+                Arc::new(Int64Array::from_iter_values(
+                    points.iter().map(|&(_, ra, dec)| healpix_cell(ra, dec)),
+                )) as ArrayRef,
+                false,
+            ),
+        ])
+        .unwrap();
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("part0.parquet");
+        let properties = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(ROWS_PER_GROUP))
+            .build();
+        let mut writer = ArrowWriter::try_new(
+            std::fs::File::create(&path).unwrap(),
+            batch.schema(),
+            Some(properties),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let file = crate::storage::open_mounted(&path).unwrap();
+
+        let regions = [circle_at(120.0, 20.0, 1.0)];
+        let read = async |healpix| {
+            let selection = Selection {
+                projection: Projection::Columns("objectid"),
+                predicate: Predicate::All,
+                spatial: Some(Spatial {
+                    regions: &regions,
+                    ra_column: "objRA",
+                    dec_column: "objDec",
+                    healpix,
+                }),
+                limit: None,
+            };
+            let result = query::run(&file, &selection, limits(), Order::File)
+                .await
+                .unwrap();
+            (result.num_rows(), result.data_bytes_read)
+        };
+
+        let (rows, whole) = read(None).await;
+        let (same_rows, pruned) = read(Some(Healpix {
+            column: DEFAULT_HEALPIX_COLUMN_NAME,
+            order: FIXTURE_ORDER,
+        }))
+        .await;
+
+        assert!(
+            rows > 0,
+            "the circle selects nothing, so this checks nothing"
+        );
+        assert_eq!(rows, same_rows, "the prefilter changed the answer");
+        // What the cells add, not what pruning is worth: the query without them still
+        // carries the circle's coordinate bounds, and those prune this file too. On this
+        // fixture it is about two and a half times less; the bound is loose enough that a
+        // change in how DataFusion prunes moves it without breaking it, and tight enough
+        // that a prefilter which never ran does.
+        assert!(
+            pruned * 2 < whole,
+            "naming the column read {pruned} bytes against {whole} without it, which is no \
+             pruning worth the name"
+        );
     }
 
     fn circle_at(ra: f64, dec: f64, radius_deg: f64) -> Region {
@@ -733,6 +1017,7 @@ mod tests {
         let fixture = Fixture {
             convention: Convention::Positive,
             precision: Precision::F64,
+            index: HealpixColumn::Present,
         };
         let dec = [5.0, 15.0];
         let across = fixture.selected(&[box_over([355.0, 5.0], dec)]).await;
@@ -756,6 +1041,7 @@ mod tests {
         let fixture = Fixture {
             convention: Convention::Positive,
             precision: Precision::F64,
+            index: HealpixColumn::Present,
         };
         let regions = [
             circle_at(320.65747, -12.35315, 10.0),
@@ -776,6 +1062,7 @@ mod tests {
         let fixture = Fixture {
             convention: Convention::Positive,
             precision: Precision::F64,
+            index: HealpixColumn::Present,
         };
         let arcseconds = Region::Circle {
             ra: 320.65747,
@@ -798,20 +1085,68 @@ mod tests {
         let (_dir, file) = Fixture {
             convention: Convention::Positive,
             precision: Precision::F64,
+            index: HealpixColumn::Present,
         }
         .on_disk();
         let regions = [circle_at(320.65747, -12.35315, 10.0)];
-
-        let rows = ids(&file, &regions, "objRA", "objDec").await.unwrap();
+        let rows = ids(&file, &regions, "objRA", "objDec", None).await.unwrap();
         assert!(!rows.is_empty());
-        assert_eq!(ids(&file, &regions, "objra", "objdec").await.unwrap(), rows);
+        assert_eq!(
+            ids(&file, &regions, "objra", "objdec", None).await.unwrap(),
+            rows
+        );
         // Neither the file's spelling nor its lowercase.
-        let error = ids(&file, &regions, "OBJRA", "objdec")
+        let error = ids(&file, &regions, "OBJRA", "objdec", None)
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("OBJRA"), "{error}");
-        assert!(ids(&file, &regions, "objra", "nosuchcolumn").await.is_err());
+        assert!(
+            ids(&file, &regions, "objra", "nosuchcolumn", None)
+                .await
+                .is_err()
+        );
+        // And the index column, which is spelled the same way and refused the same way.
+        assert_eq!(
+            ids(
+                &file,
+                &regions,
+                "objRA",
+                "objDec",
+                Some(DEFAULT_HEALPIX_COLUMN_NAME)
+            )
+            .await
+            .unwrap(),
+            rows
+        );
+        let error = ids(&file, &regions, "objRA", "objDec", Some("_HEALPIX_29"))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("_HEALPIX_29"), "{error}");
+    }
+
+    /// The index column holds a HEALPix index, which is a whole number wide enough to be
+    /// one. A float column of the right name is refused rather than compared against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_index_column_has_to_be_able_to_hold_an_index() {
+        let (_dir, file) = Fixture {
+            convention: Convention::Positive,
+            precision: Precision::F64,
+            index: HealpixColumn::Present,
+        }
+        .on_disk();
+        let error = ids(
+            &file,
+            &[circle_at(0.0, 0.0, 1.0)],
+            "objRA",
+            "objDec",
+            Some("objDec"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("objDec"), "{error}");
     }
 
     /// A column that is not a number cannot hold a coordinate, and saying so is better than
@@ -823,7 +1158,7 @@ mod tests {
         std::fs::write(&path, query::tests::fixture()).unwrap();
         let file = crate::storage::open_mounted(&path).unwrap();
 
-        let error = ids(&file, &[circle_at(0.0, 0.0, 1.0)], "band", "objectid")
+        let error = ids(&file, &[circle_at(0.0, 0.0, 1.0)], "band", "objectid", None)
             .await
             .unwrap_err()
             .to_string();
@@ -848,6 +1183,7 @@ mod tests {
                 regions,
                 ra_column: "ra",
                 dec_column: "dec",
+                healpix: None,
             },
         )
     }

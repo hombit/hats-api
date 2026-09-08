@@ -30,7 +30,7 @@ which.
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | todo | |
-| 5.2 | spatial predicate | part | `circle` and `box` refine per row against a parquet target. What is left is the HATS target — partition pruning, the `_healpix_29` prefilter, `polygon`/`moc` — and `POST /api/v1/hats`. Order policy and range budget to be settled by measurement first |
+| 5.2 | spatial predicate | part | What is left needs a catalog to point at: calling `Coverage::cover` per partition, `Coverage::within` per boundary partition, `polygon`/`moc`, and `POST /api/v1/hats`. Waits on §5.1 for the partition list and for `properties` to supply the column names |
 | 5.3 | sync / plan / auto | todo | |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
@@ -265,7 +265,7 @@ The two shapes still to add:
 
 - **`moc: {url: …}` is a caller-named fetch** and goes through §8.3 like any other.
 - **Every shape has to lower to a MOC** for §5.2's partition pruning. `circle` and `box`
-  today lower only to a per-row predicate, which is all a single-file target needs.
+  do; `polygon` and `moc` arrive needing both that and a per-row predicate.
 - **Intersection and difference** are cheap to add as explicit combinators over the array.
 
 ### 3.4 The file-server request shape
@@ -388,8 +388,16 @@ A HATS catalog is a directory with `properties`, `partition_info.csv`,
 - `properties.rs` — the `properties` file: catalog name, type, ra/dec column names,
   `hats_order`, row count.
 - `partitions.rs` — the partition list, by the tiers below.
-- `pixels.rs` — HEALPix nested-scheme arithmetic: region → covering pixel set, pixel →
-  `_healpix_29` range, ancestor/descendant tests. Use `cdshealpix` rather than writing it.
+
+`properties` is also where the column names come from, so that a request against a catalog
+need not repeat what the catalog already says: `hats_col_ra` and `hats_col_dec` for the
+coordinates, and the HEALPix column and its order for `healpix.rs`. The spec names no key
+for the latter pair — the column is a *recommended* `_healpix_29` and nothing more — so
+decide what a catalog that says nothing gets. Reading the column's own name for its order
+is the one thing that is not allowed: at the wrong order every bound is one no row
+satisfies, and the answer is no rows rather than an error.
+
+The pixel arithmetic itself is done and is `healpix.rs`, so this step needs none of it.
 
 **Partition discovery, in priority order.** Each tier is used only when the one above is
 absent:
@@ -447,26 +455,45 @@ in the parquet metadata cache.
    dropped unless `select` asked for them.
 4. Union, project to `select`, return.
 
-**Prefiltering on `_healpix_29` is required where the column exists**, but not as one exact
-covering — a covering fine enough to be exact is enormous (at order 29 a one-degree circle's
-boundary is of order 10⁷ cells), and testing membership against thousands of ranges costs
-more per row than the trigonometry it replaces. Two things keep it cheap:
+Steps 1 and 3 are `healpix::Coverage`'s to answer — `cover` for a partition, `within` to
+narrow the ranges to one, `prefilter` to build the expression — so what is left in this step
+is the code that has a catalog to ask about. The column and its order come from the request
+today; §5.1's `properties` is what will let a catalog supply them.
 
-- **Two coarse range sets, not one.** An **inner** set of cells wholly inside the region:
-  rows there are accepted with no geometric test. An **outer** set covering the region:
-  rows outside it are rejected with no geometric test. Only rows between the two — the
-  boundary shell — reach the trigonometry. Neither set has to be tight, so both stay small.
-- **Computed per boundary partition, not for the whole region.** The covering order is
-  chosen relative to that partition's own cell rather than to the region's size, so each
-  boundary partition contributes a handful of ranges however large the region is, and for a
-  large region most partitions are interior (step 1) and contribute none.
+Step 1 and step 3 need **two coverings, not one**: `healpix::Detail::Partitions` for the
+first, whose depth follows the catalog's order, and `Detail::Rows` for the third, whose
+range count is budgeted because every range is arithmetic on every row. Building one and
+using it for both is the mistake this is arranged to prevent.
 
-Size the range sets to what the page index can prune: the aim is skipping row groups and
-pages on a column the partition is already sorted by, not per-row membership. The order
-policy and the range budget are to be settled by measurement before implementing §5.2.
+Step 3's covering takes `partition_order`, and a catalog with partitions at several
+`Norder` levels therefore needs one per level among its boundary partitions — a handful,
+built once each and then `within`-ed per partition, not one per partition.
+
+**Drive step 1 from the region, not from the partition list.** Asking `cover` about every
+partition is a pass over the whole catalog to find the handful a region touches — a hundred
+thousand classifications to keep four. The region's covering has tens of ranges; the
+partitions overlapping each one are a search away if §5.1 hands over the list sorted by
+each partition's order-29 start. So what §5.1 should provide is that sorted list, and what
+this step should walk is the covering. `cover` stays the thing that classifies a candidate
+once found — it is the loop around it that should not be the catalog.
+
+**Search into the partition list; do not merge with it.** Both sides are sorted, which
+invites a merge, but they are nowhere near the same length: tens of ranges against a
+catalog's hundred thousand partitions. A merge is `O(R + P)` because it cannot skip, and a
+search is `O(R log P)` — for 30 ranges over 100,000 partitions, a hundred thousand steps
+against five hundred. Better still is to gallop, resuming each search from where the last
+one landed, which is `O(R log(P/R))` and is what a merge would be if it were allowed to
+skip. A plain merge only overtakes when the covering has about as many ranges as the
+catalog has partitions, and a region that large is one where most of the catalog is being
+opened anyway.
 
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
 still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.
+
+`polygon` and `moc` still need adding. Each needs a per-row geometric test of its own, and
+that is the harder half: `cdshealpix` covers a polygon, but a point-in-spherical-polygon
+test has to become a `datafusion` `Expr` over two columns, and a covering alone cannot
+answer a request exactly.
 
 **Parquet target:** steps 1 and 3's prefilter do not apply — there is one file and no
 `_healpix_29` to lean on — leaving the geometric test against the two columns the request

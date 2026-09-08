@@ -15,6 +15,8 @@ axum = "0.8"
 # WebDAV authenticates with Basic, which is a base64 of the caller's two options.
 base64 = "0.23"
 bytes = "1"
+# The HEALPix tesselation itself. Keep in sync with what `moc` resolves to.
+cdshealpix = "0.9.1"
 # Keep in sync with object_store
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytesize = { version = "2", features = ["serde"] }
@@ -25,6 +27,8 @@ globset = "0.4"
 html-escape = "0.2"
 http = "1"
 ipnet = "2"
+# Multi-Order Coverage maps: the covering of a region, and the set algebra over it.
+moc = "0.19.2"
 # Keep in sync with datafusion
 object_store = "0.13"
 object_store_opendal = "0.58"

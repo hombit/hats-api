@@ -187,18 +187,50 @@ pub fn filters(
 /// comes back is DataFusion's account of a coercion rather than anything naming the field
 /// the caller filled in.
 pub fn coordinate_column(schema: &DFSchema, name: &str, field: &str) -> Result<Expr, ApiError> {
+    let (column, data_type) = named_column(schema, name, field)?;
+    if !data_type.is_numeric() {
+        return Err(ApiError::bad_request(format!(
+            "{field}: {name:?} holds {data_type:?}, and a coordinate is a number of degrees"
+        )));
+    }
+    Ok(column)
+}
+
+/// A column of whole numbers a structured field names, with the integer type it is written
+/// at.
+///
+/// The type comes back because a bound on such a column is compared against a literal, and
+/// a literal of another integer type is not a comparison DataFusion keeps as one: it widens
+/// both sides to something no row-group statistic, page index or bloom filter is held in,
+/// which turns the cheapest test in the plan into a scan. Which types those are is
+/// [`crate::healpix`]'s to decide, since what fits depends on the order the caller says the
+/// column is at.
+pub fn integer_column(
+    schema: &DFSchema,
+    name: &str,
+    field: &str,
+) -> Result<(Expr, DataType), ApiError> {
+    let (column, data_type) = named_column(schema, name, field)?;
+    if !data_type.is_integer() {
+        return Err(ApiError::bad_request(format!(
+            "{field}: {name:?} holds {data_type:?}, and a HEALPix cell is a whole number"
+        )));
+    }
+    Ok((column, data_type))
+}
+
+/// One column name in the file's own spelling, with the type it holds.
+fn named_column(schema: &DFSchema, name: &str, field: &str) -> Result<(Expr, DataType), ApiError> {
     let mut ident = Ident::new(name);
     let Some(data_type) = resolve_segment(&mut ident, schema.fields()) else {
         return Err(ApiError::bad_request(format!(
             "{field}: this file has no column named {name:?}"
         )));
     };
-    if !data_type.is_numeric() {
-        return Err(ApiError::bad_request(format!(
-            "{field}: {name:?} holds {data_type:?}, and a coordinate is a number of degrees"
-        )));
-    }
-    Ok(Expr::Column(Column::new_unqualified(ident.value)))
+    Ok((
+        Expr::Column(Column::new_unqualified(ident.value)),
+        data_type,
+    ))
 }
 
 /// One boolean expression, however it was spelled: no alias, and nothing after it.

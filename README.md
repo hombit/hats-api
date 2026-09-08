@@ -221,6 +221,30 @@ then `AND`ed with `where`.
 required alongside `region`. They resolve the same way any column name does: the file's
 own spelling, or that spelling in lowercase.
 
+`healpix_column` and `healpix_order` name a HEALPix cell column, if the file has one — a
+HATS catalog's `_healpix_29`, written at order 29. They are optional, they travel
+together, and they change what a query costs rather than what it returns: the region is
+covered by HEALPix cells, so a row whose cell the region does not reach is dropped without
+the trigonometry, and one whose cell the region covers wholly is kept without it. Where the
+file is sorted by that column — which HATS catalogs usually are and no file has to be —
+those bounds also skip whole row groups, and `data_bytes_read` is where that shows.
+
+Both are needed because neither is fixed: HATS *recommends* the name `_healpix_29` and
+recommends nothing about it beyond that, so the order is what says which cell a value is.
+Naming a column with the wrong order would return no rows rather than an error, which is
+why it cannot be guessed from the name.
+
+```json
+{
+  "url": "s3://survey-data/catalog/dataset/Norder=1/Dir=0/Npix=44.parquet",
+  "region": [{ "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_arcsec": 10 }],
+  "ra_column": "ra",
+  "dec_column": "dec",
+  "healpix_column": "_healpix_29",
+  "healpix_order": 29
+}
+```
+
 Degrees throughout, and both ends of every range inclusive.
 
 | `type` | fields |
