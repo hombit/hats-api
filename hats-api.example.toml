@@ -119,6 +119,12 @@ max_concurrent_materializations = 4
 # the request that made it ends, cancelled or not.
 # scratch_dir = "/var/tmp/hats-api"
 
+# The most of a HATS catalog's "dataset/_metadata" that will be fetched to learn its
+# partition list. That file holds no rows, so its footer is the whole file, and a wide
+# schema over many partitions makes it large. Over this the partitions are listed
+# instead — the same partitions, without the per-partition sizes.
+max_catalog_metadata_bytes = "256MiB"
+
 # How much SQL one request may carry, in "select" and "where". Both bound the text the
 # caller wrote, not how many rows come back.
 

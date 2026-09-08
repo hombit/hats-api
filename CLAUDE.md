@@ -399,6 +399,102 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   sorted by the column skips row groups; one that is not gets the same rows, having only
   saved the trigonometry. Nothing checks for the sorting, because nothing depends on it.
 
+## What a catalog says about itself
+
+`hats/` reads a catalog's own files.
+
+**This service is not a validator, of a catalog or of a library.** It reads what it needs
+in order to answer the request in front of it, and it fails on a fault it *meets on the
+way* — a number that will not parse, a cell number its order does not have, a file that is
+not there. It does not go looking: no pass over the partitions checking they tile the sky,
+no summing row counts to see whether they match `hats_nrows`, no re-deriving what a
+dependency already computed. A broken catalog gets a broken answer, the same as it would
+from any other reader, and that is the catalog's problem and its writer's to fix.
+
+Two things follow, and both have been got wrong here before:
+
+- **A check is not free because it is cheap.** The argument "it is only one pass, and the
+  list is already sorted" is how a reader becomes a validator one pass at a time. Each one
+  is also a claim this service then has to be right about, on catalogs nobody here has
+  seen.
+- **A library's invariants are the library's.** `moc`'s ranges are disjoint and normalized
+  because that is what a `RangeMOC` is; `cdshealpix`'s coverings are supersets because that
+  is what the function returns. Nothing here re-checks any of it. Where `healpix::tests`
+  cross a covering against its shape, that is testing *this crate's* use of the library —
+  the depth it chose, the complement it took — not auditing the library.
+
+Everything below is about reading a catalog, not about judging one.
+
+- **A catalog is a directory, and `storage::open_dir` is how one is opened.** `open`
+  requires an object key because it is written for a caller naming a file; that refusal is
+  the only check a directory drops. A name from one of the catalog's own files — a
+  `file_path` out of `_metadata`, an entry out of a listing — is joined onto the prefix as
+  a *path*. Parsed as a url it could carry a scheme or an authority and address a different
+  server, which is a catalog choosing where this service connects. That one is not
+  validation: it is this service deciding where it will connect, which is never a caller's
+  file's decision to make.
+- **Where the properties file and the partition list both answer, the partitions do.** The
+  deepest order comes from the partitions because that is the list a query is read from.
+  `hats_order` is simply not consulted for it — not consulted and compared, just not
+  consulted.
+- **All three discovery sources describe the same catalog, so all three must produce the
+  same partitions.** They differ only in what they know *beside* the cells: `_metadata`
+  carries per-partition rows and bytes and the others carry nothing. That is why a
+  partition's path is derived from its cell and `hats_npix_suffix` rather than remembered
+  from whichever source found it — `partition_info.csv` carries no path at all, so deriving
+  is the only thing the three can agree on. `every_source_finds_the_same_partitions` is
+  what holds this.
+
+  The order they are tried in follows their cost. `partition_info.csv` is one small `GET`
+  and, with the path derived, it is everything a query needs to start — so it goes first
+  and answers for every catalog an importer writes. `_metadata` is the fallback and can be
+  hundreds of MB, since it holds no rows and its footer is therefore the whole file; over
+  `limits.max_catalog_metadata_bytes` it is not fetched at all and the listing answers
+  instead. Nothing may reorder these so that the expensive source is on the ordinary path.
+- **`hats_npix_suffix` of `/` means the partition is a directory of parquet files**, and it
+  is not an exotic shape — ZTF DR24's object catalog is written that way. So nothing may
+  assume a partition is one object: `Catalog::partition` returns a `Partitioned`, which is
+  one file or a directory, and reading the directory needs a listing. A catalog written
+  this way and served over `http(s)://` cannot be read at all, because the names inside a
+  partition appear nowhere in the catalog's own metadata.
+- **The properties file is Java properties, read by `java-properties` — but as UTF-8.**
+  The format specifies ISO-8859-1 and the crate defaults to it; a HATS file is written by
+  Python and is UTF-8. The two agree on ASCII and part company after it, so the default
+  would turn an accented name or a degree sign into different characters — data, not an
+  error. Do not "correct" that call back to the format's default. Nor hand-roll the parser
+  again: `\uXXXX`, a trailing `\` continuing a line, `:` or bare whitespace as a separator
+  and `!` as a comment are all in the format and none is in importer output today, which is
+  precisely the shape of a bug that appears years later on one catalog. What is ours is the
+  typed accessors — which keys exist and what they mean — not the reading.
+- **`hats.properties`, then `properties`, then `collection.properties`.** The first is the
+  preferred spelling and the second is deprecated, so that order costs an ordinary catalog
+  one request; a collection is asked for last and pays for the two misses ahead of it.
+  Nothing may probe for a collection first to save a request there — it would spend one on
+  every catalog instead.
+- **A collection is followed one hop, downwards, and only ever downwards.**
+  `hats_primary_table_url` is a url-shaped key in a file this service reads, so following
+  an absolute path or a url with a scheme would let that file choose where the service
+  connects next — past the endpoint rules, on a request whose caller named the collection
+  and nothing else. A relative path inside the collection is the whole of what is
+  followed; anything else is a 400 telling the caller to name the catalog directly.
+- **`hats_col_healpix` and `hats_col_healpix_order`, and `_healpix_29` at 29 when a catalog
+  says neither.** The order is never read off the column's *name*: `healpix13` is a real
+  catalog's column at order 13, and at the wrong order every bound is one no row satisfies —
+  no rows rather than an error. What makes the fallback safe is that it is a candidate and
+  not a claim: `SpatialIndex::resolve` asks the file's schema, and a file with no such
+  column is queried on the geometry alone. A request naming its own pair overrides it.
+- **The partition list is sorted by each cell's `healpix::span` start and searched into.**
+  That is what makes `Partitions::overlapping` two binary searches rather than a pass over
+  the catalog, and it is the order partitions, rows and plan entries come back in. Sorting
+  by name instead puts `Npix=1000` before `Npix=2`, which is neither spatial nor numeric.
+- **A cell that is not a cell fails where it is read, which is the shape every fault here
+  should have.** A pixel outside its order is refused as it is parsed, because converting
+  it is what this code was doing anyway and the conversion has no answer. Contrast a pass
+  over the finished list asking whether the cells tile the sky: that is a check gone
+  looking, and it does not belong here. The partitions are taken for a tiling, `Partitions`
+  is sorted and deduplicated on that basis, and a catalog whose cells nest gets whatever
+  falls out.
+
 ## What a caller's file is like
 
 **Nothing here may rely on how a HATS catalog happens to be written today.** Not the row

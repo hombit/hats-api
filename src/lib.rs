@@ -35,6 +35,7 @@ pub mod app;
 pub mod config;
 pub mod data;
 pub mod error;
+pub mod hats;
 pub mod healpix;
 pub mod listing;
 pub mod logging;

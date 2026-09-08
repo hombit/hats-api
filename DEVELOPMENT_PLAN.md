@@ -29,9 +29,9 @@ which.
 | 4.2 | say the ordering guarantees in the user documentation | done | |
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
-| 5.1 | HATS catalog metadata | todo | |
-| 5.2 | spatial predicate | part | What is left needs a catalog to point at: calling `Coverage::cover` per partition, `Coverage::within` per boundary partition, `polygon`/`moc`, and `POST /api/v1/hats`. Waits on §5.1 for the partition list and for `properties` to supply the column names |
-| 5.3 | sync / plan / auto | todo | |
+| 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
+| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: calling `Coverage::cover` per partition, `Coverage::within` per boundary partition, `polygon`/`moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names |
+| 5.3 | two endpoints, rows and plan | todo | |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -381,64 +381,53 @@ Removes the requirement that a caller know which partition file holds their obje
 
 ### 5.1 Catalog metadata
 
-A HATS catalog is a directory with `properties`, `partition_info.csv`,
-`_metadata`/`_common_metadata`, and `dataset/Norder=k/Dir=d/Npix=p/*.parquet`. Add
-`src/hats/`:
+`src/hats/` reads a catalog's `properties` and its partition list; what a later step still
+has to decide is below.
 
-- `properties.rs` — the `properties` file: catalog name, type, ra/dec column names,
-  `hats_order`, row count.
-- `partitions.rs` — the partition list, by the tiers below.
+**The per-partition sizes are not read yet.** They come only from `_metadata`, which is
+tier 2 and therefore skipped whenever `partition_info.csv` answered — which is every
+catalog an importer writes. §5.3's estimates need them, so `_metadata` has to be read
+**even when tier 1 succeeded**, lazily, when a query needs sizing rather than on every
+catalog open. That second read is where a lazy `Sizes` map belongs, not in the tier chain.
 
-`properties` is also where the column names come from, so that a request against a catalog
-need not repeat what the catalog already says: `hats_col_ra` and `hats_col_dec` for the
-coordinates, and the HEALPix column and its order for `healpix.rs`. The spec names no key
-for the latter pair — the column is a *recommended* `_healpix_29` and nothing more — so
-decide what a catalog that says nothing gets. Reading the column's own name for its order
-is the one thing that is not allowed: at the wrong order every bound is one no row
-satisfies, and the answer is no rows rather than an error.
+**A query on `_metadata`'s own url still has no answer.** It is on `[data] filenames` by
+default, so a caller can put one there today and gets a 400 — the rows its footer describes
+are in the files beside it, and the ranged read for them runs off the end of `_metadata`
+itself. The partition list and the per-partition statistics are now both available to
+answer with. Decide whether it gets one, since what it would return is metadata rather than
+the rows the caller asked for.
 
-The pixel arithmetic itself is done and is `healpix.rs`, so this step needs none of it.
+**Listing may be unavailable entirely**, which decides what a backend is worth for a
+catalog: an `http(s)://` catalog has no listing operation, so it needs tier 1 or tier 2 and
+has no third chance. The same catalog served over WebDAV (§2.4) has all three.
 
-**Partition discovery, in priority order.** Each tier is used only when the one above is
-absent:
+That bites a second time, and harder, where `hats_npix_suffix` is `/` — each partition a
+directory of files, which is how a large catalog is written. The names inside a partition
+appear in none of the catalog's metadata, so listing is the only way to them: such a
+catalog over `http(s)://` cannot be read at all, tier 1 and tier 2 notwithstanding. §5.2
+should say so as a refusal rather than answering with no rows.
 
-| | source | requests | gives |
-|---|---|---|---|
-| 1 | `partition_info.csv` | one small `GET` | `(Norder, Npix)` only |
-| 2 | `_metadata` | one `GET`, footer-first | the pixel list, plus row counts, byte sizes and column statistics per partition |
-| 3 | listing `dataset/` | one `LIST` per level, paginated | the pixel list, parsed from `Norder=k/Npix=p` path names |
+**A collection opens as its primary table, and nothing more of it is read.**
+`all_margins`, `default_margin` and `all_indexes` each name a further catalog and none is
+followed. The margins are what a margin-aware crossmatch would need, and that is `lsdb`'s
+job rather than this service's; the indexes are what an id lookup would want, which is a
+query shape this service does not have.
 
-`_metadata` is a parquet file whose footer carries the `FileMetaData` of every partition,
-each row group tagged with its `file_path`, so one ranged footer read reconstructs the
-partition list. It also supplies the per-partition sizes §5.3's estimates need, so it is
-worth reading **even when tier 1 succeeded** — lazily, when a query needs sizing, not on
-every catalog open.
-
-- `_common_metadata` cannot substitute: schema only, no row groups, no `file_path`
-  entries. It is useful for validating a projection before reading data.
-- Reading `_metadata` here is what makes it answerable at all. It is on `[data] filenames`
-  by default, so a caller can already put a query on its url — and gets a 400, because the
-  rows its footer describes are in the files beside it and the ranged read for them runs
-  off the end of `_metadata` itself. Once this tier exists, that request has a real answer
-  available: the partition list, or the statistics per partition. Decide then whether it
-  gets one, since the answer is metadata rather than the rows the caller asked for.
-- `_metadata` can reach hundreds of MB for a wide schema over many partitions. Cap it,
-  and fall through to tier 3 rather than blocking on a large download. Against a
-  non-ranging server it has already been copied whole by the time it is read, so the cap
-  that matters there is `limits.max_materialize_bytes`.
-- Listing may be unavailable entirely: an `http(s)://` catalog has no listing operation,
-  leaving tiers 1 and 2. The same catalog served over WebDAV (§2.4) has all three.
-
-If tiers 1 and 2 disagree, prefer `partition_info.csv` and log at `warn` — they disagree
-when a catalog is malformed or being rewritten.
+**A projection could be checked before any partition is read.** `dataset/_common_metadata`
+carries the schema and nothing else — no row groups, no `file_path` — so one small `GET`
+would say whether a `select` names a column the catalog has, and whether the HEALPix column
+`properties` claims is really there, without opening a partition. Worth having once there
+is a reason to pay for the request: today the first partition's own footer answers the same
+question on the way to reading it.
 
 The parsed partition list goes in §6.1's HATS metadata cache; the `_metadata` footer goes
-in the parquet metadata cache.
+in the parquet metadata cache. Nothing is cached today, so every request against a catalog
+pays two `GET`s before it reads a row.
 
 ### 5.2 The spatial predicate
 
-`region` (§3.3) is one field of an ordinary request, beside `where` and `select`. The
-`mode` field — `sync`, `plan`, `auto` (default) — controls delivery (§5.3).
+`region` (§3.3) is one field of an ordinary request, beside `where` and `select`. Which
+of the two HATS endpoints it is sent to controls delivery (§5.3).
 
 **Execution, HATS target:**
 
@@ -475,8 +464,9 @@ a partition, which is `query::Order`'s business and unchanged.
 
 Steps 1 and 3 are `healpix::Coverage`'s to answer — `cover` for a partition, `within` to
 narrow the ranges to one, `prefilter` to build the expression — so what is left in this step
-is the code that has a catalog to ask about. The column and its order come from the request
-today; §5.1's `properties` is what will let a catalog supply them.
+is the code that has a catalog to ask about. `hats::Catalog::columns` is where the
+coordinate columns and the HEALPix pair come from against a catalog; a request naming its
+own still overrides them, which is the only way to query a lone parquet file.
 
 Step 1 and step 3 need **two coverings, not one**: `healpix::Detail::Partitions` for the
 first, whose depth follows the catalog's order, and `Detail::Rows` for the third, whose
@@ -489,11 +479,11 @@ built once each and then `within`-ed per partition, not one per partition.
 
 **Drive step 1 from the region, not from the partition list.** Asking `cover` about every
 partition is a pass over the whole catalog to find the handful a region touches — a hundred
-thousand classifications to keep four. The region's covering has tens of ranges; the
-partitions overlapping each one are a search away if §5.1 hands over the list sorted by
-each partition's order-29 start. So what §5.1 should provide is that sorted list, and what
-this step should walk is the covering. `cover` stays the thing that classifies a candidate
-once found — it is the loop around it that should not be the catalog.
+thousand classifications to keep four. The region's covering has tens of ranges, and
+`Partitions::overlapping` answers each one with two binary searches into a list already
+sorted by each partition's order-29 start. So what this step walks is the covering. `cover`
+stays the thing that classifies a candidate once found — it is the loop around it that
+should not be the catalog.
 
 **Search into the partition list; do not merge with it.** Both sides are sorted, which
 invites a merge, but they are nowhere near the same length: tens of ranges against a
@@ -529,11 +519,15 @@ waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.
 
 A region over a dense catalog can touch hundreds of partitions of hundreds of MB.
 
-- **`mode=sync`** — run it and return rows, bounded by `max_partitions`,
+**Two endpoints, not one endpoint with a `mode`.** `POST {api.prefix}/hats` reads rows;
+`POST {api.prefix}/hats/plan` resolves the catalog and reads none. They take the same
+request body.
+
+- **`{api.prefix}/hats`** — run it and return rows, bounded by `max_partitions`,
   `max_scanned_bytes` and `timeout`. Sizes come from `_metadata` (§5.1); without it, fall
   back to a `HEAD` per candidate partition or to counting partitions. Exceeding a limit is
   a 413 whose body is the plan below.
-- **`mode=plan`** — resolve the catalog and return a work list without reading data:
+- **`{api.prefix}/hats/plan`** — return a work list without reading data:
 
   ```json
   {
@@ -565,7 +559,27 @@ A region over a dense catalog can touch hundreds of partitions of hundreds of MB
   logged, cached and pasted. This is not configurable: an option to echo them would be a
   footgun with no capability behind it. The flag exists so the client re-attaches
   deliberately rather than discovering the need through a 403.
-- **`mode=auto`** — sync under the limits, plan over them. The response states which.
+
+**Why two routes rather than a `mode` field**, since the field is the shape one reaches for
+first:
+
+- **The two answers are different kinds of thing, and a field will not say which arrived.**
+  Rows, or a work list. Under a `mode` the only way a client learns which it got is to look
+  at the body and infer from its shape — a value a caller cannot tell from a different
+  value, which is the failure this service keeps finding elsewhere. Across two routes the
+  client already knows, and the over-limit case says so with a 413.
+- **A `mode` does not compose with `format`.** A plan is not expressible as parquet, so
+  `format=parquet` under an automatic mode is answered in a format the caller did not ask
+  for, or refused for a reason they could not have predicted. Every output format added
+  later makes that worse.
+- **The limits are not the same limits.** `max_scanned_bytes` means nothing to a route that
+  reads no data; the plan route is bounded by the partition count and by §5.1's metadata
+  reads. Under one route each limit has to carry a note saying which mode it applies to.
+- **One route, one response schema**, which is what §7.3's generated document can describe.
+  A union return is a generated client that branches on shape.
+
+What is given up is a client that wants the fallback without handling a status code. It is
+handed a documented 413 body instead, which is less work than sniffing one.
 
 No job queue, job ids or polling: the plan is a list of stateless requests. See §7.2.
 

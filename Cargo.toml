@@ -20,13 +20,20 @@ cdshealpix = "0.9.1"
 # Keep in sync with object_store
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytesize = { version = "2", features = ["serde"] }
+# A catalog's partition_info.csv is a CSV, not a column of numbers.
+csv = "1"
 datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection", "sql"] }
+# The UTF-8 label `java-properties` takes and does not re-export. Same 0.8 as it resolves
+# to, so one copy: an `Encoding` from another would be a different type.
+encoding_rs = "0.8"
 futures = "0.3"
 # Compiles the whole list of data-file patterns into one matcher.
 globset = "0.4"
 html-escape = "0.2"
 http = "1"
 ipnet = "2"
+# A catalog's properties file is a Java properties file; escapes and continuations too.
+java-properties = "2"
 # Multi-Order Coverage maps: the covering of a region, and the set algebra over it.
 moc = "0.19.2"
 # Keep in sync with datafusion

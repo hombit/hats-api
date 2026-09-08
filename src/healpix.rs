@@ -33,6 +33,7 @@
 //! `cdshealpix` computes the coverings and `moc` holds them; neither is reimplemented here.
 
 use std::f64::consts::{FRAC_PI_2, PI};
+use std::ops::Range;
 
 use cdshealpix::nested::n_hash;
 use datafusion::arrow::datatypes::DataType;
@@ -50,13 +51,15 @@ use crate::sql;
 
 /// The deepest HEALPix order a cell number fits a 64-bit integer at, and the order HATS
 /// recommends a catalog write its column at.
-const MAX_ORDER: u8 = 29;
+pub const MAX_ORDER: u8 = 29;
 
 /// The column name HATS recommends for the HEALPix cell of a row's position.
 ///
-/// A recommendation and not a rule, which is why nothing here defaults to it: a request
-/// says which column holds the cell and at what order, and a catalog's `properties` is the
-/// other place that may say so.
+/// A recommendation and not a rule. A request says which column holds the cell and at what
+/// order; a catalog's `properties` says so in `hats_col_healpix` and
+/// `hats_col_healpix_order`, and falls back to this pair when it says neither. What makes
+/// the fallback safe is that it is a candidate rather than a claim — [`SpatialIndex::resolve`]
+/// asks the file's schema, and a file with no such column is queried on the geometry alone.
 pub const DEFAULT_HEALPIX_COLUMN_NAME: &str = "_healpix_29";
 
 /// Roughly how many cells a covering of a shape may spend along its boundary, where the
@@ -151,6 +154,18 @@ const QUARTER_TURN: f64 = 90.0;
 /// it keeps cells that are near the cone without touching it. Descending two orders before
 /// merging back costs a factor of sixteen in the cells visited and removes most of them.
 const CONE_DELTA: u8 = 2;
+
+/// The stretch of [`MAX_ORDER`] cells one cell spans.
+///
+/// The nested numbering is what makes this a range at all: a cell's children are contiguous
+/// and follow it, so an order-4 cell is exactly the order-29 cells between these two bounds.
+/// It is what orders a catalog's partitions — a mixed-order list sorts by it correctly, an
+/// order-4 partition landing among the order-8 ones that would have subdivided it — and it is
+/// the span a partition's own rows lie in.
+#[must_use]
+pub fn span(order: u8, pixel: u64) -> Range<u64> {
+    MocRange::<u64, Hpx<u64>>::from((order.min(MAX_ORDER), pixel)).0
+}
 
 /// A HEALPix covering of the union of some shapes, from both sides.
 ///
@@ -250,7 +265,7 @@ impl Coverage {
     /// answers a strictly harder one, walking every range the cell overlaps and summing
     /// their widths, and a coarse partition against a fine covering overlaps a great many.
     pub fn cover(&self, order: u8, pixel: u64) -> Cover {
-        let cell = MocRange::<u64, Hpx<u64>>::from((order, pixel)).0;
+        let cell = span(order, pixel);
         if self.inner.moc_ranges().contains_range(&cell) {
             Cover::Inside
         } else if self.outer.moc_ranges().intersects_range(&cell) {

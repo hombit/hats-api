@@ -123,6 +123,10 @@ pub struct LimitsConfig {
     pub max_concurrent_materializations: usize,
     /// Where the copies go. Absent is the system temporary directory.
     pub scratch_dir: Option<PathBuf>,
+    /// The most of a catalog's `_metadata` this service will fetch to learn its partition
+    /// list. Over this the partitions are listed instead, which costs the per-partition
+    /// sizes and nothing else.
+    pub max_catalog_metadata_bytes: ByteSize,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -142,6 +146,11 @@ impl Default for LimitsConfig {
             max_materialize_total_bytes: ByteSize::gib(8),
             max_concurrent_materializations: 4,
             scratch_dir: None,
+            // A wide schema over many partitions runs to hundreds of MB, and this is the
+            // whole file rather than a range of it: `_metadata` holds no rows, so its
+            // footer is the file. Generous enough for a real catalog and short of the
+            // sizes that would be a download rather than a lookup.
+            max_catalog_metadata_bytes: ByteSize::mib(256),
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

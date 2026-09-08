@@ -26,8 +26,10 @@ use std::path::Path as FilePath;
 use std::sync::Arc;
 
 use base64::Engine;
+use futures::StreamExt;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use object_store::{ObjectStore, local::LocalFileSystem};
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, ObjectStoreExt, local::LocalFileSystem};
 use object_store_opendal::OpendalStore;
 use opendal::layers::RetryLayer;
 use opendal::{HttpTransport, HttpTransporter, OperationContext, Operator, services};
@@ -458,6 +460,21 @@ pub struct RemoteFile {
     pub url: Url,
 }
 
+impl RemoteFile {
+    /// Another handle on the same object, sharing the one store.
+    ///
+    /// Not `Clone`: a store is an `Arc` and a url is a string, so copying one is cheap, but
+    /// a derive would also make it cheap to copy something holding a credential around
+    /// without meaning to.
+    pub fn clone_handle(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            base: self.base.clone(),
+            url: self.url.clone(),
+        }
+    }
+}
+
 /// `Url`'s own `Debug` prints its parsed fields, `password` among them.
 impl std::fmt::Debug for RemoteFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -469,6 +486,140 @@ impl std::fmt::Debug for RemoteFile {
     }
 }
 
+/// An opened directory: the store it lives in, and the prefix everything under it is
+/// addressed relative to.
+///
+/// A catalog is a directory and not an object — `properties`, `partition_info.csv`,
+/// `_metadata` and a tree of parquet files, none of which the caller names — so this is
+/// what a caller's catalog url opens as, and every file read out of it is named relative
+/// to this rather than by a url of its own.
+pub struct RemoteDir {
+    pub store: Arc<dyn ObjectStore>,
+    pub base: Url,
+    /// The prefix, always ending in `/` so that a relative name joins onto it rather than
+    /// replacing its last segment.
+    pub url: Url,
+}
+
+/// One entry of a listing, named relative to the directory that was listed.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    /// The path below the listed prefix. It may contain `/`: a listing is recursive,
+    /// which for a catalog is what makes `Norder=…/Dir=…/Npix=….parquet` one request.
+    pub name: String,
+    pub size: u64,
+}
+
+/// `Url`'s own `Debug` prints its parsed fields, `password` among them.
+impl std::fmt::Debug for RemoteDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteDir")
+            .field("store", &self.store)
+            .field("base", &self.base.as_str())
+            .field("url", &self.url.as_str())
+            .finish()
+    }
+}
+
+impl RemoteDir {
+    /// A url that named a directory, normalized so that joining a name onto it appends.
+    fn new(file: RemoteFile) -> Self {
+        let RemoteFile { store, base, url } = file;
+        let mut url = url;
+        if !url.path().ends_with('/') {
+            url.set_path(&format!("{}/", url.path()));
+        }
+        Self { store, base, url }
+    }
+
+    /// A file inside this directory, as the query layer reads one.
+    ///
+    /// `relative` is joined as a path and never as a url: a name that parses as one of its
+    /// own — `//host/x`, or anything with a scheme — would otherwise address a different
+    /// server entirely, and these names come out of a catalog's own files.
+    pub fn child(&self, relative: &str) -> Result<RemoteFile, ApiError> {
+        Ok(RemoteFile {
+            store: Arc::clone(&self.store),
+            base: self.base.clone(),
+            url: self.join(relative)?,
+        })
+    }
+
+    /// A directory inside this one, joined the same way.
+    pub fn subdir(&self, relative: &str) -> Result<Self, ApiError> {
+        Ok(Self::new(self.child(relative)?))
+    }
+
+    /// The bytes of a file inside this directory.
+    pub async fn read(&self, relative: &str) -> Result<bytes::Bytes, ApiError> {
+        let key = self.key(relative)?;
+        Ok(self.store.get(&key).await?.bytes().await?)
+    }
+
+    /// The same, for a file a catalog may simply not have. Absence is how one discovery
+    /// tier says the next one should be tried, so it is a value here rather than an error.
+    pub async fn read_if_present(&self, relative: &str) -> Result<Option<bytes::Bytes>, ApiError> {
+        match self.read(relative).await {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(ApiError::ObjectStore(object_store::Error::NotFound { .. })) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// How large a file inside this directory is, without reading it.
+    pub async fn size(&self, relative: &str) -> Result<Option<u64>, ApiError> {
+        match self.store.head(&self.key(relative)?).await {
+            Ok(meta) => Ok(Some(meta.size)),
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Every file below a prefix inside this directory, recursively.
+    ///
+    /// One request against an object store, whose namespace is flat, and one walk against a
+    /// local filesystem. Not every backend can do it at all — an `http(s)://` origin has no
+    /// listing operation — which is a refusal from the store rather than an empty answer.
+    pub async fn list(&self, relative: &str) -> Result<Vec<Entry>, ApiError> {
+        let prefix = self.key(relative)?;
+        let mut entries = Vec::new();
+        let mut listing = self.store.list(Some(&prefix));
+        while let Some(meta) = listing.next().await.transpose()? {
+            let Some(name) = meta.location.as_ref().strip_prefix(prefix.as_ref()) else {
+                continue;
+            };
+            entries.push(Entry {
+                name: name.trim_start_matches('/').to_owned(),
+                size: meta.size,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// The key a name inside this directory has in the store.
+    fn key(&self, relative: &str) -> Result<ObjectPath, ApiError> {
+        ObjectPath::from_url_path(self.join(relative)?.path())
+            .map_err(|error| ApiError::bad_request(format!("{relative:?}: {error}")))
+    }
+
+    fn join(&self, relative: &str) -> Result<Url, ApiError> {
+        let base = self.url.path();
+        let mut url = self.url.clone();
+        url.set_path(&format!("{base}{}", relative.trim_start_matches('/')));
+        // `set_path` percent-encodes what it has to and leaves `/` alone, so a name that
+        // tried to climb out is still there to be refused rather than resolved away.
+        if url
+            .path_segments()
+            .is_some_and(|mut segments| segments.any(|segment| segment == ".." || segment == "."))
+        {
+            return Err(ApiError::bad_request(format!(
+                "{relative:?} is not a name inside this directory"
+            )));
+        }
+        Ok(url)
+    }
+}
+
 pub fn open(
     url: &Url,
     options: &StorageOptions,
@@ -476,6 +627,31 @@ pub fn open(
     transfers: &Arc<Transfers>,
 ) -> Result<RemoteFile, ApiError> {
     require_object_key(url)?;
+    build(url, options, policy, transfers)
+}
+
+/// The same, for a url naming a directory rather than an object.
+///
+/// A HATS catalog is addressed as a directory — `properties` and a tree of parquet files
+/// under one prefix — so the one thing this drops is [`open`]'s refusal of a url naming no
+/// object, whose message is written for a caller who meant to name a file. Every other
+/// check `open` makes is about the url and the policy rather than about what is at the end
+/// of it, and they all still run.
+pub fn open_dir(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+    transfers: &Arc<Transfers>,
+) -> Result<RemoteDir, ApiError> {
+    Ok(RemoteDir::new(build(url, options, policy, transfers)?))
+}
+
+fn build(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+    transfers: &Arc<Transfers>,
+) -> Result<RemoteFile, ApiError> {
     refuse_userinfo(url)?;
     refuse_query_string(url)?;
     if !is_supported_scheme(url.scheme()) {
