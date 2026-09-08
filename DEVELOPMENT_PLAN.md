@@ -455,6 +455,24 @@ in the parquet metadata cache.
    dropped unless `select` asked for them.
 4. Union, project to `select`, return.
 
+**Partitions come out in HEALPix order, never in the order their names sort.** A pixel's
+number is where it is on the sky, so ordering by it puts neighbouring rows near each other
+and makes a `limit` a coherent piece of sky rather than an arbitrary sample. Sorting the
+names instead puts `Npix=1000` before `Npix=2`, which is neither spatial nor numeric — it
+is the accident of how a number was spelled. Mixed orders sort by each cell's order-29
+start, which nests correctly: an order-4 partition sorts among the order-8 ones that would
+have subdivided it.
+
+That applies wherever partitions are listed, not just to rows: §5.3's plan mode emits its
+`requests` in the same order, so a client fanning out and concatenating gets the same
+sequence a `sync` answer would have given.
+
+Ordering the partitions is what lets the API's answer be ordered at all — §4.2's rule is
+that API mode promises nothing about order, which was written when a request named one
+file. It can promise more than that here, and should: the order is free, since the
+partitions have to be enumerated anyway. What it cannot promise for free is order *within*
+a partition, which is `query::Order`'s business and unchanged.
+
 Steps 1 and 3 are `healpix::Coverage`'s to answer — `cover` for a partition, `within` to
 narrow the ranges to one, `prefilter` to build the expression — so what is left in this step
 is the code that has a catalog to ask about. The column and its order come from the request
