@@ -56,7 +56,8 @@ function build(url) {
   const row = document.createElement('tr');
   row.className = 'panel';
   const cell = row.insertCell();
-  cell.colSpan = 3;
+  /* Name, button, size, time — the panel is under all four. */
+  cell.colSpan = 4;
   cell.innerHTML =
     '<div class="panel-body">' +
     '<div class="columns-of"><span class="count">reading the columns…</span>' +

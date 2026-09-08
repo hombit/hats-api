@@ -3,11 +3,25 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use std::path::Path;
+
 use datafusion::error::DataFusionError;
 use datafusion::parquet::errors::ParquetError;
 use serde::Serialize;
 
 use crate::materialize::{Refused, TooLarge};
+
+/// Whether a message says where on disk the file is. A mount publishes a directory, not
+/// the machine it is on, so a message that names one is not repeatable to a caller
+/// however useful the rest of it is. The directory is checked rather than the file: a
+/// message naming any of what is beside it names that too.
+fn names_path(message: &str, file: &Path) -> bool {
+    [file.parent(), Some(file)]
+        .into_iter()
+        .flatten()
+        .filter_map(Path::to_str)
+        .any(|path| !path.is_empty() && message.contains(path))
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -85,14 +99,32 @@ impl ApiError {
     /// So every failure a store or a reader raises against a mounted file is the caller
     /// having asked a file that is not queryable data for rows, which is what the parquet
     /// reader is there to decide and what `[data] filenames` cannot: `_metadata` is on
-    /// that list by default and holds no rows of its own. The cost is that a genuine
-    /// local I/O error reads to the caller as a bad request. The log is where those stay
-    /// distinguishable, and a disk that cannot be read will fail the plain byte-serving
-    /// path too, where nothing dresses it up.
+    /// that list by default, and the rows its footer describes are in the files beside
+    /// it. The cost is that a genuine local I/O error reads to the caller as a bad
+    /// request. The log is where those stay distinguishable, and a disk that cannot be
+    /// read will fail the plain byte-serving path too, where nothing dresses it up.
+    ///
+    /// What must not be swept in with them is the planner's account of a query it cannot
+    /// run — a column that is not there, two types that will not compare. That is about
+    /// what the caller wrote, and telling them their file is not parquet sends them to
+    /// look at the one thing that is not wrong. Those messages are passed through, unless
+    /// one names where the file is, which is the operator's business either way.
     ///
     /// Only for a mount. In API mode the path in such a message is the caller's own url,
     /// which they already have, and `502` is the truth about a store that really is one.
-    pub fn from_mount(self) -> Self {
+    pub fn from_mount(self, file: &Path) -> Self {
+        let unreadable = |error: &Self| {
+            tracing::warn!(
+                error = %error,
+                status = %error.status(),
+                "cannot read a mounted file as data"
+            );
+            Self::BadRequest(
+                "this file cannot be read as parquet data; it is not a parquet file, \
+                 or the rows its footer describes are not in it"
+                    .to_owned(),
+            )
+        };
         match self {
             // Written here rather than by a store, which is what makes them safe to
             // repeat. The planner's account of a misspelled column arrives this way, and
@@ -102,18 +134,25 @@ impl ApiError {
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_)
             | Self::Internal(_)) => ours,
-            foreign => {
-                tracing::warn!(
-                    error = %foreign,
-                    status = %foreign.status(),
-                    "cannot read a mounted file as data"
-                );
-                Self::BadRequest(
-                    "this file cannot be read as parquet data; it is not a parquet file, \
-                     or it holds no rows of its own"
-                        .to_owned(),
-                )
+            // Getting the bytes, or reading them as parquet. These are the failures the
+            // one sentence is for, and the ones whose messages name the path.
+            bytes @ (Self::ObjectStore(_)
+            | Self::Storage(_)
+            | Self::SourceMetadata(_)
+            | Self::DataFusion(
+                DataFusionError::ObjectStore(_)
+                | DataFusionError::IoError(_)
+                | DataFusionError::ParquetError(_),
+            )) => unreadable(&bytes),
+            // Everything else DataFusion says is about the query rather than the file: a
+            // column that is not there, two types that will not compare — the last of
+            // which arrives as an optimizer rule wrapping an arrow cast, several layers
+            // from anything one would think to match on. So this is a rule about what is
+            // *not* the file, with the path guard standing behind it.
+            Self::DataFusion(error) if !names_path(&error.to_string(), file) => {
+                Self::BadRequest(error.to_string())
             }
+            foreign => unreadable(&foreign),
         }
     }
 

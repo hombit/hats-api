@@ -318,13 +318,13 @@ async fn query_mounted(
     // twice gets the same rows in the same places both times.
     let result = query::run(&opened, &selection, service.sql_limits, Order::File)
         .await
-        .map_err(ApiError::from_mount)?;
+        .map_err(|error| error.from_mount(file))?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     let response = answer(&result, &opened, format, started)
         .await
-        .map_err(ApiError::from_mount)?;
+        .map_err(|error| error.from_mount(file))?;
     tracing::info!(
         // The url path, not the local path: what is on disk is the operator's business.
         // Both parameters are the caller's own text and can be megabytes of `IN` list,
@@ -1439,6 +1439,72 @@ mod tests {
         assert_eq!(body["num_rows"], 1);
         assert!(body["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
         assert_eq!(body["rows"][0]["objectid"], 1);
+    }
+
+    /// A query that cannot run says so. Telling a caller their file is not parquet, when
+    /// what is wrong is the predicate they wrote, sends them to look at the one thing that
+    /// is not the matter — and the file's own path must not come back with the message
+    /// either, which is why every failure against a mounted file used to be flattened
+    /// into one sentence.
+    #[tokio::test]
+    async fn a_query_that_cannot_run_is_not_reported_as_a_bad_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+
+        // An Int64 column against a string: nothing is wrong with the file, and the
+        // planner is the only thing that can say what is wrong with the query.
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/part0.parquet?filters=objectid%20%3D%20'x'&format=json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_of(response).await;
+        assert!(!body.contains("not a parquet file"), "{body}");
+        assert!(body.contains("Int64"), "{body}");
+        assert!(
+            !body.contains(&dir.path().display().to_string()),
+            "leaked a local path: {body}"
+        );
+    }
+
+    /// A parquet file with no rows in it is a parquet file, and an empty answer is the
+    /// right answer about it — in either format, with or without a predicate. Only a file
+    /// that cannot be read as parquet at all is the caller's mistake, which is what the
+    /// zero-byte case above is: the two are one line apart in the code and nothing in the
+    /// answer would tell them apart.
+    #[tokio::test]
+    async fn a_parquet_file_with_no_rows_is_answered_rather_than_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("no_rows.parquet"),
+            query::tests::fixture_of(0),
+        )
+        .unwrap();
+
+        for uri in [
+            "/no_rows.parquet?format=json",
+            // The default format here, so the parquet writer answers with an empty file
+            // rather than refusing to write one.
+            "/no_rows.parquet",
+            "/no_rows.parquet?filters=objectid%3E0&format=json",
+            "/no_rows.parquet?columns=band&format=parquet",
+        ] {
+            let service = mounted(dir.path(), &ApiConfig::default());
+            let response = respond(service, Request::builder().uri(uri)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+
+        // And it still describes itself, which is what an empty file cannot do.
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let response = respond(
+            service,
+            Request::builder().uri("/no_rows.parquet?format=json"),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+        assert_eq!(body["num_rows"], 0);
+        assert_eq!(body["schema"][0]["name"], "objectid");
     }
 
     /// Rows do not describe themselves, so the answer says what its columns are — which

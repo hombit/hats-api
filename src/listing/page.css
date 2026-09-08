@@ -86,15 +86,16 @@ body.js .without-js { display: none; }
    carries its own font and line height instead. */
 button { color: var(--link); background: var(--bg); cursor: pointer; }
 .ask {
-  display: none;
-  margin-left: 0.6rem;
   padding: 0.1rem 0.5rem;
   border: 1px solid var(--edge);
   border-radius: 0.25rem;
   font: 0.72rem/1.4 system-ui, -apple-system, sans-serif;
   vertical-align: middle;
 }
-body.js .ask { display: inline-block; }
+/* The whole column goes where the script did not run, rather than standing empty: the
+   buttons are the only thing in it. */
+.listing .ask-cell { display: none; }
+body.js .listing .ask-cell { display: table-cell; padding: 0.15rem 0.5rem; }
 .ask:hover, .chip:hover, .run:hover { background: var(--hover); border-color: var(--link); }
 
 /* The panel sits between striped rows, so it takes a surface of its own and an edge down

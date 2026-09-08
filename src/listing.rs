@@ -208,8 +208,8 @@ impl Listing {
              <title>Index of {title}</title>\n<style>\n{STYLE}</style>\n</head>\n<body>\n\
              <h1>Index of {breadcrumb}</h1>\n<p class=\"summary\">{summary}</p>\n\
              <table class=\"listing\">\n\
-             <thead><tr><th>Name</th><th class=\"size\">Size</th>\
-             <th>Last modified</th></tr></thead>\n<tbody>\n",
+             <thead><tr><th>Name</th><th class=\"ask-cell\"></th>\
+             <th class=\"size\">Size</th><th>Last modified</th></tr></thead>\n<tbody>\n",
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
         );
@@ -220,7 +220,7 @@ impl Listing {
             let _ = writeln!(
                 html,
                 "<tr class=\"entry{stripe}\"><td class=\"name\"><a href=\"{parent}\">../</a>\
-                 </td><td></td><td></td></tr>",
+                 </td><td class=\"ask-cell\"></td><td></td><td></td></tr>",
                 stripe = stripe.next().unwrap_or_default(),
                 parent = html_escape::encode_double_quoted_attribute(parent)
             );
@@ -233,14 +233,17 @@ impl Listing {
             };
             // A name on the configured list is one this service will answer a question
             // about. Marking it is the only place a caller browsing a partition could
-            // learn that the file's own url takes parameters, and the button beside it is
-            // where the script puts the panel that writes one.
+            // learn that the file's own url takes parameters, and the button is where the
+            // script puts the panel that writes one. The button has a column of its own so
+            // that a directory of partitions has one line of them rather than a ragged one
+            // that follows however long each name happens to be.
             let data = entry.kind == Kind::File && data_files.matches(&entry.name);
             queryable |= data;
             let _ = writeln!(
                 html,
                 "<tr class=\"entry{stripe}\"><td class=\"name\">\
-                 <a{class} href=\"{href}\">{name}{slash}</a>{ask}</td>\
+                 <a{class} href=\"{href}\">{name}{slash}</a></td>\
+                 <td class=\"ask-cell\">{ask}</td>\
                  <td class=\"size\">{size}</td><td class=\"modified\">{modified}</td></tr>",
                 stripe = stripe.next().unwrap_or_default(),
                 class = match data {
