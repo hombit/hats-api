@@ -20,6 +20,19 @@ use common::{expect_error, lookup, parquet_fixture, permissive_policy, row_count
 use hats_api::error::ApiError;
 use hats_api::storage::StorageOptions;
 use opendal::{HttpTransporter, OperationContext, Operator, services};
+use std::sync::LazyLock;
+use tokio::sync::Mutex;
+
+/// Fixture writes go one at a time, process-wide.
+///
+/// The harness runs these tests concurrently and each one writes the same 1.4 MB fixture
+/// to the same server before reading it back. Racing those puts is what fails: the loser
+/// is answered by the connection closing with the body already sent, which arrives here
+/// as a transport error rather than as a status, so no accepted-status list reaches it.
+/// Whether a server serializes concurrent writes well is not what these tests are for —
+/// the service under test has no write path at all — so they are serialized here, which
+/// at five files costs a fraction of a second.
+static FIXTURE_WRITES: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Where the MinIO under test is, and how to write to it.
 struct Minio {
@@ -81,6 +94,7 @@ impl Minio {
 
     /// Put the fixture at `key` and return the url a caller would send to read it.
     async fn put_fixture(&self, key: &str) -> String {
+        let _serialized = FIXTURE_WRITES.lock().await;
         self.writer()
             .write(key, parquet_fixture())
             .await
