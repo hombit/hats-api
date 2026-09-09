@@ -272,12 +272,37 @@ a.run:hover { text-decoration: none; }
      indented Python body read as a different one. */
   white-space: pre;
 }
-/* The plan, in a window of its own: a page's worth of code and JSON rather than a result to
-   glance at, and the thing someone takes away to run. It borrows this page's style sheet
-   whole, so all it needs is the headings between the blocks. */
-.plan-page { max-width: 62rem; }
-.plan-page h2 { font-size: 0.9rem; font-weight: 600; margin: 1.4rem 0 0.2rem; }
-.plan-page .clients { margin-top: 0.3rem; }
+/* The answer, in a box below the query rather than inside it. Two boxes, told apart by
+   which way round they are: the query is the filled one, being the thing to write in, and
+   the answer sits on the page's own ground with a quiet edge — output rather than more
+   form. Each says which it is. */
+section.catalog .panel-body.output {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--edge);
+  margin-top: 0.6rem;
+}
+.box-title {
+  flex-basis: 100%;
+  margin: 0;
+  font: 600 0.8rem/1.4 system-ui, -apple-system, sans-serif;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* What a bar of tabs is for, at its left end, and what the chosen one does after them. A
+   row of names says which languages are on offer and nothing about why the row is there. */
+.block-title {
+  font: 600 0.78rem/1.4 system-ui, -apple-system, sans-serif;
+  color: var(--fg);
+  margin-right: 0.2rem;
+}
+.block-note { font-size: 0.72rem; color: var(--muted); }
+
+/* An answer box is headed by the button that fills it, with what it does beside it. The
+   button is the title, so nothing above it repeats the word. */
+.head { align-items: baseline; }
+.plan-note { flex: 1 1 16rem; font-size: 0.75rem; color: var(--muted); }
 
 /* `min-width` because a flex item is otherwise as wide as its content, which would put
    the scrollbar on the page rather than on the table. */

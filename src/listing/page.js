@@ -103,8 +103,11 @@ function build(url) {
 const API = document.body.dataset.api || null;
 
 /* Which of the snippets was last looked at. One choice for the page rather than one per
-   panel: someone who writes Python opens the next file's panel wanting Python. */
-let client = 'curl';
+   panel: someone who writes Python opens the next file's panel wanting Python.
+
+   It starts on the body, which is the request itself — every tab after it is a way of
+   sending that. */
+let client = 'Body';
 
 /* Each snippet asks the same question, and they differ in what they hand back and in how
    the file is named. Two shapes:
@@ -119,9 +122,15 @@ let client = 'curl';
    `pip` names, not import names — `nested-pandas` is installed with a hyphen and
    imported with an underscore, and the line is there to be pasted. Alphabetical, because
    the order says nothing and one that drifts is one more thing to read. `aiohttp` is what
-   `fsspec` fetches a url with, and is named because nothing else pulls it in. */
+   `fsspec` fetches a url with, and is named because nothing else pulls it in.
+
+   `Body` comes first and is not a client at all: it is the request body the rest of them
+   send, which is what someone reaches for who is writing this in a language nothing here
+   lists. Named for what HTTP calls it — a request has a body, and `payload` is a word the
+   spec itself stopped using. */
 const CLIENTS = {
-  curl: {},
+  Body: {write: (route, body) => JSON.stringify(body, null, 2)},
+  curl: {write: curl},
   requests: {pip: 'requests', write: viaRequests},
   nested_pandas: {pip: 'aiohttp nested-pandas requests', write: viaNestedPandas},
   astropy: {pip: 'astropy pyarrow requests', write: viaAstropy},
@@ -132,6 +141,7 @@ function clients() {
   if (API === null) return '';
   return (
     '<div class="clients"><div class="client-tabs">' +
+    '<span class="block-title">API request</span>' +
     Object.keys(CLIENTS)
       .map(
         name =>
@@ -141,6 +151,63 @@ function clients() {
     '<button class="client-copy" title="Copy to the clipboard">copy</button>' +
     '</div><pre class="client-code"></pre></div>'
   );
+}
+
+/* A second tab bar, for a set of snippets that is built rather than configured — the plan's.
+   It keeps its own choice: the page-wide `client` is which language someone reads, and these
+   are not languages but ways of using one answer.
+
+   The same markup as the bar above, so a chosen tab looks like a chosen tab wherever it is.
+   The note belongs to the tab rather than to the bar: what each of these does differs, which
+   is exactly what the name alone cannot say. */
+function tabs(title, items) {
+  const holder = document.createElement('div');
+  holder.className = 'clients';
+  const bar = document.createElement('div');
+  bar.className = 'client-tabs';
+  const name = document.createElement('span');
+  name.className = 'block-title';
+  name.textContent = title;
+  bar.appendChild(name);
+
+  const written = document.createElement('pre');
+  written.className = 'client-code';
+  const note = document.createElement('span');
+  note.className = 'block-note';
+  const buttons = items.map(item => {
+    const button = document.createElement('button');
+    button.className = 'client-tab';
+    button.textContent = item.name;
+    bar.appendChild(button);
+    return button;
+  });
+  const show = at => {
+    written.textContent = items[at].code;
+    note.textContent = items[at].note || '';
+    buttons.forEach((button, index) => button.classList.toggle('on', index === at));
+  };
+  buttons.forEach((button, at) => button.addEventListener('click', () => show(at)));
+  bar.appendChild(note);
+
+  const copy = document.createElement('button');
+  copy.className = 'client-copy';
+  copy.title = 'Copy to the clipboard';
+  copy.textContent = 'copy';
+  copy.addEventListener('click', () => {
+    navigator.clipboard.writeText(written.textContent).then(
+      () => {
+        copy.textContent = 'copied';
+        setTimeout(() => (copy.textContent = 'copy'), 1200);
+      },
+      () => (copy.textContent = 'press ⌘C')
+    );
+  });
+  bar.appendChild(copy);
+
+  holder.appendChild(bar);
+  holder.appendChild(written);
+  show(0);
+  return holder;
 }
 
 function choose(panel, name) {
@@ -160,7 +227,7 @@ function snippet(panel) {
   for (const tab of panel.querySelectorAll('.client-tab')) {
     tab.classList.toggle('on', tab.dataset.client === client);
   }
-  const {route, body} = request(panel);
+  const {route, body} = running(panel);
   /* The same question as a url with the query on it, which is the other way to ask it —
      and the one a reader that takes a url can be handed directly. */
   const got = new URL(
@@ -184,12 +251,6 @@ function request(panel) {
     const circle = [ra, dec, radius_arcsec].map(Number);
     if (circle.every(value => Number.isFinite(value))) {
       body.region = [{type: 'circle', ra: circle[0], dec: circle[1], radius_arcsec: circle[2]}];
-    } else {
-      /* With nothing to narrow it, the request is the whole catalog, which the API refuses
-         as readily as this url does. The limit is what makes it the front of the catalog
-         instead — so the snippet carries the one the panel just used, and is a request that
-         runs rather than one that comes back as a plan. */
-      body.limit = PREVIEW;
     }
   }
   return {
@@ -198,10 +259,26 @@ function request(panel) {
   };
 }
 
+/* The same request as something to run now, which is what the snippets show.
+
+   A catalog with nothing to narrow it is the whole catalog, which the API refuses as
+   readily as this url does — so a snippet for that case carries the limit the panel's own
+   preview used, and is a request that returns rows rather than one that comes back as a
+   plan. **Only the snippets.** The plan route is asked the request itself: it is the thing
+   that answers a search of any size, and a limit put there for the preview's sake would
+   bound every entry of a work list nobody asked to be bounded. */
+function running(panel) {
+  const {route, body} = request(panel);
+  if (panel.dataset.catalog !== undefined && body.region === undefined) {
+    body.limit = PREVIEW;
+  }
+  return {route, body};
+}
+
 function write(route, body, got) {
   const {pip, write: writer} = CLIENTS[client];
-  if (writer === undefined) return curl(route, body);
-  return '# pip install ' + pip + '\n' + writer(route, body, got);
+  const code = writer(route, body, got);
+  return pip === undefined ? code : '# pip install ' + pip + '\n' + code;
 }
 
 /* Single-quoted, so the shell leaves the JSON alone; `format` is asked for by name
@@ -300,7 +377,7 @@ function copied(panel) {
    It is the thing on this panel someone copies into a client or sends to a colleague, and
    one that lags the fields describes a different question than the one on the screen. */
 function address(panel) {
-  panel.querySelector('.download').href =
+  part(panel, '.download').href =
     url(panel.dataset.url, {...asked(panel), format: 'parquet'});
   const into = panel.querySelector('.asked');
   /* Half a circle is not a request, and a url written from one would answer a question
@@ -462,7 +539,7 @@ function preview(panel) {
 
 function run(panel) {
   const parameters = preview(panel);
-  const result = panel.querySelector('.result');
+  const result = (panel.rows || panel).querySelector('.result');
   result.textContent = 'running…';
   ask(panel.dataset.url, parameters)
     .then(answer => {
@@ -471,6 +548,7 @@ function run(panel) {
     })
     .catch(error => fail(result, error));
 }
+
 
 /* The url this query is, as something to open, copy or send to someone. It is a link the
    script makes rather than one the page was served with: an <a href> below this directory
@@ -616,6 +694,25 @@ if (CATALOG !== null) catalog();
    reason someone is looking at this page. The prose it replaces stays in the markup for a
    page whose script did not run — it says the same thing as a url, which is the part that
    works without any of this. */
+/* One answer box: the row of controls that fills it, and the space its answer lands in. */
+function box(section, head) {
+  const holder = document.createElement('div');
+  holder.className = 'panel-body output';
+  holder.innerHTML = '<div class="row head">' + head + '</div><div class="result"></div>';
+  section.appendChild(holder);
+  return holder;
+}
+
+/* A control lives in whichever box carries it, and every box is asked in turn. A file's
+   panel is one box and finds all of its own. */
+function part(panel, selector) {
+  for (const box of panel.boxes || [panel]) {
+    const found = box.querySelector(selector);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
 function catalog() {
   const section = document.querySelector('section.catalog');
   if (section === null) return;
@@ -638,6 +735,7 @@ function catalog() {
      and its legend is the only place that can say so *and* say it is optional. Without the
      grouping the radius reads as a third thing to fill in beside `filters`. */
   panel.innerHTML =
+    '<h3 class="box-title">Query</h3>' +
     '<div class="columns-of">' +
     '<span class="count">' + (SCHEMA === null ? '' : 'reading the columns…') + '</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
@@ -653,22 +751,37 @@ function catalog() {
     '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
     '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
     '</fieldset>' +
-    '<div class="row">' +
-    '<span class="buttons">' +
-    '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
-    '<a class="run download">Download parquet</a>' +
-    (API === null ? '' : '<button class="run plan">Plan</button>') +
-    '</span>' +
-    '<p class="gate"></p>' +
-    '</div>' +
     '<div class="asked"></div>' +
-    clients() +
-    '<div class="result"></div>';
+    clients();
   section.appendChild(panel);
 
-  panel.querySelector('.preview').addEventListener('click', () => run(panel));
-  const plan = panel.querySelector('.plan');
-  if (plan) plan.addEventListener('click', () => planned(panel));
+  /* Two answers, two boxes, each headed by the button that fills it — so both are on the
+     page at once and neither is a title saying what the button below it already says. Rows
+     and a work list are different kinds of thing, and a reader comparing them should not
+     have to ask for one again to see the other. */
+  panel.rows = box(
+    section,
+    '<span class="buttons">' +
+      '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
+      '<a class="run download">Download parquet</a>' +
+      '</span><p class="gate"></p>'
+  );
+  if (API !== null) {
+    panel.plan = box(
+      section,
+      '<button class="run plan">Plan</button>' +
+        '<span class="plan-note">The requests this search fans out into, one per ' +
+        'partition, for a client to send itself.</span>'
+    );
+  }
+  /* Every control, wherever it ended up: the two answer boxes carry the buttons that fill
+     them, and a file's panel is one box that carries everything. */
+  panel.boxes = [panel, panel.rows, panel.plan].filter(Boolean);
+
+  part(panel, '.preview').addEventListener('click', () => run(panel));
+  if (API !== null) {
+    part(panel, '.plan').addEventListener('click', () => planned(panel));
+  }
   for (const tab of panel.querySelectorAll('.client-tab')) {
     tab.addEventListener('click', () => choose(panel, tab.dataset.client));
   }
@@ -704,11 +817,11 @@ function catalog() {
    describes a search of any size. */
 function gate(panel) {
   const at = state(panel);
-  const note = panel.querySelector('.gate');
+  const note = part(panel, '.gate');
   note.textContent =
     at === 'partial' ? 'A cone needs all three fields.'
     : at === 'wide' ? 'Too wide for one answer. Plan lists the requests it would take.'
-    : at === 'none' ? 'First rows of the catalog. Download needs a cone.'
+    : at === 'none' ? 'First rows of the catalog. Download parquet needs a cone to keep the size down.'
     : '';
   const off = {
     preview: at === 'partial' || at === 'wide',
@@ -716,7 +829,7 @@ function gate(panel) {
     plan: at === 'partial',
   };
   for (const [name, dimmed] of Object.entries(off)) {
-    const button = panel.querySelector('.' + name);
+    const button = part(panel, '.' + name);
     if (button === null) continue;
     /* An anchor has no `disabled`, so the class is what all of them read. */
     button.classList.toggle('off', dimmed);
@@ -728,18 +841,11 @@ function gate(panel) {
    send, one per partition. It reads the catalog's own files and no rows, so it answers a
    search of any size — which is what it is here for.
 
-   It opens a window of its own. A plan is a page's worth of code and JSON rather than a
-   result to glance at, and it is the thing someone takes away to run — so it wants a tab
-   they can keep, scroll and print, not a panel that closes when the next query is asked. */
+   It lands in the box its own button heads, below the query the rows come back into. */
 function planned(panel) {
   const {route, body} = request(panel);
-  /* Opened in the click and not after the fetch: a window opened from a promise is a popup
-     as far as the browser is concerned, and gets blocked. Where it is blocked anyway, the
-     panel below is the fallback. */
-  const opened = window.open('', '_blank');
-  const into = panel.querySelector('.result');
+  const into = panel.plan.querySelector('.result');
   into.textContent = 'planning…';
-  if (opened) opened.document.write('planning…');
   fetch(route + '/plan', {
     method: 'POST',
     headers: {'content-type': 'application/json'},
@@ -750,21 +856,13 @@ function planned(panel) {
       if (!response.ok) throw new Error(plan.error || response.status);
       into.textContent = '';
       const summary = document.createElement('p');
-      summary.textContent = counts(plan);
+      summary.textContent =
+        counts(plan) + '. Each reads one partition, in the catalog’s order, so their ' +
+        'answers concatenated are what one request would have returned.';
       into.appendChild(summary);
-      if (opened) {
-        page(opened, plan, route, body);
-        return;
-      }
-      const written = document.createElement('pre');
-      written.className = 'client-code';
-      written.textContent = JSON.stringify(plan, null, 2);
-      into.appendChild(written);
+      into.appendChild(tabs('Follow it', runners(plan, route, body)));
     })
-    .catch(error => {
-      if (opened) opened.close();
-      fail(into, error);
-    });
+    .catch(error => fail(into, error));
 }
 
 function counts(plan) {
@@ -775,96 +873,25 @@ function counts(plan) {
   );
 }
 
-/* The plan as a page: what it is, the code that runs it, and the plan itself.
+/* What the plan is, and what following it looks like in each client.
 
-   Built with DOM calls rather than as markup, so nothing here has to escape a catalog's
-   name or a caller's own predicate on the way into a document. The style sheet is this
-   page's own, copied across — the window is `about:blank` and same-origin, so it has no
-   other way to get one, and inventing a second one would leave two to keep in step. */
-function page(opened, plan, route, body) {
-  const doc = opened.document;
-  /* `open` first: the window was given something to say while the plan was being fetched,
-     and a `write` into a document still open appends to it rather than replacing it. */
-  doc.open();
-  doc.write('<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>');
-  doc.close();
-  /* The path the reader is browsing, not `plan.catalog` — that is the `file://` url the
-     request carried, which names the same directory in a spelling nobody typed. */
-  doc.title = 'Plan for ' + CATALOG;
-  const style = doc.createElement('style');
-  style.textContent = document.querySelector('style').textContent;
-  doc.head.appendChild(style);
-  doc.body.className = 'js plan-page';
+   The plan itself is the first tab: it is what came back, and every tab after it is a way of
+   using that. The rest are not the single-request snippets with a loop around them \u2014 those
+   name one file, and these ask for the plan and follow it, so a client running one does not
+   have to know what a plan is. `nested_pandas` is absent for the reason it is present on a
+   file's panel: it takes a url, and a plan's entries are bodies. */
 
-  const heading = doc.createElement('h1');
-  heading.textContent = 'Plan for ' + CATALOG;
-  const summary = doc.createElement('p');
-  summary.textContent = counts(plan);
-  doc.body.appendChild(heading);
-  doc.body.appendChild(summary);
-
-  const said = doc.createElement('p');
-  said.textContent =
-    'Each request reads one partition, and they are in the catalog\u2019s order. ' +
-    'Concatenating the answers in that order gives what one request would have returned' +
-    (body.limit === undefined && plan.requests.some(one => one.body.limit !== undefined)
-      ? ', of which the first ' + plan.requests[0].body.limit + ' rows are the answer.'
-      : '.');
-  doc.body.appendChild(said);
-
-  for (const {title, note, code} of runners(plan, route, body)) {
-    const name = doc.createElement('h2');
-    name.textContent = title;
-    doc.body.appendChild(name);
-    if (note) {
-      const why = doc.createElement('p');
-      why.textContent = note;
-      doc.body.appendChild(why);
-    }
-    doc.body.appendChild(block(doc, code));
-  }
-}
-
-/* One titled block, with the button that copies it. Written from the parent window, which
-   can reach into a same-origin document it opened. */
-function block(doc, code) {
-  const holder = doc.createElement('div');
-  holder.className = 'clients';
-  const tabs = doc.createElement('div');
-  tabs.className = 'client-tabs';
-  const copy = doc.createElement('button');
-  copy.className = 'client-copy';
-  copy.textContent = 'copy';
-  tabs.appendChild(copy);
-  const written = doc.createElement('pre');
-  written.className = 'client-code';
-  written.textContent = code;
-  copy.addEventListener('click', () => {
-    navigator.clipboard.writeText(code).then(
-      () => {
-        copy.textContent = 'copied';
-        setTimeout(() => (copy.textContent = 'copy'), 1200);
-      },
-      () => (copy.textContent = 'press \u2318C')
-    );
-  });
-  holder.appendChild(tabs);
-  holder.appendChild(written);
-  return holder;
-}
-
-/* What running the plan looks like in each client.
-
-   Not the single-request snippets with a loop around them: those name one file, and these
-   ask for the plan and follow it, so a client that runs one of these does not have to know
-   what a plan is. `nested_pandas` is absent for the reason it is present on a file's panel —
-   it takes a url, and a plan's entries are bodies. */
 function runners(plan, route, body) {
   const base = new URL('/', location.href).href.replace(/\/$/, '');
   const asked = python(JSON.stringify(body, null, 4));
   return [
     {
-      title: 'Python',
+      name: 'Response',
+      note: 'What came back, and what each tab after this one sends.',
+      code: JSON.stringify(plan, null, 2),
+    },
+    {
+      name: 'Python',
       note: 'The rows, as JSON. One request per partition, in order.',
       code:
         '# pip install requests\n' +
@@ -883,7 +910,7 @@ function runners(plan, route, body) {
         'print(len(rows), "rows")',
     },
     {
-      title: 'pyarrow',
+      name: 'pyarrow',
       note: 'The same, as parquet, so the types are the file\u2019s rather than JSON\u2019s.',
       code:
         '# pip install pyarrow requests\n' +
@@ -903,7 +930,7 @@ function runners(plan, route, body) {
         'table = pa.concat_tables(tables)',
     },
     {
-      title: 'Shell',
+      name: 'Shell',
       note: 'Needs jq. Writes one parquet file per partition.',
       code:
         'curl -sS -X POST ' + route + '/plan \\\n' +
@@ -920,11 +947,6 @@ function runners(plan, route, body) {
         "    -H 'content-type: application/json' \\\n" +
         '    -d "$request" > "part-$name.parquet"\n' +
         'done',
-    },
-    {
-      title: 'The plan',
-      note: 'What the code above fetches, as it stands now.',
-      code: JSON.stringify(plan, null, 2),
     },
   ];
 }
