@@ -48,6 +48,13 @@ says which crate went double before the compiler gets a chance to be unhelpful a
 
 ## Credentials
 
+- **A credential leaves this service in exactly one place, and a caller has to ask.**
+  `StorageOptions::echo` writes a request's own options back into a plan's entries, and only
+  where that request set `return_storage`. Nothing else reads a secret out — not a log, not
+  an error, not a metric, not a plan by default. It discloses nothing, being the caller's
+  own secret in a response to their own request; what it costs is a plan that is now a
+  document with a credential in it, so a second caller for such an echo needs the same
+  argument made again rather than a reference to this one.
 - **A credential is never printed, and neither is anything a caller wrote beside one.**
   `storage::Headers` prints its count and nothing else: both the name and the value of a
   header come from the caller, and a token typed into a name is still a token in this

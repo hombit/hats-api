@@ -333,6 +333,9 @@ will do at once" is the list of requests that would do it.
 }
 ```
 
+With `"return_storage": true` in the request, each `body` also carries the `storage` object
+that request was sent with.
+
 Each entry is a request against this service. The client sends them with its own
 concurrency and retries and concatenates the answers **in the order given**, which is the
 same rows the `hats` route would have returned. A `limit` is carried on each entry, so the
@@ -348,10 +351,16 @@ without it is a partition every row of which qualifies.
 found any other way. It is omitted rather than guessed, at the top too — a sum over the
 entries that knew would read as a total.
 
-**Credentials are never echoed.** The entries carry the stripped url and
-`requires_credentials` says whether the original request had any, so the client re-attaches
-what it already holds. Copying the secret into a body that gets logged and pasted would
-enable nothing it cannot already do.
+**Credentials are not echoed unless asked for.** By default the entries carry the stripped
+url and `requires_credentials` says whether the original request had any, so the client
+re-attaches what it already holds.
+
+Set `"return_storage": true` and each entry gains the request's own `storage`, credentials
+included, ready to send as it stands. It is your secret coming back to you in a response to
+your own request, so it discloses nothing — but the plan is then a document with a
+credential in it, and plans get logged, cached and pasted into issues. Hence off by
+default. Asking for it with no `storage` in the request writes no field at all, and the
+rows route refuses the flag outright, having no plan to put it in.
 
 Nothing bounds this route: the point of it is to answer a request too large to run.
 

@@ -472,6 +472,17 @@ struct QueryRequest {
     format: Option<String>,
     /// Most rows to return.
     limit: Option<usize>,
+    /// Whether a plan's entries carry `storage` — this request's own, credentials included
+    /// — so that they can be sent as they stand.
+    ///
+    /// **Off unless asked for, and only ever the caller's own secret handed back to them.**
+    /// It enables nothing they cannot already do: they sent it. What it costs is that the
+    /// plan becomes a document with a credential in it, and a plan is the sort of thing that
+    /// gets logged, cached and pasted into an issue. So the default writes the stripped url
+    /// and `requires_credentials`, and a client that would rather re-attach them itself —
+    /// which is most of them — never has to think about it.
+    #[serde(default)]
+    return_storage: bool,
 }
 
 impl QueryRequest {
@@ -738,6 +749,13 @@ async fn query_parquet(
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
+    // Refused rather than ignored: this route answers with rows and never with a plan, so
+    // there is nothing here for it to have done.
+    if params.return_storage {
+        return Err(ApiError::bad_request(
+            "return_storage writes credentials into a plan, and this route returns rows",
+        ));
+    }
     // Everything decidable from the request alone, before anything is opened.
     let format = Format::parse(params.format.as_deref(), Format::Json)?;
     let selection = params.selection()?;
@@ -1014,6 +1032,11 @@ struct PlanBody {
     /// would have returned, the entries being in the same order.
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<usize>,
+    /// The caller's own storage options, credentials included, and only where they asked
+    /// for them with `return_storage`. Absent is the default and means the client attaches
+    /// what it already holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<serde_json::Value>,
 }
 
 async fn plan_of(
@@ -1040,6 +1063,12 @@ async fn plan_of(
     let healpix = columns
         .filter(|columns| columns.absence == Absence::Refuse)
         .map(|columns| &columns.healpix);
+
+    // Both halves, and both are the caller's doing: they asked for it, and they sent
+    // something to hand back. Asked for with nothing to return writes no field rather than
+    // an empty object, which would read as "these are the options" and they are not.
+    let storage =
+        (params.return_storage && !params.storage.is_empty()).then(|| params.storage.echo());
 
     let mut estimated_bytes = Some(0);
     let requests = entries
@@ -1073,6 +1102,7 @@ async fn plan_of(
                     healpix_order: named.and(healpix).map(|(_, order)| *order),
                     format: params.format.clone(),
                     limit: params.limit,
+                    storage: storage.clone(),
                 },
             })
         })
@@ -1514,6 +1544,7 @@ mod tests {
             healpix_order: None,
             format: None,
             limit: None,
+            return_storage: false,
         };
         let shown = format!("{params:?}");
         assert!(!shown.contains(SECRET), "leaked: {shown}");
@@ -2081,6 +2112,7 @@ mod tests {
             healpix_order: None,
             format: None,
             limit: None,
+            return_storage: false,
         };
         let url = parse_url(params.url.as_str()).unwrap();
         let dir_handle = storage::open_dir(
@@ -2104,6 +2136,93 @@ mod tests {
         // finding out from a 403.
         assert!(plan.requires_credentials, "{shown}");
         assert!(!plan.requests.is_empty(), "{shown}");
+    }
+
+    /// `return_storage` writes the caller's own options into every entry, and only when they
+    /// both asked for it and sent something.
+    ///
+    /// Two conditions rather than one: asking for it with nothing to return writes no field
+    /// at all, since an empty object would read as "these are the options" and they are not.
+    #[tokio::test]
+    async fn a_plan_returns_the_credentials_only_when_asked() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let plan = async |storage: StorageOptions, return_storage: bool| {
+            let params = QueryRequest {
+                url: "file:///".to_owned().into(),
+                storage,
+                select: None,
+                r#where: None,
+                columns: Some("id".to_owned()),
+                filters: None,
+                region: None,
+                ra_column: None,
+                dec_column: None,
+                healpix_column: None,
+                healpix_order: None,
+                format: None,
+                limit: None,
+                return_storage,
+            };
+            let url = parse_url(params.url.as_str()).unwrap();
+            let opened = storage::open_dir(
+                &url,
+                &StorageOptions::default(),
+                &service.policy,
+                &service.transfers,
+            )
+            .unwrap();
+            let search = Search::resolve(opened, None, service.catalog_limits)
+                .await
+                .unwrap();
+            serde_json::to_value(plan_of(&service, &search, &params, None).await.unwrap()).unwrap()
+        };
+        let given = || StorageOptions {
+            region: Some("us-west-2".to_owned()),
+            secret_access_key: Some(SECRET.to_owned().into()),
+            ..Default::default()
+        };
+
+        // Asked for, and something to give.
+        let asked = plan(given(), true).await;
+        let body = &asked["requests"][0]["body"];
+        assert_eq!(body["storage"]["secret_access_key"], SECRET, "{asked}");
+        assert_eq!(body["storage"]["region"], "us-west-2", "{asked}");
+        assert!(asked["requires_credentials"].as_bool().unwrap(), "{asked}");
+
+        // Not asked for, though there is something to give.
+        let unasked = plan(given(), false).await;
+        assert!(
+            unasked["requests"][0]["body"]["storage"].is_null(),
+            "{unasked}"
+        );
+        assert!(!unasked.to_string().contains(SECRET), "leaked: {unasked}");
+
+        // Asked for, with nothing to give: no field rather than an empty one.
+        let nothing = plan(StorageOptions::default(), true).await;
+        assert!(
+            nothing["requests"][0]["body"]["storage"].is_null(),
+            "{nothing}"
+        );
+        assert!(
+            !nothing["requires_credentials"].as_bool().unwrap(),
+            "{nothing}"
+        );
+    }
+
+    /// The rows route never produces a plan, so a field about what a plan carries is refused
+    /// there rather than quietly doing nothing.
+    #[tokio::test]
+    async fn return_storage_is_refused_where_there_is_no_plan() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let (status, body) = ask(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///part0.parquet", "return_storage": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("return_storage"), "{body}");
     }
 
     /// A request over more than the server will do comes back as the plan for it, with the

@@ -404,6 +404,86 @@ impl StorageOptions {
         }
     }
 
+    /// These options written back out, credentials in the clear, for a plan whose caller
+    /// asked to have them.
+    ///
+    /// **The only place a credential is copied out of this struct on purpose.** Everything
+    /// else — logs, errors, metrics, the plan by default — sees the stripped url and
+    /// nothing more. What makes this safe is not the code here but who asked for it: a
+    /// caller gets back the secret they themselves sent, in a response to their own
+    /// request, and only when they set `return_storage`. It enables nothing they cannot
+    /// already do; what it costs is that the plan is then a document with a secret in it,
+    /// which is why it is off unless asked for.
+    ///
+    /// Destructured like `named`, so a field added to the struct and not written
+    /// here does not compile. The guard runs the other way for this one: forgetting a field
+    /// hands back a plan missing something the caller asked for, rather than one carrying
+    /// what they did not.
+    pub fn echo(&self) -> serde_json::Value {
+        fn plain(into: &mut serde_json::Map<String, serde_json::Value>, name: &str, value: &str) {
+            into.insert(name.to_owned(), value.into());
+        }
+        fn secret(
+            into: &mut serde_json::Map<String, serde_json::Value>,
+            name: &str,
+            value: &Option<SecretString>,
+        ) {
+            if let Some(value) = value {
+                plain(into, name, value.expose_secret());
+            }
+        }
+        let Self {
+            endpoint,
+            allow_http,
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            service_account_key,
+            access_token,
+            account,
+            access_key,
+            sas_token,
+            headers,
+            transport,
+            username,
+            password,
+        } = self;
+        let mut out = serde_json::Map::new();
+        for (name, value) in [
+            ("endpoint", endpoint),
+            ("region", region),
+            ("account", account),
+        ] {
+            if let Some(value) = value {
+                plain(&mut out, name, value);
+            }
+        }
+        if *allow_http {
+            out.insert("allow_http".to_owned(), true.into());
+        }
+        if let Some(transport) = transport {
+            plain(&mut out, "transport", transport.scheme());
+        }
+        secret(&mut out, "access_key_id", access_key_id);
+        secret(&mut out, "secret_access_key", secret_access_key);
+        secret(&mut out, "session_token", session_token);
+        secret(&mut out, "service_account_key", service_account_key);
+        secret(&mut out, "access_token", access_token);
+        secret(&mut out, "access_key", access_key);
+        secret(&mut out, "sas_token", sas_token);
+        secret(&mut out, "username", username);
+        secret(&mut out, "password", password);
+        if !headers.is_empty() {
+            let mut written = serde_json::Map::new();
+            for (name, value) in &headers.0 {
+                plain(&mut written, name, value.expose_secret());
+            }
+            out.insert("headers".to_owned(), written.into());
+        }
+        out.into()
+    }
+
     /// Whether anything here would be sent to the store as proof of identity — which is
     /// the whole of what `allow_cleartext` is protecting, and what a plan says to re-attach.
     pub fn has_credentials(&self) -> bool {

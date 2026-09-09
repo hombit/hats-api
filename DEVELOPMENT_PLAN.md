@@ -800,7 +800,12 @@ backend in §2 is a chance to break it.
   which is why it is a list with a reason per entry rather than a wildcard.
 - **No credential in an error message**, including errors raised inside `object_store` or
   DataFusion, which must only ever be handed the stripped url.
-- **No credential in a response**, including §5.3's plan bodies.
+- **No credential in a response**, with one exception the caller has to ask for: a plan
+  entry carries the `storage` of the request that produced it when that request set
+  `return_storage`. It is the caller's own secret returned to the caller who sent it, so it
+  discloses nothing — what it costs is that the plan becomes a document with a credential in
+  it, which is why it is off by default and why `StorageOptions::echo` is the only place
+  anything reads one back out.
 - **No credential in a metric label.**
 - **The request body is the only source of credentials.** The service reads them from
   nowhere else: not from environment variables, not from files on disk, not from ambient
