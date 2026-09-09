@@ -387,18 +387,26 @@ required alongside `region` — except where every shape in it is a `moc`, which
 reads no position. They resolve the same way any column name does: the file's own spelling,
 or that spelling in lowercase.
 
-`healpix_column` and `healpix_order` name a HEALPix cell column, if the file has one — a
-HATS catalog's `_healpix_29`, written at order 29. They are optional, they travel
-together, and they change what a query costs rather than what it returns: the region is
+**A file with a `_healpix_29` column is accelerated without being asked.** That is the one
+column name that carries its own order, so it is the one that can be recognised: if the
+schema has exactly one column called `_healpix_29`, of an integer type wide enough for an
+order-29 cell, it is used. Nothing else is guessed at — any other index column is at some
+order the name does not say, and reading it at the wrong one returns no rows.
+
+`healpix_column` and `healpix_order` name a HEALPix cell column that is called something
+else, or written at another order. They are optional, they travel together, and naming one
+the file has not got is an error — unlike the discovered column, whose absence is simply a
+file with no index. They change what a query costs rather than what it returns: the region is
 covered by HEALPix cells, so a row whose cell the region does not reach is dropped without
 the trigonometry, and one whose cell the region covers wholly is kept without it. Where the
 file is sorted by that column — which HATS catalogs usually are and no file has to be —
 those bounds also skip whole row groups, and `data_bytes_read` is where that shows.
 
-Both are needed because neither is fixed: HATS *recommends* the name `_healpix_29` and
-recommends nothing about it beyond that, so the order is what says which cell a value is.
-Naming a column with the wrong order would return no rows rather than an error, which is
-why it cannot be guessed from the name.
+Both are needed together because neither is fixed: HATS *recommends* the name `_healpix_29`
+and recommends nothing about it beyond that, so a catalog may call its column anything and
+write it at any order — and the order is what says which cell a value is. A column named
+with the wrong order returns no rows rather than an error, which is why only the one name
+that states its order is ever assumed.
 
 ```json
 {

@@ -27,7 +27,7 @@ use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{Absence, Healpix, Region, Spatial};
+use crate::region::{Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -571,11 +571,7 @@ impl QueryRequest {
             (None, None) => None,
             // The caller wrote it, so a file without it is their mistake and not a file
             // that happens to have no index.
-            (Some(column), Some(order)) => Some(Healpix {
-                column,
-                order,
-                absence: Absence::Refuse,
-            }),
+            (Some(column), Some(order)) => Some(Healpix { column, order }),
             _ => return Err(ApiError::bad_request(HEALPIX_PAIR)),
         };
         if self.region.is_none() && healpix.is_some() {
@@ -1062,12 +1058,10 @@ async fn plan_of(
         .ok_or_else(|| ApiError::internal("the API has no prefix"))?;
 
     let columns = search.columns();
-    // Only a column somebody named. The `_healpix_29` default is a candidate the catalog
-    // route can try and drop; the single-file route refuses a column it cannot find, so
-    // passing a guess on would turn every entry into a 400.
-    let healpix = columns
-        .filter(|columns| columns.absence == Absence::Refuse)
-        .map(|columns| &columns.healpix);
+    // Only where the catalog named one, which is the only case `Columns` carries. Where it
+    // did not, each entry's file is asked for `_healpix_29` itself — the same discovery the
+    // catalog route did — so there is nothing to pass on and nothing lost by not passing it.
+    let healpix = columns.and_then(|columns| columns.healpix.as_ref());
 
     // Both halves, and both are the caller's doing: they asked for it, and they sent
     // something to hand back. Asked for with nothing to return writes no field rather than

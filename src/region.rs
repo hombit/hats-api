@@ -203,28 +203,15 @@ pub struct Spatial<'a> {
 /// order — and the order is what a value means. Taken from a caller's request, or from a
 /// catalog's `properties`, but never from the column's name: a name is not a promise, and
 /// the wrong order turns every bound into one no row can satisfy.
+///
+/// **Present only where somebody named it**, which is what makes a file lacking it a fault
+/// rather than a file with no index. The one column that needs no naming is `_healpix_29`,
+/// whose name carries its order too, and that one is found in the file's own schema by
+/// [`healpix::SpatialIndex::discover`] rather than passed through here.
 #[derive(Debug, Clone, Copy)]
 pub struct Healpix<'a> {
     pub column: &'a str,
     pub order: u8,
-    pub absence: Absence,
-}
-
-/// What it means for a file not to have the HEALPix column it was offered.
-///
-/// The two differ in who said the column was there, and the answer is the same either way —
-/// the column is an accelerator, so a query that cannot use it returns the same rows on the
-/// geometry alone. What differs is whether anyone should be told.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Absence {
-    /// Somebody named this column — the request, or a catalog's `hats_col_healpix`. A file
-    /// without it contradicts what they said, which is a fault met on the way and reported
-    /// where it is met.
-    Refuse,
-    /// Nobody named it: this is the `_healpix_29` default, which HATS recommends and does
-    /// not require. It is a candidate rather than a claim, so a file without it is a file
-    /// with no index and is queried on the geometry alone.
-    Ignore,
 }
 
 /// The union of every shape, as one predicate over the file's columns.
@@ -269,36 +256,33 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
         None => healpix::Cells::Required,
     };
     let exact = exact.unwrap_or_else(|| lit(false));
-    match spatial.healpix {
-        None => without_cells(exact, cells),
-        Some(Healpix {
+
+    // Two ways to get one, and they differ in whether anyone claimed it was there.
+    let index = match spatial.healpix {
+        // Somebody named it — the request, or a catalog's `hats_col_healpix` — so a file
+        // without it contradicts what they said, and that is a fault met on the way.
+        Some(Healpix { column, order }) => Some(healpix::SpatialIndex::resolve(
+            schema,
             column,
             order,
-            absence,
-        }) => {
-            let resolved = healpix::SpatialIndex::resolve(schema, column, order, "healpix_order");
-            let index = match (resolved, absence) {
-                (Ok(index), _) => index,
-                (Err(error), Absence::Refuse) => return Err(error),
-                // A guess that does not fit this file is not used. Every way it can fail —
-                // no such column, or one too narrow for the order — says the same thing
-                // about a column nobody named: this is not the index it was taken for. Not
-                // where the covering is the only answer, which is what `cells` decides.
-                (Err(error), Absence::Ignore) => {
-                    tracing::debug!(%error, "no usable HEALPix column");
-                    return without_cells(exact, cells);
-                }
-            };
-            // A request naming one file says nothing about a catalog above it, and then
-            // there is no partition order to put a floor under the covering; a partition of
-            // a catalog says exactly that, and is cut to as well.
-            let detail = healpix::Detail::Rows {
-                partition_order: spatial.partition.map(|(order, _)| order),
-            };
-            let coverage = healpix::Coverage::of(&shapes, detail);
-            Ok(coverage.prefilter(spatial.partition, &index, exact, cells))
-        }
-    }
+            "healpix_order",
+        )?),
+        // Nobody did, so the file is asked. `_healpix_29` is the one column whose name says
+        // its order as well as which column it is, which is what makes it recognisable
+        // without being told; any other index column has to be named.
+        None => healpix::SpatialIndex::discover(schema),
+    };
+    let Some(index) = index else {
+        return without_cells(exact, cells);
+    };
+    // A request naming one file says nothing about a catalog above it, and then there is no
+    // partition order to put a floor under the covering; a partition of a catalog says
+    // exactly that, and is cut to as well.
+    let detail = healpix::Detail::Rows {
+        partition_order: spatial.partition.map(|(order, _)| order),
+    };
+    let coverage = healpix::Coverage::of(&shapes, detail);
+    Ok(coverage.prefilter(spatial.partition, &index, exact, cells))
 }
 
 /// The answer where there is no HEALPix column to test cells against.
@@ -1044,7 +1028,6 @@ mod tests {
                 healpix: healpix_column.map(|column| Healpix {
                     column,
                     order: FIXTURE_ORDER,
-                    absence: Absence::Refuse,
                 }),
                 partition: None,
             }),
@@ -1097,55 +1080,65 @@ mod tests {
         // statistics of one row group say something the next one's do not.
         points.sort_by_key(|&(_, ra, dec)| healpix_cell(ra, dec));
 
-        let batch = RecordBatch::try_from_iter_with_nullable([
-            (
-                "objectid",
-                Arc::new(Int64Array::from_iter_values(
-                    points.iter().map(|(id, _, _)| *id),
-                )) as ArrayRef,
-                false,
-            ),
-            (
-                "objRA",
-                Arc::new(Float64Array::from_iter_values(
-                    points.iter().map(|(_, ra, _)| *ra),
-                )) as ArrayRef,
-                false,
-            ),
-            (
-                "objDec",
-                Arc::new(Float64Array::from_iter_values(
-                    points.iter().map(|(_, _, dec)| *dec),
-                )) as ArrayRef,
-                false,
-            ),
-            (
-                DEFAULT_HEALPIX_COLUMN_NAME,
-                Arc::new(Int64Array::from_iter_values(
-                    points.iter().map(|&(_, ra, dec)| healpix_cell(ra, dec)),
-                )) as ArrayRef,
-                false,
-            ),
-        ])
-        .unwrap();
-
+        // The same rows written twice: once with the index column and once without, which is
+        // the comparison this test is now about. Naming the column is no longer what turns
+        // the prefilter on — a file that has `_healpix_29` gets it found — so what is left to
+        // measure is what having the column is worth.
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("part0.parquet");
-        let properties = WriterProperties::builder()
-            .set_max_row_group_row_count(Some(ROWS_PER_GROUP))
-            .build();
-        let mut writer = ArrowWriter::try_new(
-            std::fs::File::create(&path).unwrap(),
-            batch.schema(),
-            Some(properties),
-        )
-        .unwrap();
-        writer.write(&batch).unwrap();
-        writer.close().unwrap();
-        let file = crate::storage::open_mounted(&path).unwrap();
+        let written = |indexed: bool| {
+            let mut columns: Vec<(&str, ArrayRef, bool)> = vec![
+                (
+                    "objectid",
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|(id, _, _)| *id),
+                    )) as ArrayRef,
+                    false,
+                ),
+                (
+                    "objRA",
+                    Arc::new(Float64Array::from_iter_values(
+                        points.iter().map(|(_, ra, _)| *ra),
+                    )) as ArrayRef,
+                    false,
+                ),
+                (
+                    "objDec",
+                    Arc::new(Float64Array::from_iter_values(
+                        points.iter().map(|(_, _, dec)| *dec),
+                    )) as ArrayRef,
+                    false,
+                ),
+            ];
+            if indexed {
+                columns.push((
+                    DEFAULT_HEALPIX_COLUMN_NAME,
+                    Arc::new(Int64Array::from_iter_values(
+                        points.iter().map(|&(_, ra, dec)| healpix_cell(ra, dec)),
+                    )) as ArrayRef,
+                    false,
+                ));
+            }
+            let batch = RecordBatch::try_from_iter_with_nullable(columns).unwrap();
+            let path = dir.path().join(match indexed {
+                true => "indexed.parquet",
+                false => "plain.parquet",
+            });
+            let properties = WriterProperties::builder()
+                .set_max_row_group_row_count(Some(ROWS_PER_GROUP))
+                .build();
+            let mut writer = ArrowWriter::try_new(
+                std::fs::File::create(&path).unwrap(),
+                batch.schema(),
+                Some(properties),
+            )
+            .unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+            crate::storage::open_mounted(&path).unwrap()
+        };
 
         let regions = [circle_at(120.0, 20.0, 1.0)];
-        let read = async |healpix| {
+        let read = async |file: &RemoteFile| {
             let selection = Selection {
                 projection: Projection::Columns("objectid"),
                 predicate: Predicate::All,
@@ -1153,24 +1146,21 @@ mod tests {
                     regions: &regions,
                     ra_column: Some("objRA"),
                     dec_column: Some("objDec"),
-                    healpix,
+                    // Nothing named: the file with the column has it found, the file without
+                    // it is queried on the geometry, and that difference is the measurement.
+                    healpix: None,
                     partition: None,
                 }),
                 limit: None,
             };
-            let result = query::run(&file, &selection, limits(), Order::File)
+            let result = query::run(file, &selection, limits(), Order::File)
                 .await
                 .unwrap();
             (result.num_rows(), result.data_bytes_read)
         };
 
-        let (rows, whole) = read(None).await;
-        let (same_rows, pruned) = read(Some(Healpix {
-            column: DEFAULT_HEALPIX_COLUMN_NAME,
-            order: FIXTURE_ORDER,
-            absence: Absence::Refuse,
-        }))
-        .await;
+        let (rows, whole) = read(&written(false)).await;
+        let (same_rows, pruned) = read(&written(true)).await;
 
         assert!(
             rows > 0,
@@ -1184,8 +1174,8 @@ mod tests {
         // that a prefilter which never ran does.
         assert!(
             pruned * 2 < whole,
-            "naming the column read {pruned} bytes against {whole} without it, which is no \
-             pruning worth the name"
+            "the indexed file read {pruned} bytes against {whole} for the plain one, which \
+             is no pruning worth the name"
         );
     }
 

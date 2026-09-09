@@ -37,7 +37,7 @@ use std::ops::Range;
 
 use cdshealpix::nested::n_hash;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{DFSchema, ScalarValue};
+use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::lit;
 use moc::elem::range::MocRange;
@@ -489,6 +489,42 @@ enum Side {
 }
 
 impl SpatialIndex {
+    /// The column HATS recommends, where the file turns out to have exactly one of it.
+    ///
+    /// **Discovered rather than named, and only this one name.** `_healpix_29` is the only
+    /// column whose name says both which column it is and what order it holds, so it is the
+    /// only one that can be recognised without being told. Any other index column has to be
+    /// named — by the request, or by a catalog's `hats_col_healpix` — because its order is
+    /// not in its name and reading it at the wrong one selects no rows.
+    ///
+    /// `None` rather than an error for every way it can fail to be the column it looks like:
+    /// absent, present twice, or of a type too narrow to hold an order-29 cell. Nobody
+    /// claimed it was there, so its not being there is not a fault — the query runs on the
+    /// geometry, which is the answer either way.
+    ///
+    /// Two of them is the interesting case. A schema may carry one name twice, and then
+    /// "the `_healpix_29` column" names neither, exactly as `sql::resolve_identifiers` has
+    /// it for a name two columns share.
+    pub fn discover(schema: &DFSchema) -> Option<Self> {
+        let mut found = schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() == DEFAULT_HEALPIX_COLUMN_NAME);
+        let field = found.next()?;
+        if found.next().is_some() {
+            return None;
+        }
+        let cell_type = field.data_type().clone();
+        if capacity(&cell_type)? < n_hash(MAX_ORDER) - 1 {
+            return None;
+        }
+        Some(Self {
+            column: Expr::Column(Column::new_unqualified(field.name())),
+            cell_type,
+            order: MAX_ORDER,
+        })
+    }
+
     /// The column in the file's own spelling, with the order checked against what the column
     /// can actually hold.
     ///
@@ -931,6 +967,8 @@ fn depth_for(perimeter: f64) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use datafusion::arrow::datatypes::{Field, Schema};
 
     use crate::hats::partitions::Source;
 
@@ -1456,6 +1494,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `_healpix_29` is found in a file's own schema, and only where it is unmistakable.
+    ///
+    /// One name, because one name is all that carries its own order: any other index column
+    /// could be at any order and reading it at the wrong one selects no rows. Found rather
+    /// than named, so a HATS partition queried directly gets the same acceleration a catalog
+    /// gives it — and `None` rather than an error for every way it can fail to be what it
+    /// looks like, nobody having claimed it was there.
+    #[test]
+    fn the_recommended_column_is_recognised_and_nothing_else_is() {
+        let schema = |fields: Vec<Field>| DFSchema::try_from(Schema::new(fields)).unwrap();
+        let cell = |name: &str, of: DataType| Field::new(name, of, false);
+
+        let found = SpatialIndex::discover(&schema(vec![
+            cell("ra", DataType::Float64),
+            cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Int64),
+        ]));
+        let found = found.expect("the recommended column should be recognised");
+        assert_eq!(found.order, MAX_ORDER, "found at the order its name says");
+        assert_eq!(found.cell_type, DataType::Int64);
+
+        for reason in [
+            // Not there at all.
+            vec![cell("ra", DataType::Float64)],
+            // A column of that name too narrow to hold an order-29 cell, which is a column
+            // holding something else.
+            vec![cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Int32)],
+            vec![cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Float64)],
+        ] {
+            assert!(
+                SpatialIndex::discover(&schema(reason.clone())).is_none(),
+                "{reason:?} should not be taken for an index column"
+            );
+        }
+
+        // Two of them, where the name picks out neither — the same answer
+        // `sql::resolve_identifiers` gives for a name two columns share.
+        let twice = Schema::new(vec![
+            cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Int64),
+            cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::UInt64),
+        ]);
+        assert!(
+            SpatialIndex::discover(&DFSchema::try_from(twice).unwrap()).is_none(),
+            "one name on two columns names neither"
+        );
     }
 
     /// A MOC is its own covering, at its own depth, from both sides.

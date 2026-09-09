@@ -27,7 +27,7 @@ use crate::error::ApiError;
 use crate::hats::{Catalog, HatsPartition, Partitioned};
 use crate::healpix::{Cover, Coverage, Detail};
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{self, Absence, Healpix, Region, Spatial};
+use crate::region::{self, Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{RemoteDir, RemoteFile};
 
@@ -120,17 +120,14 @@ impl From<&LimitsConfig> for CatalogLimits {
 pub struct Columns {
     pub ra: String,
     pub dec: String,
-    /// The index column and the order its values are at.
+    /// The index column and the order its values are at, where the catalog **names one**.
     ///
-    /// Always present, because a catalog always offers a candidate — `_healpix_29` at 29
-    /// where nothing names one.
-    pub healpix: (String, u8),
-    /// Which of those two it is, and therefore what a file without the column means.
-    ///
-    /// [`Absence::Ignore`] only where nobody named a column. That is the whole of what makes
-    /// the default safe to try: a catalog whose files have no `_healpix_29` is queried on the
-    /// geometry alone, rather than refused for not having a column it never claimed.
-    pub absence: Absence,
+    /// `None` where it does not, rather than the `_healpix_29` default filled in here: the
+    /// file's own schema is asked for that one, and a catalog whose files have not got it is
+    /// then queried on the geometry rather than refused for lacking a column it never
+    /// claimed. What this being `Some` means is that the catalog said so, which is what
+    /// makes a file without it a fault.
+    pub healpix: Option<(String, u8)>,
 }
 
 /// One partition this request will read, and what its rows still need.
@@ -427,10 +424,9 @@ impl Search {
             regions,
             ra_column: Some(&columns.ra),
             dec_column: Some(&columns.dec),
-            healpix: Some(Healpix {
-                column: &columns.healpix.0,
-                order: columns.healpix.1,
-                absence: columns.absence,
+            healpix: columns.healpix.as_ref().map(|(column, order)| Healpix {
+                column,
+                order: *order,
             }),
             partition: Some((chosen.partition.order, chosen.partition.pixel)),
         })
@@ -511,18 +507,22 @@ fn columns(catalog: &Catalog) -> Result<Columns, ApiError> {
              tested against it; query one of its files directly",
         )
     })?;
-    let (column, order) = properties.healpix_column()?;
+    // Only where the catalog names one. `hats_col_healpix` is a claim about its files, so a
+    // file without that column is a broken catalog and says so. The `_healpix_29` that
+    // `healpix_column` otherwise falls back to is HATS's recommendation rather than the
+    // catalog's word, so it is left to the file's own schema to offer — which it does under
+    // exactly that name, and under no other.
+    let healpix = match properties.names_healpix_column() {
+        false => None,
+        true => {
+            let (column, order) = properties.healpix_column()?;
+            Some((column.to_owned(), order))
+        }
+    };
     Ok(Columns {
         ra: ra.to_owned(),
         dec: dec.to_owned(),
-        healpix: (column.to_owned(), order),
-        // The catalog's own `hats_col_healpix` is a claim about its files; the `_healpix_29`
-        // this falls back to is HATS's recommendation, which a catalog is free not to have
-        // taken.
-        absence: match properties.names_healpix_column() {
-            true => Absence::Refuse,
-            false => Absence::Ignore,
-        },
+        healpix,
     })
 }
 

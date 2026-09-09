@@ -446,11 +446,23 @@ of the two HATS endpoints it is sent to controls delivery (§5.3).
 
 Rules this leaves behind live in `CLAUDE.md`. What is still open:
 
-**A `moc` against a file with no HEALPix column is refused, and a hash per row would be the
-alternative.** The cells could become a test on `ra`/`dec` — `healpix_hash(ra, dec) IN …` —
-but that is a `ScalarUDF` this crate does not have, and it would prune nothing, a computed
-column being invisible to statistics. Worth revisiting only alongside
-`ScalarUDFImpl::preimage`, which is what would make such a column prunable.
+**A `moc` against a file with no HEALPix column is refused**, and there are two ways to
+make it answer instead. Both are optimizations rather than corrections — the refusal is
+honest, and every HATS partition has the column — so both wait for a reason.
+
+- **A cell per row, from the coordinates.** `healpix_of(ra, dec) IN …` as a `ScalarUDF`,
+  compared against the same order-29 ranges the column path uses. It gives the right rows
+  and prunes nothing, a computed value being invisible to `PruningPredicate`; the file is
+  read through. Written once and taken out again as too much machinery for what it buys.
+  `ScalarUDFImpl::preimage` is what would make it prune, and is the thing to look at first.
+- **Coordinate bounds from the MOC's own cells**, `AND`ed on the way `circle` and `box`
+  already do theirs, which *would* prune. Two things to get right, and the first is where
+  it was left: the number of cells walked has to be bounded, so the MOC is degraded to a
+  coarse depth first — a superset, which is the safe direction. The second is that such a
+  bound may only ever be too wide, and a cell's extreme latitude is not obviously at a
+  vertex; padding by the cell's own diameter is sound because every point of a cell is
+  within that of any vertex of it. Right ascension is the harder half and can be given up,
+  as it already is for a cone near a pole.
 
 **Partitions are ordered wherever they are listed, not only where rows are.** §5.3's plan
 mode emits its `requests` in the same order the rows come back in, so a client fanning out

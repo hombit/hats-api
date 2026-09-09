@@ -418,6 +418,14 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   round number. Dropping cells is what an inner covering is allowed to do. For the outer
   one a box is the intersection of two supersets built from cones: its declination band,
   and the cones enclosing the pieces of its arc.
+- **`_healpix_29` is discovered; every other index column has to be named.** It is the one
+  name that carries its own order, so it is the only one a file can be recognised as having
+  — `SpatialIndex::discover` takes it where the schema holds exactly one column of that
+  name, of a type wide enough for an order-29 cell. Two of them names neither, the way
+  `sql::resolve_identifiers` has it for any shared name. Everything it rejects is `None`
+  rather than an error: nobody claimed the column was there, so its absence is a file with
+  no index rather than a fault. That is what makes a HATS partition queried directly as fast
+  as the same partition reached through its catalog.
 - **A HEALPix column is a name *and* an order.** HATS recommends `_healpix_29` and
   recommends nothing else about it, so the column may be called anything and be written at
   any order, in any integer type wide enough for it — an order-13 catalog fits `Int32`. The
@@ -541,13 +549,11 @@ request in front of it.
   caller did not write, which they cannot tell from the ones they asked for. They *are*
   written into a plan's entries, since the single-file route those entries go to has no
   catalog to ask.
-- **A column nobody named is a candidate, and a candidate that is absent is not an error.**
-  `region::Absence` is which. A column the *request* named, or a catalog's own
-  `hats_col_healpix`, is a claim: a file without it contradicts what was said, and that is
-  a fault met on the way. The `_healpix_29` fallback is nobody's claim — HATS recommends it
-  and does not require it — so a file without it is a file with no index, queried on the
-  geometry alone. Getting this backwards refuses every catalog that took the
-  recommendation's absence for an answer.
+- **`hats_col_healpix` is passed on only where the catalog names it.** Where it does not,
+  nothing fills in the `_healpix_29` default here — the file's own schema is asked instead,
+  by `SpatialIndex::discover`. What that keeps is the difference between a claim and a
+  guess: a column the catalog named and the file lacks is a broken catalog and says so,
+  while the recommended name simply being absent is a file with no index.
 - **The coordinate columns are the region's requirement, not the catalog's.** They are
   resolved only where a request carries a region. A catalog that names neither still
   answers a query that asks no spatial question, and refusing one is refusing a request
