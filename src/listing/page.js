@@ -626,25 +626,37 @@ function catalog() {
   panel.dataset.url = CATALOG;
   panel.dataset.catalog = '';
   /* The same order a file's panel is in — the columns to pick from, the query, the
-     buttons, the url, a client, the answer — with the circle where the query begins. One
-     panel read twice a day should not be laid out two ways. */
+     buttons, the url, a client, the answer — but in rows rather than in one wrapping line.
+     A file's panel asks two things and a catalog's asks five, and five fields running one
+     into the next say nothing about which of them go together.
+
+     The cone is a `fieldset` because that is what one is: three fields that are one value,
+     and its legend is the only place that can say so *and* say it is optional. Without the
+     grouping the radius reads as a third thing to fill in beside `columns`. */
   panel.innerHTML =
     '<div class="columns-of">' +
     '<span class="count">' + (SCHEMA === null ? '' : 'reading the columns…') + '</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
+    '<fieldset class="cone"><legend>Cone search (optional)</legend>' +
     '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
     '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
     '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
+    '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
+    '</fieldset>' +
+    '<div class="row">' +
     '<label><span>columns</span><textarea class="columns" rows="1" ' +
     'placeholder="all of them"></textarea></label>' +
     '<label><span>filters</span><textarea class="filters" rows="1" ' +
     'placeholder="every row"></textarea></label>' +
+    '</div>' +
+    '<div class="row">' +
     '<span class="buttons">' +
     '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
     '<a class="run download">Download parquet</a>' +
     (API === null ? '' : '<button class="run plan">Plan</button>') +
     '</span>' +
     '<p class="gate"></p>' +
+    '</div>' +
     '<div class="asked"></div>' +
     clients() +
     '<div class="result"></div>';
@@ -690,9 +702,9 @@ function gate(panel) {
   const at = state(panel);
   const note = panel.querySelector('.gate');
   note.textContent =
-    at === 'partial' ? 'A cone search takes a centre and a radius.'
-    : at === 'wide' ? 'Wider than ' + MAX_RADIUS + '″, which is more than one answer carries. Plan hands back the requests it fans out into.'
-    : at === 'none' ? 'The front of the catalog, in its own order. A circle narrows it, and a download needs one.'
+    at === 'partial' ? 'A cone needs all three fields.'
+    : at === 'wide' ? 'Too wide for one answer. Plan lists the requests it would take.'
+    : at === 'none' ? 'First rows of the catalog. Download needs a cone.'
     : '';
   const off = {
     preview: at === 'partial' || at === 'wide',

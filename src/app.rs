@@ -480,9 +480,9 @@ impl Circle {
         let asked = radius * 3600.0;
         if asked > max_radius_arcsec {
             return Err(ApiError::bad_request(format!(
-                "a radius of {asked}\u{2033} is wider than this url answers, which is \
-                 {max_radius_arcsec}\u{2033}; the API's catalog route takes a larger one, \
-                 and its plan route answers one too large to run"
+                "radius {asked}\u{2033} is over the {max_radius_arcsec}\u{2033} this url \
+                 answers; the API's catalog route takes a larger one, and its plan route \
+                 answers one too large to run"
             )));
         }
         Ok(Some(vec![region]))
@@ -638,9 +638,8 @@ async fn query_catalog_mounted(
 /// do is say which bound was reached and where the request that fans out is written.
 fn too_much_for_a_url(why: &Exceeded) -> ApiError {
     ApiError::too_much_work(format!(
-        "{why}; a limit takes the front of the catalog and a radius takes a piece of the \
-         sky, or send this to the API's catalog route, whose plan route hands back the \
-         requests it takes"
+        "{why}; add a limit or a radius, or use the API's plan route, which lists the \
+         requests this takes"
     ))
 }
 

@@ -89,6 +89,9 @@ section.catalog h2 code { font-size: 0.95em; }
 /* Which catalog and how big, under the heading rather than in it: the name is what is
    being queried and these are how to tell it from another release of the same thing. */
 .about { margin: 0 0 0.35rem; font: 0.75rem var(--mono); }
+/* Rows, not one wrapping line. A file's panel asks two things and fits on a line; this one
+   asks five, and five fields running one into the next say nothing about which of them are
+   one question. */
 section.catalog .panel-body {
   background: var(--surface);
   border: 1px solid var(--line);
@@ -96,15 +99,40 @@ section.catalog .panel-body {
   border-radius: 0 0.3rem 0.3rem 0;
   padding: 0.6rem 0.7rem 0.8rem;
   font: 0.85rem system-ui, -apple-system, sans-serif;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.55rem;
 }
+section.catalog .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.8rem; }
+/* The three fields that are one value, in the one box that can say so — and whose legend is
+   the only place that says the cone is optional and how wide it may be before either is
+   found out by typing. */
+fieldset.cone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.8rem;
+  margin: 0;
+  padding: 0.1rem 0.75rem 0.55rem;
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  /* Only as wide as the fields in it: a box drawn across the panel would read as a section
+     of the panel rather than as one field made of three. */
+  align-self: flex-start;
+}
+fieldset.cone legend { padding: 0 0.3rem; font-size: 0.75rem; color: var(--muted); }
+/* The bound, beside the field it bounds rather than in the legend: it is about the radius
+   and not about the cone. */
+fieldset.cone .unit { font-size: 0.72rem; color: var(--muted); }
 /* A centre is short next to a predicate and not short in itself: a position read off a
    catalog is written to the microarcsecond, and a field that scrolls its own front off the
    left is one nobody can check. */
 section.catalog input.ra, section.catalog input.dec { width: 11rem; }
 section.catalog input.radius_arcsec { width: 5rem; }
-/* What the fields as they stand will and will not answer, on a line of its own so that it
-   does not move the buttons about as it appears and goes. */
-.gate { flex-basis: 100%; margin: 0; min-height: 1.1em; font-size: 0.75rem; }
+/* What the fields as they stand will and will not answer, beside the buttons it is about.
+   `flex: 1` rather than a width, so a long sentence wraps under them instead of pushing
+   them off the row. */
+.gate { flex: 1 1 14rem; margin: 0; font-size: 0.75rem; }
 /* A button whose request the service would refuse. Dimmed rather than removed: what is
    missing is a field above it, and a control that vanishes is one nobody looks for. The
    anchor needs `pointer-events`, having no `disabled` of its own. */

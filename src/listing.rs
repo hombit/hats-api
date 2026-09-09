@@ -446,14 +446,14 @@ fn catalog_note(catalog: &Catalog<'_>, url: &str) -> String {
         "<section class=\"catalog\">\n\
          <h2>Query HATS catalog{named}</h2>\n\
          <p class=\"about\">{about}</p>\n\
-         <p class=\"without-js\">The catalog's url answers a query: \
-         <code>{url}?limit=10</code> is the front of it, in the catalog's own order, and \
-         <code>&amp;ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> narrows it to a cone. \
-         With <code>&amp;columns=</code>, <code>&amp;filters=</code> and \
-         <code>&amp;format=json</code>, parquet otherwise. The catalog names its own \
-         position columns and chooses which of its partitions to read. A radius reaches \
-         {radius}\u{2033}; past that, and for the whole catalog at once, the API's plan \
-         route hands back the requests it fans out into.</p>\n\
+         <p class=\"without-js\">This catalog's url answers a query. \
+         <code>{url}?limit=10</code> gives the first rows, in the catalog's own order. \
+         Add <code>&amp;ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> for a cone search, \
+         up to {radius}\u{2033} wide. Also <code>&amp;columns=</code>, \
+         <code>&amp;filters=</code> and <code>&amp;format=json</code>; parquet otherwise. \
+         The catalog names its own position columns and picks the partitions to read. For a \
+         wider search, or the whole catalog, the API's plan route lists the requests it \
+         takes.</p>\n\
          </section>\n",
         // The catalog's own name where it gave one. A catalog that did not is still a
         // catalog, and the heading says what the section is either way.
