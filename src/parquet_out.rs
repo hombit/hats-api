@@ -117,11 +117,12 @@ struct ColumnLayout {
 /// Read the source file's footer. One extra request against the object store, made only
 /// when the caller asked for parquet back.
 pub async fn read_layout(file: &RemoteFile) -> Result<SourceLayout, ApiError> {
+    // Neither the url nor the error goes into the message. For a local file `file.url`
+    // is where it sits on the disk, and `object_store`'s own path errors print the path
+    // they were given — so both would put a mount's `source` in a response.
     let path = Path::from_url_path(file.url.path()).map_err(|error| {
-        ApiError::bad_request(format!(
-            "url {} is not a valid object path: {error}",
-            file.url
-        ))
+        tracing::warn!(%error, "a source url is not a valid object path");
+        ApiError::bad_request("this url is not a valid object path")
     })?;
     let fetch = FooterFetch {
         store: Arc::clone(&file.store),

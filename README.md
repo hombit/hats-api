@@ -14,6 +14,9 @@ Two interfaces:
 
 Both are off until configured, and both can run at once.
 
+A `[[mount]]` is the only way a local directory becomes readable, in either mode. Its
+`path` is the address both modes use; `serve` publishes it as a directory as well.
+
 ## Running it
 
 ```
@@ -48,13 +51,36 @@ enabled = false
 [[mount]]
 path = "/"
 source = "/srv/hats"
+serve = true
 ```
+
+## Mounts
+
+```toml
+[[mount]]
+path = "/hats"            # the address, in both modes
+source = "/data/hats"     # where it actually is, which no caller sees
+serve = true              # publish it as a directory; off is API-only
+follow_symlinks = false
+immutable = false
+filenames = ["*.parquet"] # in place of [data] filenames, for this mount
+```
+
+`path` is the address in both modes. The file server publishes the directory there, and
+an API request names a file in it by the same path — `file:///hats/dr1/x.parquet`, never
+the `/data/hats` it lives in.
+
+`serve` publishes the directory. With it off the mount is not served and not listed, and
+a request for any path under it is a 404; an API request naming a file in it is answered
+as usual.
+
+Two mounts may not claim overlapping url prefixes, served or not. A mount's `filenames`
+replaces `[data] filenames` for the files under it.
 
 ## File-server mode
 
-Each `[[mount]]` publishes one directory under one url prefix. A request for a file
-gets the file; a request for a directory gets its own `index.html` if it has one, and
-otherwise a listing of every entry ordered by name.
+A request for a file gets the file; a request for a directory gets its own `index.html`
+if it has one, and otherwise a listing of every entry ordered by name.
 
 A listing answers in whichever form the client asked for. `Accept: text/html` gets a
 page; everything else, `*/*` included, gets JSON.
@@ -315,8 +341,8 @@ Two independent sets of rules, and both apply:
 
 - **`[api.access.<backend>]`** decides which endpoint a request may name. Three states
   per backend: no `endpoints` key at all for any endpoint, an empty list to turn the
-  scheme off, or a list for exactly those. `[api.access.local] paths` is empty by
-  default, so no local file is readable until a directory is listed.
+  scheme off, or a list for exactly those. There is no section for local files: a
+  `[[mount]]` is the whole of what makes one readable.
 - **`[api.access.network]`** decides which addresses may be reached, whatever backend the
   request goes through. Loopback, private ranges — link-local included, where a cloud
   instance serves this machine's own IAM credentials — and network-internal names are all
@@ -325,8 +351,8 @@ Two independent sets of rules, and both apply:
 A name is judged before it is resolved, and every address it resolves to is judged again
 inside the HTTP client's own resolver. Redirects are not followed.
 
-Mounting a directory also lets API mode read it, scoped to that directory. The grant is
-one way — `[api.access.local]` says nothing about what the mounts publish.
+A `file://` url names a mount's `path`, not a place on the disk. A path under no mount is
+refused whether or not anything is there.
 
 ### Servers that ignore `Range`
 

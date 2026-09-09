@@ -130,7 +130,7 @@ impl Webdav {
                 },
                 ..Default::default()
             },
-            &hats_api::mount::Mounts::default(),
+            std::sync::Arc::default(),
         )
         .expect("the policy should build")
     }

@@ -321,7 +321,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         app::Service::new(
             permissive_policy(),
             &hats_api::config::LimitsConfig::default(),
-            hats_api::mount::Mounts::default(),
+            Arc::default(),
             &hats_api::config::ApiConfig::default(),
             &hats_api::config::DataConfig::default(),
             &hats_api::config::ServerConfig::default(),
@@ -396,7 +396,7 @@ async fn a_policy_refusal_logs_no_secret() {
             },
             ..Default::default()
         },
-        &hats_api::mount::Mounts::default(),
+        Arc::default(),
     )
     .expect("policy");
 

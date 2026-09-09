@@ -598,8 +598,13 @@ impl RemoteDir {
 
     /// The key a name inside this directory has in the store.
     fn key(&self, relative: &str) -> Result<ObjectPath, ApiError> {
-        ObjectPath::from_url_path(self.join(relative)?.path())
-            .map_err(|error| ApiError::bad_request(format!("{relative:?}: {error}")))
+        // `relative` is what the request or the catalog named and is safe to repeat; the
+        // error is not, since `object_store`'s path errors print the whole path they were
+        // given, which for a local directory is a mount's `source`.
+        ObjectPath::from_url_path(self.join(relative)?.path()).map_err(|error| {
+            tracing::warn!(%error, "not a valid object path");
+            ApiError::bad_request(format!("{relative:?} is not a valid object path"))
+        })
     }
 
     fn join(&self, relative: &str) -> Result<Url, ApiError> {
@@ -751,8 +756,12 @@ pub fn open_mounted(path: &FilePath) -> Result<RemoteFile, ApiError> {
               a local file"
 )]
 fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
+    // The path is the mount's `source` joined with what the caller wrote, so naming it
+    // here would put the operator's directory in a response. Only a path that is not
+    // absolute reaches this, and a mount's source is canonical.
     let url = Url::from_file_path(path).map_err(|()| {
-        ApiError::bad_request(format!("{} is not a valid file url", path.display()))
+        tracing::error!(path = %path.display(), "a resolved local path is not a file url");
+        ApiError::internal("cannot read this file")
     })?;
     Ok(RemoteFile {
         store: Arc::new(LocalFileSystem::new()),
@@ -1507,7 +1516,7 @@ mod tests {
         super::open(
             url,
             options,
-            &AccessPolicy::new(&config, &crate::mount::Mounts::default()).unwrap(),
+            &AccessPolicy::new(&config, Arc::default()).unwrap(),
             &transfers(),
         )
     }
@@ -2193,7 +2202,7 @@ mod tests {
                 },
                 ..Default::default()
             },
-            &crate::mount::Mounts::default(),
+            Arc::default(),
         )
         .unwrap();
         assert!(super::open(&url, &cleartext, &policy, &transfers()).is_ok());
@@ -2317,7 +2326,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let policy = AccessPolicy::new(&config, &crate::mount::Mounts::default()).unwrap();
+        let policy = AccessPolicy::new(&config, Arc::default()).unwrap();
         let url = parse_url(&format!("http://127.0.0.1:{port}/hats/part0.parquet")).unwrap();
         let file = super::open(&url, &no_options(), &policy, &transfers()).unwrap();
         assert_eq!(store_key(&file), format!("http://127.0.0.1:{port}"));
@@ -2512,7 +2521,7 @@ mod tests {
                 },
                 ..Default::default()
             },
-            &crate::mount::Mounts::default(),
+            Arc::default(),
         )
         .unwrap()
     }

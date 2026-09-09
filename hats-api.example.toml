@@ -14,7 +14,7 @@ show_version = true
 
 [api]
 # API mode: the caller names the data in the request, and [api.access] decides what it
-# may name. Off serves nothing but the mounts.
+# may name. Off serves nothing but the mounts that set `serve`.
 enabled = true
 # The url subtree the API answers under. It wins over a mount covering the same paths.
 prefix = "/api/v1"
@@ -70,35 +70,35 @@ allow_plain_http = false
 # naming the "http://" server.
 # endpoints = ["https://dav.example.com"]
 
-[api.access.local]
-# Directories a request may read parquet files from, as absolute paths or file:// urls.
-# A directory that does not exist is a startup error. Mounts are readable too, scoped to
-# themselves; this key says nothing about what the mounts publish.
-paths = []
-# Whether a local path may go through a symlink. A path is resolved before it is
-# matched, so a link inside an allowed directory cannot lead out of one.
-follow_symlinks = false
+# There is no [api.access] section for local files: a [[mount]] is what makes a
+# directory readable.
 
-# File-server mode: zero or more mounts, each publishing one local directory under a url
-# prefix. Both keys are required, and two mounts may not claim the same subtree.
+# Zero or more mounts, each naming one local directory. `path` and `source` are required,
+# and two mounts may not claim the same subtree, served or not.
+#
+# `path` is the address in both modes. The file server publishes the directory there, and
+# an API request names a file in it by the same path: file:///hats/dr1/x.parquet, never
+# the /data/hats it lives in.
 #
 # [[mount]]
-# path = "/"                   # the url prefix
-# source = "/srv/data"         # an absolute path or a file:// url, and a directory
+# path = "/hats"               # the address, in both modes
+# source = "/data/hats"        # an absolute path or a file:// url, and a directory
+# serve = true                 # publish it; off is API-only
 # follow_symlinks = false      # per mount
 # immutable = false            # never changes once published, so a cached copy needs no
 #                              # revalidating
+# filenames = ["*.parquet"]    # in place of [data] filenames, for this mount
 #
 # [[mount]]
-# path = "/hats"
-# source = "/data/hats"
-# immutable = true
+# path = "/staging"
+# source = "/srv/staging"
+# # no `serve`: readable through the API, not published as a directory
 
 [data]
-# Which files are read as data, as glob patterns; both modes consult this one list.
-# Matched against a file's own name, never the path above it. The default is what a HATS
-# catalog contains; "_metadata" and "_common_metadata" are parquet files with no
-# extension.
+# Which files are read as data, as glob patterns; both modes consult this list, and a
+# [[mount]] may name its own in place of it. Matched against a file's own name, never
+# the path above it. The default is what a HATS catalog contains; "_metadata" and
+# "_common_metadata" are parquet files with no extension.
 #
 # Off the list, the file server still serves the bytes and ignores the query parameters;
 # the API answers 404.

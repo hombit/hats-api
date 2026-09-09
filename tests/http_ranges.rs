@@ -228,7 +228,7 @@ fn policy() -> AccessPolicy {
             },
             ..Default::default()
         },
-        &hats_api::mount::Mounts::default(),
+        Arc::default(),
     )
     .expect("the policy should build")
 }

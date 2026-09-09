@@ -9,13 +9,12 @@ use axum::{
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
-use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
 // here and is a literal `+` in a path segment.
-use url::form_urlencoded;
+use url::{Url, form_urlencoded};
 
 use crate::access::{self, AccessPolicy};
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
@@ -38,7 +37,8 @@ pub struct Service {
     pub policy: Arc<AccessPolicy>,
     pub transfers: Arc<Transfers>,
     pub mounts: Arc<Mounts>,
-    /// Which files either mode will read as data.
+    /// Which files are read as data where no mount governs the question, which in API
+    /// mode is every remote url. A mount answers it with [`Mount::data_files`] instead.
     pub data_files: Arc<DataFiles>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
@@ -54,12 +54,12 @@ impl Service {
     pub fn new(
         policy: AccessPolicy,
         limits: &LimitsConfig,
-        mounts: Mounts,
+        mounts: Arc<Mounts>,
         api: &ApiConfig,
         data: &DataConfig,
         server: &ServerConfig,
     ) -> Result<Self, ConfigError> {
-        let data_files = DataFiles::new(data)?;
+        let data_files = DataFiles::new(&data.filenames)?;
         let api_prefix = match api.enabled {
             true => Some(mount::normalize_prefix(&api.prefix).map_err(|reason| {
                 ConfigError::Route(format!("api.prefix {:?}: {reason}", api.prefix))
@@ -67,6 +67,9 @@ impl Service {
             false => None,
         };
         if let Some(prefix) = &api_prefix {
+            // Every mount, served or not: a mount's `path` is its address in both modes,
+            // so one buried under the API's routes is unreachable either way.
+            //
             // The other way round is the expected arrangement — a mount at `/` with the
             // API inside it — and needs no rule: a route wins over the fallback that
             // reaches the mounts.
@@ -80,9 +83,12 @@ impl Service {
                     mount.prefix()
                 )));
             }
-        } else if mounts.is_empty() {
+        } else if mounts.serves_nothing() {
+            // A mount the file server does not publish is not something the file server
+            // can serve, so a config of nothing but those has the same hole in it as a
+            // config with no mounts at all.
             return Err(ConfigError::Route(
-                "api.enabled is false and there is no [[mount]], so there would be \
+                "api.enabled is false and no [[mount]] sets serve, so there would be \
                  nothing to serve"
                     .to_owned(),
             ));
@@ -90,7 +96,7 @@ impl Service {
         Ok(Self {
             policy: Arc::new(policy),
             transfers: Arc::new(Transfers::new(limits)),
-            mounts: Arc::new(mounts),
+            mounts,
             data_files: Arc::new(data_files),
             sql_limits: limits.into(),
             show_version: server.show_version,
@@ -104,6 +110,22 @@ impl Service {
         self.api_prefix
             .as_ref()
             .is_some_and(|prefix| mount::within(prefix, path).is_some())
+    }
+
+    /// Which files a url's own location reads as data. A `file://` url is addressed in
+    /// the mounts' url space, so the mount it names answers for it; everything else is
+    /// remote and has only `[data] filenames` to go on.
+    ///
+    /// Asked before the store is built, so it is a question about the url rather than
+    /// about the file — a url under no mount gets the default list and is refused a
+    /// moment later by the policy, which is where saying so belongs.
+    fn data_files_for(&self, url: &Url) -> &DataFiles {
+        if url.scheme() != access::LOCAL_SCHEME {
+            return &self.data_files;
+        }
+        self.mounts
+            .resolve(url.path())
+            .map_or(&self.data_files, |(mount, _)| mount.data_files())
     }
 }
 
@@ -177,10 +199,12 @@ async fn serve_mounted(
     if service.is_api_path(&path) {
         return Err(ApiError::not_found(format!("{path} is not a route")));
     }
-    let Some((mount, relative)) = service.mounts.resolve(&path) else {
+    // `published`, not `resolve`: a mount that did not opt in claims no url space, and a
+    // request for one of its paths is a request for a route that is not there.
+    let Some((mount, relative)) = service.mounts.published(&path) else {
         return Err(ApiError::not_found(format!("{path} is not a route")));
     };
-    let segments = path_segments(relative)?;
+    let segments = mount::path_segments(relative)?;
     let mut requested = mount.source().to_owned();
     requested.extend(&segments);
     let mut file = access::authorize_mounted(mount, &requested)?;
@@ -197,7 +221,7 @@ async fn serve_mounted(
     // A query string turns a data file into a question about itself. Anything else keeps
     // going out verbatim, parameters and all: a file server that has no use for a
     // parameter ignores it, and `index.html?v=3` is a request for `index.html`.
-    if service.data_files.matches_path(&file)
+    if mount.data_files().matches_path(&file)
         && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default())?
     {
         return query_mounted(&service, &file, &query, &parts).await;
@@ -212,7 +236,7 @@ async fn serve_mounted(
         .into_response();
     // mime_guess has no answer for `.parquet`, and the clients that read these files
     // look at the content type.
-    if service.data_files.matches_path(&file) {
+    if mount.data_files().matches_path(&file) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static(PARQUET_CONTENT_TYPE),
@@ -380,30 +404,9 @@ async fn list_directory(
             })?;
 
     Ok(match listing::wants_html(&request.headers) {
-        true => Html(listing.to_html(&service.data_files, service.show_version)).into_response(),
+        true => Html(listing.to_html(mount.data_files(), service.show_version)).into_response(),
         false => Json(listing).into_response(),
     })
-}
-
-/// The path a request names inside a mount, one component per url segment.
-///
-/// Percent-decoded one segment at a time, so that an encoded separator arrives as part
-/// of a name rather than as a separator, and `..` is refused outright rather than left
-/// for the resolver to clean up: a request path is not a place to be climbing from.
-fn path_segments(relative: &str) -> Result<Vec<String>, ApiError> {
-    let mut segments = Vec::new();
-    for segment in relative.split('/').filter(|segment| !segment.is_empty()) {
-        let decoded = percent_decode_str(segment)
-            .decode_utf8()
-            .map_err(|_| ApiError::bad_request("this path is not valid UTF-8"))?;
-        if matches!(decoded.as_ref(), "." | "..") || decoded.contains(['/', '\0']) {
-            return Err(ApiError::bad_request(format!(
-                "{segment:?} is not something a path here can contain"
-            )));
-        }
-        segments.push(decoded.into_owned());
-    }
-    Ok(segments)
 }
 
 #[derive(Debug, Serialize)]
@@ -664,22 +667,38 @@ async fn query_parquet(
     // The API has only one thing to do with an object, so a url naming something it does
     // not read as data names nothing this route serves. Answered before the store is
     // built, so a request for the wrong object costs no connection.
-    if !service.data_files.matches_url(&url) {
+    let data_files = service.data_files_for(&url);
+    if !data_files.matches_url(&url) {
         return Err(ApiError::not_found(format!(
             "this url does not name a data file; url must end in a name matching {}",
-            service.data_files.describe()
+            data_files.describe()
         )));
     }
     let file = storage::open(&url, &params.storage, &service.policy, &service.transfers)?;
+    // A local url resolved to a place on the disk that the caller did not write and must
+    // not be shown: they named a mount's `path`, and a store's message names its
+    // `source`. So a local answer is mapped the way a mounted one is. A remote one keeps
+    // its own message, where the path in it is the caller's own url.
+    let on_disk = file.url.to_file_path().ok();
+    let hide_the_path = |error: ApiError| match &on_disk {
+        Some(path) => error.from_mount(path),
+        None => error,
+    };
     // No order promised: the caller named a url and asked for rows, not for a view of a
     // file's layout. A `limit` is still answered reproducibly — that is `query`'s own
     // rule, since which rows come back is a different question from what order they are
     // in.
-    let result = query::run(&file, &selection, service.sql_limits, Order::Unspecified).await?;
+    let result = query::run(&file, &selection, service.sql_limits, Order::Unspecified)
+        .await
+        .map_err(hide_the_path)?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, &file, format, started).await?;
+    // Both of them, the way the mounted path does it: encoding a parquet answer reads
+    // the source file's layout, so it raises the store's messages too.
+    let response = answer(&result, &file, format, started)
+        .await
+        .map_err(hide_the_path)?;
     tracing::info!(
         // file.url, not the parameter: the parameter may carry credentials. The two
         // expressions are the caller's own text and can be megabytes of `IN` list, so
@@ -797,7 +816,7 @@ mod tests {
         Service::new(
             AccessPolicy::default(),
             &LimitsConfig::default(),
-            Mounts::default(),
+            Arc::default(),
             &ApiConfig::default(),
             &DataConfig::default(),
             &ServerConfig::default(),
@@ -1060,16 +1079,12 @@ mod tests {
         assert!(shown.contains("us-west-2"), "{shown}");
     }
 
-    /// A directory with one file in it, and a service that publishes it at `/`.
-    fn mounted(dir: &Path, api: &ApiConfig) -> Service {
-        let mounts = Mounts::new(&[crate::config::MountConfig {
-            path: "/".to_owned(),
-            source: dir.display().to_string(),
-            follow_symlinks: false,
-            immutable: false,
-        }])
-        .unwrap();
-        let policy = AccessPolicy::new(&crate::config::AccessConfig::default(), &mounts).unwrap();
+    /// One `[[mount]]`, and a service built around it.
+    fn with_mount(config: crate::config::MountConfig, api: &ApiConfig) -> Service {
+        let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
+        let policy =
+            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
+                .unwrap();
         Service::new(
             policy,
             &LimitsConfig::default(),
@@ -1079,6 +1094,23 @@ mod tests {
             &ServerConfig::default(),
         )
         .unwrap()
+    }
+
+    /// A `[[mount]]` publishing `dir` at `/`, which is what most of these want.
+    fn serving(dir: &Path) -> crate::config::MountConfig {
+        crate::config::MountConfig {
+            path: "/".to_owned(),
+            source: dir.display().to_string(),
+            serve: true,
+            follow_symlinks: false,
+            immutable: false,
+            filenames: None,
+        }
+    }
+
+    /// A directory with one file in it, and a service that publishes it at `/`.
+    fn mounted(dir: &Path, api: &ApiConfig) -> Service {
+        with_mount(serving(dir), api)
     }
 
     async fn respond(service: Service, request: http::request::Builder) -> Response {
@@ -1358,48 +1390,153 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    /// A `POST` of `body` to a service's own API route, as JSON.
+    async fn ask(service: Service, body: serde_json::Value) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/parquet")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// `serve` is what the file server needs and the API does not, and `path` is the
+    /// address for both. So an unserved mount is a 404 to a browser and a readable file
+    /// to a query — and the query writes the mount's path, not the disk's.
+    #[tokio::test]
+    async fn an_unserved_mount_is_read_by_the_api_and_by_nothing_else() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || {
+            with_mount(
+                crate::config::MountConfig {
+                    path: "/staging".to_owned(),
+                    serve: false,
+                    ..serving(dir.path())
+                },
+                &ApiConfig::default(),
+            )
+        };
+
+        // Nothing of it is published: not the file, not the directory it is in.
+        for path in ["/staging/part0.parquet", "/staging/", "/staging"] {
+            let response = respond(service(), Request::builder().uri(path)).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+
+        // The API reads it, by the mount's path.
+        let (status, body) = ask(
+            service(),
+            serde_json::json!({"url": "file:///staging/part0.parquet", "limit": 1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // And not by where it is on the disk, which is not a url this service publishes.
+        let on_disk = dir.path().canonicalize().unwrap().join("part0.parquet");
+        let (status, body) = ask(
+            service(),
+            serde_json::json!({"url": Url::from_file_path(&on_disk).unwrap().to_string()}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    }
+
+    /// One question, and the mount's own list answers it for both routes: the file
+    /// server decides whether a query string means anything, and the API decides whether
+    /// the url names data at all.
+    #[tokio::test]
+    async fn a_mount_s_own_filenames_govern_both_routes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.pq"), query::tests::fixture()).unwrap();
+        // `*.pq` is on `[data] filenames` by default, and this mount takes it off.
+        let service = || {
+            with_mount(
+                crate::config::MountConfig {
+                    filenames: Some(vec!["*.parquet".to_owned()]),
+                    ..serving(dir.path())
+                },
+                &ApiConfig::default(),
+            )
+        };
+
+        // The file server hands the bytes over and ignores a query it has no use for.
+        let response = respond(
+            service(),
+            Request::builder().uri("/part0.pq?columns=objectid&format=json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            PARQUET_CONTENT_TYPE
+        );
+
+        // The API has nothing to say about it, and says which names it would have read.
+        let (status, body) = ask(
+            service(),
+            serde_json::json!({"url": "file:///part0.pq", "limit": 1}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+        assert!(body.contains("*.parquet"), "{body}");
+    }
+
     /// The two modes have to divide the url space between them, and a configuration
     /// where they do not is a startup error rather than a route nothing reaches.
     #[test]
     fn a_url_space_that_serves_nothing_is_a_startup_error() {
         let dir = tempfile::TempDir::new().unwrap();
-        let service = |mount_path: &str, api: ApiConfig| {
-            let mounts = Mounts::new(&[crate::config::MountConfig {
-                path: mount_path.to_owned(),
-                source: dir.path().display().to_string(),
-                follow_symlinks: false,
-                immutable: false,
-            }])
+        let service = |mount_path: &str, serve: bool, api_enabled: bool| {
+            let api = ApiConfig {
+                enabled: api_enabled,
+                ..Default::default()
+            };
+            let mounts = Mounts::new(
+                &[crate::config::MountConfig {
+                    path: mount_path.to_owned(),
+                    serve,
+                    ..serving(dir.path())
+                }],
+                &DataConfig::default(),
+            )
             .unwrap();
             Service::new(
                 AccessPolicy::default(),
                 &LimitsConfig::default(),
-                mounts,
+                Arc::new(mounts),
                 &api,
                 &DataConfig::default(),
                 &ServerConfig::default(),
             )
         };
 
-        // A mount inside the API's subtree is one no request could reach.
-        let error = service("/api/v1/hats", ApiConfig::default())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("/api/v1"), "{error}");
+        // A mount inside the API's subtree is one no request could reach. `path` is the
+        // mount's address in both modes, so an unserved one is no more reachable there
+        // than a served one.
+        for serve in [true, false] {
+            let error = service("/api/v1/hats", serve, true)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("/api/v1"), "serve={serve}: {error}");
+        }
         // The same directory one level up is the expected arrangement.
-        assert!(service("/hats", ApiConfig::default()).is_ok());
-        // The API off, with a mount, is a file server.
-        let off = ApiConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        assert!(service("/api/v1/hats", off).is_ok());
+        assert!(service("/hats", true, true).is_ok());
+        // The API off, with a served mount, is a file server.
+        assert!(service("/api/v1/hats", true, false).is_ok());
+        // The API off, and a mount only the API could have read, serves nothing.
+        let error = service("/hats", false, false).unwrap_err().to_string();
+        assert!(error.contains("nothing to serve"), "{error}");
 
-        // The API off with nothing mounted serves nothing at all.
+        // And the API off with nothing mounted, likewise.
         let error = Service::new(
             AccessPolicy::default(),
             &LimitsConfig::default(),
-            Mounts::default(),
+            Arc::default(),
             &ApiConfig {
                 enabled: false,
                 ..Default::default()
@@ -1667,22 +1804,19 @@ mod tests {
     async fn the_list_of_data_files_is_configurable() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("part0.pq"), query::tests::fixture()).unwrap();
-        let mounts = Mounts::new(&[crate::config::MountConfig {
-            path: "/".to_owned(),
-            source: dir.path().display().to_string(),
-            follow_symlinks: false,
-            immutable: false,
-        }])
-        .unwrap();
-        let policy = AccessPolicy::new(&crate::config::AccessConfig::default(), &mounts).unwrap();
+        let data = DataConfig {
+            filenames: vec!["*.pq".to_owned()],
+        };
+        let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &data).unwrap());
+        let policy =
+            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
+                .unwrap();
         let service = Service::new(
             policy,
             &LimitsConfig::default(),
             mounts,
             &ApiConfig::default(),
-            &DataConfig {
-                filenames: vec!["*.pq".to_owned()],
-            },
+            &data,
             &ServerConfig::default(),
         )
         .unwrap();
@@ -1773,6 +1907,32 @@ mod tests {
         // And without a query they are still ordinary files.
         let response = respond(service(), Request::builder().uri("/liar.parquet")).await;
         assert_eq!(response.status(), StatusCode::OK);
+
+        // The same three through the API, which reaches the same files by the mount's
+        // path. Every one of these messages is raised by a store or a reader that knows
+        // only where the file is on the disk, so this is where that would be repeated.
+        for name in ["liar.parquet", "empty.parquet", "metadata_only.parquet"] {
+            for format in ["parquet", "json"] {
+                let (status, body) = ask(
+                    service(),
+                    serde_json::json!({
+                        "url": format!("file:///{name}"),
+                        "format": format,
+                        "limit": 1,
+                    }),
+                )
+                .await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{name} as {format}: {body}"
+                );
+                assert!(
+                    !body.contains(&dir.path().display().to_string()),
+                    "{name} as {format} leaked a local path: {body}"
+                );
+            }
+        }
     }
 
     /// The API has only one thing to do with an object, so a url naming something it

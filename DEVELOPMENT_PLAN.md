@@ -63,15 +63,15 @@ One binary, two interfaces over shared storage and query layers.
   POST /api/v1/…      ┌───────────────────────────────────────┐
                       │ API mode: url-addressed               │
                       │  the caller names the location        │
-                      │  any scheme, incl. local files        │
-                      │  governed by [api.access]  ◄──┐       │
-                      └───────────────┬───────────────┼───────┘
-                                      │               │ each mount
-  GET  /  /hats  …    ┌───────────────┴───────────────┼───────┐
-                      │ File-server mode: path-addr.  │ grants│
-                      │  the operator named it        │ its   │
-                      │  local directories            │ prefix│
-                      │  governed by [[mount]] ───────┘       │
+                      │  remote: governed by [api.access]     │
+                      │  local:  file:// is a mount's path ─┐ │
+                      └───────────────┬─────────────────────┼─┘
+                                      │                     │ one
+  GET  /  /hats  …    ┌───────────────┴─────────────────────┼─┐
+                      │ File-server mode: path-addressed    │ │
+                      │  the operator named it              │ │
+                      │  the mounts that set `serve` ◄──────┘ │
+                      │  governed by [[mount]]                │
                       └───────────────┬───────────────────────┘
                                       │
                       ┌───────────────┴───────────────────────┐
@@ -82,13 +82,16 @@ One binary, two interfaces over shared storage and query layers.
 The modes differ in who names the location:
 
 - **API mode** takes the location from the caller as a `url`, which may carry storage
-  options and credentials. `[api.access]` governs where a caller may point the service.
-  Every backend is reachable, local files included; local access is denied by default,
-  not absent.
-- **File-server mode** maps an operator-configured prefix onto a URL path (`/` →
-  `/srv/data`, `/hats` → `/data/hats`). The caller never names a store and never supplies
-  a credential. Outside a mount is a 404, not a policy refusal. A mount's source is a
-  local directory.
+  options and credentials. `[api.access]` governs which remote endpoint a caller may
+  point the service at. A `file://` url names a mount's `path`, never a place on the
+  disk, so local access is scoped to the mounts by construction.
+- **File-server mode** publishes the mounts that set `serve`, mapping the mount's `path`
+  onto the directory under it (`/` → `/srv/data`, `/hats` → `/data/hats`). The caller
+  never names a store and never supplies a credential. Outside a published mount is a
+  404, not a policy refusal.
+
+`[[mount]]` is the one place a local directory is named, and `path` is its address in
+both modes. `serve` is the only thing that differs between them.
 
 The query engine, parquet writer, object stores and path-resolution primitives are one
 implementation under both. The request shapes differ (§3.3, §3.4).
@@ -906,14 +909,16 @@ backend in §2 is a chance to break it.
 
 ### 8.2 No local filesystem until the config says so
 
-- Default deny, and **an empty list means none**, not "unset, so allow".
+- Default deny: with no `[[mount]]`, no local file is readable by either mode.
+- A caller addresses a local file by a mount's `path`, so **the disk is not an address**.
+  There is no url that reaches a directory no mount named.
 - Every path is **canonicalized before matching**, so `..` cannot climb out and a symlink
-  inside an allowed directory cannot lead out of one. Without `follow_symlinks`, a path
+  inside a mount cannot lead out of it. Without the mount's `follow_symlinks`, a path
   traversing a symlink at all is refused.
-- **Refusal must not be a filesystem oracle.** Outside every allowed directory is 403
-  whether or not the path exists; only inside one does a missing file become 404. Preserve
-  this when adding the file-server mode.
-- Derived API grants (§3.1) are never wider than the mount they come from.
+- **Refusal must not be a filesystem oracle.** Under no mount is 403 whether or not
+  anything is there; only inside one does a missing file become 404.
+- A mount's rules are its own: one mount never resolves a path against another's
+  directory, whatever either says about symlinks.
 - Run as an unprivileged user, and document `ReadOnlyPaths=`/`ProtectSystem=` (systemd)
   and read-only bind mounts (Docker) in `docs/deployment.md`.
 

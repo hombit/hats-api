@@ -1,10 +1,13 @@
 //! Which files this service reads as data, and which are only bytes to hand over.
 //!
-//! One list, consulted by both modes, because the question is the same one: a caller
-//! asking a file-server path for fewer columns and a caller naming a url in the API are
-//! both asking this service to parse something. What differs is the answer for a file
-//! that is not on the list — the file server still has bytes to send, and the API has
-//! nothing to say.
+//! One question, asked the same way by both modes: a caller asking a file-server path
+//! for fewer columns and a caller naming a url in the API are both asking this service
+//! to parse something. What differs is the answer for a file that is not on the list —
+//! the file server still has bytes to send, and the API has nothing to say.
+//!
+//! `[data] filenames` is the list, and a `[[mount]]` may carry its own in place of it.
+//! Which list governs follows the file rather than the mode, so a file under a mount is
+//! read as data, or not, on the same terms whichever route reached it.
 
 use std::path::Path;
 
@@ -28,9 +31,9 @@ pub struct DataFiles {
 }
 
 impl DataFiles {
-    pub fn new(config: &DataConfig) -> Result<Self, ConfigError> {
+    pub fn new(filenames: &[String]) -> Result<Self, ConfigError> {
         let mut builder = GlobSetBuilder::new();
-        for pattern in &config.filenames {
+        for pattern in filenames {
             // `literal_separator` is what keeps a pattern to a name: without it `*`
             // crosses `/`, so `*.parquet` would match `catalog.parquet/properties` as
             // readily as a file, and what an operator wrote for a name would silently be
@@ -43,10 +46,10 @@ impl DataFiles {
         }
         let patterns = builder
             .build()
-            .map_err(|error| ConfigError::Data(config.filenames.join(", "), error.to_string()))?;
+            .map_err(|error| ConfigError::Data(filenames.join(", "), error.to_string()))?;
         Ok(Self {
             patterns,
-            written: config.filenames.clone(),
+            written: filenames.to_vec(),
         })
     }
 
@@ -94,7 +97,7 @@ impl DataFiles {
     /// been read.
     pub fn describe(&self) -> String {
         match self.written.is_empty() {
-            true => "nothing: data.filenames is empty".to_owned(),
+            true => "nothing: the filenames list is empty".to_owned(),
             false => self.written.join(", "),
         }
     }
@@ -108,7 +111,7 @@ impl Default for DataFiles {
             reason = "the default patterns are literals in `DataConfig::default`, and \
                       `the_default_patterns_compile` is what holds them to compiling"
         )]
-        Self::new(&DataConfig::default()).expect("the default patterns are valid globs")
+        Self::new(&DataConfig::default().filenames).expect("the default patterns are valid globs")
     }
 }
 
@@ -117,10 +120,8 @@ mod tests {
     use super::*;
 
     fn files(patterns: &[&str]) -> DataFiles {
-        DataFiles::new(&DataConfig {
-            filenames: patterns.iter().map(|it| (*it).to_owned()).collect(),
-        })
-        .unwrap()
+        let filenames: Vec<String> = patterns.iter().map(|it| (*it).to_owned()).collect();
+        DataFiles::new(&filenames).unwrap()
     }
 
     #[test]
@@ -178,11 +179,9 @@ mod tests {
 
     #[test]
     fn a_pattern_that_is_not_a_glob_is_a_startup_error() {
-        let error = DataFiles::new(&DataConfig {
-            filenames: vec!["[unclosed".to_owned()],
-        })
-        .unwrap_err()
-        .to_string();
-        assert!(error.contains("[data]"), "{error}");
+        let error = DataFiles::new(&["[unclosed".to_owned()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("filenames"), "{error}");
     }
 }

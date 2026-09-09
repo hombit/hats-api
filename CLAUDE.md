@@ -216,9 +216,15 @@ everything about what SQL means here is decided there.
 
   A parameter on a path that has no query surface is a different thing and is ignored, the
   way any HTTP server ignores what it has no use for. `data::DataFiles` is what draws that
-  line — one configured list of filename globs, consulted by both modes — so whether a
-  request is a query at all is decided before any parameter is read, rather than by each
-  parameter deciding for itself.
+  line — a list of filename globs — so whether a request is a query at all is decided
+  before any parameter is read, rather than by each parameter deciding for itself.
+
+  **Which list is the file's, never the mode's.** `[data] filenames` is the default and a
+  `[[mount]]` may name its own in place of it, so a file under a mount is judged by that
+  mount's list whichever route reached it — the file server asks `Mount::data_files`, and
+  the API asks the mount a `file://` url resolved to. A route that reaches for
+  `Service::data_files` where a mount governs the file makes the two modes disagree about
+  what one file is.
 
 Adding a scalar function feature to the `datafusion` dependency adds everything it
 registers to what a caller may call. That is the decision being made; make it
@@ -572,12 +578,36 @@ A mount publishes a directory, not the machine it is on. What is on disk — the
 path, the layout above it, whether a name exists outside what the mount serves — is the
 operator's business, and none of it may appear in an answer.
 
-- **A local path never reaches a caller, and an error message is where one gets out.** A
-  store names the path it was reading, so the message a store or a reader raises about a
-  mounted file is not repeatable as-is. `ApiError::from_mount` is where that is turned
-  into a message of this crate's own; the original goes to the log. Anything reading a
-  mounted file goes through it, and it is not needed in API mode — there the path in the
-  message is the caller's own url.
+**A `[[mount]]` is the only local directory this service reads, and its `path` is the
+address in both modes.** The file server publishes it there when `serve` says so, and a
+`file://` url in an API request names that same path — never the `source`. So there is no
+second list of directories to keep in step with the mounts, and no spelling of a path that
+reaches a directory no mount named. `Mounts::resolve` is every mount, which is what the
+API asks; `Mounts::published` is the served ones, which is what the file server asks.
+Reaching for `resolve` in the file server publishes what an operator did not.
+
+Two consequences that are easy to get backwards:
+
+- **A mount's `path` is checked for overlap whether or not it is served.** It is an
+  address either way, so two mounts sharing one is two answers to one question.
+- **`serve` is the file server's alone.** It says nothing about what the API may read, and
+  a rule about local access that reads `serve` is a rule in the wrong place.
+
+- **A local path never reaches a caller.** The log is a different question and may say
+  anything — it is the operator's. A response may not, and an error message is where one
+  gets out. A store names the path it was reading, so the message a store or a reader
+  raises about a local file is not repeatable as-is. `ApiError::from_mount` is where that
+  is turned into a message of this crate's own; the original goes to the log. **Both
+  modes need it**: a caller who named `file:///hats/x.parquet` wrote a mount's `path`,
+  and the store's message names its `source`. Only a remote url may keep the store's own
+  message, the path in that one being the caller's.
+- **`RemoteFile::url` is that path**, spelled `file:///…`, for anything local. So it goes
+  in the log and never in a response — and neither does an `object_store::path::Error`,
+  whose own `Display` prints the path it was handed. `from_mount` is no help with either:
+  it passes a `BadRequest` through untouched, on the ground that this crate wrote it, and
+  a message this crate wrote out of `file.url` is exactly the case that defeats. What
+  a refusal may name is what the *caller* wrote — the url they sent, or the name inside a
+  catalog they asked for.
 - **No status may describe a store the caller never named.** A mount has no origin behind
   it, so `502` blames a gateway that does not exist. Neither is it a `500`: the bytes of
   that same file are served without complaint when the url carries no query, so a failure

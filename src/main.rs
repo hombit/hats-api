@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -75,9 +75,11 @@ fn startup() -> Result<(Config, app::Service), NotServing> {
         Some(path) => config::load(&path).map_err(|error| invalid(&error))?,
         None => Config::default(),
     };
-    // Before the policy, which is built from these as well as from `[api.access]`.
-    let mounts = Mounts::new(&config.mounts).map_err(|error| invalid(&error))?;
-    let policy = AccessPolicy::new(&config.api.access, &mounts).map_err(|error| invalid(&error))?;
+    // Before the policy, which reads them: a mount is the local half of what the service
+    // may read, and the two must be looking at one list rather than two copies of it.
+    let mounts = Arc::new(Mounts::new(&config.mounts, &config.data).map_err(|e| invalid(&e))?);
+    let policy = AccessPolicy::new(&config.api.access, Arc::clone(&mounts))
+        .map_err(|error| invalid(&error))?;
     let service = app::Service::new(
         policy,
         &config.limits,
@@ -90,13 +92,20 @@ fn startup() -> Result<(Config, app::Service), NotServing> {
     Ok((config, service))
 }
 
-/// The mounts as one line of the startup log: what is published, and out of where.
+/// The mounts as one line of the startup log: what is readable, out of where, and which
+/// of them the file server publishes rather than only answering questions about.
 fn describe_mounts(mounts: &Mounts) -> String {
     match mounts.is_empty() {
         true => "none".to_owned(),
         false => mounts
             .iter()
-            .map(|mount| format!("{} -> {}", mount.prefix(), mount.source().display()))
+            .map(|mount| {
+                let served = match mount.serve() {
+                    true => "",
+                    false => " (api only)",
+                };
+                format!("{} -> {}{served}", mount.prefix(), mount.source().display())
+            })
             .collect::<Vec<_>>()
             .join(", "),
     }

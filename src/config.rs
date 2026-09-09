@@ -80,8 +80,12 @@ impl Default for ApiConfig {
     }
 }
 
-/// One published directory. `path` and `source` are required: a mount with either
-/// missing is not a mount with a sensible default, it is an unfinished sentence.
+/// One local directory this service will read, and where it sits in the url space.
+///
+/// `path` and `source` are required: a mount with either missing is not a mount with a
+/// sensible default, it is an unfinished sentence. `path` is the mount's address in both
+/// modes — the API names a local file by the url space rather than by the disk — so a
+/// mount that the file server does not publish still needs one.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountConfig {
@@ -89,15 +93,22 @@ pub struct MountConfig {
     pub path: String,
     /// The local directory it publishes, as an absolute path or a `file://` url.
     pub source: String,
+    /// Whether the file server publishes it at `path`. Off is API-only: the directory is
+    /// still readable, and only by a request that asks a question about a file in it.
+    #[serde(default)]
+    pub serve: bool,
     /// Whether a path under it may go through a symlink. Per mount rather than global,
     /// so publishing a directory of links does not decide the question for every other
-    /// mount and for the API.
+    /// mount.
     #[serde(default)]
     pub follow_symlinks: bool,
     /// Whether what is published never changes once published, which is what lets a
     /// cached copy be served without revalidating it.
     #[serde(default)]
     pub immutable: bool,
+    /// Which files under it are read as data, in place of `[data] filenames`. Absent is
+    /// that list; an empty list is a mount with no query surface at all.
+    pub filenames: Option<Vec<String>>,
 }
 
 /// What one request, and the process as a whole, may spend.
@@ -227,10 +238,9 @@ impl Default for LogConfig {
 /// What the service may read when the request says where to read from. See
 /// [`crate::access`] for what the entries mean.
 ///
-/// The default is every remote endpoint on the public internet, and no local files.
-/// It governs API mode alone: a mount publishes its own directory whatever
-/// `[api.access.local]` says, and mounting one does not let a caller name a path
-/// outside it.
+/// The default is every remote endpoint on the public internet. It says nothing about
+/// local files: `[[mount]]` is the only thing that makes a directory readable, and a
+/// caller reaches one by its `path` rather than by where it is on the disk.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct AccessConfig {
@@ -240,7 +250,6 @@ pub struct AccessConfig {
     pub azure: EndpointConfig,
     pub http: HttpConfig,
     pub webdav: EndpointConfig,
-    pub local: LocalConfig,
 }
 
 /// Which addresses a request may reach, whatever backend it goes through: the
@@ -301,31 +310,22 @@ pub struct HttpConfig {
     pub allow_plain_http: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct LocalConfig {
-    /// Directories a request may read files from. Empty, the default, is no local
-    /// file access at all.
-    pub paths: Vec<String>,
-    /// Whether a local path may go through a symlink.
-    pub follow_symlinks: bool,
-}
-
 #[derive(Debug)]
 pub enum ConfigError {
     Read(PathBuf, io::Error),
     Parse(PathBuf, toml::de::Error),
-    /// An `[api.access]` entry — an endpoint or a directory — that means nothing.
+    /// An `[api.access]` endpoint entry that means nothing.
     Rule(String, String),
-    /// A `[[mount]]` that cannot be served: a source that is not a local directory, or
-    /// a prefix that is not a prefix, or two mounts claiming the same subtree. Named by
+    /// A `[[mount]]` that cannot be read: a source that is not a local directory, or a
+    /// prefix that is not a prefix, or two mounts claiming the same subtree. Named by
     /// its `path`, which is what the operator wrote and what tells the two apart.
     Mount(String, String),
     /// The two modes do not divide the url space between them: an `api.prefix` that is
     /// not a prefix, a mount inside it where no request could reach it, or a
     /// configuration that would serve nothing at all.
     Route(String),
-    /// A `[data]` pattern that is not a glob, named as the operator wrote it.
+    /// A `filenames` pattern that is not a glob, named as the operator wrote it. Either
+    /// list can hold one, and both spell it the same way.
     Data(String, String),
 }
 
@@ -340,7 +340,7 @@ impl fmt::Display for ConfigError {
             Self::Mount(path, reason) => write!(f, "invalid [[mount]] {path:?}: {reason}"),
             Self::Route(reason) => write!(f, "invalid routing: {reason}"),
             Self::Data(pattern, reason) => {
-                write!(f, "invalid [data] filenames entry {pattern:?}: {reason}")
+                write!(f, "invalid filenames entry {pattern:?}: {reason}")
             }
         }
     }
@@ -371,14 +371,12 @@ mod tests {
         assert_eq!(access.s3.endpoints, None);
         assert_eq!(access.gcs.endpoints, None);
         assert_eq!(access.azure.endpoints, None);
-        assert!(access.local.paths.is_empty());
         assert!(!access.network.allow_loopback);
         assert!(!access.network.allow_private);
         assert!(!access.network.allow_local_names);
         assert!(access.network.allow_cidrs.is_empty());
         assert!(access.network.allow_hosts.is_empty());
-        assert!(!access.local.follow_symlinks);
-        // The API on its own: no directory is published until a mount says so.
+        // The API on its own: no directory is readable until a mount says so.
         assert!(config.api.enabled);
         assert_eq!(config.api.prefix, "/api/v1");
         assert!(config.mounts.is_empty());
@@ -390,8 +388,8 @@ mod tests {
         assert_eq!(config.server.listen_addr().to_string(), "127.0.0.1:80");
         let config = parse("[server]\nport = 8080").unwrap();
         assert_eq!(config.server.listen_addr().to_string(), "0.0.0.0:8080");
-        let config = parse("[api.access.local]\nfollow_symlinks = true").unwrap();
-        assert!(config.api.access.local.follow_symlinks);
+        let config = parse("[api.access.http]\nallow_plain_http = true").unwrap();
+        assert!(config.api.access.http.allow_plain_http);
         // Setting one access key must not disturb the others.
         assert_eq!(config.api.access.s3.endpoints, None);
         // Nor the mode switches: naming one part of [api] leaves the rest default.
@@ -407,27 +405,37 @@ mod tests {
         };
         assert_eq!(mount.path, "/hats");
         assert_eq!(mount.source, "/data/hats");
+        assert!(!mount.serve);
         assert!(!mount.follow_symlinks);
         assert!(!mount.immutable);
+        // Absent is `[data] filenames`, which an empty list is not.
+        assert_eq!(mount.filenames, None);
         // Neither half has a default that could stand in for the other.
         assert!(parse("[[mount]]\npath = \"/hats\"").is_err());
         assert!(parse("[[mount]]\nsource = \"/data/hats\"").is_err());
         assert!(parse("[[mount]]\npath = \"/a\"\nsource = \"/b\"\nimmutabe = true").is_err());
     }
 
-    /// Several mounts are the ordinary case, and each keeps its own resolution rules.
+    /// Several mounts are the ordinary case, and each keeps its own rules.
     #[test]
     fn mounts_are_a_list_and_do_not_share_their_rules() {
         let config = parse(
             "[[mount]]\npath = \"/\"\nsource = \"/srv/data\"\nfollow_symlinks = true\n\
-             [[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"\nimmutable = true",
+             filenames = [\"*.parquet\"]\n\
+             [[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"\nimmutable = true\n\
+             serve = true",
         )
         .unwrap();
         let [first, second] = config.mounts.as_slice() else {
             panic!("expected two mounts, got {:?}", config.mounts)
         };
-        assert!(first.follow_symlinks && !first.immutable);
-        assert!(!second.follow_symlinks && second.immutable);
+        assert!(first.follow_symlinks && !first.immutable && !first.serve);
+        assert_eq!(
+            first.filenames.as_deref(),
+            Some(["*.parquet".to_owned()].as_slice())
+        );
+        assert!(!second.follow_symlinks && second.immutable && second.serve);
+        assert_eq!(second.filenames, None);
     }
 
     #[test]
@@ -495,7 +503,11 @@ mod tests {
     fn a_misspelled_key_is_an_error_rather_than_a_silent_default() {
         for toml in [
             "[server]\nadress = \"127.0.0.1\"",
-            "[api.access.local]\nallow_symlinks = true",
+            // Every remote backend has an `[api.access.<backend>]` section, so a local
+            // one is a plausible thing to write. There is none: `[[mount]]` is where a
+            // directory is named, and a config that says otherwise does not start.
+            "[api.access.local]\npaths = [\"/srv/data\"]",
+            "[api.access.local]\nfollow_symlinks = true",
             "[api.access.s3]\nendpoint = \"aws\"",
             "[api.access.gcs]\nendpoint = \"gcp\"",
             "[api.access.azure]\nendpoitns = []",

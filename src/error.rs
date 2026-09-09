@@ -110,8 +110,11 @@ impl ApiError {
     /// look at the one thing that is not wrong. Those messages are passed through, unless
     /// one names where the file is, which is the operator's business either way.
     ///
-    /// Only for a mount. In API mode the path in such a message is the caller's own url,
-    /// which they already have, and `502` is the truth about a store that really is one.
+    /// For every local file, whichever mode reached it. A caller who named one wrote a
+    /// mount's `path`, and a store's message names its `source` — so the path in it is
+    /// the operator's there too. A remote url keeps its own message: the path in that one
+    /// is the caller's own url, which they already have, and `502` is the truth about a
+    /// store that really is one.
     pub fn from_mount(self, file: &Path) -> Self {
         let unreadable = |error: &Self| {
             tracing::warn!(

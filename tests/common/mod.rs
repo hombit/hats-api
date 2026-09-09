@@ -19,7 +19,6 @@ use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, NetworkConfig};
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
-use hats_api::mount::Mounts;
 use hats_api::query::{Predicate, Projection, QueryResult, Selection};
 use hats_api::storage::{self, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -203,7 +202,7 @@ pub fn permissive_policy() -> AccessPolicy {
             },
             ..Default::default()
         },
-        &Mounts::default(),
+        Arc::default(),
     )
     .expect("permissive policy")
 }
@@ -218,7 +217,7 @@ pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
             },
             ..Default::default()
         },
-        &Mounts::default(),
+        Arc::default(),
     )
     .expect("endpoint policy")
 }

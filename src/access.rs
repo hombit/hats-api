@@ -38,24 +38,28 @@
 //! # No provider name: an http(s) url names its own server, so every entry is a url.
 //! endpoints = ["https://data.example.com"]
 //! allow_plain_http = false
-//!
-//! [access.local]
-//! paths = ["/srv/hats"]
-//! follow_symlinks = false
 //! ```
 //!
-//! Local paths get two checks an endpoint does not need, because a filesystem has ways
-//! of pointing outside itself. A path is resolved before it is matched, so neither `..`
-//! nor a symlink inside an allowed directory can lead out of one; and unless
+//! **There is no local section.** A `[[mount]]` is the whole of what makes a directory
+//! readable, and a `file://` url in a request is addressed in the mounts' url space
+//! rather than on the disk: `file:///hats/dr1/x.parquet` is the mount at `/hats`, and
+//! whatever `source` that mount holds. So there is no second list of directories to keep
+//! in step with the mounts, and no spelling of a path that reaches a directory no mount
+//! named.
+//!
+//! Under the mount, two checks an endpoint does not need, because a filesystem has ways
+//! of pointing outside itself. The path is resolved before it is matched, so neither `..`
+//! nor a symlink inside the mount can lead out of it; and unless the mount's
 //! `follow_symlinks` is on, a path that goes through a symlink at all is refused.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 use url::{Host, Url};
 
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
-use crate::mount::{Mount, Mounts};
+use crate::mount::{self, Mount, Mounts};
 use crate::network::NetworkPolicy;
 
 /// What a URL turned out to be, once it was allowed.
@@ -180,21 +184,10 @@ pub struct AccessPolicy {
     /// but the assurance that the bytes came from the host the url names — and only the
     /// operator knows whether the deployment's network makes that acceptable.
     allow_plain_http: bool,
-    /// Allowed directories, canonical, so that a resolved request path can simply be
-    /// tested for being under one of them.
-    local: Vec<LocalRule>,
+    /// Every readable directory, which is every mount. Shared with the rest of the
+    /// service rather than copied, so a mount's rules cannot be two things at once.
+    mounts: Arc<Mounts>,
     network: NetworkPolicy,
-}
-
-/// One allowed directory and the resolution rules that come with it.
-///
-/// The rules are per directory rather than one switch over all of them because a mount
-/// brings its own: publishing a directory of symlinks must not decide the question for
-/// every other directory this policy allows.
-#[derive(Debug)]
-struct LocalRule {
-    root: PathBuf,
-    follow_symlinks: bool,
 }
 
 #[derive(Debug)]
@@ -265,20 +258,18 @@ impl Default for AccessPolicy {
                   no rule for `new` to reject; a panic here would be a bug in this file"
     )]
     fn default() -> Self {
-        Self::new(&AccessConfig::default(), &Mounts::default())
+        Self::new(&AccessConfig::default(), Arc::default())
             .expect("the default access config is valid")
     }
 }
 
 impl AccessPolicy {
-    /// The rules as configured, plus what the mounts grant.
+    /// The endpoint rules as configured, over the directories the mounts name.
     ///
-    /// A mount is passed in rather than looked up later because the grant is not
-    /// optional: the bytes under a mount are already served whole over its own route, so
-    /// refusing to query them through the API would withhold nothing. Taking the mounts
-    /// as an argument is what makes that a thing this function does rather than a thing
-    /// each caller has to remember.
-    pub fn new(config: &AccessConfig, mounts: &Mounts) -> Result<Self, ConfigError> {
+    /// The mounts are the local half of the policy rather than an addition to it, so
+    /// they are an argument: a policy that could be built without them would be one that
+    /// reads no local files, and every caller would have to remember to say otherwise.
+    pub fn new(config: &AccessConfig, mounts: Arc<Mounts>) -> Result<Self, ConfigError> {
         // Every host the operator named, collected as the rules are built rather than by
         // walking them again afterwards: a second pass would be a second list of
         // backends to keep in step, and a backend missing from it would have its own
@@ -300,27 +291,6 @@ impl AccessPolicy {
         let webdav = build(&config.webdav.endpoints, Backend::Webdav)?;
 
         let network = NetworkPolicy::new(&config.network, &named)?;
-        let mut local = config
-            .local
-            .paths
-            .iter()
-            // Resolved now so that startup fails on a directory that is not there,
-            // rather than every request failing later for a reason nobody can see.
-            .map(|entry| {
-                canonical_root(entry)
-                    .map(|root| LocalRule {
-                        root,
-                        follow_symlinks: config.local.follow_symlinks,
-                    })
-                    .map_err(|reason| ConfigError::Rule(entry.to_owned(), reason))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        // Scoped to what the mount publishes and no wider, and under the mount's own
-        // resolution rules, so both routes agree about the same file.
-        local.extend(mounts.iter().map(|mount| LocalRule {
-            root: mount.source().to_owned(),
-            follow_symlinks: mount.follow_symlinks(),
-        }));
         Ok(Self {
             s3,
             gcs,
@@ -328,7 +298,7 @@ impl AccessPolicy {
             http,
             webdav,
             allow_plain_http: config.http.allow_plain_http,
-            local,
+            mounts,
             network,
         })
     }
@@ -351,7 +321,7 @@ impl AccessPolicy {
             // every url in gets refused would send a caller looking for the wrong rule.
             .filter(|scheme| *scheme != EndpointScheme::Http.name() || self.reads_cleartext_http())
             .collect();
-        if !self.local.is_empty() {
+        if !self.mounts.is_empty() {
             schemes.push(LOCAL_SCHEME);
         }
         schemes
@@ -477,44 +447,61 @@ impl AccessPolicy {
         )))
     }
 
+    /// A `file://` url, which names a place in the mounts' url space rather than on the
+    /// disk. So the answer comes in two steps: which mount the caller named, and then
+    /// what that mount's own rules make of the path inside it.
+    ///
+    /// Nothing the caller is told here names a `source`. A mount's `path` is what the
+    /// caller wrote and what an operator published; where it is on the disk is neither.
     fn authorize_local(&self, url: &Url) -> Result<PathBuf, ApiError> {
-        if self.local.is_empty() {
+        if self.mounts.is_empty() {
             return Err(ApiError::forbidden(
-                "this server reads no local files; add a directory to \
-                 api.access.local.paths, or mount one, to change that",
+                "this server reads no local files; add a [[mount]] to change that",
             ));
         }
-        let path = url
-            .to_file_path()
-            .map_err(|()| ApiError::bad_request(format!("url {url} is not a local path")))?;
-        let lexical = lexically_clean(&path)
-            .ok_or_else(|| ApiError::bad_request(format!("path {} escapes /", path.display())))?;
+        // Not `to_file_path`: what follows the authority is a url path, and reading it as
+        // one is what keeps `file:///hats/x` the same address in both modes.
+        if url.host().is_some() {
+            return Err(ApiError::bad_request(format!(
+                "url {url} names a host; a local url is file:// followed by a path this \
+                 server publishes"
+            )));
+        }
+        let Some((mount, relative)) = self.mounts.resolve(url.path()) else {
+            return Err(self.local_refusal(url));
+        };
+        let mut requested = mount.source().to_owned();
+        requested.extend(mount::path_segments(relative)?);
 
-        resolve_local(&self.local, &lexical).map_err(|refusal| match refusal {
-            LocalRefusal::NotAllowed => self.local_refusal(url),
-            LocalRefusal::Symlink(path) => ApiError::forbidden(format!(
-                "{} goes through a symlink, which this server does not follow; set \
-                 api.access.local.follow_symlinks, or the mount's own, to change that",
-                path.display()
-            )),
-            LocalRefusal::NotFound(path) => {
-                ApiError::not_found(format!("{} does not exist", path.display()))
-            }
-            LocalRefusal::Unreadable(path, error) => {
-                ApiError::forbidden(format!("cannot read {}: {error}", path.display()))
+        resolve_under(mount, &requested).map_err(|refusal| {
+            // The path is the operator's; the reason is the caller's, since they named
+            // the url and can act on every one of these.
+            tracing::debug!(mount = mount.prefix(), reason = %refusal, "not read");
+            match refusal {
+                // Under the mount as written and outside it once resolved: a symlink led
+                // out of what the mount publishes.
+                LocalRefusal::NotAllowed | LocalRefusal::Symlink(_) => ApiError::forbidden(
+                    format!("{url} goes through a symlink this mount does not follow"),
+                ),
+                LocalRefusal::NotFound(_) => ApiError::not_found(format!("{url} does not exist")),
+                LocalRefusal::Unreadable(..) => {
+                    ApiError::forbidden(format!("{url} cannot be read"))
+                }
             }
         })
     }
 
+    /// A url under no mount. It says which prefixes there are, because those are urls
+    /// this server publishes and a caller has to be able to find out what to write.
     fn local_refusal(&self, url: &Url) -> ApiError {
-        let roots: Vec<String> = self
-            .local
+        let prefixes: Vec<String> = self
+            .mounts
             .iter()
-            .map(|rule| rule.root.display().to_string())
+            .map(|mount| format!("file://{}", mount.prefix()))
             .collect();
         ApiError::forbidden(format!(
-            "{url} is not under any allowed directory; this server reads {}",
-            describe(&roots)
+            "{url} is not under any mount; this server reads {}",
+            describe(&prefixes)
         ))
     }
 
@@ -653,9 +640,8 @@ fn parse_endpoint(entry: &str, backend: Backend) -> Result<Endpoint, ConfigError
 /// The directory an entry names, resolved: an absolute path or a `file://` url, and a
 /// directory that is there now rather than a rule that silently never matches.
 ///
-/// Returns the reason rather than a [`ConfigError`], because the entry means the same
-/// thing in `[api.access.local]` and in a `[[mount]]` while the two name it differently,
-/// and a message that says the wrong section is worse than one that says none.
+/// Returns the reason rather than a [`ConfigError`], so that the caller names the
+/// section it read the entry out of.
 pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
     let path = if entry.starts_with('/') {
         PathBuf::from(entry)
@@ -681,19 +667,14 @@ pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// The file a path under a mount names, resolved under that mount's own rule and
-/// nothing else — so one mount cannot serve a file out of another's directory, and a
-/// mount cannot serve one out of a directory `[api.access.local]` happens to allow.
+/// The file a path under a mount names, for the file server.
 ///
-/// Every refusal is the same answer. A caller here named a place in the url space rather
-/// than a file on a disk, so which file is missing, which is outside the mount and which
-/// is behind a symlink are all distinctions about a filesystem they were never shown.
+/// Every refusal is the same answer. A caller here walked into the directory rather than
+/// naming it, so which file is missing, which is outside the mount and which is behind a
+/// symlink are all distinctions about a filesystem they were never shown. The API says
+/// more, because there the caller wrote the url and can act on each of them.
 pub fn authorize_mounted(mount: &Mount, path: &Path) -> Result<PathBuf, ApiError> {
-    let rules = [LocalRule {
-        root: mount.source().to_owned(),
-        follow_symlinks: mount.follow_symlinks(),
-    }];
-    resolve_local(&rules, path).map_err(|refusal| {
+    resolve_under(mount, path).map_err(|refusal| {
         // The reason belongs in the log, where the operator can see it, and not in the
         // response.
         tracing::debug!(mount = mount.prefix(), reason = %refusal, "not served");
@@ -702,14 +683,13 @@ pub fn authorize_mounted(mount: &Mount, path: &Path) -> Result<PathBuf, ApiError
 }
 
 /// Why a path is not a file that may be read. Separate from [`ApiError`] because how
-/// much a refusal may say differs by mode: a caller who named the path is told which
-/// directories exist, and one who walked into it through a mount is not.
+/// much a refusal may say differs by mode.
 enum LocalRefusal {
-    /// Under none of the rules.
+    /// Outside the mount.
     NotAllowed,
-    /// Under a rule, but nothing is there.
+    /// Inside it, but nothing is there.
     NotFound(PathBuf),
-    /// It goes through a symlink and the rule that governs it does not follow them.
+    /// It goes through a symlink and the mount does not follow them.
     Symlink(PathBuf),
     Unreadable(PathBuf, std::io::Error),
 }
@@ -719,7 +699,7 @@ enum LocalRefusal {
 impl std::fmt::Display for LocalRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotAllowed => f.write_str("outside every allowed directory"),
+            Self::NotAllowed => f.write_str("outside the mount"),
             Self::NotFound(path) => write!(f, "{} does not exist", path.display()),
             Self::Symlink(path) => write!(f, "{} goes through a symlink", path.display()),
             Self::Unreadable(path, error) => write!(f, "cannot read {}: {error}", path.display()),
@@ -727,36 +707,36 @@ impl std::fmt::Display for LocalRefusal {
     }
 }
 
-/// The file a path names, resolved and checked against the rules. `lexical` must already
-/// be [`lexically_clean`], so that comparing it with the canonical path is a question
-/// about symlinks and nothing else.
-fn resolve_local(rules: &[LocalRule], lexical: &Path) -> Result<PathBuf, LocalRefusal> {
-    // The rule the path was written under. Without symlink resolution the path as
-    // written is the path that gets opened, so having none settles it before the
-    // filesystem is touched at all — and a path outside every allowed directory then
-    // gets the same answer whether or not it exists.
-    let named = rules.iter().find(|rule| lexical.starts_with(&rule.root));
-    if named.is_none() && !rules.iter().any(|rule| rule.follow_symlinks) {
+/// The file a path names, resolved and checked against the one mount that governs it.
+///
+/// One mount and not a list of them: a path arrives here having already been matched to
+/// its mount by prefix, and resolving it against any other would let one mount serve a
+/// file out of another's directory.
+fn resolve_under(mount: &Mount, path: &Path) -> Result<PathBuf, LocalRefusal> {
+    let root = mount.source();
+    // `..` resolved without touching the filesystem, so that comparing the result with
+    // the canonical path afterwards is a question about symlinks and nothing else.
+    let lexical = lexically_clean(path).ok_or(LocalRefusal::NotAllowed)?;
+    // Without symlink resolution the path as written is the path that gets opened, so a
+    // path outside the mount is settled before the filesystem is touched at all — and
+    // then gets the same answer whether or not it exists.
+    let inside = lexical.starts_with(root);
+    if !inside && !mount.follow_symlinks() {
         return Err(LocalRefusal::NotAllowed);
     }
-    let canonical = std::fs::canonicalize(lexical).map_err(|error| match error.kind() {
+    let canonical = std::fs::canonicalize(&lexical).map_err(|error| match error.kind() {
         // Saying "no such file" about a path the caller was never allowed to name would
         // answer a question they did not get to ask.
-        _ if named.is_none() => LocalRefusal::NotAllowed,
-        std::io::ErrorKind::NotFound => LocalRefusal::NotFound(lexical.to_owned()),
-        _ => LocalRefusal::Unreadable(lexical.to_owned(), error),
+        _ if !inside => LocalRefusal::NotAllowed,
+        std::io::ErrorKind::NotFound => LocalRefusal::NotFound(lexical.clone()),
+        _ => LocalRefusal::Unreadable(lexical.clone(), error),
     })?;
-    // Again on the resolved path: a link inside an allowed directory must still not
-    // lead out of every allowed directory.
-    let destination = rules
-        .iter()
-        .find(|rule| canonical.starts_with(&rule.root))
-        .ok_or(LocalRefusal::NotAllowed)?;
-    // The rule the path was written under is the one that decides about the link, so a
-    // directory whose rules allow symlinks cannot become a way of following one out of
-    // a directory whose rules do not.
-    if !named.unwrap_or(destination).follow_symlinks && canonical != lexical {
-        return Err(LocalRefusal::Symlink(lexical.to_owned()));
+    // Again on the resolved path: a link inside the mount must still not lead out of it.
+    if !canonical.starts_with(root) {
+        return Err(LocalRefusal::NotAllowed);
+    }
+    if !mount.follow_symlinks() && canonical != lexical {
+        return Err(LocalRefusal::Symlink(lexical));
     }
     Ok(canonical)
 }
@@ -786,12 +766,12 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use crate::config::{EndpointConfig, HttpConfig, LocalConfig, NetworkConfig};
+    use crate::config::{DataConfig, EndpointConfig, HttpConfig, MountConfig, NetworkConfig};
 
     use super::*;
 
     fn policy(config: &AccessConfig) -> AccessPolicy {
-        AccessPolicy::new(config, &Mounts::default()).unwrap()
+        AccessPolicy::new(config, Arc::default()).unwrap()
     }
 
     fn entries(entries: &[&str]) -> EndpointConfig {
@@ -857,14 +837,38 @@ mod tests {
         })
     }
 
+    /// A policy over mounts, which is the only kind that reads a local file. Each
+    /// directory is published under `/<n>`, so a test writes `file:///0/x.parquet` for
+    /// the first of them.
     fn with_paths(paths: &[&Path], follow_symlinks: bool) -> AccessPolicy {
-        policy(&AccessConfig {
-            local: LocalConfig {
-                paths: paths.iter().map(|p| p.display().to_string()).collect(),
+        let configs: Vec<MountConfig> = paths
+            .iter()
+            .enumerate()
+            .map(|(n, path)| MountConfig {
+                path: format!("/{n}"),
+                source: path.display().to_string(),
+                serve: false,
                 follow_symlinks,
-            },
-            ..Default::default()
-        })
+                immutable: false,
+                filenames: None,
+            })
+            .collect();
+        let mounts = Mounts::new(&configs, &DataConfig::default()).unwrap();
+        AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts)).unwrap()
+    }
+
+    /// The url a path under the `n`th of those mounts is named by. Built a segment at a
+    /// time, which is what encodes each name — a test may pass one with a space in it.
+    fn mounted_url(n: usize, relative: &str) -> Url {
+        let mut url = Url::parse("file:///").unwrap();
+        url.path_segments_mut()
+            .unwrap()
+            // `file:///` already has one empty segment, and pushing onto it would give
+            // `//0` rather than `/0`.
+            .pop_if_empty()
+            .push(&n.to_string())
+            .extend(relative.split('/'));
+        url
     }
 
     fn url(raw: &str) -> Url {
@@ -1191,79 +1195,72 @@ mod tests {
     }
 
     #[test]
-    fn a_local_root_allows_what_is_under_it_and_nothing_else() {
+    fn a_mount_allows_what_is_under_it_and_nothing_else() {
         let (_dir, root) = temp_dir();
-        let inside = root.join("part0.parquet");
+        let published = root.join("published");
+        fs::create_dir(&published).unwrap();
+        let inside = published.join("part0.parquet");
         fs::write(&inside, b"").unwrap();
-        let outside = root.parent().unwrap().join("outside.parquet");
+        let outside = root.join("outside.parquet");
         fs::write(&outside, b"").unwrap();
 
-        let policy = with_paths(&[&root], false);
+        let policy = with_paths(&[&published], false);
         assert_eq!(
-            policy.authorize(&file_url(&inside)).unwrap(),
+            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
             Target::Local(inside)
         );
-        let error = policy.authorize(&file_url(&outside)).unwrap_err();
-        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-
-        fs::remove_file(&outside).unwrap();
+        // Mounting a directory is not a way to read its parent. `Url` resolves `..`
+        // itself, percent-encoded or not, so what arrives here is already a path outside
+        // the mount rather than one that climbs out of it.
+        for climb in [
+            "file:///0/../outside.parquet",
+            "file:///0/%2E%2E/outside.parquet",
+        ] {
+            let error = policy.authorize(&url(climb)).unwrap_err();
+            assert!(matches!(error, ApiError::Forbidden(_)), "{climb}: {error}");
+        }
+        assert!(policy.authorize(&url("file:///1/x.parquet")).is_err());
     }
 
+    /// The headline of the design: `path` is the address and `source` is not. A caller
+    /// writing where the directory really is on the disk is writing a url no mount
+    /// claims, whether or not the file is there.
     #[test]
-    fn a_local_root_may_be_written_as_a_file_url() {
+    fn the_api_cannot_name_a_mount_by_where_it_is_on_the_disk() {
         let (_dir, root) = temp_dir();
-        let inside = root.join("part0.parquet");
+        let published = root.join("published");
+        fs::create_dir(&published).unwrap();
+        let inside = published.join("part0.parquet");
         fs::write(&inside, b"").unwrap();
-        let policy = policy(&AccessConfig {
-            local: LocalConfig {
-                paths: vec![file_url(&root).to_string()],
-                follow_symlinks: false,
-            },
-            ..Default::default()
-        });
-        assert!(policy.authorize(&file_url(&inside)).is_ok());
-    }
 
-    /// A sibling directory whose name starts with the root's name is not under it.
-    #[test]
-    fn a_local_root_is_matched_by_path_component() {
-        let (_dir, root) = temp_dir();
-        let allowed = root.join("data");
-        let sibling = root.join("data-private");
-        fs::create_dir(&allowed).unwrap();
-        fs::create_dir(&sibling).unwrap();
-        let target = sibling.join("part0.parquet");
-        fs::write(&target, b"").unwrap();
-
-        let policy = with_paths(&[&allowed], false);
-        assert!(policy.authorize(&file_url(&target)).is_err());
-    }
-
-    #[test]
-    fn a_path_cannot_climb_out_of_an_allowed_root() {
-        let (_dir, root) = temp_dir();
-        let policy = with_paths(&[&root], false);
-        // `..` is resolved before the path is matched, and never on the filesystem.
-        let climb = format!("{}/../../etc/passwd", root.display());
-        let error = policy
-            .authorize(&Url::from_file_path(&climb).unwrap())
-            .unwrap_err();
+        let policy = with_paths(&[&published], false);
+        assert!(policy.authorize(&mounted_url(0, "part0.parquet")).is_ok());
+        let error = policy.authorize(&file_url(&inside)).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
+        // The refusal says which urls there are, since those a caller may write.
+        assert!(error.to_string().contains("file:///0"), "{error}");
+        // And says nothing about where they are. This url quotes back only itself, so
+        // the source appearing in the message could only have come from the mount list.
+        let error = policy.authorize(&url("file:///elsewhere/x")).unwrap_err();
+        assert!(
+            !error.to_string().contains(&published.display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]
-    fn a_missing_file_under_an_allowed_root_is_a_404() {
+    fn a_missing_file_under_a_mount_is_a_404() {
         let (_dir, root) = temp_dir();
         let policy = with_paths(&[&root], false);
         let error = policy
-            .authorize(&file_url(&root.join("nope.parquet")))
+            .authorize(&mounted_url(0, "nope.parquet"))
             .unwrap_err();
         assert!(matches!(error, ApiError::NotFound(_)), "{error}");
     }
 
     #[cfg(unix)]
     #[test]
-    fn a_symlink_is_refused_unless_the_server_follows_them() {
+    fn a_symlink_is_refused_unless_the_mount_follows_them() {
         let (_dir, root) = temp_dir();
         let real = root.join("part0.parquet");
         fs::write(&real, b"").unwrap();
@@ -1271,25 +1268,27 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let refuses = with_paths(&[&root], false);
-        let error = refuses.authorize(&file_url(&link)).unwrap_err();
+        let error = refuses
+            .authorize(&mounted_url(0, "link.parquet"))
+            .unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
         assert!(error.to_string().contains("symlink"), "{error}");
 
         // Following it lands on the real file, which is what gets opened.
         let follows = with_paths(&[&root], true);
         assert_eq!(
-            follows.authorize(&file_url(&link)).unwrap(),
+            follows.authorize(&mounted_url(0, "link.parquet")).unwrap(),
             Target::Local(real)
         );
     }
 
-    /// The spelling of a path may go through a symlink without the *file* being
-    /// anywhere unexpected — `/tmp` is a link to `/private/tmp` on macOS. A server
-    /// that follows symlinks has to resolve first and judge second, or it refuses
-    /// files that are plainly inside an allowed directory.
+    /// The spelling of a mount's own source may go through a symlink without the *file*
+    /// being anywhere unexpected — `/tmp` is a link to `/private/tmp` on macOS. Which is
+    /// why a source is canonicalized at startup: the path that gets opened is the
+    /// resolved one, and it is what the file is then judged against.
     #[cfg(unix)]
     #[test]
-    fn following_symlinks_allows_a_linked_spelling_of_an_allowed_directory() {
+    fn a_linked_spelling_of_a_source_is_resolved_at_startup() {
         let (_dir, root) = temp_dir();
         let real = root.join("data");
         fs::create_dir(&real).unwrap();
@@ -1298,137 +1297,94 @@ mod tests {
         let linked_root = root.join("link");
         std::os::unix::fs::symlink(&real, &linked_root).unwrap();
 
-        let follows = with_paths(&[&real], true);
+        let policy = with_paths(&[&linked_root], false);
         assert_eq!(
-            follows
-                .authorize(&file_url(&linked_root.join("part0.parquet")))
-                .unwrap(),
+            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
             Target::Local(target)
         );
     }
 
-    /// The point of resolving before matching: a link inside an allowed directory is
-    /// still not a way out of it.
+    /// The point of resolving before matching: a link inside a mount is still not a way
+    /// out of it, even for a mount that follows links.
     #[cfg(unix)]
     #[test]
-    fn following_symlinks_does_not_let_one_escape_the_allowed_roots() {
+    fn following_symlinks_does_not_let_one_escape_the_mount() {
         let (_dir, root) = temp_dir();
-        let allowed = root.join("allowed");
-        fs::create_dir(&allowed).unwrap();
+        let published = root.join("published");
+        fs::create_dir(&published).unwrap();
         let secret = root.join("secret.parquet");
         fs::write(&secret, b"").unwrap();
-        let link = allowed.join("innocent.parquet");
+        let link = published.join("innocent.parquet");
         std::os::unix::fs::symlink(&secret, &link).unwrap();
 
-        let follows = with_paths(&[&allowed], true);
-        let error = follows.authorize(&file_url(&link)).unwrap_err();
+        let follows = with_paths(&[&published], true);
+        let error = follows
+            .authorize(&mounted_url(0, "innocent.parquet"))
+            .unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
     }
 
-    fn mounted(source: &Path, follow_symlinks: bool) -> Mounts {
-        Mounts::new(&[crate::config::MountConfig {
-            path: "/".to_owned(),
-            source: source.display().to_string(),
-            follow_symlinks,
-            immutable: false,
-        }])
-        .unwrap()
-    }
-
-    /// The bytes under a mount are already served whole over its own route, so the API
-    /// can read them too — without `api.access.local.paths` naming the directory again.
-    #[test]
-    fn a_mount_lets_the_api_read_what_it_publishes() {
-        let (_dir, root) = temp_dir();
-        let published = root.join("published");
-        fs::create_dir(&published).unwrap();
-        let file = published.join("part0.parquet");
-        fs::write(&file, b"").unwrap();
-        let elsewhere = root.join("elsewhere.parquet");
-        fs::write(&elsewhere, b"").unwrap();
-
-        let policy =
-            AccessPolicy::new(&AccessConfig::default(), &mounted(&published, false)).unwrap();
-        assert_eq!(
-            policy.authorize(&file_url(&file)).unwrap(),
-            Target::Local(file.clone())
-        );
-        // Scoped to what the mount publishes: mounting a directory is not a way to read
-        // its parent.
-        let error = policy.authorize(&file_url(&elsewhere)).unwrap_err();
-        assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-        // And the grant is one way: the API's own table says nothing about the mount.
-        assert!(AccessPolicy::default().authorize(&file_url(&file)).is_err());
-    }
-
-    /// Two directories, two answers about the same question, because the rules that
-    /// decide it are the mount's rather than the service's.
+    /// Two mounts, two answers about the same question, because the rule that decides
+    /// it is the mount's rather than the service's — and because a link out of one
+    /// mount is refused even when the file it points at is inside another. A mount that
+    /// follows links is not a way into a mount that does not.
     #[cfg(unix)]
     #[test]
-    fn a_mount_brings_its_own_symlink_rule() {
+    fn a_mount_brings_its_own_symlink_rule_and_nobody_else_s_directory() {
         let (_dir, root) = temp_dir();
-        let published = root.join("published");
-        fs::create_dir(&published).unwrap();
-        let real = published.join("part0.parquet");
+        let strict = root.join("strict");
+        let loose = root.join("loose");
+        fs::create_dir(&strict).unwrap();
+        fs::create_dir(&loose).unwrap();
+        let real = strict.join("part0.parquet");
         fs::write(&real, b"").unwrap();
-        let link = published.join("link.parquet");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-
-        let refuses = AccessPolicy::new(&AccessConfig::default(), &mounted(&published, false))
-            .unwrap()
-            .authorize(&file_url(&link));
-        assert!(refuses.is_err(), "{refuses:?}");
-
-        let follows = AccessPolicy::new(&AccessConfig::default(), &mounted(&published, true))
-            .unwrap()
-            .authorize(&file_url(&link))
-            .unwrap();
-        assert_eq!(follows, Target::Local(real));
-    }
-
-    /// A directory the operator listed keeps its own answer whatever a mount says, so a
-    /// mount that follows symlinks cannot become a way of following one out of a
-    /// directory that does not.
-    #[cfg(unix)]
-    #[test]
-    fn a_mount_that_follows_symlinks_does_not_widen_the_api_table() {
-        let (_dir, root) = temp_dir();
-        let listed = root.join("listed");
-        let published = root.join("published");
-        fs::create_dir(&listed).unwrap();
-        fs::create_dir(&published).unwrap();
-        let target = published.join("part0.parquet");
-        fs::write(&target, b"").unwrap();
-        let link = listed.join("innocent.parquet");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        fs::write(loose.join("part0.parquet"), b"").unwrap();
+        std::os::unix::fs::symlink(&real, strict.join("link.parquet")).unwrap();
+        std::os::unix::fs::symlink(&real, loose.join("link.parquet")).unwrap();
 
         let policy = AccessPolicy::new(
-            &AccessConfig {
-                local: LocalConfig {
-                    paths: vec![listed.display().to_string()],
-                    follow_symlinks: false,
-                },
-                ..Default::default()
-            },
-            &mounted(&published, true),
+            &AccessConfig::default(),
+            Arc::new(
+                Mounts::new(
+                    &[
+                        MountConfig {
+                            path: "/0".to_owned(),
+                            source: strict.display().to_string(),
+                            serve: false,
+                            follow_symlinks: false,
+                            immutable: false,
+                            filenames: None,
+                        },
+                        MountConfig {
+                            path: "/1".to_owned(),
+                            source: loose.display().to_string(),
+                            serve: false,
+                            follow_symlinks: true,
+                            immutable: false,
+                            filenames: None,
+                        },
+                    ],
+                    &DataConfig::default(),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
-        let error = policy.authorize(&file_url(&link)).unwrap_err();
-        assert!(error.to_string().contains("symlink"), "{error}");
-        // The file itself is still readable where it actually lives.
+        // The same name under each, and the mount decides.
+        assert!(policy.authorize(&mounted_url(0, "link.parquet")).is_err());
+        // The loose mount follows its link, and the link leaves the mount, so it is
+        // refused for that instead of quietly reading the strict mount's file.
+        assert!(policy.authorize(&mounted_url(1, "link.parquet")).is_err());
+        // Each still reads its own file.
         assert_eq!(
-            policy.authorize(&file_url(&target)).unwrap(),
-            Target::Local(target)
+            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
+            Target::Local(real)
         );
+        assert!(policy.authorize(&mounted_url(1, "part0.parquet")).is_ok());
     }
 
     #[test]
     fn a_rule_that_could_never_match_is_a_startup_error() {
-        let (_dir, root) = temp_dir();
-        let missing = root.join("not-there");
-        let a_file = root.join("a-file");
-        fs::write(&a_file, b"").unwrap();
-
         for entry in [
             // An endpoint is a server, not a place in one.
             "https://minio.example.com/bucket",
@@ -1446,7 +1402,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                AccessPolicy::new(&config, &Mounts::default()).is_err(),
+                AccessPolicy::new(&config, Arc::default()).is_err(),
                 "{entry} was accepted as an s3 endpoint"
             );
         }
@@ -1459,7 +1415,7 @@ mod tests {
                     gcs: entries(&["aws"]),
                     ..Default::default()
                 },
-                &Mounts::default()
+                Arc::default()
             )
             .is_err(),
             "the gcs section accepted \"aws\""
@@ -1470,31 +1426,11 @@ mod tests {
                     azure: entries(&["gcp"]),
                     ..Default::default()
                 },
-                &Mounts::default()
+                Arc::default()
             )
             .is_err(),
             "the azure section accepted \"gcp\""
         );
-
-        for entry in [
-            "relative/path",
-            "s3://bucket",
-            "file://relative/path",
-            &missing.display().to_string(),
-            &a_file.display().to_string(),
-        ] {
-            let config = AccessConfig {
-                local: LocalConfig {
-                    paths: vec![entry.to_owned()],
-                    follow_symlinks: false,
-                },
-                ..Default::default()
-            };
-            assert!(
-                AccessPolicy::new(&config, &Mounts::default()).is_err(),
-                "{entry} was accepted as a local directory"
-            );
-        }
     }
 
     /// Every backend, against the narrowest config that should allow it and against the

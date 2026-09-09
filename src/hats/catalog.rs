@@ -246,21 +246,25 @@ mod tests {
     /// a coarse one, which is what a real catalog does where the sky is empty.
     const CELLS: [(u8, u64); 4] = [(3, 264), (3, 707), (1, 43), (3, 708)];
 
+    /// The prefix the fixture is mounted under, which is also how a request names it: a
+    /// local directory is addressed in the mounts' url space rather than on the disk.
+    const MOUNT: &str = "/catalog";
+
     fn opened(root: &Path, max_metadata_bytes: u64) -> Result<Catalog, ApiError> {
-        let policy = AccessPolicy::new(
-            &AccessConfig {
-                local: crate::config::LocalConfig {
-                    paths: vec![root.display().to_string()],
-                    follow_symlinks: false,
-                },
-                ..Default::default()
-            },
-            &crate::mount::Mounts::default(),
+        let mounts = crate::mount::Mounts::new(
+            &[crate::config::MountConfig {
+                path: MOUNT.to_owned(),
+                source: root.display().to_string(),
+                serve: false,
+                follow_symlinks: false,
+                immutable: false,
+                filenames: None,
+            }],
+            &crate::config::DataConfig::default(),
         )
         .unwrap();
-        // macOS puts a temporary directory behind a symlink, and the policy matches the
-        // canonical path it resolved the configured root to.
-        let url = Url::from_directory_path(root.canonicalize().unwrap()).unwrap();
+        let policy = AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts)).unwrap();
+        let url = Url::parse(&format!("file://{MOUNT}/")).unwrap();
         let dir = crate::storage::open_dir(
             &url,
             &StorageOptions::default(),
