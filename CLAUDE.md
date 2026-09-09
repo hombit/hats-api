@@ -558,6 +558,12 @@ request in front of it.
   across concurrent scans and read often enough to stop one mid-file would serialize the
   thing it is bounding. Overshoot is the price, and the partition count is what keeps it
   bounded, which is why that one has to stay the strict one.
+
+  **A partition's declared size is not the pre-check the counters are missing.** It is the
+  whole file's compressed size and a query fetches a pruned projection, so it runs one to
+  two orders of magnitude high — refusing on it would refuse requests that go on to read a
+  percent of it. What it bounds is how large one request could be, which is a fan-out hint
+  and not a cost. Do not reach for it to make `max_bytes_fetched` act earlier.
 - **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
   a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
   bound and its two numbers, and the route renders the work list with `reason` set.

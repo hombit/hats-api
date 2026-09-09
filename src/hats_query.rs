@@ -479,7 +479,15 @@ pub struct Entry {
     pub path: String,
     /// Whether this file's rows still need the region tested against them.
     pub cover: Cover,
-    /// Bytes on the wire to read the whole file, where the catalog said.
+    /// Bytes on the wire to read **the whole file**, where the catalog said — which only
+    /// `_metadata` does, so it is absent for a catalog found any other way.
+    ///
+    /// **Not what the query will fetch.** A projection with the predicate pruned reads a
+    /// percent or two of a wide partition, so this is larger than the answer by one or two
+    /// orders of magnitude. What it does bound is how big one of these requests could get,
+    /// which is what a client deciding fan-out concurrency wants. Reading `_metadata` to
+    /// fill it in where the catalog did not is not worth a large `GET` for a number nobody
+    /// can use as a cost.
     pub estimated_bytes: Option<u64>,
 }
 

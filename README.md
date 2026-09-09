@@ -347,9 +347,11 @@ single-file route has no catalog to ask.
 An entry carries `region` only where the region does not contain that partition whole; one
 without it is a partition every row of which qualifies.
 
-`estimated_bytes` comes from `_metadata` and is absent for a catalog whose partitions were
-found any other way. It is omitted rather than guessed, at the top too — a sum over the
-entries that knew would read as a total.
+`estimated_bytes` is the size of the **whole** partition file, not what the query will
+fetch — a projection with the predicate pruned reads a small fraction of it. What it is
+good for is deciding how much to run at once. It comes from `_metadata` and is absent for a
+catalog whose partitions were found any other way, omitted rather than guessed, at the top
+too: a sum over only the entries that knew would read as a total.
 
 **Credentials are not echoed unless asked for.** By default the entries carry the stripped
 url and `requires_credentials` says whether the original request had any, so the client

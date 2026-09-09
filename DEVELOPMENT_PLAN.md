@@ -29,9 +29,9 @@ which.
 | 4.2 | say the ordering guarantees in the user documentation | done | |
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
-| 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
+| 5.1 | HATS catalog metadata | done | |
 | 5.2 | spatial predicate | part | The machinery is built: the covering chooses the partitions, each boundary partition gets its own row prefilter, and the rows come back. What is left is the `moc` shape — `region::Region` is `circle` and `box` and nothing else. `polygon` is §9 |
-| 5.3 | two endpoints, rows and plan | done | the per-partition sizes §5.1 names would make `estimated_bytes` answerable for every catalog rather than only one written with `_metadata` |
+| 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -389,11 +389,23 @@ Removes the requirement that a caller know which partition file holds their obje
 `src/hats/` reads a catalog's `properties` and its partition list; what a later step still
 has to decide is below.
 
-**The per-partition sizes are not read yet.** They come only from `_metadata`, which is
-tier 2 and therefore skipped whenever `partition_info.csv` answered — which is every
-catalog an importer writes. §5.3's estimates need them, so `_metadata` has to be read
-**even when tier 1 succeeded**, lazily, when a query needs sizing rather than on every
-catalog open. That second read is where a lazy `Sizes` map belongs, not in the tier chain.
+**The per-partition sizes are read where they are free and not fetched otherwise, and
+that is the answer rather than a gap.** They come only from `_metadata`, which the tier
+chain skips whenever `partition_info.csv` answered — every catalog an importer writes — so
+having them for such a catalog means a second `GET` of a file that holds no rows and whose
+footer is therefore the whole of it: hundreds of MB on a wide catalog, on the ordinary path.
+
+What that would buy does not cover it, because the number is not the quantity anyone wants.
+A partition's compressed size is the whole partition; a query fetches a projection with the
+predicate pruned, which is a percent or two of it on a wide catalog. So it cannot be a
+pre-check for `max_bytes_fetched` — refusing on an estimate a hundred times the true cost
+is worse than the counter that watches the real one — and it cannot tell a caller what
+their query will cost.
+
+It answers one question honestly: **how large could one of these requests be**, which is
+what a client deciding fan-out concurrency wants. That is worth having for nothing and not
+worth a large `GET`, which is why `estimated_bytes` is present when `_metadata` already
+answered and absent otherwise. Absent, not guessed: a partial sum would read as a total.
 
 **A query on `_metadata`'s own url still has no answer.** It is on `[data] filenames` by
 default, so a caller can put one there today and gets a 400 — the rows its footer describes
@@ -472,13 +484,6 @@ waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.
 
 `POST {api.prefix}/hats` reads rows and `POST {api.prefix}/hats/plan` hands back the work
 instead; rules this leaves behind live in `CLAUDE.md`. What is still open:
-
-**`estimated_bytes` is answerable for one catalog in three.** It comes from `_metadata`,
-which the discovery chain skips whenever `partition_info.csv` answered — which is every
-catalog an importer writes. §5.1 says where the lazy read of it belongs, and until it
-exists the field is absent from most plans and `max_bytes_fetched` cannot be checked before
-the bytes are fetched. Sizes would also let `max_partitions` relax: a count is a proxy for
-work and bytes are the thing itself.
 
 **A `timeout` bounds none of this yet.** §8.4 and §7.2 are where it lands, and it is what a
 slow origin hits long before any of the three counters do.
