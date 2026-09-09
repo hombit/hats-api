@@ -2053,6 +2053,59 @@ mod tests {
         assert_eq!(ids, expected, "the plan and the query disagree");
     }
 
+    /// A plan carries no credential, and says that one is needed.
+    ///
+    /// [`PlanBody`] has no `storage` field, so this cannot regress by an entry gaining one —
+    /// but it can by a credential reaching the body some other way, and a url is where it
+    /// would. Rendered rather than routed: `file://` refuses storage options before a plan
+    /// would ever be built, and the rendering is the part that could copy one.
+    #[tokio::test]
+    async fn a_plan_never_carries_the_credentials() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let params = QueryRequest {
+            url: "file:///".to_owned().into(),
+            storage: StorageOptions {
+                region: Some("us-west-2".to_owned()),
+                secret_access_key: Some(SECRET.to_owned().into()),
+                ..Default::default()
+            },
+            select: None,
+            r#where: None,
+            columns: Some("id".to_owned()),
+            filters: None,
+            region: Some(vec![crate::hats_query::tests::regions()[1]]),
+            ra_column: None,
+            dec_column: None,
+            healpix_column: None,
+            healpix_order: None,
+            format: None,
+            limit: None,
+        };
+        let url = parse_url(params.url.as_str()).unwrap();
+        let dir_handle = storage::open_dir(
+            &url,
+            &StorageOptions::default(),
+            &service.policy,
+            &service.transfers,
+        )
+        .unwrap();
+        let search = Search::resolve(dir_handle, params.region.as_deref(), service.catalog_limits)
+            .await
+            .unwrap();
+
+        let plan = plan_of(&service, &search, &params, None).await.unwrap();
+        let shown = serde_json::to_string(&plan).unwrap();
+        assert!(!shown.contains(SECRET), "leaked: {shown}");
+        assert!(!shown.contains("us-west-2"), "leaked: {shown}");
+        assert!(!shown.contains("secret_access_key"), "{shown}");
+        assert!(!shown.contains("storage"), "{shown}");
+        // The flag is how the client knows to re-attach what it already holds, rather than
+        // finding out from a 403.
+        assert!(plan.requires_credentials, "{shown}");
+        assert!(!plan.requests.is_empty(), "{shown}");
+    }
+
     /// A request over more than the server will do comes back as the plan for it, with the
     /// bound that stopped it named.
     #[tokio::test]
