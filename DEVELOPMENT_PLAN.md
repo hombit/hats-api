@@ -30,7 +30,7 @@ which.
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | done | |
-| 5.2 | spatial predicate | part | The machinery is built: the covering chooses the partitions, each boundary partition gets its own row prefilter, and the rows come back. What is left is the `moc` shape — `region::Region` is `circle` and `box` and nothing else. `polygon` is §9 |
+| 5.2 | spatial predicate | done | `polygon` is §9; `moc` takes no `url` yet, which §3.3 says why |
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
@@ -259,17 +259,15 @@ of one, and the array is a union. `ra_column` and `dec_column` are required alon
 a lone parquet file says nothing about which of its columns are a position. A catalog's
 `properties` (§5.1) does, which is what will make them optional for a HATS target.
 
-The shape still to add:
+`circle`, `box` and `moc` are built. What is left of the field:
 
-| `type` | fields |
-|---|---|
-| `moc` | `ascii`, or `url` — an IVOA MOC given directly |
-
-- **`moc: {url: …}` is a caller-named fetch** and goes through §8.3 like any other.
-- **Every shape has to lower to a MOC** for §5.2's partition pruning. `circle` and `box`
-  do. `moc` is already cells, so it is the one shape whose exact test *is* its covering:
-  the outer and inner sets are the same set, and no row reaches any geometry.
-- **Intersection and difference** are cheap to add as explicit combinators over the array.
+- **`moc: {url: …}`, a MOC fetched rather than sent.** A caller-named fetch, so it needs
+  §8.3's endpoint and address rules deciding it, a bound on what may be pulled down, and an
+  answer to whether a plan echoes the url — cheap, and each entry re-fetches — or the cells
+  it resolved to, which is self-contained and large. Worth its own step. `ascii` and `json`
+  cover the caller who has the MOC in hand.
+- **Intersection and difference** are cheap to add as explicit combinators over the array,
+  which is a union today.
 
 `polygon` is §9. It is the one shape whose per-row test is not a formula.
 
@@ -448,23 +446,11 @@ of the two HATS endpoints it is sent to controls delivery (§5.3).
 
 Rules this leaves behind live in `CLAUDE.md`. What is still open:
 
-**The `moc` shape, which is not written.** `region::Region` has `circle` and `box`; §3.3's
-table is the third. Two pieces: the request shape — `ascii`, or `url`, which is a
-caller-named fetch through §8.3 — and a `Shape::Moc` whose `covering` returns the caller's
-own cells as both the inner and the outer set.
-
-**The caller's MOC is used as given.** No re-covering at a depth of ours, and no range
-budget: it is not an approximation of a shape, it *is* the shape, so a depth chosen here
-could only make the answer wrong. It is exact from both sides, and no row reaches any
-geometry.
-
-That is what the remaining decision turns on. `ROW_RANGE_BUDGET` drops a covering that
-grew too long for a row expression, which is safe for `circle` and `box` because the
-haversine behind it is the answer either way — the covering is only ever a saving. A MOC
-has nothing behind it, so a dropped covering is every row returned. **The budget must not
-apply to a MOC**, and a file with no HEALPix column has no cheap answer at all: either the
-cells become a hash per row on `ra`/`dec`, or such a file is refused. Decide which; the
-refusal is honest and the hash is a `ScalarUDF` this crate does not have.
+**A `moc` against a file with no HEALPix column is refused, and a hash per row would be the
+alternative.** The cells could become a test on `ra`/`dec` — `healpix_hash(ra, dec) IN …` —
+but that is a `ScalarUDF` this crate does not have, and it would prune nothing, a computed
+column being invisible to statistics. Worth revisiting only alongside
+`ScalarUDFImpl::preimage`, which is what would make such a column prunable.
 
 **Partitions are ordered wherever they are listed, not only where rows are.** §5.3's plan
 mode emits its `requests` in the same order the rows come back in, so a client fanning out
@@ -770,9 +756,10 @@ from the router side but is an order of magnitude less used and still pre-1.0.
   to enumerate: every url under a mount is a data path. The listing response and the
   query parameters are describable, "any path below this prefix" is not, so the README
   stays the document for that half rather than OpenAPI pretending to cover it.
-- **Not before §5.** §5.2 still adds `moc` to `region` and brings
-  `POST /api/v1/hats`, and §5.3 adds the sync / plan / auto modes. Describing the API
-  before those land describes a shape that then changes — the reason §4.1 waits, applied to the document that is harder to correct
+- **§5's routes are settled, so what remains is smaller than it was.** `region` may still
+  gain `moc: {url}` (§3.3) and the combinators beside it, and §7.2's streaming would change
+  how a large answer arrives. Describing the API before those land describes a shape that
+  then changes — the reason §4.1 waited, applied to the document that is harder to correct,
   because clients will have generated code from it.
 - IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
   `/availability`, arriving with TAP in §9.6. Nothing here should make serving both

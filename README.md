@@ -376,13 +376,16 @@ inside a partition appear in none of its metadata.
 
 ### Selecting a region of the sky
 
+Three shapes: `circle`, `box` and `moc`.
+
 `region` is a structured field rather than part of `where`. It is always an array, and
 **the array is a union**: a row inside any of its shapes qualifies. The whole field is
 then `AND`ed with `where`.
 
 `ra_column` and `dec_column` say which columns of the file hold the position, and are
-required alongside `region`. They resolve the same way any column name does: the file's
-own spelling, or that spelling in lowercase.
+required alongside `region` — except where every shape in it is a `moc`, which is cells and
+reads no position. They resolve the same way any column name does: the file's own spelling,
+or that spelling in lowercase.
 
 `healpix_column` and `healpix_order` name a HEALPix cell column, if the file has one — a
 HATS catalog's `_healpix_29`, written at order 29. They are optional, they travel
@@ -414,11 +417,13 @@ Degrees throughout, and both ends of every range inclusive.
 |---|---|
 | `circle` | `ra`, `dec`, and exactly one of `radius_deg` or `radius_arcsec` — the cone search, under ADQL's name for it |
 | `box` | `ra: [from, to]`, `dec: [from, to]` |
+| `moc` | exactly one of `ascii` or `json` — an IVOA MOC given directly |
 
 ```json
 "region": [
   { "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_arcsec": 36 },
-  { "type": "box", "ra": [349.5, 10.5], "dec": [-20, -10] }
+  { "type": "box", "ra": [349.5, 10.5], "dec": [-20, -10] },
+  { "type": "moc", "ascii": "3/3 10 4/16-18 22" }
 ]
 ```
 
@@ -433,6 +438,36 @@ degrees across the origin and `[10, 350]` is the three hundred and forty the oth
 both legal and different boxes. A whole turn, `[0, 360]`, is every right ascension; the
 two values naming the *same* point is refused. `dec` is ordered, so its first value may
 not be the greater one.
+
+#### `moc`
+
+A Multi-Order Coverage map, in either of IVOA's two text serializations — exactly one of:
+
+```json
+{ "type": "moc", "ascii": "3/3 10 4/16-18 22" }
+{ "type": "moc", "json": { "3": [3, 10], "4": [16, 17, 18, 22] } }
+```
+
+These are what `mocpy`'s `serialize(format="str")` and `serialize(format="json")` write.
+FITS is not accepted: it is binary, so it would have to arrive base64-encoded, which is
+neither of the two things a caller already has. There is no `url` — fetching a MOC the
+caller names is a request this service would make on their behalf, and that needs the
+endpoint and network rules deciding it.
+
+**It is used at the depth you wrote it at.** Every other shape is approximated by cells and
+this service picks how finely; a MOC *is* cells, so re-covering it could only move the
+answer. That also makes it the one exact shape — the inner and outer coverings are the same
+set — so no row reaches any trigonometry.
+
+**It needs a HEALPix column**, and is refused without one. The cells are the whole of the
+test, so unlike every other shape there is no geometry to fall back on, and answering with
+no rows would be indistinguishable from a MOC that holds none. For a catalog the column
+comes from `hats_col_healpix`; for a single file, name `healpix_column` and `healpix_order`.
+
+Since it reads no position, `ra_column` and `dec_column` are not required alongside a
+region whose shapes are all `moc`.
+
+A MOC that names no cells at all is refused rather than answered with nothing.
 
 Which numbers your file writes for a right ascension does not matter: a column running
 from 0 to 360 and one running from -180 to 180 both work, and so does a shape crossing

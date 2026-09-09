@@ -25,6 +25,15 @@ use datafusion::common::DFSchema;
 use datafusion::functions::math::expr_fn::{cos, sin};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::lit;
+use moc::deser::ascii::from_ascii_ivoa;
+use moc::deser::json::from_json_aladin;
+use moc::elemset::range::MocRanges;
+use moc::moc::range::RangeMOC;
+use moc::moc::{
+    CellMOCIntoIterator, CellMOCIterator, CellOrCellRangeMOCIntoIterator,
+    CellOrCellRangeMOCIterator, HasMaxDepth,
+};
+use moc::qty::Hpx;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -62,7 +71,9 @@ const NEAR_ONE: f64 = 1e-6;
 /// It serializes as well as deserializes so that a shape can be written back out in the
 /// spelling the caller used — the radius in the unit they gave it in, rather than one
 /// converted on their behalf.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+///
+/// Not `Copy`: a `moc` carries the caller's serialization.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Region {
     /// The cone search, under ADQL's name for it: everything within the radius of a point.
@@ -97,6 +108,29 @@ pub enum Region {
     /// and answering it with no rows would be indistinguishable from a range that held
     /// none.
     Box { ra: [f64; 2], dec: [f64; 2] },
+    /// A Multi-Order Coverage map, in either of IVOA's two text serializations.
+    ///
+    /// Exactly one of `ascii` — `"3/3 10 4/16-18 5/19-20"` — and `json` —
+    /// `{"3": [3, 10], "4": [16, 17, 18]}`. Both are what `mocpy`'s `serialize` writes, under
+    /// `format="str"` and `format="json"`; the JSON one needs no escaping inside a JSON body
+    /// and the ASCII one is shorter. FITS is not accepted: it is binary, so it would arrive
+    /// base64-encoded, which is neither of the two things a caller already has.
+    ///
+    /// **The only shape that is already cells**, so it is the only one whose covering is
+    /// exact: the inner and outer sets are the same set, and no row reaches any geometry. It
+    /// is also the only one with no test on the coordinates at all, which is why it needs a
+    /// HEALPix column and is refused without one — a covering that could be dropped would
+    /// leave the region nothing to say.
+    ///
+    /// Taken at whatever depth the caller wrote it at. Nothing here re-covers it: it is not
+    /// an approximation of a shape, it *is* the shape, so a depth of ours could only move
+    /// the answer.
+    Moc {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ascii: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        json: Option<serde_json::Value>,
+    },
 }
 
 /// One shape with every field checked and in the one form the rest of the code reads.
@@ -106,7 +140,8 @@ pub enum Region {
 /// that has to be read as a direction rather than as a range. This is what that means once,
 /// so the predicate and the HEALPix covering ([`crate::healpix`]) are two readings of the
 /// same numbers rather than two validations that can drift apart.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Not `Copy`: a MOC is a set of ranges on the heap. Everything else here is a few floats.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
     /// Centre and radius, both in degrees; the radius is in `(0, 180]`.
     Circle { ra: f64, dec: f64, radius: f64 },
@@ -118,6 +153,8 @@ pub enum Shape {
         dec_from: f64,
         dec_to: f64,
     },
+    /// The caller's own cells, parsed. Both coverings, and there is nothing behind them.
+    Moc(RangeMOC<u64, Hpx<u64>>),
 }
 
 /// A spatial constraint, and the two columns of the file it is tested against.
@@ -135,8 +172,11 @@ pub enum Shape {
 #[derive(Debug, Clone, Copy)]
 pub struct Spatial<'a> {
     pub regions: &'a [Region],
-    pub ra_column: &'a str,
-    pub dec_column: &'a str,
+    /// Optional because one shape needs no coordinates at all: a `moc` is cells, and is
+    /// tested against the HEALPix column instead. A shape that does need them and has none
+    /// is refused, so what these being absent means is "nobody said", not "test nothing".
+    pub ra_column: Option<&'a str>,
+    pub dec_column: Option<&'a str>,
     /// The file's HEALPix index column, where it has one.
     ///
     /// Optional, and named rather than looked for, for the same reason the coordinates are:
@@ -196,15 +236,41 @@ pub enum Absence {
 /// front of it, and [`crate::healpix`] is where that happens.
 pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiError> {
     let shapes = shapes(spatial.regions)?;
-    let ra = sql::coordinate_column(schema, spatial.ra_column, "ra_column")?;
-    let dec = sql::coordinate_column(schema, spatial.dec_column, "dec_column")?;
+    // Resolved only where some shape reads a position out of a row, since a `moc` does not.
+    // A shape that needs them and has none is refused inside `predicate`, so this being
+    // absent means nobody named them rather than that nothing is to be tested.
+    let coordinates = match shapes.iter().any(Shape::needs_coordinates) {
+        false => None,
+        true => Some((
+            sql::coordinate_column(
+                schema,
+                required(spatial.ra_column, "ra_column")?,
+                "ra_column",
+            )?,
+            sql::coordinate_column(
+                schema,
+                required(spatial.dec_column, "dec_column")?,
+                "dec_column",
+            )?,
+        )),
+    };
+    // A shape with no coordinate test contributes no term here and is answered by the
+    // covering alone, so `false` is the right identity: it is what says "none of the shapes
+    // that test a position matched", and the covering is `OR`ed in front of it.
     let exact = shapes
         .iter()
-        .map(|shape| shape.predicate(&ra, &dec))
-        .reduce(Expr::or)
-        .unwrap_or_else(|| unreachable!("the array was checked to be non-empty"));
+        .filter_map(|shape| shape.predicate(coordinates.as_ref()))
+        .reduce(Expr::or);
+    // Which is also what makes the covering compulsory rather than a saving. Dropping it
+    // would leave `false`, and a region that returns no rows is one a caller cannot tell
+    // from a region that holds none.
+    let cells = match &exact {
+        Some(_) => healpix::Cells::Optional,
+        None => healpix::Cells::Required,
+    };
+    let exact = exact.unwrap_or_else(|| lit(false));
     match spatial.healpix {
-        None => Ok(exact),
+        None => without_cells(exact, cells),
         Some(Healpix {
             column,
             order,
@@ -216,10 +282,11 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
                 (Err(error), Absence::Refuse) => return Err(error),
                 // A guess that does not fit this file is not used. Every way it can fail —
                 // no such column, or one too narrow for the order — says the same thing
-                // about a column nobody named: this is not the index it was taken for.
+                // about a column nobody named: this is not the index it was taken for. Not
+                // where the covering is the only answer, which is what `cells` decides.
                 (Err(error), Absence::Ignore) => {
-                    tracing::debug!(%error, "no usable HEALPix column, testing the geometry alone");
-                    return Ok(exact);
+                    tracing::debug!(%error, "no usable HEALPix column");
+                    return without_cells(exact, cells);
                 }
             };
             // A request naming one file says nothing about a catalog above it, and then
@@ -229,9 +296,29 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
                 partition_order: spatial.partition.map(|(order, _)| order),
             };
             let coverage = healpix::Coverage::of(&shapes, detail);
-            Ok(coverage.prefilter(spatial.partition, &index, exact))
+            Ok(coverage.prefilter(spatial.partition, &index, exact, cells))
         }
     }
+}
+
+/// The answer where there is no HEALPix column to test cells against.
+///
+/// For every shape but `moc` that is the ordinary case and the geometry is the whole answer.
+/// A `moc` has no geometry, so there is nothing left — and returning `false` would answer
+/// with no rows, which reads exactly like a region that holds none.
+fn without_cells(exact: Expr, cells: healpix::Cells) -> Result<Expr, ApiError> {
+    match cells {
+        healpix::Cells::Optional => Ok(exact),
+        healpix::Cells::Required => Err(ApiError::bad_request(format!(
+            "{FIELD}: a moc is tested against a HEALPix column, and this file has none \
+             usable; name healpix_column and healpix_order"
+        ))),
+    }
+}
+
+/// A column name a shape needs and the request did not give.
+fn required<'a>(name: Option<&'a str>, field: &str) -> Result<&'a str, ApiError> {
+    name.ok_or_else(|| ApiError::bad_request(format!("{FIELD} needs {field}")))
 }
 
 /// Every shape of a request, checked.
@@ -253,6 +340,15 @@ pub fn shapes(regions: &[Region]) -> Result<Vec<Shape>, ApiError> {
 }
 
 impl Region {
+    /// Whether this shape reads a position out of a row, which every shape but a `moc` does.
+    ///
+    /// Asked of the request's own field rather than of a parsed [`Shape`], so that a request
+    /// missing a column it needs is refused from the body alone — before a store is opened
+    /// and a connection made for a request that was never going to run.
+    pub fn needs_coordinates(&self) -> bool {
+        !matches!(self, Self::Moc { .. })
+    }
+
     /// This shape with every field checked, in the one form the rest of the code reads.
     pub fn shape(&self) -> Result<Shape, ApiError> {
         match *self {
@@ -289,15 +385,96 @@ impl Region {
                     dec_to,
                 })
             }
+            Self::Moc { .. } => self.moc(),
         }
+    }
+
+    /// The caller's MOC, parsed, at whatever depth they wrote it.
+    ///
+    /// The ranges come out of either parser sorted and disjoint, being a normalized MOC —
+    /// but they are the caller's text, so they go through the constructor that sorts and
+    /// merges rather than the one that assumes. What that costs is a sort; what it buys is
+    /// that a malformed serialization the parser accepted cannot become a range set the rest
+    /// of the code reads as ordered.
+    fn moc(&self) -> Result<Shape, ApiError> {
+        let Self::Moc { ascii, json } = self else {
+            unreachable!("only a moc parses a moc")
+        };
+        // The parsers' own accounts are a `nom` trace and a boxed error, neither of which
+        // reads as anything to a caller. What they need is the shape that was expected, so
+        // that is the message; the detail goes to the log, where it says which of the two
+        // parsers rejected what.
+        let refuse = |error: &dyn std::fmt::Display, expected: &str| {
+            tracing::debug!(%error, "a moc did not parse");
+            ApiError::bad_request(format!(
+                "{FIELD}: this is not an IVOA MOC; expected {expected}"
+            ))
+        };
+        // The two serializations reach different parsers and the same ranges. The JSON one
+        // is handed back to a string because that is what the parser takes — it is the
+        // caller's own object re-printed, so nothing is lost in the round trip.
+        let ranges = match (ascii.as_deref(), json) {
+            (Some(_), Some(_)) => {
+                return Err(ApiError::bad_request(format!(
+                    "{FIELD}: send a moc as ascii or as json, not both"
+                )));
+            }
+            (None, None) => {
+                return Err(ApiError::bad_request(format!(
+                    "{FIELD}: a moc needs ascii or json"
+                )));
+            }
+            (Some(ascii), None) => {
+                let cells = from_ascii_ivoa::<u64, Hpx<u64>>(ascii)
+                    .map_err(|e| refuse(&e, r#"depth/pixels, as in "3/3 10 4/16-18""#))?;
+                let depth = cells.depth_max();
+                (
+                    depth,
+                    cells.into_cellcellrange_moc_iter().ranges().collect(),
+                )
+            }
+            (None, Some(json)) => {
+                let cells = from_json_aladin::<u64, Hpx<u64>>(&json.to_string())
+                    .map_err(|e| refuse(&e, r#"a depth to its pixels, as in {"3": [3, 10]}"#))?;
+                let depth = cells.depth_max();
+                (depth, cells.into_cell_moc_iter().ranges().collect())
+            }
+        };
+        let (depth, ranges) = ranges;
+        let moc = RangeMOC::new(depth, MocRanges::new_from(ranges));
+        if moc.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "{FIELD}: this moc is empty; omit it to select every row"
+            )));
+        }
+        Ok(Shape::Moc(moc))
     }
 }
 
 impl Shape {
-    /// This shape, as a predicate over the two coordinate expressions.
-    pub(crate) fn predicate(&self, ra_column: &Expr, dec_column: &Expr) -> Expr {
+    /// Whether this shape reads a position out of a row, which every shape but a `moc` does.
+    pub(crate) fn needs_coordinates(&self) -> bool {
+        !matches!(self, Self::Moc(_))
+    }
+
+    /// This shape as a predicate over the coordinate columns, where it has one.
+    ///
+    /// `None` for a `moc`: it is cells, and its rows are decided by the covering on the
+    /// HEALPix column rather than by arithmetic on a position. That is the whole reason
+    /// [`healpix::Cells`] exists — a covering nothing stands behind may not be dropped.
+    pub(crate) fn predicate(&self, coordinates: Option<&(Expr, Expr)>) -> Option<Expr> {
+        let Self::Moc(_) = self else {
+            let (ra_column, dec_column) = coordinates?;
+            return Some(self.geometry(ra_column, dec_column));
+        };
+        None
+    }
+
+    /// The arithmetic, for the shapes that are arithmetic.
+    fn geometry(&self, ra_column: &Expr, dec_column: &Expr) -> Expr {
         match *self {
             Self::Circle { ra, dec, radius } => circle(ra_column, dec_column, ra, dec, radius),
+            Self::Moc(_) => unreachable!("a moc has no geometry"),
             Self::Box {
                 ra_from,
                 ra_span,
@@ -776,6 +953,10 @@ mod tests {
                 let offset = (ra - from).rem_euclid(360.0);
                 (low..=high).contains(&dec) && (span >= 360.0 || offset <= span)
             }
+            // Its own cells, so there is nothing to work out independently: the reference
+            // answer for a `moc` would be the covering, which is the thing under test.
+            // `a_moc_selects_the_rows_in_its_cells` compares against the cells directly.
+            Region::Moc { .. } => unreachable!("no reference geometry for a moc"),
         }
     }
 
@@ -832,6 +1013,25 @@ mod tests {
         regions: &[Region],
         ra_column: &str,
         dec_column: &str,
+        healpix_column: Option<&str>,
+    ) -> Result<Vec<i64>, ApiError> {
+        ids_with(
+            file,
+            regions,
+            Some(ra_column),
+            Some(dec_column),
+            healpix_column,
+        )
+        .await
+    }
+
+    /// The same, for the one shape that needs no coordinate columns and so may be sent
+    /// without them.
+    async fn ids_with(
+        file: &RemoteFile,
+        regions: &[Region],
+        ra_column: Option<&str>,
+        dec_column: Option<&str>,
         healpix_column: Option<&str>,
     ) -> Result<Vec<i64>, ApiError> {
         let selection = Selection {
@@ -951,8 +1151,8 @@ mod tests {
                 predicate: Predicate::All,
                 spatial: Some(Spatial {
                     regions: &regions,
-                    ra_column: "objRA",
-                    dec_column: "objDec",
+                    ra_column: Some("objRA"),
+                    dec_column: Some("objDec"),
                     healpix,
                     partition: None,
                 }),
@@ -1039,7 +1239,7 @@ mod tests {
     async fn a_circle_selects_what_the_haversine_formula_selects() {
         for fixture in Fixture::ALL {
             for circle in circles() {
-                let regions = [circle];
+                let regions = [circle.clone()];
                 let expected = fixture.reference(&regions);
                 assert!(
                     !expected.is_empty(),
@@ -1060,7 +1260,7 @@ mod tests {
     async fn a_box_selects_a_range_in_each_coordinate() {
         for fixture in Fixture::ALL {
             for region in boxes() {
-                let regions = [region];
+                let regions = [region.clone()];
                 let expected = fixture.reference(&regions);
                 assert!(
                     !expected.is_empty(),
@@ -1191,6 +1391,172 @@ mod tests {
         assert!(error.contains("_HEALPIX_29"), "{error}");
     }
 
+    /// A `moc` in either serialization selects exactly the rows whose cells it holds.
+    ///
+    /// The reference answer is not geometry here — it cannot be, a MOC being cells — so it is
+    /// the cells themselves: a row qualifies when its order-29 index falls in one of the
+    /// order-3 cells the MOC names, which is a shift and a comparison worked out in the test
+    /// rather than shared with the code under test.
+    ///
+    /// Both serializations are asked for the same MOC, so they must return the same rows: one
+    /// answer differing from the other would be one parser reading the caller differently.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moc_selects_the_rows_in_its_cells() {
+        // **More ranges than a row expression is allowed to carry.** The budget drops a
+        // covering past `ROW_RANGE_BUDGET`, which for every other shape leaves the geometry
+        // as the answer and here would leave nothing at all. So the cells are scattered
+        // rather than adjacent and there are more of them than the budget allows: a covering
+        // treated as optional would be thrown away, and this test would see no rows.
+        //
+        // One contiguous run among them, so the ASCII carries a range as well as a list.
+        let scattered: Vec<u64> = (0..40).step_by(2).collect();
+        let cells: Vec<u64> = scattered.iter().copied().chain(264..=266).collect();
+        let ascii = format!(
+            "3/{} 264-266",
+            scattered
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let json = serde_json::json!({"3": cells});
+
+        let fixture = Fixture {
+            convention: Convention::Positive,
+            precision: Precision::F64,
+            index: HealpixColumn::Present,
+        };
+        let (_dir, file) = fixture.on_disk();
+        // The order-29 span of each order-3 cell, which is what the column holds.
+        let shift = 2 * u32::from(FIXTURE_ORDER - 3);
+        let expected: Vec<i64> = fixture
+            .points()
+            .into_iter()
+            .filter(|&(_, ra, dec)| {
+                let cell = healpix_cell(ra, dec).cast_unsigned() >> shift;
+                cells.contains(&cell)
+            })
+            .map(|(id, _, _)| id)
+            .collect();
+        assert!(!expected.is_empty(), "the moc holds none of the fixture");
+
+        for region in [
+            Region::Moc {
+                ascii: Some(ascii.clone()),
+                json: None,
+            },
+            Region::Moc {
+                ascii: None,
+                json: Some(json),
+            },
+        ] {
+            let selected = ids(
+                &file,
+                std::slice::from_ref(&region),
+                "objRA",
+                "objDec",
+                Some(DEFAULT_HEALPIX_COLUMN_NAME),
+            )
+            .await
+            .unwrap();
+            assert_eq!(selected, expected, "{region:?}");
+
+            // And with no coordinate columns named at all, which a `moc` may do: it reads no
+            // position, so requiring them would be requiring what nothing uses.
+            let without = ids_with(
+                &file,
+                std::slice::from_ref(&region),
+                None,
+                None,
+                Some(DEFAULT_HEALPIX_COLUMN_NAME),
+            )
+            .await
+            .unwrap();
+            assert_eq!(without, expected, "{region:?} without coordinate columns");
+        }
+    }
+
+    /// A `moc` is tested against the HEALPix column and has nothing else to be tested
+    /// against, so a file without one is refused rather than answered with no rows.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_moc_needs_the_index_column() {
+        let (_dir, file) = Fixture {
+            convention: Convention::Positive,
+            precision: Precision::F64,
+            index: HealpixColumn::Absent,
+        }
+        .on_disk();
+        let region = [Region::Moc {
+            ascii: Some("3/264".to_owned()),
+            json: None,
+        }];
+        // Not named, so the `_healpix_29` candidate is tried and found absent — which for
+        // every other shape means "test the geometry" and here means there is nothing left.
+        let error = ids(&file, &region, "objRA", "objDec", None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HEALPix column"), "{error}");
+    }
+
+    /// Neither serialization, or both, is a request with no one region in it.
+    #[test]
+    fn a_moc_comes_one_way_or_the_other() {
+        let refuse = |ascii: Option<&str>, json: Option<serde_json::Value>| {
+            Region::Moc {
+                ascii: ascii.map(str::to_owned),
+                json,
+            }
+            .shape()
+            .unwrap_err()
+            .to_string()
+        };
+        assert!(
+            refuse(Some("3/264"), Some(serde_json::json!({"3": [264]}))).contains("not both"),
+            "two serializations are two mocs with nothing saying which"
+        );
+        assert!(
+            refuse(None, None).contains("needs ascii or json"),
+            "neither is not a shape"
+        );
+        // The parsers' own accounts are a `nom` trace and a boxed error. What comes back is
+        // the shape that was expected.
+        for (bad, expected) in [
+            (refuse(Some("not a moc"), None), "3/3 10 4/16-18"),
+            (
+                refuse(None, Some(serde_json::json!([1, 2, 3]))),
+                r#"{"3": [3, 10]}"#,
+            ),
+        ] {
+            assert!(bad.contains("not an IVOA MOC"), "{bad}");
+            assert!(bad.contains(expected), "{bad}");
+            assert!(
+                !bad.contains("Parse error"),
+                "the parser's trace got out: {bad}"
+            );
+        }
+        // Legal syntax naming no cell at all: a shape with no extent, which would select no
+        // rows and read exactly like a region that holds none.
+        //
+        // **The JSON parser is lenient, so this check is what refuses for it.** An object it
+        // cannot make sense of comes back as no cells rather than as an error — an order that
+        // does not exist, a value that is not a list — and each of those is caught here
+        // rather than by the parser.
+        for empty in [
+            serde_json::json!({"nonsense": true}),
+            serde_json::json!({"3": []}),
+            serde_json::json!({"99": [1]}),
+            serde_json::json!({"3": "x"}),
+        ] {
+            let error = refuse(None, Some(empty.clone()));
+            assert!(error.contains("empty"), "{empty} gave {error}");
+        }
+        assert!(
+            refuse(Some("3/"), None).contains("empty"),
+            "an empty moc should be refused"
+        );
+    }
+
     /// The index column holds a HEALPix index, which is a whole number wide enough to be
     /// one. A float column of the right name is refused rather than compared against.
     #[tokio::test(flavor = "multi_thread")]
@@ -1246,8 +1612,8 @@ mod tests {
             &schema(),
             &Spatial {
                 regions,
-                ra_column: "ra",
-                dec_column: "dec",
+                ra_column: Some("ra"),
+                dec_column: Some("dec"),
                 healpix: None,
                 partition: None,
             },

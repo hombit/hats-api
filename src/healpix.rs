@@ -217,6 +217,23 @@ pub enum Detail {
     Rows { partition_order: Option<u8> },
 }
 
+/// Whether the covering may be left out of a row expression.
+///
+/// It is a saving for every shape that is arithmetic on a position: the geometry behind it
+/// is the answer, so a covering too long to be worth carrying is dropped and the rows are
+/// tested exactly. A `moc` has no geometry — it *is* cells — so its covering is the answer,
+/// and dropping it would return no rows at all, which reads like a region holding none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cells {
+    /// Dropped when it grows past `ROW_RANGE_BUDGET`. Every shape but a `moc`.
+    Optional,
+    /// Carried whatever its length, there being nothing else to answer with.
+    ///
+    /// **No budget applies.** The count is the caller's MOC's own, so what bounds it is the
+    /// size of the body they sent it in.
+    Required,
+}
+
 /// How much of one cell — a catalog partition — a region covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cover {
@@ -390,6 +407,7 @@ impl Coverage {
         partition: Option<(u8, u64)>,
         index: &SpatialIndex,
         exact: Expr,
+        cells: Cells,
     ) -> Expr {
         let cut;
         let coverage = match partition {
@@ -399,10 +417,10 @@ impl Coverage {
             }
             None => self,
         };
-        let Some(outer) = index.ranges(&coverage.outer, Side::Outer) else {
+        let Some(outer) = index.ranges(&coverage.outer, Side::Outer, cells) else {
             return exact;
         };
-        match index.ranges(&coverage.inner, Side::Inner) {
+        match index.ranges(&coverage.inner, Side::Inner, cells) {
             Some(inner) => inner.or(outer.and(exact)),
             None => outer.and(exact),
         }
@@ -512,15 +530,19 @@ impl SpatialIndex {
     /// need not be one the column's type can hold: the last cell of the sky at the order a
     /// column is exactly wide enough for is its type's largest value, and one past it is not
     /// a literal at all.
-    fn ranges(&self, moc: &RangeMOC<u64, Hpx<u64>>, side: Side) -> Option<Expr> {
+    fn ranges(&self, moc: &RangeMOC<u64, Hpx<u64>>, side: Side, cells: Cells) -> Option<Expr> {
         let bounds = self.bounds(moc, side);
         // A covering built for partitions, used here — or one whose ranges a coarse column
         // did not merge as expected — would put more comparisons on every row than the
         // geometry behind them costs. Then it is better to have no prefilter at all.
-        let too_many = match u32::try_from(bounds.len()) {
-            Ok(count) => count > ROW_RANGE_BUDGET,
-            Err(_) => true,
-        };
+        //
+        // Unless there is no geometry behind them, which is a `moc`: the ranges are the
+        // answer, and dropping them answers with no rows.
+        let too_many = cells == Cells::Optional
+            && match u32::try_from(bounds.len()) {
+                Ok(count) => count > ROW_RANGE_BUDGET,
+                Err(_) => true,
+            };
         if bounds.is_empty() || too_many {
             return None;
         }
@@ -602,7 +624,15 @@ fn capacity(data_type: &DataType) -> Option<u64> {
 impl Shape {
     /// This shape's inner and outer coverings, at the depth its own size asks for.
     fn covering(&self, detail: Detail) -> (RangeMOC<u64, Hpx<u64>>, RangeMOC<u64, Hpx<u64>>) {
+        // The one shape that is not covered at all: it is already cells, so both sets are
+        // the set the caller wrote, and `detail` has nothing to decide. Re-covering it at a
+        // depth of ours could only move the answer — a coarser one would take in cells the
+        // caller excluded and a finer one is the same set spelled longer.
+        if let Self::Moc(cells) = self {
+            return (cells.clone(), cells.clone());
+        }
         match *self {
+            Self::Moc(_) => unreachable!("answered above, where it needs no depth"),
             Self::Circle { ra, dec, radius } => {
                 // The circumference of a small circle of angular radius `r` is `2 pi sin r`,
                 // which is the length the covering has to follow. Past a quarter turn it
@@ -983,7 +1013,12 @@ mod tests {
             // expression may: cutting it to the partition is `prefilter`'s own doing.
             let predicate = format!(
                 "{}",
-                rows.prefilter(Some((CATALOG_ORDER, pixel)), &index, lit(true))
+                rows.prefilter(
+                    Some((CATALOG_ORDER, pixel)),
+                    &index,
+                    lit(true),
+                    Cells::Optional
+                )
             );
             assert!(
                 predicate.contains(DEFAULT_HEALPIX_COLUMN_NAME),
@@ -1335,7 +1370,7 @@ mod tests {
     fn a_covering_brackets_its_shape() {
         for shape in awkward_shapes() {
             let coverage = Coverage::of(
-                &[shape],
+                std::slice::from_ref(&shape),
                 Detail::Rows {
                     partition_order: None,
                 },
@@ -1374,7 +1409,10 @@ mod tests {
             // Both sides of the catalog's own order, so the covering is coarser than some
             // partitions and finer than others.
             for catalog_order in [0_u8, 1, 3, 6] {
-                let coverage = Coverage::of(&[shape], Detail::Partitions { catalog_order });
+                let coverage = Coverage::of(
+                    std::slice::from_ref(&shape),
+                    Detail::Partitions { catalog_order },
+                );
                 let expected = partitions
                     .cells()
                     .iter()
@@ -1415,6 +1453,41 @@ mod tests {
                     gallop(cells, from, still),
                     expected,
                     "resuming from {from} with the answer at {expected}"
+                );
+            }
+        }
+    }
+
+    /// A MOC is its own covering, at its own depth, from both sides.
+    ///
+    /// Every other shape is approximated: the inner set is smaller than it and the outer set
+    /// larger, and `Detail` picks how much. A MOC is cells already, so both sets are the set
+    /// the caller wrote whatever depth is asked for — and that is what makes it exact, which
+    /// is what lets its rows be answered with no geometry at all.
+    #[test]
+    fn a_moc_is_its_own_covering_at_any_detail() {
+        let cells = [(3_u8, 264_u64), (3, 700), (5, 40)];
+        let shape = Shape::Moc(RangeMOC::from_cells(5, cells.iter().copied(), None));
+        let ranges = |moc: &RangeMOC<u64, Hpx<u64>>| moc.moc_ranges().0.0.clone();
+
+        for detail in [
+            Detail::Partitions { catalog_order: 0 },
+            Detail::Partitions { catalog_order: 12 },
+            Detail::Rows {
+                partition_order: None,
+            },
+            Detail::Rows {
+                partition_order: Some(8),
+            },
+        ] {
+            let (inner, outer) = shape.covering(detail);
+            assert_eq!(ranges(&inner), ranges(&outer), "{detail:?}: not exact");
+            let coverage = Coverage { inner, outer };
+            for (order, pixel) in cells {
+                assert_eq!(
+                    coverage.cover(order, pixel),
+                    Cover::Inside,
+                    "{detail:?}: Norder={order} Npix={pixel} is not inside its own moc"
                 );
             }
         }
@@ -1555,7 +1628,10 @@ mod tests {
     #[test]
     fn a_covering_of_everything_is_one_range() {
         let index = spatial_index(MAX_ORDER);
-        let predicate = format!("{}", all_sky().prefilter(None, &index, lit(false)));
+        let predicate = format!(
+            "{}",
+            all_sky().prefilter(None, &index, lit(false), Cells::Optional)
+        );
         assert!(
             predicate.contains(DEFAULT_HEALPIX_COLUMN_NAME) && predicate.contains("OR"),
             "the whole sky should be a range the geometry sits behind: {predicate}"
@@ -1567,7 +1643,10 @@ mod tests {
             },
         );
         assert_eq!(
-            format!("{}", nothing.prefilter(None, &index, lit(false))),
+            format!(
+                "{}",
+                nothing.prefilter(None, &index, lit(false), Cells::Optional)
+            ),
             format!("{}", lit(false)),
             "an empty covering should leave the predicate alone"
         );
@@ -1648,6 +1727,9 @@ mod tests {
                 dec_from,
                 dec_to,
             } => (dec_from..=dec_to).contains(&dec) && (ra - ra_from).rem_euclid(360.0) <= ra_span,
+            // Cells rather than geometry, so the question this answers is put to the cells
+            // directly and `awkward_shapes` carries none.
+            Shape::Moc(_) => unreachable!("a moc has no geometry to check a point against"),
         }
     }
 

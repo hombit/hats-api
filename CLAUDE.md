@@ -313,6 +313,19 @@ quote and no second parser.
   and both are legal; the two values naming the *same* point is refused, because it reads
   equally as an empty box and as the whole sky. `hats` reads that case as the whole sky —
   a deliberate divergence, since nothing in the answer would say which reading was used.
+- **A `moc` is cells, and that changes three rules rather than adding a shape.** It is used
+  at the caller's own depth — `Shape::covering` ignores `Detail` for it, since re-covering
+  the shape *is* moving it — so its inner and outer sets are the same set and it is the one
+  exact shape. It has no coordinate test, so it needs no `ra_column`; and it has nothing
+  behind its covering, so the covering may not be dropped. `healpix::Cells` carries that
+  last one: `Required` turns off `ROW_RANGE_BUDGET`, which for every other shape trades a
+  long covering for the geometry and here would trade it for nothing. A dropped covering
+  there returns no rows, which reads exactly like a MOC that holds none — and a file with no
+  usable HEALPix column is refused for the same reason rather than answered.
+- **A caller's MOC is not validated beyond being non-empty.** The JSON parser is lenient: an
+  order that does not exist or a value that is not a list comes back as no cells rather than
+  as an error. The emptiness check is what refuses those, and it is the right place — a
+  region selecting nothing is the failure worth catching, whatever produced it.
 - Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
   widened before the arithmetic rather than the trigonometry running at single precision.
   `region::tests` crosses both column types against both right-ascension conventions.

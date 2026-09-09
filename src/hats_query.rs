@@ -425,8 +425,8 @@ impl Search {
         }
         Some(Spatial {
             regions,
-            ra_column: &columns.ra,
-            dec_column: &columns.dec,
+            ra_column: Some(&columns.ra),
+            dec_column: Some(&columns.dec),
             healpix: Some(Healpix {
                 column: &columns.healpix.0,
                 order: columns.healpix.1,
@@ -796,7 +796,9 @@ pub(crate) mod tests {
         for healpix in [true, false] {
             let dir = fixture(healpix);
             for region in regions() {
-                let (_, result) = read(dir.path(), Some(&[region]), None).await.unwrap();
+                let (_, result) = read(dir.path(), Some(std::slice::from_ref(&region)), None)
+                    .await
+                    .unwrap();
                 assert_eq!(
                     ids(&result),
                     inside(&region),
@@ -823,8 +825,8 @@ pub(crate) mod tests {
             let (search, result) = read(dir.path(), Some(&[region]), None).await.unwrap();
             (search.chosen().len(), result.partitions_read)
         };
-        let (narrow, _) = opened(regions()[0]).await;
-        let (whole, read_whole) = opened(regions()[2]).await;
+        let (narrow, _) = opened(regions()[0].clone()).await;
+        let (whole, read_whole) = opened(regions()[2].clone()).await;
         assert_eq!(narrow, 1, "a cone inside one partition reached others");
         assert_eq!(whole, CELLS.len(), "a cone over the fixture missed some");
         assert_eq!(read_whole, CELLS.len());
@@ -837,7 +839,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_partition_the_region_contains_needs_no_row_test() {
         let dir = fixture(true);
-        let (search, _) = read(dir.path(), Some(&[regions()[2]]), None).await.unwrap();
+        let (search, _) = read(dir.path(), Some(&[regions()[2].clone()]), None)
+            .await
+            .unwrap();
         assert!(
             search
                 .chosen()
@@ -961,7 +965,7 @@ pub(crate) mod tests {
         let (_, result) = read(dir.path(), None, None).await.unwrap();
         assert_eq!(result.rows.num_rows(), rows.len());
 
-        let error = read(dir.path(), Some(&[regions()[0]]), None)
+        let error = read(dir.path(), Some(&[regions()[0].clone()]), None)
             .await
             .unwrap_err();
         assert!(

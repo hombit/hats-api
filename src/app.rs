@@ -583,28 +583,33 @@ impl QueryRequest {
                 "healpix_column needs a region; to filter on that column alone, use where",
             ));
         }
-        match (
-            self.region.as_deref(),
-            self.ra_column.as_deref(),
-            self.dec_column.as_deref(),
-        ) {
-            (None, None, None) => Ok(None),
-            (Some(regions), Some(ra_column), Some(dec_column)) => Ok(Some(Spatial {
-                regions,
-                ra_column,
-                dec_column,
-                healpix,
-                // A url naming one file names no catalog, so nothing here says the file is
-                // a partition of one. The HATS routes fill this in.
-                partition: None,
-            })),
-            (Some(_), _, _) => Err(ApiError::bad_request(
+        let Some(regions) = self.region.as_deref() else {
+            return match self.ra_column.is_some() || self.dec_column.is_some() {
+                true => Err(ApiError::bad_request(
+                    "ra_column and dec_column need a region",
+                )),
+                false => Ok(None),
+            };
+        };
+        // Which columns a region needs is the region's business: a `moc` is cells and reads
+        // no position, so it needs neither. Asked here rather than left to the planner, so
+        // that a request missing a column it needs is refused from its own body — before a
+        // store is opened for a request that was never going to run.
+        let needs_coordinates = regions.iter().any(Region::needs_coordinates);
+        if needs_coordinates && (self.ra_column.is_none() || self.dec_column.is_none()) {
+            return Err(ApiError::bad_request(
                 "region needs ra_column and dec_column",
-            )),
-            (None, _, _) => Err(ApiError::bad_request(
-                "ra_column and dec_column need a region",
-            )),
+            ));
         }
+        Ok(Some(Spatial {
+            regions,
+            ra_column: self.ra_column.as_deref(),
+            dec_column: self.dec_column.as_deref(),
+            healpix,
+            // A url naming one file names no catalog, so nothing here says the file is a
+            // partition of one. The HATS routes fill this in.
+            partition: None,
+        }))
     }
 }
 
@@ -1899,7 +1904,7 @@ mod tests {
     #[tokio::test]
     async fn the_hats_route_answers_a_region_over_a_catalog() {
         let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[0];
+        let region = crate::hats_query::tests::regions()[0].clone();
         let expected = crate::hats_query::tests::inside(&region);
         assert!(!expected.is_empty(), "the cone selects nothing");
 
@@ -2013,7 +2018,7 @@ mod tests {
     #[tokio::test]
     async fn a_plan_is_requests_the_caller_could_send() {
         let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[1];
+        let region = crate::hats_query::tests::regions()[1].clone();
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
             serde_json::json!({"url": "file:///", "columns": "id", "region": [region]}),
@@ -2059,7 +2064,7 @@ mod tests {
     #[tokio::test]
     async fn following_a_plan_gives_the_same_rows() {
         let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[1];
+        let region = crate::hats_query::tests::regions()[1].clone();
         let expected = crate::hats_query::tests::inside(&region);
         let body = serde_json::json!({"url": "file:///", "columns": "id", "region": [region]});
 
@@ -2105,7 +2110,7 @@ mod tests {
             r#where: None,
             columns: Some("id".to_owned()),
             filters: None,
-            region: Some(vec![crate::hats_query::tests::regions()[1]]),
+            region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
             ra_column: None,
             dec_column: None,
             healpix_column: None,
