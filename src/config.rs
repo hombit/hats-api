@@ -138,15 +138,32 @@ pub struct LimitsConfig {
     /// list. Over this the partitions are listed instead, which costs the per-partition
     /// sizes and nothing else.
     pub max_catalog_metadata_bytes: ByteSize,
-    /// How many partitions of a catalog one request may read. Over this it is refused
-    /// rather than run.
+    /// How many partitions of a catalog one request may read.
     ///
-    /// A count and not a size, because a count is what every catalog can answer: the
-    /// partition list comes from any of the three discovery sources, and the per-partition
-    /// bytes come only from `_metadata`. So it bounds the wrong thing — a thousand small
-    /// partitions pass where one large one does not — and it bounds it without a second
-    /// request.
+    /// The only one of the three known before anything is read: the partition list comes
+    /// from whichever discovery source answered, so this is checked and refused without a
+    /// single byte of data fetched. The other two can only be watched as they accumulate.
     pub max_partitions: usize,
+    /// How many bytes of data one request may fetch from the store, across every partition.
+    ///
+    /// What a request costs the origin, which the partition count does not bound: one dense
+    /// partition can be larger than a thousand sparse ones.
+    ///
+    /// Checked between files, since the counter is only final once a scan has finished, so
+    /// a request overshoots by at most the file that carried it past.
+    pub max_bytes_fetched: ByteSize,
+    /// How many rows one request may return.
+    ///
+    /// Not the caller's `limit`, which is them asking for fewer. This is the operator's
+    /// ceiling on the answer, and it binds a request that set no limit at all.
+    pub max_rows: usize,
+    /// How many partitions of one request are read at once.
+    ///
+    /// A performance knob rather than a bound: the read is over a network whose latency is
+    /// what a request spends most of its time on, so the partitions go out together. It is
+    /// also what decides how far `max_bytes_fetched` can overshoot, since the reads already
+    /// in flight when it trips are not stopped.
+    pub max_concurrent_partitions: usize,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -171,10 +188,14 @@ impl Default for LimitsConfig {
             // footer is the file. Generous enough for a real catalog and short of the
             // sizes that would be a download rather than a lookup.
             max_catalog_metadata_bytes: ByteSize::mib(256),
-            // A degree-wide cone over an order-8 catalog reaches a dozen partitions, and a
-            // band of declination across a dense one reaches thousands. This admits the
-            // second and refuses the region that would open a catalog whole.
-            max_partitions: 2_000,
+            // A HATS partition runs to gigabytes, so this is already a substantial read, and
+            // the plan route is what a caller uses for a region larger than it — fanning the
+            // same partitions out as separate requests, with their own concurrency and their
+            // own retries.
+            max_partitions: 16,
+            max_bytes_fetched: ByteSize::gib(10),
+            max_rows: 1_000_000,
+            max_concurrent_partitions: 4,
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

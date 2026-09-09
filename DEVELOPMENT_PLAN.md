@@ -31,7 +31,7 @@ which.
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
 | 5.2 | spatial predicate | part | The machinery is built: the covering chooses the partitions, each boundary partition gets its own row prefilter, and the rows come back. What is left is the `moc` shape — `region::Region` is `circle` and `box` and nothing else. `polygon` is §9 |
-| 5.3 | two endpoints, rows and plan | part | `{api.prefix}/hats` reads rows and `max_partitions` bounds it. Left: the plan route, the per-partition sizes §5.1 names and the `max_scanned_bytes` they allow, and making the over-limit 413 carry a plan rather than a message |
+| 5.3 | two endpoints, rows and plan | done | the per-partition sizes §5.1 names would make `estimated_bytes` answerable for every catalog rather than only one written with `_metadata` |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -458,87 +458,34 @@ refusal is honest and the hash is a `ScalarUDF` this crate does not have.
 mode emits its `requests` in the same order the rows come back in, so a client fanning out
 and concatenating gets the sequence a single request would have given.
 
-**Reading them concurrently is not built.** Where there is no `limit` every chosen
-partition is read anyway, so a bounded window of them in flight is free speed; under a
-`limit` it reads partitions whose rows are then discarded. Two cases, and only the
-sequential one is written. Worth doing with §7.2's streaming rather than before it, since
-that is what decides whether a partition's rows can leave before the next one is opened.
-
 **A partition that is a directory cannot be read over `http(s)://`,** and says so as
 whatever the listing failed with rather than as a refusal naming the reason. §5.1 says why
 the case exists.
 
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
-still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.
+still select terabytes, which is what §5.3's limits and plan route are for.
 
 Nearest-object lookup is a `circle` plus ordering and `limit: 1`, not a predicate, and
 waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.
 
 ### 5.3 Small queries and large queries
 
-A region over a dense catalog can touch hundreds of partitions of hundreds of MB.
+`POST {api.prefix}/hats` reads rows and `POST {api.prefix}/hats/plan` hands back the work
+instead; rules this leaves behind live in `CLAUDE.md`. What is still open:
 
-**Two endpoints, not one endpoint with a `mode`.** `POST {api.prefix}/hats` reads rows;
-`POST {api.prefix}/hats/plan` resolves the catalog and reads none. They take the same
-request body.
+**`estimated_bytes` is answerable for one catalog in three.** It comes from `_metadata`,
+which the discovery chain skips whenever `partition_info.csv` answered — which is every
+catalog an importer writes. §5.1 says where the lazy read of it belongs, and until it
+exists the field is absent from most plans and `max_bytes_fetched` cannot be checked before
+the bytes are fetched. Sizes would also let `max_partitions` relax: a count is a proxy for
+work and bytes are the thing itself.
 
-- **`{api.prefix}/hats`** — run it and return rows, bounded by `max_partitions`,
-  `max_scanned_bytes` and `timeout`. Sizes come from `_metadata` (§5.1); without it, fall
-  back to a `HEAD` per candidate partition or to counting partitions. Exceeding a limit is
-  a 413 whose body is the plan below.
-- **`{api.prefix}/hats/plan`** — return a work list without reading data:
+**A `timeout` bounds none of this yet.** §8.4 and §7.2 are where it lands, and it is what a
+slow origin hits long before any of the three counters do.
 
-  ```json
-  {
-    "catalog": "s3://bucket/hats/ztf_dr24",
-    "num_partitions": 3,
-    "estimated_bytes": 1140850688,
-    "requires_credentials": true,
-    "requests": [
-      {
-        "order": 5, "pixel": 12240,
-        "method": "POST",
-        "path": "/api/v1/parquet",
-        "body": {"url": "…", "where": "_healpix_29 = …", "select": "…"},
-        "estimated_bytes": 380375000
-      }
-    ]
-  }
-  ```
-
-  Each entry is a request against this service. The client fans out with its own
-  concurrency limit and concatenates; retries are per partition. `method` and `path` are
-  separate fields so the file-server case, where entries are `GET`s under a mount, uses the
-  same shape.
-
-  **Credentials are never echoed into a plan** (§8.1). When the original request carried
-  them, the entries carry the stripped url and `requires_credentials` is `true`; the client
-  re-attaches the credentials it already holds before sending. Returning them would enable
-  nothing the client cannot already do, while copying the secret into a response that gets
-  logged, cached and pasted. This is not configurable: an option to echo them would be a
-  footgun with no capability behind it. The flag exists so the client re-attaches
-  deliberately rather than discovering the need through a 403.
-
-**Why two routes rather than a `mode` field**, since the field is the shape one reaches for
-first:
-
-- **The two answers are different kinds of thing, and a field will not say which arrived.**
-  Rows, or a work list. Under a `mode` the only way a client learns which it got is to look
-  at the body and infer from its shape — a value a caller cannot tell from a different
-  value, which is the failure this service keeps finding elsewhere. Across two routes the
-  client already knows, and the over-limit case says so with a 413.
-- **A `mode` does not compose with `format`.** A plan is not expressible as parquet, so
-  `format=parquet` under an automatic mode is answered in a format the caller did not ask
-  for, or refused for a reason they could not have predicted. Every output format added
-  later makes that worse.
-- **The limits are not the same limits.** `max_scanned_bytes` means nothing to a route that
-  reads no data; the plan route is bounded by the partition count and by §5.1's metadata
-  reads. Under one route each limit has to carry a note saying which mode it applies to.
-- **One route, one response schema**, which is what §7.3's generated document can describe.
-  A union return is a generated client that branches on shape.
-
-What is given up is a client that wants the fallback without handling a status code. It is
-handed a documented 413 body instead, which is less work than sniffing one.
+**A file-server plan has no route.** `method` and `path` are separate fields so that entries
+could be `GET`s under a mount, and nothing emits them; whether a mount wants a plan at all
+is undecided, the caller there already knowing the paths.
 
 No job queue, job ids or polling: the plan is a list of stateless requests. See §7.2.
 
@@ -914,8 +861,9 @@ Rules to preserve:
 
 ### 8.4 Bounded work per request
 
-- Per request: a timeout, a cap on bytes fetched from the store, §5.3's
-  `max_partitions` and `max_scanned_bytes`. `limits.max_materialize_bytes` is done.
+- Per request: a timeout. `limits.max_materialize_bytes` is done, and so are the catalog
+  routes' `max_partitions`, `max_bytes_fetched` and `max_rows` — which bound a request
+  against a catalog and leave one naming a single url bounded by nothing but its file.
 - Per process: a concurrency limit (§7.1). `limits.max_materialize_total_bytes` and
   `limits.max_concurrent_materializations` are done, and `[limits]` is where the rest of
   these belong.

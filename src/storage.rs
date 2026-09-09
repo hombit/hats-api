@@ -405,8 +405,8 @@ impl StorageOptions {
     }
 
     /// Whether anything here would be sent to the store as proof of identity — which is
-    /// the whole of what [`allow_cleartext`] is protecting.
-    fn has_credentials(&self) -> bool {
+    /// the whole of what `allow_cleartext` is protecting, and what a plan says to re-attach.
+    pub fn has_credentials(&self) -> bool {
         self.named()
             .iter()
             .any(|option| option.set && option.kind == Kind::Credential)

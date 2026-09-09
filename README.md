@@ -176,11 +176,13 @@ The caller names the data in the request body. The route is under `[api] prefix`
 ```
 POST /api/v1/parquet
 POST /api/v1/hats
+POST /api/v1/hats/plan
 GET  /api/v1/health
 ```
 
 `parquet` takes a url naming one file. `hats` takes a url naming a catalog directory and
-chooses the files itself — [below](#querying-a-whole-catalog). The body is the same.
+chooses the files itself; `hats/plan` takes the same body and returns the work rather than
+doing it — [below](#querying-a-whole-catalog). All three take the same body.
 
 ```json
 {
@@ -255,9 +257,12 @@ than a file in it:
 }
 ```
 
-The catalog's `properties` supplies what a lone file cannot, so `ra_column`, `dec_column`,
-`healpix_column` and `healpix_order` are all optional here. A request naming them overrides
-the catalog; `ra_column` and `dec_column` are given together or not at all.
+**The catalog names its own columns, so this route refuses `ra_column`, `dec_column`,
+`healpix_column` and `healpix_order`.** `hats_col_ra`, `hats_col_dec` and `hats_col_healpix`
+are what the catalog says its files hold, and it can see more of them than a request can. A
+caller who wants a different pair tested queries one of the files directly, where the
+single-file route takes them. They are refused rather than ignored: rows tested against
+columns the caller did not write are an answer they cannot tell from the one they asked for.
 
 The answer is a `parquet`-route answer with one more field:
 
@@ -275,8 +280,80 @@ cells fall on the sky, so neighbouring rows arrive near each other and a `limit`
 coherent piece of sky. Within one partition nothing is promised, as everywhere else in API
 mode.
 
-**Omitting `region` reads the whole catalog**, bounded by `limits.max_partitions`. A
-request over more partitions than that is refused with `413` rather than run.
+**Omitting `region` reads the whole catalog**, which is what the limits below are for.
+
+Partitions are read `limits.max_concurrent_partitions` at a time and still come back in the
+catalog's order, so the parallelism costs nothing in reproducibility.
+
+### What one request may spend
+
+Three bounds, whichever is reached first, all in `[limits]`:
+
+| | default | |
+|---|---|---|
+| `max_partitions` | 16 | checked before anything is read |
+| `max_bytes_fetched` | `10GiB` | watched as partitions land |
+| `max_rows` | 1000000 | watched as partitions land |
+
+Only the first can act before work happens; the other two are counters, so a request
+overshoots them by whatever the reads already in flight go on to fetch. Nothing is returned
+part-way: a truncated answer is one a caller cannot tell from a complete one.
+
+**Over a limit is `413`, and the body is the plan.** So the answer to "that is more than I
+will do at once" is the list of requests that would do it.
+
+### Planning instead of running
+
+`POST /api/v1/hats/plan` takes the same body and resolves it without reading a row:
+
+```json
+{
+  "catalog": "s3://survey-data/catalog",
+  "num_partitions": 3,
+  "estimated_bytes": 1140850688,
+  "requires_credentials": true,
+  "requests": [
+    {
+      "order": 3, "pixel": 264,
+      "method": "POST",
+      "path": "/api/v1/parquet",
+      "estimated_bytes": 380375000,
+      "body": {
+        "url": "s3://survey-data/catalog/dataset/Norder=3/Dir=0/Npix=264.parquet",
+        "columns": "source_id, mag",
+        "filters": "mag < 18",
+        "region": [{ "type": "circle", "ra": 348.05, "dec": -29.28, "radius_deg": 3.0 }],
+        "ra_column": "source_ra",
+        "dec_column": "source_dec",
+        "healpix_column": "_healpix_29",
+        "healpix_order": 29
+      }
+    }
+  ]
+}
+```
+
+Each entry is a request against this service. The client sends them with its own
+concurrency and retries and concatenates the answers **in the order given**, which is the
+same rows the `hats` route would have returned. A `limit` is carried on each entry, so the
+client takes the first `limit` rows of the concatenation.
+
+The column names the `hats` route refuses are written into each entry, because the
+single-file route has no catalog to ask.
+
+An entry carries `region` only where the region does not contain that partition whole; one
+without it is a partition every row of which qualifies.
+
+`estimated_bytes` comes from `_metadata` and is absent for a catalog whose partitions were
+found any other way. It is omitted rather than guessed, at the top too — a sum over the
+entries that knew would read as a total.
+
+**Credentials are never echoed.** The entries carry the stripped url and
+`requires_credentials` says whether the original request had any, so the client re-attaches
+what it already holds. Copying the secret into a body that gets logged and pasted would
+enable nothing it cannot already do.
+
+Nothing bounds this route: the point of it is to answer a request too large to run.
 
 The catalog's own files are read first: `hats.properties` or `properties`, then
 `partition_info.csv`, `dataset/_metadata` or a listing of `dataset/`, whichever answers

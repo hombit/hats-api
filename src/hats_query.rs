@@ -13,15 +13,18 @@
 //! about order than a request naming one url does. What it does not promise is the order
 //! *within* a partition, which is [`Order`]'s business and unchanged.
 
+use std::fmt;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use futures::StreamExt;
+use futures::stream;
 
 use crate::config::LimitsConfig;
 use crate::data::DataFiles;
 use crate::error::ApiError;
-use crate::hats::{Catalog, HatsPartition};
+use crate::hats::{Catalog, HatsPartition, Partitioned};
 use crate::healpix::{Cover, Coverage, Detail};
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::region::{self, Absence, Healpix, Region, Spatial};
@@ -33,14 +36,65 @@ use crate::storage::{RemoteDir, RemoteFile};
 pub struct CatalogLimits {
     /// How much of `_metadata` may be fetched to learn the partition list.
     pub max_metadata_bytes: u64,
-    /// How many partitions one request may read.
+    /// How many partitions one request may read, how many bytes it may fetch, and how many
+    /// rows it may return. Whichever is reached first stops it.
     ///
-    /// The one bound available without knowing how large a partition is: a count comes from
-    /// the partition list, which every discovery source produces, while bytes come only from
-    /// `_metadata`. So this is what refuses a region over a dense catalog today, and it
-    /// refuses by the wrong measure — a thousand small partitions pass and one large one
-    /// does not.
+    /// Only the first can be checked before anything is read — the partition list says how
+    /// many there are, and the other two are counters that have to accumulate. So the
+    /// partition count is what actually protects the origin, and the other two are what
+    /// catch a request whose few partitions turn out to be enormous.
     pub max_partitions: usize,
+    pub max_bytes_fetched: u64,
+    pub max_rows: usize,
+    /// How many partitions are read at once. Not a bound — a performance setting, and the
+    /// reason the two accumulating bounds overshoot rather than stop dead.
+    pub max_concurrent_partitions: usize,
+}
+
+/// Which bound stopped a request, and the two numbers it turned on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Exceeded {
+    Partitions { reached: usize, allowed: usize },
+    Bytes { reached: u64, allowed: u64 },
+    Rows { allowed: usize },
+}
+
+impl fmt::Display for Exceeded {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Partitions { reached, allowed } => write!(
+                f,
+                "this request reaches {reached} partitions; this server reads at most \
+                 {allowed} in one request"
+            ),
+            Self::Bytes { reached, allowed } => write!(
+                f,
+                "this request fetched {reached} bytes; this server fetches at most \
+                 {allowed} in one request"
+            ),
+            Self::Rows { allowed } => write!(
+                f,
+                "this request matches more than {allowed} rows; this server returns at \
+                 most that in one request"
+            ),
+        }
+    }
+}
+
+/// What running a request came to.
+///
+/// A bound reached is not an error here: the caller gets the work list instead, and
+/// building it needs the [`Search`] that ran. So it comes back as a value rather than
+/// through `?`, and the route decides what to answer with.
+#[derive(Debug)]
+pub enum Outcome {
+    /// Boxed because the other variant is three integers and this one carries every row of
+    /// the answer, and an enum is as large as its largest variant wherever it is passed.
+    Rows(Box<CatalogResult>),
+    /// Nothing is returned with this. Half an answer that a caller cannot tell from a whole
+    /// one is the failure this service keeps finding, and a truncated set of rows under no
+    /// promised order is exactly that.
+    TooMuchWork(Exceeded),
 }
 
 impl From<&LimitsConfig> for CatalogLimits {
@@ -48,12 +102,20 @@ impl From<&LimitsConfig> for CatalogLimits {
         Self {
             max_metadata_bytes: config.max_catalog_metadata_bytes.as_u64(),
             max_partitions: config.max_partitions,
+            max_bytes_fetched: config.max_bytes_fetched.as_u64(),
+            max_rows: config.max_rows,
+            max_concurrent_partitions: config.max_concurrent_partitions,
         }
     }
 }
 
-/// The columns a request reads a position out of, after its own names have overridden what
-/// the catalog says about itself.
+/// The columns a request reads a position out of, as the catalog names them.
+///
+/// **The catalog is the only source.** A request against a catalog does not get to name its
+/// own: `hats_col_ra`, `hats_col_dec` and `hats_col_healpix` are what the catalog says its
+/// columns are, and a caller overriding them would be describing a file they can see less of
+/// than the catalog does. The routes refuse those fields rather than honour them, and a
+/// caller who really wants to test a different pair of columns names the file itself.
 #[derive(Debug, Clone)]
 pub struct Columns {
     pub ra: String,
@@ -69,15 +131,6 @@ pub struct Columns {
     /// the default safe to try: a catalog whose files have no `_healpix_29` is queried on the
     /// geometry alone, rather than refused for not having a column it never claimed.
     pub absence: Absence,
-}
-
-/// The column names a request supplied for itself, each overriding the catalog's answer.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Requested<'a> {
-    /// Both or neither. One of the two alone is a request whose other coordinate would come
-    /// from the catalog, which is a pairing no caller could have meant.
-    pub coordinates: Option<(&'a str, &'a str)>,
-    pub healpix: Option<Healpix<'a>>,
 }
 
 /// One partition this request will read, and what its rows still need.
@@ -121,7 +174,6 @@ impl Search {
     pub async fn resolve(
         dir: RemoteDir,
         regions: Option<&[Region]>,
-        requested: Requested<'_>,
         limits: CatalogLimits,
     ) -> Result<Self, ApiError> {
         let catalog = Catalog::open(dir, limits.max_metadata_bytes).await?;
@@ -131,7 +183,7 @@ impl Search {
         // that is not wrong.
         let columns = match regions {
             None => None,
-            Some(_) => Some(columns(&catalog, requested)?),
+            Some(_) => Some(columns(&catalog)?),
         };
         let chosen = match regions {
             // No region is every partition, and none of them needs a spatial test.
@@ -181,59 +233,81 @@ impl Search {
         &self.chosen
     }
 
-    /// Read them, in order, stopping as soon as a `limit` is met.
+    /// Read the chosen partitions and gather their rows.
     ///
-    /// **One partition at a time.** Reading them concurrently would be faster wherever there
-    /// is no `limit`, since every chosen partition is then read anyway — but under a `limit`
-    /// it reads partitions whose rows are thrown away, and the two cases want different
-    /// code. A client that needs the parallelism has it: the plan route hands back the same
-    /// partitions as separate requests to fan out over.
+    /// **Several at a time, and the answer is still in the catalog's order.** `buffered`
+    /// keeps `max_concurrent_partitions` reads in flight and yields them by position, so the
+    /// parallelism costs nothing in order — which matters, because the order is what makes a
+    /// `limit` here a coherent piece of sky rather than whichever partition finished first.
+    ///
+    /// **The two accumulating bounds are checked between partitions, not within them.** A
+    /// counter shared across concurrent scans, read often enough to stop one mid-file, would
+    /// serialize the thing it is bounding. So a request overshoots by whatever the partitions
+    /// already in flight go on to fetch, and the partition count is what keeps that bounded:
+    /// it is checked before anything is read, so nothing else has to be exact.
     pub async fn run(
         &self,
         selection: &CatalogSelection<'_>,
         data: &DataFiles,
         limits: sql::Limits,
-    ) -> Result<CatalogResult, ApiError> {
+        bounds: CatalogLimits,
+    ) -> Result<Outcome, ApiError> {
+        if self.chosen.len() > bounds.max_partitions {
+            return Ok(Outcome::TooMuchWork(Exceeded::Partitions {
+                reached: self.chosen.len(),
+                allowed: bounds.max_partitions,
+            }));
+        }
+        // Built before the stream rather than inside a closure it calls: a closure returning
+        // a future that borrows its argument has to satisfy a higher-ranked bound the
+        // compiler cannot infer here, and materializing the futures sidesteps it. Nothing is
+        // read until the stream is polled, so the eager `collect` costs nothing.
+        let reads = self
+            .chosen
+            .iter()
+            .map(|chosen| self.read(chosen, selection, data, limits))
+            .collect::<Vec<_>>();
+        let mut reads = stream::iter(reads).buffered(bounds.max_concurrent_partitions.max(1));
+
         let mut batches: Vec<RecordBatch> = Vec::new();
-        let mut schema = None;
+        let mut schema: Option<SchemaRef> = None;
         let mut data_bytes_read = 0;
         let mut rows = 0;
         let mut partitions_read = 0;
         let mut source = None;
-
-        'partitions: for chosen in &self.chosen {
-            if selection.limit.is_some_and(|limit| rows >= limit) {
-                break;
-            }
+        while let Some(read) = reads.next().await {
+            let read = read?;
             partitions_read += 1;
-            let files = self
-                .catalog
-                .partition(&chosen.partition)?
-                .files(data)
-                .await?;
-            for file in files {
-                let remaining = selection.limit.map(|limit| limit - rows);
-                if remaining == Some(0) {
-                    break 'partitions;
-                }
-                let per_file = Selection {
-                    projection: selection.projection,
-                    predicate: selection.predicate,
-                    spatial: self.spatial(selection.regions, chosen),
-                    limit: remaining,
-                };
-                let result = query::run(&file, &per_file, limits, Order::Unspecified).await?;
-                data_bytes_read += result.data_bytes_read;
-                schema.get_or_insert_with(|| Arc::clone(&result.schema));
-                source.get_or_insert(file);
-                // Nothing to truncate: each file was read with what is left of the limit as
-                // its own, so a file's whole answer fits inside it.
-                rows += result.num_rows();
-                batches.extend(result.batches);
+            data_bytes_read += read.data_bytes_read;
+            rows += read.rows;
+            if let Some(read_schema) = read.schema {
+                schema.get_or_insert(read_schema);
+            }
+            if source.is_none() {
+                source = read.source;
+            }
+            batches.extend(read.batches);
+            if data_bytes_read > bounds.max_bytes_fetched {
+                return Ok(Outcome::TooMuchWork(Exceeded::Bytes {
+                    reached: data_bytes_read,
+                    allowed: bounds.max_bytes_fetched,
+                }));
+            }
+            if rows > bounds.max_rows {
+                return Ok(Outcome::TooMuchWork(Exceeded::Rows {
+                    allowed: bounds.max_rows,
+                }));
             }
         }
+        // Each partition was read with the whole `limit` as its own, so the total can exceed
+        // it. Trimming here rather than there is what a concurrent read costs: a partition
+        // cannot know how many rows the ones before it matched. The order is the catalog's,
+        // so which rows survive the trim is the same every time.
+        if let Some(limit) = selection.limit {
+            truncate(&mut batches, limit);
+        }
 
-        Ok(CatalogResult {
+        Ok(Outcome::Rows(Box::new(CatalogResult {
             rows: QueryResult {
                 schema: schema.unwrap_or_else(|| Arc::new(Schema::empty())),
                 batches,
@@ -241,7 +315,96 @@ impl Search {
             },
             partitions_read,
             source,
-        })
+        })))
+    }
+
+    /// One partition: every file of it, with the region cut down to that partition's cell.
+    async fn read(
+        &self,
+        chosen: &Chosen,
+        selection: &CatalogSelection<'_>,
+        data: &DataFiles,
+        limits: sql::Limits,
+    ) -> Result<Read, ApiError> {
+        let mut read = Read::default();
+        for file in self
+            .catalog
+            .partition(&chosen.partition)?
+            .files(data)
+            .await?
+        {
+            let per_file = Selection {
+                projection: selection.projection,
+                predicate: selection.predicate,
+                spatial: self.spatial(selection.regions, chosen),
+                // The caller's whole limit, not a share of it: this read does not know what
+                // the others matched. It caps what one partition returns, and the total is
+                // trimmed once every partition is in.
+                limit: selection.limit,
+            };
+            let result = query::run(&file, &per_file, limits, Order::Unspecified).await?;
+            read.data_bytes_read += result.data_bytes_read;
+            read.rows += result.num_rows();
+            read.schema
+                .get_or_insert_with(|| Arc::clone(&result.schema));
+            if read.source.is_none() {
+                read.source = Some(file);
+            }
+            read.batches.extend(result.batches);
+        }
+        Ok(read)
+    }
+
+    /// The same work, as one entry per file, without reading a row of any of them.
+    ///
+    /// **Every entry names a path below the catalog and never a url.** The urls this holds
+    /// are the store's, and for a mounted catalog a store's url is the operator's absolute
+    /// path on disk — the one thing that may not reach a caller. A path joined onto the url
+    /// the caller themselves wrote is the same object said in the spelling they can use, so
+    /// the caller's url is the one the entry is built from, and this hands back the half
+    /// that is the catalog's own.
+    ///
+    /// A partition written as a directory needs a listing to enumerate. That is metadata
+    /// rather than rows, so it is within what this route promises, but it is one request per
+    /// such partition and the ordinary catalog pays none.
+    pub async fn entries(&self, data: &DataFiles) -> Result<Vec<Entry>, ApiError> {
+        let suffix = self.catalog.properties().npix_suffix();
+        let mut entries = Vec::new();
+        for chosen in &self.chosen {
+            let partition = &chosen.partition;
+            let path = partition.path(suffix);
+            match self.catalog.partition(partition)? {
+                Partitioned::One(_) => entries.push(Entry {
+                    order: partition.order,
+                    pixel: partition.pixel,
+                    path,
+                    cover: chosen.cover,
+                    // Only `_metadata` knows it, so only a catalog whose partition list came
+                    // from there has an estimate to give.
+                    estimated_bytes: partition.bytes,
+                }),
+                Partitioned::Many(_) => {
+                    for file in self.catalog.partition(partition)?.files(data).await? {
+                        let Some(name) = file.url.path_segments().and_then(|mut s| s.next_back())
+                        else {
+                            continue;
+                        };
+                        entries.push(Entry {
+                            order: partition.order,
+                            pixel: partition.pixel,
+                            // The name inside the partition, which is the catalog's own and
+                            // says nothing about where the catalog is.
+                            path: format!("{path}{name}"),
+                            cover: chosen.cover,
+                            // The partition's bytes are the whole directory's, so they are
+                            // not this file's and are not divisible into one.
+                            estimated_bytes: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(entries)
     }
 
     /// The spatial constraint one partition's rows still have to meet.
@@ -274,6 +437,52 @@ impl Search {
     }
 }
 
+/// What one partition came to, before it is folded in with the rest.
+#[derive(Debug, Default)]
+struct Read {
+    schema: Option<SchemaRef>,
+    batches: Vec<RecordBatch>,
+    data_bytes_read: u64,
+    rows: usize,
+    source: Option<RemoteFile>,
+}
+
+/// Drop everything past `limit` rows, keeping the batches in the order they arrived.
+///
+/// The batch that straddles the limit is sliced rather than dropped, which is a view onto
+/// the same buffers and copies nothing.
+fn truncate(batches: &mut Vec<RecordBatch>, limit: usize) {
+    let mut kept = 0;
+    for index in 0..batches.len() {
+        let Some(batch) = batches.get_mut(index) else {
+            break;
+        };
+        if kept >= limit {
+            batches.truncate(index);
+            return;
+        }
+        let room = limit - kept;
+        if batch.num_rows() > room {
+            *batch = batch.slice(0, room);
+        }
+        kept += batch.num_rows();
+    }
+}
+
+/// One file of the answer, named by where it sits below the catalog.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    pub order: u8,
+    pub pixel: u64,
+    /// Below the catalog directory — `dataset/Norder=3/Dir=0/Npix=707.parquet`. A path and
+    /// not a url, so that whoever renders it joins it onto the url the caller wrote.
+    pub path: String,
+    /// Whether this file's rows still need the region tested against them.
+    pub cover: Cover,
+    /// Bytes on the wire to read the whole file, where the catalog said.
+    pub estimated_bytes: Option<u64>,
+}
+
 /// The rows, and what reading them cost.
 #[derive(Debug)]
 pub struct CatalogResult {
@@ -285,41 +494,27 @@ pub struct CatalogResult {
     pub source: Option<RemoteFile>,
 }
 
-/// The catalog's answer about its own columns, overridden by whatever the request named.
-fn columns(catalog: &Catalog, requested: Requested<'_>) -> Result<Columns, ApiError> {
+/// What the catalog says its own columns are.
+fn columns(catalog: &Catalog) -> Result<Columns, ApiError> {
     let properties = catalog.properties();
-    let (ra, dec) = match requested.coordinates {
-        Some(pair) => pair,
-        None => properties.coordinate_columns().ok_or_else(|| {
-            ApiError::bad_request(
-                "this catalog does not name its position columns; send ra_column and \
-                 dec_column",
-            )
-        })?,
-    };
-    let (healpix, absence) = match requested.healpix {
-        Some(Healpix {
-            column,
-            order,
-            absence,
-        }) => ((column.to_owned(), order), absence),
-        None => {
-            let (column, order) = properties.healpix_column()?;
-            // The catalog's own `hats_col_healpix` is a claim about its files; the
-            // `_healpix_29` this falls back to is HATS's recommendation, which a catalog is
-            // free not to have taken.
-            let absence = match properties.names_healpix_column() {
-                true => Absence::Refuse,
-                false => Absence::Ignore,
-            };
-            ((column.to_owned(), order), absence)
-        }
-    };
+    let (ra, dec) = properties.coordinate_columns().ok_or_else(|| {
+        ApiError::bad_request(
+            "this catalog does not name its position columns, so a region cannot be \
+             tested against it; query one of its files directly",
+        )
+    })?;
+    let (column, order) = properties.healpix_column()?;
     Ok(Columns {
         ra: ra.to_owned(),
         dec: dec.to_owned(),
-        healpix,
-        absence,
+        healpix: (column.to_owned(), order),
+        // The catalog's own `hats_col_healpix` is a claim about its files; the `_healpix_29`
+        // this falls back to is HATS's recommendation, which a catalog is free not to have
+        // taken.
+        absence: match properties.names_healpix_column() {
+            true => Absence::Refuse,
+            false => Absence::Ignore,
+        },
     })
 }
 
@@ -539,25 +734,47 @@ pub(crate) mod tests {
         vec![cone(ra, dec, 1.0), cone(ra, dec, 6.0), cone(ra, dec, 60.0)]
     }
 
+    /// The default bounds are tight enough to refuse the fixture's four partitions, and what
+    /// most of these are about is which rows come back rather than what a deployment allows.
+    fn generous() -> CatalogLimits {
+        CatalogLimits {
+            max_partitions: 1_000,
+            ..limits()
+        }
+    }
+
     async fn read(
         dir: &Path,
         regions: Option<&[Region]>,
         limit: Option<usize>,
     ) -> Result<(Search, CatalogResult), ApiError> {
-        let search = Search::resolve(opened(dir), regions, Requested::default(), limits()).await?;
+        match bounded(dir, regions, limit, generous()).await? {
+            (search, Outcome::Rows(result)) => Ok((search, *result)),
+            (_, Outcome::TooMuchWork(why)) => panic!("unexpectedly refused: {why}"),
+        }
+    }
+
+    async fn bounded(
+        dir: &Path,
+        regions: Option<&[Region]>,
+        limit: Option<usize>,
+        bounds: CatalogLimits,
+    ) -> Result<(Search, Outcome), ApiError> {
+        let search = Search::resolve(opened(dir), regions, bounds).await?;
         let selection = CatalogSelection {
             regions,
             limit,
             ..CatalogSelection::default()
         };
-        let result = search
+        let outcome = search
             .run(
                 &selection,
                 &DataFiles::new(&DataConfig::default().filenames).unwrap(),
                 sql::Limits::from(&LimitsConfig::default()),
+                bounds,
             )
             .await?;
-        Ok((search, result))
+        Ok((search, outcome))
     }
 
     /// The rows a region search returns are the rows the region holds — no more, and none
@@ -635,18 +852,76 @@ pub(crate) mod tests {
         assert_eq!(ids(&result), all);
     }
 
-    /// A `limit` stops the read rather than trimming its answer, so the partitions past it
-    /// are never opened.
+    /// A `limit` takes the front of the catalog in HEALPix order, and takes the same rows
+    /// every time.
     ///
-    /// The rows are the front of the catalog in HEALPix order, which is what makes the same
-    /// request twice the same answer twice.
+    /// It does not stop the read: the partitions go out together, so by the time enough rows
+    /// have arrived the rest are already in flight. What a concurrent read must not cost is
+    /// *which* rows — a limit answered by whichever partition finished first would return a
+    /// different subset each time, and a caller cannot tell that from the data having
+    /// changed.
     #[tokio::test]
-    async fn a_limit_stops_before_the_partitions_it_does_not_need() {
+    async fn a_limit_takes_the_front_of_the_catalog_every_time() {
         let dir = fixture(true);
         let (search, result) = read(dir.path(), None, Some(3)).await.unwrap();
         assert_eq!(search.chosen().len(), CELLS.len());
-        assert_eq!(result.partitions_read, 1, "read past the limit");
         assert_eq!(ids(&result), vec![1, 2, 3]);
+        for _ in 0..4 {
+            let (_, again) = read(dir.path(), None, Some(3)).await.unwrap();
+            assert_eq!(ids(&again), vec![1, 2, 3]);
+        }
+        // A limit past the end is every row and not an error.
+        let (_, everything) = read(dir.path(), None, Some(10_000)).await.unwrap();
+        assert_eq!(everything.rows.num_rows(), CELLS.len() * 64);
+    }
+
+    /// Every bound refuses rather than trims, and says which one it was.
+    #[tokio::test]
+    async fn each_bound_stops_the_request() {
+        let dir = fixture(true);
+        let cases = [
+            (
+                CatalogLimits {
+                    max_partitions: 2,
+                    ..generous()
+                },
+                Exceeded::Partitions {
+                    reached: 4,
+                    allowed: 2,
+                },
+            ),
+            (
+                CatalogLimits {
+                    max_bytes_fetched: 1,
+                    ..generous()
+                },
+                Exceeded::Bytes {
+                    reached: 0,
+                    allowed: 1,
+                },
+            ),
+            (
+                CatalogLimits {
+                    max_rows: 10,
+                    ..generous()
+                },
+                Exceeded::Rows { allowed: 10 },
+            ),
+        ];
+        for (bounds, expected) in cases {
+            let (_, outcome) = bounded(dir.path(), None, None, bounds).await.unwrap();
+            let Outcome::TooMuchWork(why) = outcome else {
+                panic!("{bounds:?} answered with rows");
+            };
+            // The byte count is whatever the read reached, which is not a fixed number; the
+            // other two are the numbers the request turned on.
+            match (why, expected) {
+                (Exceeded::Bytes { allowed, .. }, Exceeded::Bytes { allowed: want, .. }) => {
+                    assert_eq!(allowed, want);
+                }
+                (found, want) => assert_eq!(found, want),
+            }
+        }
     }
 
     /// A catalog that does not name its position columns still answers a request that asks
@@ -681,7 +956,12 @@ pub(crate) mod tests {
         let error = read(dir.path(), Some(&[regions()[0]]), None)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("ra_column"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("does not name its position columns"),
+            "{error}"
+        );
     }
 
     /// An empty region is refused rather than read as "no region at all", which would return

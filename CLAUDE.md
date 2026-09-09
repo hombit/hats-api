@@ -515,6 +515,12 @@ and decides nothing; `healpix.rs` answers questions about cells and knows nothin
 catalog's contents. Keep it that way — the decisions belong in the one module that has a
 request in front of it.
 
+- **The catalog names its own columns, and the routes refuse a request that names them.**
+  `ra_column`, `dec_column`, `healpix_column` and `healpix_order` are `hats_col_*`'s to
+  answer. Refused rather than ignored: a dropped one returns rows tested against columns the
+  caller did not write, which they cannot tell from the ones they asked for. They *are*
+  written into a plan's entries, since the single-file route those entries go to has no
+  catalog to ask.
 - **A column nobody named is a candidate, and a candidate that is absent is not an error.**
   `region::Absence` is which. A column the *request* named, or a catalog's own
   `hats_col_healpix`, is a claim: a file without it contradicts what was said, and that is
@@ -534,16 +540,27 @@ request in front of it.
   where it is on the sky, so the order costs nothing — the partitions are enumerated anyway
   — and it makes a `limit` a coherent piece of sky rather than an arbitrary sample. Order
   *within* a partition is `query::Order`'s and is unchanged.
-- **One partition at a time, and a `limit` stops the read rather than trimming the answer.**
-  Reading them concurrently would pay off wherever there is no `limit`, since every chosen
-  partition is read anyway — but under one it reads partitions whose rows are discarded, so
-  the two cases want different code and only the simple one is written. A client that wants
-  the parallelism fans out over the plan route's entries.
-- **`limits.max_partitions` bounds by the wrong measure and is what there is.** A count
-  comes from the partition list, which every discovery source produces; bytes come only
-  from `_metadata`, which the tier chain skips whenever `partition_info.csv` answered. So a
-  thousand small partitions pass where one large one does not. A bound in bytes waits on
-  the per-partition sizes being read.
+- **Partitions are read several at a time, and the answer is still the catalog's order.**
+  `buffered` yields by position, so the parallelism costs nothing in reproducibility — which
+  is the whole of what a `limit` here depends on. A `limit` no longer stops the read: by the
+  time enough rows have arrived the rest are in flight, so each partition is read with the
+  whole limit as its own and the total is trimmed at the end.
+- **Three bounds, and only one of them can act before work happens.** `max_partitions` is
+  checked against the chosen list before a byte is read; `max_bytes_fetched` and `max_rows`
+  are counters watched between partitions. Do not make the counters exact — a total shared
+  across concurrent scans and read often enough to stop one mid-file would serialize the
+  thing it is bounding. Overshoot is the price, and the partition count is what keeps it
+  bounded, which is why that one has to stay the strict one.
+- **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
+  a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
+  bound and its two numbers, and the route renders the work list with `reason` set.
+- **A plan entry is built from the url the caller wrote, never from a store's.** For a
+  mounted catalog a store's url is the operator's absolute path on disk, so an entry built
+  from one would publish it — and would hand back a url that names nothing, a local file
+  being addressed by its mount. `Search::entries` therefore returns a *path* below the
+  catalog and the route joins it onto the caller's url; keep that split.
+- **The plan route is not bounded by the limits.** Answering a request too large to run is
+  what it is for.
 
 ## What a caller's file is like
 

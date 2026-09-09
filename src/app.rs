@@ -20,7 +20,8 @@ use crate::access::{self, AccessPolicy};
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
 use crate::error::ApiError;
-use crate::hats_query::{CatalogLimits, CatalogSelection, Requested, Search};
+use crate::hats_query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
+use crate::healpix::Cover;
 use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
@@ -151,7 +152,11 @@ pub fn router(service: Service) -> Router {
             .route(&route(&prefix, "parquet"), post(query_parquet))
             // The same body, against a catalog instead of a file: the url names a HATS
             // directory and this chooses the partitions to read out of it.
-            .route(&route(&prefix, "hats"), post(query_hats));
+            .route(&route(&prefix, "hats"), post(query_hats))
+            // The same body again, resolved and not run. Two routes rather than one with a
+            // mode: rows and a work list are different kinds of thing, and a field saying
+            // which arrived is one more value a caller has to look at the body to trust.
+            .route(&route(&prefix, "hats/plan"), post(query_hats_plan));
     }
     router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -506,35 +511,35 @@ impl QueryRequest {
         Ok((projection, predicate))
     }
 
-    /// The column names this request supplies for itself, for a target that can fill in
-    /// what it leaves out.
+    /// The four column names a catalog answers for itself, refused rather than honoured.
     ///
-    /// Where [`Self::spatial`] refuses a region with no columns beside it, this does not: a
-    /// catalog says which of its columns hold a position, so a request against one need not.
-    /// What it may not do is name one coordinate and leave the other to the catalog — that
-    /// is a pair of columns nobody chose, and it would be tested against without either the
-    /// caller or the catalog having asked for it.
-    fn requested_columns(&self) -> Result<Requested<'_>, ApiError> {
-        let coordinates = match (self.ra_column.as_deref(), self.dec_column.as_deref()) {
-            (None, None) => None,
-            (Some(ra), Some(dec)) => Some((ra, dec)),
-            _ => return Err(ApiError::bad_request(COORDINATE_PAIR)),
-        };
-        let healpix = match (self.healpix_column.as_deref(), self.healpix_order) {
-            (None, None) => None,
-            // The caller wrote it, so a file without it is their mistake and not a file
-            // that happens to have no index.
-            (Some(column), Some(order)) => Some(Healpix {
-                column,
-                order,
-                absence: Absence::Refuse,
-            }),
-            _ => return Err(ApiError::bad_request(HEALPIX_PAIR)),
-        };
-        Ok(Requested {
-            coordinates,
-            healpix,
-        })
+    /// `hats_col_ra`, `hats_col_dec` and `hats_col_healpix` are the catalog's statement
+    /// about its own files, and it can see more of them than a caller can. Accepting an
+    /// override would let a request test a pair of columns the catalog does not call a
+    /// position and get an answer that looks like a cone search.
+    ///
+    /// They are refused rather than ignored: a parameter this service acts on is honoured or
+    /// refused, and one silently dropped here returns rows tested against different columns
+    /// than the caller wrote — which they could not tell from the ones they asked for. A
+    /// caller who does want their own pair names the file, where the route takes them.
+    fn refuse_catalog_columns(&self) -> Result<(), ApiError> {
+        let named = [
+            ("ra_column", self.ra_column.is_some()),
+            ("dec_column", self.dec_column.is_some()),
+            ("healpix_column", self.healpix_column.is_some()),
+            ("healpix_order", self.healpix_order.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect::<Vec<_>>();
+        match named.is_empty() {
+            true => Ok(()),
+            false => Err(ApiError::bad_request(format!(
+                "{} not accepted against a catalog, which names its own columns; \
+                 to choose them, query one of its files",
+                named.join(", ")
+            ))),
+        }
     }
 
     /// The region and the two columns it is tested against, which travel together or not
@@ -597,11 +602,6 @@ impl QueryRequest {
 /// at the wrong order puts every bound where no row is, which returns nothing rather than
 /// failing. None of which the caller needs; they need to send the other field.
 const HEALPIX_PAIR: &str = "healpix_column and healpix_order must be given together";
-
-/// Likewise: one coordinate named and the other left to the catalog is a pair neither the
-/// caller nor the catalog chose, and the rows would be tested against it without either
-/// having asked.
-const COORDINATE_PAIR: &str = "ra_column and dec_column must be given together";
 
 fn one_of_two(one: &str, other: &str) -> ApiError {
     ApiError::bad_request(format!("send {one} or {other}, not both"))
@@ -804,22 +804,22 @@ async fn query_parquet(
 /// other three.
 const NUM_PARTITIONS_HEADER: &str = "x-hats-num-partitions";
 
-/// A query against a catalog: the url names a HATS directory, and the partitions to read
-/// are chosen from the region rather than named by the caller.
+/// Everything both catalog routes settle before either of them does its own work.
 ///
-/// The body is the same one [`query_parquet`] takes, and every field means what it means
-/// there. What differs is what the catalog can answer for itself — `ra_column`,
-/// `dec_column` and the HEALPix pair are all optional here, because a catalog's `properties`
-/// says which of its columns are a position and a lone parquet file does not.
-async fn query_hats(
-    State(service): State<Service>,
-    body: Result<Json<QueryRequest>, JsonRejection>,
-) -> Result<Response, ApiError> {
-    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
-    let started = Instant::now();
+/// They have to choose the same partitions to be answers to the same question, so they ask
+/// for them through one function rather than two that look alike.
+struct Opened {
+    search: Search,
+    /// The catalog as the *caller* spelled it, which is what a plan entry's url is built
+    /// from. The opened directory's url is the store's, and for a mount a store's url is the
+    /// operator's path on disk.
+    url: Url,
+    format: Format,
+}
+
+async fn open_catalog(service: &Service, params: &QueryRequest) -> Result<Opened, ApiError> {
     let format = Format::parse(params.format.as_deref(), Format::Json)?;
-    let (projection, predicate) = params.expressions()?;
-    let requested = params.requested_columns()?;
+    params.refuse_catalog_columns()?;
     let url = parse_url(params.url.as_str())?;
     // A directory rather than an object: `open_dir` drops only the refusal of a url naming
     // no object, and every policy check `open` makes still runs. There is no `[data]`
@@ -827,37 +827,69 @@ async fn query_hats(
     // it are read is the catalog's own answer.
     let dir = storage::open_dir(&url, &params.storage, &service.policy, &service.transfers)?;
     let on_disk = dir.url.to_file_path().ok();
+    let search = Search::resolve(dir, params.region.as_deref(), service.catalog_limits)
+        .await
+        .map_err(|error| match &on_disk {
+            Some(path) => error.from_mount(path),
+            None => error,
+        })?;
+    Ok(Opened {
+        search,
+        url,
+        format,
+    })
+}
+
+/// A query against a catalog: the url names a HATS directory, and the partitions to read
+/// are chosen from the region rather than named by the caller.
+///
+/// The body is the same one [`query_parquet`] takes, and every field means what it means
+/// there. What differs is the four column names, which the catalog answers for itself and
+/// this route therefore refuses.
+async fn query_hats(
+    State(service): State<Service>,
+    body: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let started = Instant::now();
+    let (projection, predicate) = params.expressions()?;
+    let Opened {
+        search,
+        url,
+        format,
+    } = open_catalog(&service, &params).await?;
+    let on_disk = url.to_file_path().ok();
     let hide_the_path = |error: ApiError| match &on_disk {
         Some(path) => error.from_mount(path),
         None => error,
     };
 
-    let search = Search::resolve(
-        dir,
-        params.region.as_deref(),
-        requested,
-        service.catalog_limits,
-    )
-    .await
-    .map_err(&hide_the_path)?;
-    let chosen = search.chosen().len();
-    if chosen > service.catalog_limits.max_partitions {
-        return Err(ApiError::too_much_work(format!(
-            "this request reaches {chosen} partitions; this server reads at most {} in one \
-             request",
-            service.catalog_limits.max_partitions
-        )));
-    }
     let selection = CatalogSelection {
         projection,
         predicate,
         regions: params.region.as_deref(),
         limit: params.limit,
     };
-    let result = search
-        .run(&selection, service.data_files_for(&url), service.sql_limits)
+    let outcome = search
+        .run(
+            &selection,
+            service.data_files_for(&url),
+            service.sql_limits,
+            service.catalog_limits,
+        )
         .await
         .map_err(&hide_the_path)?;
+
+    let result = match outcome {
+        Outcome::Rows(result) => result,
+        // The work list rather than a sentence: a caller who asked for more than this server
+        // will do in one request needs the requests it would take, not to be told to try
+        // something smaller and guess what.
+        Outcome::TooMuchWork(why) => {
+            let plan = plan_of(&service, &search, &params, Some(why)).await?;
+            return Ok((StatusCode::PAYLOAD_TOO_LARGE, Json(plan)).into_response());
+        }
+    };
 
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
@@ -870,7 +902,7 @@ async fn query_hats(
         url = %search.catalog().dir().url,
         partitions = search.catalog().partitions().len(),
         source = search.catalog().partitions().source().name(),
-        chosen,
+        chosen = search.chosen().len(),
         partitions_read,
         selected = params.select.is_some() || params.columns.is_some(),
         filtered = params.r#where.is_some() || params.filters.is_some(),
@@ -884,6 +916,191 @@ async fn query_hats(
         "catalog query"
     );
     Ok(response)
+}
+
+/// The same request, resolved and handed back as a work list rather than run.
+///
+/// It reads the catalog's own files and no data at all, so the limits that bound
+/// [`query_hats`] do not apply: the whole point is to answer a request too large to run.
+async fn query_hats_plan(
+    State(service): State<Service>,
+    body: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let started = Instant::now();
+    // Planned, not run — but the expressions still have to parse, or the plan would hand
+    // back entries every one of which is a 400 the client discovers one at a time.
+    params.expressions()?;
+    let Opened { search, .. } = open_catalog(&service, &params).await?;
+    let plan = plan_of(&service, &search, &params, None).await?;
+    tracing::info!(
+        url = %search.catalog().dir().url,
+        partitions = search.catalog().partitions().len(),
+        chosen = search.chosen().len(),
+        requests = plan.requests.len(),
+        regions = params.region.as_ref().map_or(0, Vec::len),
+        elapsed_ms = started.elapsed().as_millis(),
+        "catalog plan"
+    );
+    Ok(Json(plan).into_response())
+}
+
+/// A work list: the requests this one resolves to, for a client to send itself.
+#[derive(Debug, Serialize)]
+struct PlanResponse {
+    /// Why this came back instead of rows, where it did. Absent on the plan route, which
+    /// was asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// The catalog, spelled the way the caller spelled it.
+    catalog: String,
+    num_partitions: usize,
+    /// The sum over the entries, where every one of them knew. Absent otherwise: a partial
+    /// sum would read as a total.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_bytes: Option<u64>,
+    /// Whether the original request carried credentials. The entries never do — copying a
+    /// secret into a body that gets logged, cached and pasted enables nothing the client
+    /// cannot already do, since it is the client's own secret. This says to re-attach them.
+    requires_credentials: bool,
+    requests: Vec<PlanRequest>,
+}
+
+/// One entry: a request against this service, for one file of the catalog.
+#[derive(Debug, Serialize)]
+struct PlanRequest {
+    order: u8,
+    pixel: u64,
+    /// Separate fields so that a file-server entry, which is a `GET` under a mount, has the
+    /// same shape as this one.
+    method: &'static str,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_bytes: Option<u64>,
+    body: PlanBody,
+}
+
+/// The body of one entry, which is an ordinary [`query_parquet`] request.
+///
+/// Every field the caller wrote that still applies, and the column names they were refused
+/// — because the single-file route has no catalog to ask and needs them stated.
+#[derive(Debug, Serialize)]
+struct PlanBody {
+    url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    select: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: Option<String>,
+    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
+    where_: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<String>,
+    /// Only where the region does not contain this partition whole. An entry without it is
+    /// one whose every row qualifies, and testing them again would only cost time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<Vec<Region>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ra_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dec_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healpix_column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    healpix_order: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    /// Carried as the caller wrote it. Each entry returns at most this many, and the client
+    /// takes the first `limit` of the concatenation — which is the same rows this service
+    /// would have returned, the entries being in the same order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<usize>,
+}
+
+async fn plan_of(
+    service: &Service,
+    search: &Search,
+    params: &QueryRequest,
+    reason: Option<Exceeded>,
+) -> Result<PlanResponse, ApiError> {
+    let url = parse_url(params.url.as_str())?;
+    let data = service.data_files_for(&url);
+    let entries = search.entries(data).await?;
+    // The route an entry is sent to. `None` cannot happen — the API is how this request
+    // arrived — but a prefix is what the caller must be told, not what this can assume.
+    let path = service
+        .api_prefix
+        .as_deref()
+        .map(|prefix| route(prefix, "parquet"))
+        .ok_or_else(|| ApiError::internal("the API has no prefix"))?;
+
+    let columns = search.columns();
+    // Only a column somebody named. The `_healpix_29` default is a candidate the catalog
+    // route can try and drop; the single-file route refuses a column it cannot find, so
+    // passing a guess on would turn every entry into a 400.
+    let healpix = columns
+        .filter(|columns| columns.absence == Absence::Refuse)
+        .map(|columns| &columns.healpix);
+
+    let mut estimated_bytes = Some(0);
+    let requests = entries
+        .iter()
+        .map(|entry| {
+            estimated_bytes = match (estimated_bytes, entry.estimated_bytes) {
+                (Some(total), Some(bytes)) => Some(total + bytes),
+                _ => None,
+            };
+            // The region only where the rows still need it, and the columns only where the
+            // region is there to be tested.
+            let tested = entry.cover != Cover::Inside;
+            let region = tested.then(|| params.region.clone()).flatten();
+            let named = region.is_some().then_some(columns).flatten();
+            Ok(PlanRequest {
+                order: entry.order,
+                pixel: entry.pixel,
+                method: "POST",
+                path: path.clone(),
+                estimated_bytes: entry.estimated_bytes,
+                body: PlanBody {
+                    url: below(&url, &entry.path)?,
+                    select: params.select.clone(),
+                    columns: params.columns.clone(),
+                    where_: params.r#where.clone(),
+                    filters: params.filters.clone(),
+                    region,
+                    ra_column: named.map(|columns| columns.ra.clone()),
+                    dec_column: named.map(|columns| columns.dec.clone()),
+                    healpix_column: named.and(healpix).map(|(column, _)| column.clone()),
+                    healpix_order: named.and(healpix).map(|(_, order)| *order),
+                    format: params.format.clone(),
+                    limit: params.limit,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+
+    Ok(PlanResponse {
+        reason: reason.map(|why| why.to_string()),
+        catalog: url.to_string(),
+        num_partitions: search.chosen().len(),
+        estimated_bytes,
+        requires_credentials: params.storage.has_credentials(),
+        requests,
+    })
+}
+
+/// A path below the catalog, as a url in the caller's own spelling.
+///
+/// Built from the url the caller wrote and never from the store's. For a mounted catalog
+/// the store's url is the operator's absolute path on disk, so an entry built from it would
+/// publish the one thing a response may not carry — and would hand back a url the caller
+/// could not send back to this service anyway, a local file being addressed by its mount.
+fn below(catalog: &Url, path: &str) -> Result<String, ApiError> {
+    let mut url = catalog.clone();
+    url.path_segments_mut()
+        .map_err(|()| ApiError::bad_request("this url cannot name a catalog"))?
+        .pop_if_empty()
+        .extend(path.split('/'));
+    Ok(url.to_string())
 }
 
 /// The catalog's answer, in whichever encoding was asked for.
@@ -1681,13 +1898,10 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
-    /// A catalog that says nothing about its position columns, and a request that says
-    /// nothing either, is refused rather than answered without a spatial test.
-    ///
-    /// Only where there is a region: the same catalog answers a request that asks no spatial
-    /// question, since the columns it cannot name are ones such a request never reads.
+    /// A catalog that says nothing about its position columns cannot be region-searched, and
+    /// says so rather than answering without a spatial test.
     #[tokio::test]
-    async fn a_region_needs_columns_from_somewhere() {
+    async fn a_catalog_that_names_no_position_columns_cannot_be_searched() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("hats.properties"), "obs_collection=x\n").unwrap();
         std::fs::write(dir.path().join("partition_info.csv"), "Norder,Npix\n0,0\n").unwrap();
@@ -1702,7 +1916,185 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert!(body.contains("ra_column"), "{body}");
+        assert!(
+            body.contains("does not name its position columns"),
+            "{body}"
+        );
+    }
+
+    /// The four column names are the catalog's to answer, so a request naming one is refused
+    /// rather than obeyed.
+    ///
+    /// Refused and not ignored: silently dropping one would test the rows against different
+    /// columns than the caller wrote, which is an answer they cannot tell from the one they
+    /// asked for. The refusal names the field and says where a caller who means it should go.
+    #[tokio::test]
+    async fn a_catalog_route_refuses_column_names() {
+        let dir = crate::hats_query::tests::fixture(true);
+        for field in ["ra_column", "dec_column", "healpix_column", "healpix_order"] {
+            let value = match field {
+                "healpix_order" => serde_json::json!(29),
+                _ => serde_json::json!("whatever"),
+            };
+            for route in ["hats", "hats/plan"] {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/{route}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"url": "file:///", field: value}).to_string(),
+                    ))
+                    .unwrap();
+                let response = router(mounted(dir.path(), &ApiConfig::default()))
+                    .oneshot(request)
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = body_of(response).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {field}: {body}");
+                assert!(body.contains(field), "{route} {field}: {body}");
+            }
+        }
+    }
+
+    async fn ask_plan(
+        service: Service,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/hats/plan")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = body_of(response).await;
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
+    /// The plan is the same work as separate requests, and every url in it is one the caller
+    /// could send back to this service.
+    ///
+    /// **No disk path may appear in it.** A mounted catalog's store urls are the operator's
+    /// absolute paths, so an entry built from those would publish them — and would hand back
+    /// a url that does not name anything, a local file being addressed by its mount.
+    #[tokio::test]
+    async fn a_plan_is_requests_the_caller_could_send() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[1];
+        let (status, plan) = ask_plan(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///", "columns": "id", "region": [region]}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["catalog"], "file:///");
+        assert!(
+            plan["reason"].is_null(),
+            "a plan that was asked for has none"
+        );
+        assert_eq!(plan["requires_credentials"], false);
+        let requests = plan["requests"].as_array().unwrap();
+        assert_eq!(
+            u64::try_from(requests.len()).unwrap(),
+            plan["num_partitions"].as_u64().unwrap()
+        );
+        assert!(!requests.is_empty(), "the region reached nothing");
+
+        let source = dir.path().display().to_string();
+        for entry in requests {
+            assert_eq!(entry["method"], "POST");
+            assert_eq!(entry["path"], "/api/v1/parquet");
+            let url = entry["body"]["url"].as_str().unwrap();
+            assert!(url.starts_with("file:///dataset/Norder="), "{url}");
+            assert!(
+                !plan.to_string().contains(&source),
+                "the plan names the disk"
+            );
+            assert_eq!(entry["body"]["columns"], "id");
+            // A region is carried only where the rows still need it, and the columns only
+            // where the region is there to test.
+            match entry["body"]["region"].is_null() {
+                true => assert!(entry["body"]["ra_column"].is_null(), "{entry}"),
+                false => assert_eq!(entry["body"]["ra_column"], "ra", "{entry}"),
+            }
+        }
+    }
+
+    /// Every entry of a plan is a request this service answers, and together they are the
+    /// rows the catalog route would have returned.
+    #[tokio::test]
+    async fn following_a_plan_gives_the_same_rows() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[1];
+        let expected = crate::hats_query::tests::inside(&region);
+        let body = serde_json::json!({"url": "file:///", "columns": "id", "region": [region]});
+
+        let (_, plan) = ask_plan(mounted(dir.path(), &ApiConfig::default()), body.clone()).await;
+        let mut ids = Vec::new();
+        for entry in plan["requests"].as_array().unwrap() {
+            let (status, answer) = ask(
+                mounted(dir.path(), &ApiConfig::default()),
+                entry["body"].clone(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{answer}");
+            let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+            ids.extend(
+                answer["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["id"].as_i64().unwrap()),
+            );
+        }
+        assert_eq!(ids, expected, "the plan and the query disagree");
+    }
+
+    /// A request over more than the server will do comes back as the plan for it, with the
+    /// bound that stopped it named.
+    #[tokio::test]
+    async fn too_much_work_is_answered_with_the_plan_for_it() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 2,
+            ..LimitsConfig::default()
+        };
+        let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
+        let policy =
+            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
+                .unwrap();
+        let service = Service::new(
+            policy,
+            &limits,
+            mounts,
+            &ApiConfig::default(),
+            &DataConfig::default(),
+            &ServerConfig::default(),
+        )
+        .unwrap();
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/hats")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"url": "file:///"}).to_string(),
+            ))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let status = response.status();
+        let plan: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{plan}");
+        assert!(
+            plan["reason"].as_str().unwrap().contains("at most 2"),
+            "{plan}"
+        );
+        assert_eq!(plan["num_partitions"], 4);
+        assert_eq!(plan["requests"].as_array().unwrap().len(), 4);
     }
 
     /// A url that is not a catalog is a 404, the same as a missing file: the caller named a
