@@ -273,7 +273,7 @@ impl Listing {
             },
             cone = catalog
                 .url
-                .map(|url| cone_note(catalog, url))
+                .map(|url| catalog_note(catalog, url))
                 .unwrap_or_default(),
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
@@ -441,18 +441,19 @@ const QUERY_NOTE: &str = "<p><span class=\"without-js\">Files marked \u{25c6}</s
 /// The catalog's own url is written out rather than linked. It is this directory or one
 /// above, so `fsspec` would drop it either way — but a page whose ancestors are linked
 /// somewhere other than the breadcrumb is a page with two answers to where they are.
-fn cone_note(catalog: &Catalog<'_>, url: &str) -> String {
+fn catalog_note(catalog: &Catalog<'_>, url: &str) -> String {
     format!(
         "<section class=\"catalog\">\n\
          <h2>Query HATS catalog{named}</h2>\n\
          <p class=\"about\">{about}</p>\n\
-         <p class=\"without-js\">The catalog's url answers a cone search: \
-         <code>{url}?ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> — with \
-         <code>&amp;columns=</code>, <code>&amp;filters=</code>, <code>&amp;limit=</code> \
-         and <code>&amp;format=json</code>, parquet otherwise. The catalog names its own \
-         position columns and chooses which of its partitions to read. The radius reaches \
-         {radius}\u{2033}; a wider search is the API's, whose plan route hands back the \
-         requests it fans out into.</p>\n\
+         <p class=\"without-js\">The catalog's url answers a query: \
+         <code>{url}?limit=10</code> is the front of it, in the catalog's own order, and \
+         <code>&amp;ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> narrows it to a cone. \
+         With <code>&amp;columns=</code>, <code>&amp;filters=</code> and \
+         <code>&amp;format=json</code>, parquet otherwise. The catalog names its own \
+         position columns and chooses which of its partitions to read. A radius reaches \
+         {radius}\u{2033}; past that, and for the whole catalog at once, the API's plan \
+         route hands back the requests it fans out into.</p>\n\
          </section>\n",
         // The catalog's own name where it gave one. A catalog that did not is still a
         // catalog, and the heading says what the section is either way.
@@ -836,9 +837,10 @@ mod tests {
         // form must not offer past.
         assert!(html.contains("data-catalog=\"/hats/dr1\""), "{html}");
         assert!(html.contains("data-max-radius=\"60\""), "{html}");
-        assert!(html.contains("<code>/hats/dr1?ra="), "{html}");
         // Said as a url, which is the whole of what the page offers with no script — so it
-        // is written for a reader rather than hidden behind one.
+        // is written for a reader rather than hidden behind one. Both requests: the front of
+        // the catalog, which needs no circle, and the cone that narrows it.
+        assert!(html.contains("<code>/hats/dr1?limit=10</code>"), "{html}");
         assert!(html.contains("radius_arcsec=10"), "{html}");
         assert!(html.contains("60\u{2033}"), "{html}");
         // Which catalog, and how much of it: a reader standing two levels down can see

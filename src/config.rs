@@ -174,7 +174,9 @@ pub struct LimitsConfig {
     /// The other three bounds still apply behind it; this is the one that acts on the
     /// request's own numbers rather than on what reading it turns out to cost. Raising it is
     /// how an operator opens the file server up to wider searches, and `0` closes the
-    /// circle surface entirely, no radius being smaller than none.
+    /// circle surface entirely, no radius being smaller than none — which leaves the plain
+    /// `limit` request, a circle being what a catalog's url narrows rather than what makes
+    /// it answerable.
     pub max_query_radius_arcsec: f64,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
@@ -208,10 +210,10 @@ impl Default for LimitsConfig {
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             max_concurrent_partitions: 4,
-            // A minute of arc: wide enough for the cross-match a browser is actually doing
-            // — a source, its neighbours, and what a survey put at the same position — and
-            // narrow enough that a dense catalog answers it out of a couple of partitions.
-            max_query_radius_arcsec: 60.0,
+            // Ten minutes of arc: a field around a source rather than a single position,
+            // which is the size of question a person browsing actually asks — and still
+            // small enough against a partition that it lands in a couple of them.
+            max_query_radius_arcsec: 600.0,
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

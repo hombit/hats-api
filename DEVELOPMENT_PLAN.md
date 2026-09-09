@@ -32,7 +32,7 @@ which.
 | 5.1 | HATS catalog metadata | done | |
 | 5.2 | spatial predicate | done | `polygon` is §9; `moc` takes no `url` yet, which §3.3 says why |
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
-| 5.4 | a catalog under a mount | done | a circle only; a plan there is still §5.3's open question |
+| 5.4 | a catalog under a mount | done | a limit or a circle; a plan there is still §5.3's open question |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -497,17 +497,21 @@ No job queue, job ids or polling: the plan is a list of stateless requests. See 
 
 ### 5.4 A catalog under a mount
 
-`GET {mount}/{catalog}?ra=&dec=&radius_arcsec=` runs the same search `POST {api}/hats` does,
-and the directory page carries a form for it — for the catalog above whichever of its own
-layers is being browsed. `[limits] max_query_radius_arcsec` bounds it, on the request's own
-numbers rather than on what reading it costs, because the three counters answer a fan-out
-and a url cannot carry one.
+`GET {mount}/{catalog}?limit=` is the front of the catalog and
+`&ra=&dec=&radius_arcsec=` narrows it to a cone; both run what `POST {api}/hats` runs, and
+the directory page carries a form for them — for the catalog above whichever of its own
+layers is being browsed. `[limits] max_query_radius_arcsec` bounds the radius, on the
+request's own numbers rather than on what reading it costs, because the three counters
+answer a fan-out and a url cannot carry one.
 
 What is still open:
 
-**Only a circle.** A `box` is two ordered pairs and a `moc` is a document, so neither reads
-as a query parameter; a caller who wants one uses the API. A `box` would fit as four numbers
-if anyone asks for it.
+**Only a circle, and only a `limit` beside it.** A `box` is two ordered pairs and a `moc` is
+a document, so neither reads as a query parameter; a caller who wants one uses the API. A
+`box` would fit as four numbers if anyone asks for it. An offset would make the `limit` a
+way to walk a catalog rather than only to sample its front, and nothing needs one yet —
+`query::Order` promises nothing within a partition, so it would have to say what it is an
+offset into.
 
 **The JSON listing says nothing about the catalog.** The page carries `data-catalog`, and a
 client walking a mount has to recognise a catalog from the names in the listing the way this

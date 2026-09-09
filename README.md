@@ -153,32 +153,41 @@ named. Naming the columns is the thing that makes a query cheap: on a 335 MiB, 1
 Gaia partition, ten rows of everything read 335 MiB and ten rows of one column read 3.8
 MiB. `x-hats-data-bytes-read`, and `data_bytes_read` in a JSON answer, is where that shows.
 
-### Searching a catalog by its own url
+### Querying a catalog by its own url
 
-A HATS catalog's directory answers a cone search on its url. The catalog chooses which of
-its partitions to read and names its own position columns, so the request is the circle:
+A HATS catalog's directory answers a query on its url. The catalog chooses which of its
+partitions to read and names its own position columns, so the request is only what to
+narrow it by:
 
 ```
+GET /small_sky_order3_source?limit=10
 GET /small_sky_order3_source?ra=348.077&dec=-29.339&radius_arcsec=30&columns=source_id,mag
 ```
 
-The answer is the same body as the API's catalog route — parquet by default here, with the
-partition count in `x-hats-num-partitions` — and `format=json` gives the rows with
-`num_partitions` beside them.
+The first is the front of the catalog, in the catalog's own order — which is HEALPix order,
+so it is a coherent piece of sky rather than an arbitrary sample. **A `limit` stops the
+read**: partitions are read in order until there are enough rows, so ten rows of a
+thousand-partition catalog cost the first partition.
 
-**The radius is capped, at 60″ by default.** A url is followed rather than fanned out, so
+The second narrows it to a cone. The answer is the same body as the API's catalog route —
+parquet by default here, with the partition count in `x-hats-num-partitions` — and
+`format=json` gives the rows with `num_partitions` beside them.
+
+**The radius is capped, at 600″ by default.** A url is followed rather than fanned out, so
 what it asks for has to fit in one answer; a wider search is the API's, whose plan route
 hands back the requests it takes. `[limits] max_query_radius_arcsec` is the operator's
-knob, and `0` closes the surface entirely.
+knob, and `0` closes the circle surface entirely, leaving the plain `limit` request.
 
 ```toml
 [limits]
-max_query_radius_arcsec = 60
+max_query_radius_arcsec = 600
 ```
 
-Without a circle the url is a directory listing as it always was, and the other parameters
-are ignored: a request for the whole catalog is a fan-out, which is the thing a url cannot
-say.
+With neither a circle nor a limit the request is the whole catalog, and `max_partitions`
+refuses it before anything is read. With no query string at all the url is the directory
+listing it always was, and a directory that is not a catalog ignores the parameters
+entirely — whether there is a query surface is decided by which directory this is, before
+any parameter is looked at.
 
 ### The page
 
@@ -187,10 +196,10 @@ panel on it: the columns are fetched from the file when the panel is opened, and
 runs against the same url a client would write by hand.
 
 A directory that is a catalog — or that is inside one, `dataset/Norder=5/Dir=0` included —
-gets the cone search over the whole catalog above it: the catalog's name, what it says about
-its own size, its columns read from `dataset/_common_metadata`, the request written out for
-`curl` and for the Python readers, and a **Plan** button for a search too wide to return in
-one answer.
+gets the query over the whole catalog above it: the catalog's name, what it says about its
+own size, its columns read from `dataset/_common_metadata`, the request written out for
+`curl` and for the Python readers, and a **Plan** button. Preview asks for the first ten
+rows and the circle is optional, so a catalog answers something the moment it is opened.
 
 Both are additions to the markup rather than replacements for it: with the script blocked,
 the listing and its links are exactly what they were, and what the page says about querying
@@ -338,6 +347,12 @@ Three bounds, whichever is reached first, all in `[limits]`:
 Only the first can act before work happens; the other two are counters, so a request
 overshoots them by whatever the reads already in flight go on to fetch. Nothing is returned
 part-way: a truncated answer is one a caller cannot tell from a complete one.
+
+**A `limit` is the other bound that acts before work happens.** The read stops as soon as
+enough rows are in, so a request that carries one is bounded by it rather than by the
+partition list, and `max_partitions` is watched as the reads land instead of refusing the
+list up front. That is what makes `?limit=10` against a thousand-partition catalog cost one
+partition rather than being refused for naming a thousand.
 
 **Over a limit is `413`, and the body is the plan.** So the answer to "that is more than I
 will do at once" is the list of requests that would do it.

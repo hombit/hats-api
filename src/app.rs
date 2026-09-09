@@ -230,9 +230,14 @@ async fn serve_mounted(
         // A catalog is the one directory that answers a question about itself, and the
         // question comes before the page: a directory with an `index.html` still has
         // partitions to search, and serving the page instead would drop the query.
+        //
+        // Any parameter this service reads makes it a question — the circle narrows the
+        // answer rather than being what makes one possible, the way `columns` and `limit`
+        // are against a file. Which directory this is decides whether there is a query
+        // surface at all, so a directory that is not a catalog is listed with its query
+        // string ignored, and one that is answers or refuses but never drops it.
         if hats::local::describes_a_catalog(&file)
             && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
-            && query.region.is_some()
         {
             return query_catalog_mounted(&service, mount, &file, &query, &parts).await;
         }
@@ -562,9 +567,11 @@ async fn query_mounted(
 /// answer is refused here rather than answered with a work list, and the message says which
 /// route hands one back.
 ///
-/// **A circle is what makes this a query.** Without one the request is the whole catalog,
-/// which is the shape a url has no way to express, so the directory is listed and the other
-/// parameters are ignored the way any file server ignores what it has no use for.
+/// **The circle is optional, and a `limit` is what makes it so.** Without a region the
+/// request is the whole catalog in its own order, which a `limit` turns into the front of it
+/// — read partition by partition until there are enough rows, which for the first ten is the
+/// first partition. Without either, the whole catalog is what it says, and the partition
+/// bound refuses it before anything is read.
 async fn query_catalog_mounted(
     service: &Service,
     mount: &Mount,
@@ -631,8 +638,9 @@ async fn query_catalog_mounted(
 /// do is say which bound was reached and where the request that fans out is written.
 fn too_much_for_a_url(why: &Exceeded) -> ApiError {
     ApiError::too_much_work(format!(
-        "{why}; narrow the radius, or send this to the API's catalog route, whose plan \
-         route hands back the requests it takes"
+        "{why}; a limit takes the front of the catalog and a radius takes a piece of the \
+         sky, or send this to the API's catalog route, whose plan route hands back the \
+         requests it takes"
     ))
 }
 
@@ -2370,7 +2378,7 @@ mod tests {
         let (ra, dec) = centre();
         let service = || mounted(dir.path(), &ApiConfig::default());
 
-        for radius in ["radius_arcsec=120", "radius_deg=1"] {
+        for radius in ["radius_arcsec=1200", "radius_deg=1"] {
             let response = respond(
                 service(),
                 Request::builder().uri(format!("/?ra={ra}&dec={dec}&{radius}")),
@@ -2379,7 +2387,7 @@ mod tests {
             let status = response.status();
             let body = body_of(response).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{radius}: {body}");
-            assert!(body.contains("60"), "{radius}: {body}");
+            assert!(body.contains("600"), "{radius}: {body}");
             assert!(body.contains("plan route"), "{radius}: {body}");
         }
 
@@ -2387,7 +2395,7 @@ mod tests {
         // the route.
         let response = respond(
             service(),
-            Request::builder().uri(format!("/?ra={ra}&dec={dec}&radius_arcsec=60&format=json")),
+            Request::builder().uri(format!("/?ra={ra}&dec={dec}&radius_arcsec=600&format=json")),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -2415,22 +2423,25 @@ mod tests {
         }
     }
 
-    /// A circle is what makes a directory's url a query. Without one the request is the
-    /// whole catalog, which is the shape a url cannot express — so the directory is listed
-    /// and the rest of the parameters are ignored, the way any file server ignores what it
-    /// has no use for.
+    /// Which directory this is decides whether there is a query surface at all, and it is
+    /// decided before any parameter is read.
+    ///
+    /// So a directory that is not a catalog is listed with its query string ignored, the way
+    /// any file server ignores what it has no use for — and a catalog asked nothing this
+    /// service reads is listed too, there being no question in it.
     #[tokio::test]
-    async fn a_directory_is_listed_unless_the_url_asks_a_spatial_question() {
+    async fn a_directory_with_no_query_surface_is_listed_parameters_and_all() {
         let catalog = crate::hats_query::tests::fixture(true);
         let plain = tempfile::TempDir::new().unwrap();
         std::fs::write(plain.path().join("part0.parquet"), b"x").unwrap();
         let (ra, dec) = centre();
 
         for (dir, query) in [
-            // A catalog, asked something that is not a search.
-            (catalog.path(), "?columns=id&limit=3"),
-            // Not a catalog, asked one that is: nothing here answers it, and the listing
-            // is what this url has always been.
+            // A catalog, asked nothing at all, and asked something it has no use for.
+            (catalog.path(), ""),
+            (catalog.path(), "?v=3"),
+            // Not a catalog, asked a search: nothing here answers one, and the listing is
+            // what this url has always been.
             (
                 plain.path(),
                 &*format!("?ra={ra}&dec={dec}&radius_arcsec=10"),
@@ -2443,10 +2454,58 @@ mod tests {
             .await;
             let status = response.status();
             let body = body_of(response).await;
-            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            assert_eq!(status, StatusCode::OK, "{query:?}: {body}");
             let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
-            assert!(listing["entries"].is_array(), "{query}: {body}");
+            assert!(listing["entries"].is_array(), "{query:?}: {body}");
         }
+    }
+
+    /// The front of a catalog, with no circle in it.
+    ///
+    /// A `limit` is what makes that a bounded question: the partitions are read in the
+    /// catalog's own order and the read stops once there are enough rows, so the first few
+    /// rows cost the first partition rather than all of them. Without a limit the request
+    /// really is the whole catalog, and the partition bound says so before anything is read.
+    #[tokio::test]
+    async fn a_limit_asks_a_catalog_for_its_front() {
+        let dir = crate::hats_query::tests::fixture(true);
+        // Tighter than the fixture has partitions, so a request that read them all would be
+        // refused and one that stops early is not.
+        let service = || {
+            with_limits(
+                serving(dir.path()),
+                &ApiConfig::default(),
+                &LimitsConfig {
+                    max_partitions: 2,
+                    ..LimitsConfig::default()
+                },
+            )
+        };
+        let front = || Request::builder().uri("/?limit=3&format=json");
+
+        let response = respond(service(), front()).await;
+        let status = response.status();
+        let body = body_of(response).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 3, "{body}");
+        assert_eq!(
+            answer["num_partitions"], 1,
+            "the front of a catalog read past the partition holding it: {body}"
+        );
+
+        // The same request twice is the same rows: the catalog's order decides where the
+        // read stops, and that does not depend on which partition finished first.
+        let again = body_of(respond(service(), front()).await).await;
+        let again: serde_json::Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(answer["rows"], again["rows"]);
+
+        // With no limit the request is every partition, and that is what the bound is for.
+        let response = respond(service(), Request::builder().uri("/?format=json")).await;
+        let status = response.status();
+        let body = body_of(response).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(body.contains("partitions"), "{body}");
     }
 
     /// One file of a catalog answers the same circle, and needs to be told which columns
@@ -2513,7 +2572,7 @@ mod tests {
             assert!(body.contains("HATS catalog"), "{path}: {body}");
             // What the page offers without a script, which is the url itself.
             assert!(body.contains("radius_arcsec=10"), "{path}: {body}");
-            assert!(body.contains("data-max-radius=\"60\""), "{path}: {body}");
+            assert!(body.contains("data-max-radius=\"600\""), "{path}: {body}");
             // The catalog's own word for itself, which a reader inside it cannot see.
             assert!(body.contains("<code>fixture</code>"), "{path}: {body}");
             assert!(body.contains("order 3"), "{path}: {body}");

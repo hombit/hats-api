@@ -184,6 +184,12 @@ function request(panel) {
     const circle = [ra, dec, radius_arcsec].map(Number);
     if (circle.every(value => Number.isFinite(value))) {
       body.region = [{type: 'circle', ra: circle[0], dec: circle[1], radius_arcsec: circle[2]}];
+    } else {
+      /* With nothing to narrow it, the request is the whole catalog, which the API refuses
+         as readily as this url does. The limit is what makes it the front of the catalog
+         instead — so the snippet carries the one the panel just used, and is a request that
+         runs rather than one that comes back as a plan. */
+      body.limit = PREVIEW;
     }
   }
   return {
@@ -297,24 +303,29 @@ function address(panel) {
   panel.querySelector('.download').href =
     url(panel.dataset.url, {...asked(panel), format: 'parquet'});
   const into = panel.querySelector('.asked');
-  /* A catalog's url without a circle on it is a directory listing rather than a query, so
-     showing one would offer a link that answers something else entirely. */
-  if (whole(panel)) {
-    show(into, url(panel.dataset.url, preview(panel)));
-  } else {
+  /* Half a circle is not a request, and a url written from one would answer a question
+     nobody asked. Every other state has a url worth showing. */
+  if (state(panel) === 'partial') {
     into.textContent = '';
+  } else {
+    show(into, url(panel.dataset.url, preview(panel)));
   }
   snippet(panel);
 }
 
-/* Whether the fields describe a request at all. A file's panel always does — every field
-   on it is optional. A catalog's needs its circle, all three of it. */
-function whole(panel) {
-  if (panel.dataset.catalog === undefined) return true;
+/* What the circle currently is, which is what decides which buttons mean anything.
+
+   `none` is a request in its own right — the front of the catalog, in the catalog's own
+   order — so the circle narrows an answer rather than being what makes one possible. A
+   file's panel has no circle and is always `none`. */
+function state(panel) {
   const {ra, dec, radius_arcsec} = asked(panel);
-  return [ra, dec, radius_arcsec].every(
-    value => value !== undefined && Number.isFinite(Number(value))
-  );
+  const written = [ra, dec, radius_arcsec].filter(value => value !== undefined);
+  if (written.length === 0) return 'none';
+  if (written.length < 3 || !written.every(value => Number.isFinite(Number(value)))) {
+    return 'partial';
+  }
+  return Number(radius_arcsec) > MAX_RADIUS ? 'wide' : 'ok';
 }
 
 /* What columns there are, which is one query with no rows in it. The answer's schema is
@@ -666,31 +677,34 @@ function catalog() {
   if (SCHEMA !== null) describe(panel, SCHEMA);
 }
 
-/* Which of the two things this circle is, said before it is asked for rather than after.
+/* What the fields as they stand will and will not answer, said before anything is asked
+   rather than after.
 
-   A radius over the cap is a request the url refuses, and one with a field missing is not a
-   circle at all — so neither offers a download, and the message says which it is. The plan
-   stays available for both, and is the answer to the first: it reads the catalog's own files
-   and no data, so a search too wide to return is one it can still describe. */
+   Four states and each button reads them differently. A preview always has something to
+   show unless the circle is half-written or wider than the url answers. A download has no
+   `limit` on it — asking for parquet is asking for the rows that matched — so with no
+   circle it would be the whole catalog, which this url does not do. And the plan is the one
+   thing a wide circle is still good for: it reads the catalog's own files and no rows, so it
+   describes a search of any size. */
 function gate(panel) {
-  const written = whole(panel);
-  const wide = written && Number(asked(panel).radius_arcsec) > MAX_RADIUS;
+  const at = state(panel);
   const note = panel.querySelector('.gate');
   note.textContent =
-    !written ? 'A cone search takes a centre and a radius.'
-    : wide ? 'Wider than ' + MAX_RADIUS + '″, which is more than one answer carries. Plan hands back the requests it fans out into.'
+    at === 'partial' ? 'A cone search takes a centre and a radius.'
+    : at === 'wide' ? 'Wider than ' + MAX_RADIUS + '″, which is more than one answer carries. Plan hands back the requests it fans out into.'
+    : at === 'none' ? 'The front of the catalog, in its own order. A circle narrows it, and a download needs one.'
     : '';
-  for (const button of panel.querySelectorAll('.preview, .download')) {
-    /* An anchor has no `disabled`, so the class is what both of them read. */
-    button.classList.toggle('off', !written || wide);
-    if (button.disabled !== undefined) button.disabled = !written || wide;
-  }
-  /* The plan is dimmed only where there is no circle at all. A wide one is exactly what it
-     is for — that is the whole reason the other two go and it stays. */
-  const plan = panel.querySelector('.plan');
-  if (plan) {
-    plan.classList.toggle('off', !written);
-    plan.disabled = !written;
+  const off = {
+    preview: at === 'partial' || at === 'wide',
+    download: at !== 'ok',
+    plan: at === 'partial',
+  };
+  for (const [name, dimmed] of Object.entries(off)) {
+    const button = panel.querySelector('.' + name);
+    if (button === null) continue;
+    /* An anchor has no `disabled`, so the class is what all of them read. */
+    button.classList.toggle('off', dimmed);
+    if (button.disabled !== undefined) button.disabled = dimmed;
   }
 }
 
@@ -700,10 +714,6 @@ function gate(panel) {
 function planned(panel) {
   const {route, body} = request(panel);
   const into = panel.querySelector('.result');
-  if (body.region === undefined) {
-    fail(into, new Error('A cone search takes a centre and a radius.'));
-    return;
-  }
   into.textContent = 'planning…';
   fetch(route + '/plan', {
     method: 'POST',

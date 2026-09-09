@@ -240,8 +240,19 @@ impl Search {
     /// **The two accumulating bounds are checked between partitions, not within them.** A
     /// counter shared across concurrent scans, read often enough to stop one mid-file, would
     /// serialize the thing it is bounding. So a request overshoots by whatever the partitions
-    /// already in flight go on to fetch, and the partition count is what keeps that bounded:
-    /// it is checked before anything is read, so nothing else has to be exact.
+    /// already in flight go on to fetch, and the partition count is what keeps that bounded.
+    ///
+    /// **A `limit` stops the read, at partition granularity.** Once the partitions already
+    /// yielded hold enough rows, the rest are never polled — and a stream that is never
+    /// polled reads nothing. That is what makes the front of a catalog cheap to ask for: the
+    /// first ten rows of a catalog of thousands of partitions cost the first partition.
+    ///
+    /// It is also what lets a `limit` stand in for [`CatalogLimits::max_partitions`] as the
+    /// bound that acts before work happens. Without one, the chosen list is the whole of what
+    /// this will read and is checked up front, as strictly as ever. With one, what bounds the
+    /// work is the limit, and the partition count is watched as the reads land — the same
+    /// shape as the other two, and sound for the same reason: the reads in flight when it
+    /// trips are what the overshoot is.
     pub async fn run(
         &self,
         selection: &CatalogSelection<'_>,
@@ -249,7 +260,7 @@ impl Search {
         limits: sql::Limits,
         bounds: CatalogLimits,
     ) -> Result<Outcome, ApiError> {
-        if self.chosen.len() > bounds.max_partitions {
+        if selection.limit.is_none() && self.chosen.len() > bounds.max_partitions {
             return Ok(Outcome::TooMuchWork(Exceeded::Partitions {
                 reached: self.chosen.len(),
                 allowed: bounds.max_partitions,
@@ -294,6 +305,21 @@ impl Search {
                 return Ok(Outcome::TooMuchWork(Exceeded::Rows {
                     allowed: bounds.max_rows,
                 }));
+            }
+            // With a limit, this is the bound that acts before the work does; the read stops
+            // below as soon as the limit is met, so what it catches is a limit large enough
+            // to want more of the catalog than one request may read.
+            if selection.limit.is_some() && partitions_read > bounds.max_partitions {
+                return Ok(Outcome::TooMuchWork(Exceeded::Partitions {
+                    reached: self.chosen.len(),
+                    allowed: bounds.max_partitions,
+                }));
+            }
+            // Enough rows are in, so the partitions after this one are dropped unpolled. They
+            // are the ones the catalog's order puts last, and that order does not depend on
+            // which finished first — so the same request stops in the same place every time.
+            if selection.limit.is_some_and(|limit| rows >= limit) {
+                break;
             }
         }
         // Each partition was read with the whole `limit` as its own, so the total can exceed

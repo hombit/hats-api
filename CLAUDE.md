@@ -233,10 +233,11 @@ everything about what SQL means here is decided there.
   `Service::data_files` where a mount governs the file makes the two modes disagree about
   what one file is.
 
-  **A directory draws the same line twice.** It has to be a catalog, and the url has to
-  carry a circle; anything else is the listing it has always been, parameters and all. The
-  second half is not a convenience — no region means the whole catalog, which is a fan-out,
-  and a fan-out is exactly what a url has no way to express.
+  **For a directory the line is which directory this is.** A catalog has a query surface and
+  no other directory has one, so a catalog answers or refuses every parameter it reads and
+  anything else is the listing it has always been, parameters and all. The circle is not part
+  of that line: it narrows an answer rather than making one possible, the way `columns` and
+  `limit` do against a file.
 
 Adding a scalar function feature to the `datafusion` dependency adds everything it
 registers to what a caller may call. That is the decision being made; make it
@@ -253,6 +254,11 @@ than being validated twice.
   the request's own numbers, before anything is opened. The other three bounds act on what
   reading turns out to cost and answer with a plan; a url has no plan to answer with, so the
   bound that can refuse early is the one that has to.
+- **The circle is optional, and a `limit` is the other narrowing.** Either bounds the request;
+  neither is what makes a catalog's url answerable, and a url with neither is the whole
+  catalog and refused. So the page offers the limit first — a catalog answers something the
+  moment it is opened, and the circle is what a reader adds — and nothing may go back to
+  treating the circle as the thing that makes a query a query.
 - **A catalog under a mount refuses `ra_column` and `dec_column`**, and a lone file requires
   them. That is the same split the API's two routes make, for the same reason, and it is why
   both vocabularies lower to one `Selection` rather than each deciding.
@@ -594,15 +600,27 @@ request in front of it.
   *within* a partition is `query::Order`'s and is unchanged.
 - **Partitions are read several at a time, and the answer is still the catalog's order.**
   `buffered` yields by position, so the parallelism costs nothing in reproducibility — which
-  is the whole of what a `limit` here depends on. A `limit` no longer stops the read: by the
-  time enough rows have arrived the rest are in flight, so each partition is read with the
-  whole limit as its own and the total is trimmed at the end.
-- **Three bounds, and only one of them can act before work happens.** `max_partitions` is
-  checked against the chosen list before a byte is read; `max_bytes_fetched` and `max_rows`
-  are counters watched between partitions. Do not make the counters exact — a total shared
-  across concurrent scans and read often enough to stop one mid-file would serialize the
-  thing it is bounding. Overshoot is the price, and the partition count is what keeps it
-  bounded, which is why that one has to stay the strict one.
+  is the whole of what a `limit` here depends on. Each partition is read with the whole limit
+  as its own, since none of them knows what the ones before it matched, and the total is
+  trimmed at the end.
+- **A `limit` stops the read, at partition granularity.** Once the partitions already yielded
+  hold enough rows the rest are dropped unpolled, and a stream that is never polled reads
+  nothing. So the front of a catalog costs the front of it. Where it stops is the catalog's
+  order and not whichever partition finished first, so the same request stops in the same
+  place every time; the overshoot is the reads already in flight, which is what
+  `max_concurrent_partitions` bounds.
+- **Three bounds, and which of them acts before work happens depends on the `limit`.**
+  `max_bytes_fetched` and `max_rows` are always counters watched between partitions. Do not
+  make them exact — a total shared across concurrent scans and read often enough to stop one
+  mid-file would serialize the thing it is bounding. Overshoot is the price, and something
+  else has to bound it.
+
+  `max_partitions` is that something, and it is checked against the chosen list before a byte
+  is read — but only for a request with no `limit`, where the chosen list really is what will
+  be read. With a limit the read stops itself, so the limit is the bound that acts first and
+  the partition count joins the counters. Do not collapse these two cases: refusing a
+  `?limit=10` for naming a thousand partitions refuses a request that would have read one,
+  and dropping the up-front check for a request with no limit leaves nothing acting early.
 
   **A partition's declared size is not the pre-check the counters are missing.** It is the
   whole file's compressed size and a query fetches a pruned projection, so it runs one to
