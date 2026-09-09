@@ -663,14 +663,20 @@ async fn list_directory(
     // ten thousand of them. The catalog probe is a handful more, on the same thread.
     let read = tokio::task::spawn_blocking(move || {
         let listing = Listing::read(&dir, &root, &path, follow_symlinks)?;
-        Ok::<_, std::io::Error>((listing, hats::local::enclosing(&dir, depth)))
+        // The catalog this directory is inside, and what it says about itself — both read
+        // here rather than beside the page, `about` being another small file off the disk.
+        let found = hats::local::enclosing(&dir, depth).map(|levels| {
+            let at = dir.ancestors().nth(levels).unwrap_or(&dir);
+            (levels, hats::local::about(at))
+        });
+        Ok::<_, std::io::Error>((listing, found))
     })
     .await
     .map_err(|error| {
         tracing::error!(%error, "listing a directory panicked");
         ApiError::internal("cannot read this directory")
     })?;
-    let (listing, levels) = read.map_err(|error| {
+    let (listing, found) = read.map_err(|error| {
         // The path is the operator's business and not the caller's, so what comes back
         // is the same answer as for a directory that is not published at all.
         tracing::warn!(%error, mount = mount.prefix(), "cannot list");
@@ -679,10 +685,30 @@ async fn list_directory(
     // The catalog's own url, which is this directory's with as many levels trimmed off it as
     // the walk climbed. Built from the decoded segments the same way this directory's was, so
     // the two agree on how a name is spelled in a url.
-    let catalog = levels.and_then(|levels| {
-        let above = segments.get(..segments.len().checked_sub(levels)?)?;
-        Some(listing::url(mount.prefix(), above))
-    });
+    let (catalog, about) = match found {
+        Some((levels, about)) => (
+            segments
+                .get(..segments.len().saturating_sub(levels))
+                .map(|above| listing::url(mount.prefix(), above)),
+            Some(about),
+        ),
+        None => (None, None),
+    };
+    // Where the catalog's columns are, as a url under this mount. Only where the catalog
+    // has the file: a catalog without one is answered by the page a different way rather
+    // than offered a url that is a 404.
+    let schema = catalog
+        .as_deref()
+        .zip(about.as_ref())
+        .and_then(|(at, about)| {
+            about.has_schema.then(|| {
+                format!(
+                    "{}/{}",
+                    at.trim_end_matches('/'),
+                    hats::partitions::COMMON_METADATA
+                )
+            })
+        });
 
     Ok(match listing::wants_html(&request.headers) {
         true => Html(listing.to_html(
@@ -690,6 +716,10 @@ async fn list_directory(
             service.api_prefix.as_deref(),
             &listing::Catalog {
                 url: catalog.as_deref(),
+                name: about.as_ref().and_then(|about| about.name.as_deref()),
+                rows: about.as_ref().and_then(|about| about.rows),
+                order: about.as_ref().and_then(|about| about.order),
+                schema_url: schema.as_deref(),
                 max_radius_arcsec: service.max_query_radius_arcsec,
             },
             service.show_version,
@@ -2484,7 +2514,30 @@ mod tests {
             // What the page offers without a script, which is the url itself.
             assert!(body.contains("radius_arcsec=10"), "{path}: {body}");
             assert!(body.contains("data-max-radius=\"60\""), "{path}: {body}");
+            // The catalog's own word for itself, which a reader inside it cannot see.
+            assert!(body.contains("<code>fixture</code>"), "{path}: {body}");
+            assert!(body.contains("order 3"), "{path}: {body}");
+            // The fixture writes no `_common_metadata`, so no url is offered for one: a
+            // catalog without the file gets its columns from the first answer instead of a
+            // link to a 404.
+            assert!(!body.contains("data-schema"), "{path}: {body}");
         }
+
+        // And where the catalog does have one, that is where the page reads its columns.
+        std::fs::create_dir_all(dir.path().join("dataset")).unwrap();
+        std::fs::write(dir.path().join("dataset/_common_metadata"), b"x").unwrap();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/dataset")
+                .header(header::ACCEPT, "text/html"),
+        )
+        .await;
+        let body = body_of(response).await;
+        assert!(
+            body.contains("data-schema=\"/dataset/_common_metadata\""),
+            "{body}"
+        );
 
         // A directory named like one of the layers, with no catalog over it, is an ordinary
         // directory: the walk climbs the layout looking for a catalog and does not assume

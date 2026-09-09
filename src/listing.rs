@@ -110,10 +110,21 @@ pub struct Listing {
 /// A catalog is browsed from the inside — `dataset/Norder=5/Dir=0` is where the files are —
 /// so the url here is the catalog's own and not this directory's, and a reader who has
 /// climbed down into a partition is still offered the search over the whole thing.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Catalog<'a> {
     /// `None` where this directory is neither a catalog nor inside one.
     pub url: Option<&'a str>,
+    /// What the catalog calls itself, and how much of it there is. Every part optional: it
+    /// is the catalog introducing itself, and a key it does not carry is a line the page
+    /// does not write.
+    pub name: Option<&'a str>,
+    pub rows: Option<u64>,
+    pub order: Option<u8>,
+    /// Where the catalog's columns can be read without choosing a partition, which is
+    /// `dataset/_common_metadata` where the catalog has one. The page asks it the same
+    /// question it asks a parquet file, so the column list is there before the first
+    /// search rather than after it.
+    pub schema_url: Option<&'a str>,
     /// The widest circle that url will answer, which is what the page must not offer more
     /// than: a form that writes a request the service refuses is worse than no form.
     pub max_radius_arcsec: f64,
@@ -247,15 +258,22 @@ impl Listing {
             },
             catalog = match catalog.url {
                 Some(url) => format!(
-                    " data-catalog=\"{url}\" data-max-radius=\"{radius}\"",
+                    " data-catalog=\"{url}\" data-max-radius=\"{radius}\"{schema}",
                     url = html_escape::encode_double_quoted_attribute(url),
                     radius = catalog.max_radius_arcsec,
+                    schema = match catalog.schema_url {
+                        Some(schema) => format!(
+                            " data-schema=\"{}\"",
+                            html_escape::encode_double_quoted_attribute(schema)
+                        ),
+                        None => String::new(),
+                    },
                 ),
                 None => String::new(),
             },
             cone = catalog
                 .url
-                .map(|url| cone_note(url, catalog.max_radius_arcsec))
+                .map(|url| cone_note(catalog, url))
                 .unwrap_or_default(),
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
@@ -423,21 +441,63 @@ const QUERY_NOTE: &str = "<p><span class=\"without-js\">Files marked \u{25c6}</s
 /// The catalog's own url is written out rather than linked. It is this directory or one
 /// above, so `fsspec` would drop it either way — but a page whose ancestors are linked
 /// somewhere other than the breadcrumb is a page with two answers to where they are.
-fn cone_note(url: &str, max_radius_arcsec: f64) -> String {
+fn cone_note(catalog: &Catalog<'_>, url: &str) -> String {
     format!(
         "<section class=\"catalog\">\n\
-         <h2>HATS catalog</h2>\n\
-         <p class=\"without-js\">This directory is inside a HATS catalog, whose url \
-         answers a cone search: \
+         <h2>Query HATS catalog{named}</h2>\n\
+         <p class=\"about\">{about}</p>\n\
+         <p class=\"without-js\">The catalog's url answers a cone search: \
          <code>{url}?ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> — with \
          <code>&amp;columns=</code>, <code>&amp;filters=</code>, <code>&amp;limit=</code> \
          and <code>&amp;format=json</code>, parquet otherwise. The catalog names its own \
          position columns and chooses which of its partitions to read. The radius reaches \
-         {max_radius_arcsec}\u{2033}; a wider search is the API's, whose plan route hands \
-         back the requests it fans out into.</p>\n\
+         {radius}\u{2033}; a wider search is the API's, whose plan route hands back the \
+         requests it fans out into.</p>\n\
          </section>\n",
+        // The catalog's own name where it gave one. A catalog that did not is still a
+        // catalog, and the heading says what the section is either way.
+        named = match catalog.name {
+            Some(name) => format!(" <code>{}</code>", html_escape::encode_text(name)),
+            None => String::new(),
+        },
+        about = about(catalog, url),
         url = html_escape::encode_text(url),
+        radius = catalog.max_radius_arcsec,
     )
+}
+
+/// How much of the catalog there is, and where it is — the two things a reader standing in
+/// `Dir=0` cannot see for themselves.
+///
+/// The url is written out and never linked, for the reason nothing else on this page links
+/// upwards: the breadcrumb is where an ancestor belongs, and a second link to one is a
+/// second answer to where it is.
+///
+/// Every number is the catalog's own word for itself. Nothing here counts anything or
+/// checks one against another — that is a validator, and this is a heading.
+fn about(catalog: &Catalog<'_>, url: &str) -> String {
+    let mut said = vec![html_escape::encode_text(url).into_owned()];
+    if let Some(rows) = catalog.rows {
+        said.push(format!("{} rows", grouped(rows)));
+    }
+    if let Some(order) = catalog.order {
+        said.push(format!("order {order}"));
+    }
+    said.join(" \u{b7} ")
+}
+
+/// A count with its thousands marked off. A catalog's row count runs to ten digits, and
+/// ten digits in a row is a number nobody reads — they count the digits instead.
+fn grouped(count: u64) -> String {
+    let digits = count.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// The same question as a request to the API, which is what a client writes rather than
@@ -570,8 +630,25 @@ mod tests {
     /// A directory with no catalog over it, which is what most of these are.
     const NO_CATALOG: Catalog<'static> = Catalog {
         url: None,
+        name: None,
+        rows: None,
+        order: None,
+        schema_url: None,
         max_radius_arcsec: 60.0,
     };
+
+    /// A catalog that said everything it could about itself, which is what the page has
+    /// the most to render from.
+    fn a_catalog() -> Catalog<'static> {
+        Catalog {
+            url: Some("/hats/dr1"),
+            name: Some("dr1"),
+            rows: Some(17_161),
+            order: Some(3),
+            schema_url: Some("/hats/dr1/dataset/_common_metadata"),
+            max_radius_arcsec: 60.0,
+        }
+    }
 
     fn accepting(accept: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -753,15 +830,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1/dataset", false).unwrap();
-        let html = listing.to_html(
-            &DataFiles::default(),
-            Some(API),
-            &Catalog {
-                url: Some("/hats/dr1"),
-                max_radius_arcsec: 60.0,
-            },
-            true,
-        );
+        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), true);
 
         // The url the search goes to, for the script and for the reader, and the bound the
         // form must not offer past.
@@ -772,6 +841,37 @@ mod tests {
         // is written for a reader rather than hidden behind one.
         assert!(html.contains("radius_arcsec=10"), "{html}");
         assert!(html.contains("60\u{2033}"), "{html}");
+        // Which catalog, and how much of it: a reader standing two levels down can see
+        // neither for themselves.
+        assert!(
+            html.contains("Query HATS catalog <code>dr1</code>"),
+            "{html}"
+        );
+        assert!(html.contains("17,161 rows"), "{html}");
+        assert!(html.contains("order 3"), "{html}");
+        // Where the columns come from, which is the catalog's own schema file rather than
+        // whatever a search happened to match.
+        assert!(
+            html.contains("data-schema=\"/hats/dr1/dataset/_common_metadata\""),
+            "{html}"
+        );
+
+        // A catalog that says nothing about itself is still a catalog, and every line the
+        // page cannot write is simply absent.
+        let bare = listing.to_html(
+            &DataFiles::default(),
+            Some(API),
+            &Catalog {
+                url: Some("/hats/dr1"),
+                ..Catalog::default()
+            },
+            true,
+        );
+        assert!(bare.contains("Query HATS catalog</h2>"), "{bare}");
+        // The url alone, no count and no order: a line the catalog gave nothing for is a
+        // line the page does not write.
+        assert!(bare.contains("<p class=\"about\">/hats/dr1</p>"), "{bare}");
+        assert!(!bare.contains("data-schema"), "{bare}");
 
         // A directory with no catalog over it says none of it.
         let plain = listing.to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
@@ -792,15 +892,7 @@ mod tests {
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1", false).unwrap();
 
-        let html = listing.to_html(
-            &DataFiles::default(),
-            Some(API),
-            &Catalog {
-                url: Some("/hats/dr1"),
-                max_radius_arcsec: 60.0,
-            },
-            true,
-        );
+        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), true);
         let scraped: Vec<&str> = html
             .split("<a")
             .skip(1)

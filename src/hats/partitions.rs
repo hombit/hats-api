@@ -27,6 +27,13 @@ pub const DATASET_DIR: &str = "dataset";
 /// The parquet file whose footer describes every partition's.
 pub const METADATA: &str = "dataset/_metadata";
 
+/// The parquet file that carries the schema every partition shares, and no rows.
+///
+/// Nothing here reads it — a query is planned against the file it is about to read, whose
+/// schema is the one that governs. What it is for is naming a catalog's columns without
+/// choosing a partition, which is a question the page asks and a query never has to.
+pub const COMMON_METADATA: &str = "dataset/_common_metadata";
+
 /// The one-line-per-partition listing at the catalog root.
 pub const PARTITION_INFO: &str = "partition_info.csv";
 

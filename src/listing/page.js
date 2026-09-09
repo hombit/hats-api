@@ -46,7 +46,7 @@ function toggle(button) {
   }
   const panel = build(button.dataset.url);
   row.after(panel);
-  describe(panel);
+  describe(panel, panel.dataset.url);
   panel.querySelector('.columns').focus();
 }
 
@@ -317,23 +317,28 @@ function whole(panel) {
   );
 }
 
-/* What columns the file has, which is one query with no rows in it. The answer's schema
-   is the file's own, since this asks for no projection. */
-function describe(panel) {
+/* What columns there are, which is one query with no rows in it. The answer's schema is
+   the file's own, since this asks for no projection.
+
+   `at` is what to ask: the file itself for a file's panel, and for a catalog the schema
+   file the server pointed at — `dataset/_common_metadata`, which is every partition's
+   columns and no rows. A catalog has no schema of its own to read, and asking one of its
+   partitions would mean choosing one, which is the search. */
+function describe(panel, at) {
   const count = panel.querySelector('.count');
-  ask(panel.dataset.url, {limit: '0', format: 'json'})
+  ask(at, {limit: '0', format: 'json'})
     .then(answer => chipsFrom(panel, answer.schema))
     .catch(error => fail(count.parentElement, error));
 }
 
-/* The columns as buttons. Every answer carries its schema, so a panel that cannot ask for
-   one cheaply gets its columns from the first answer it does receive — which is the
-   catalog's case: a catalog has no schema of its own to read, and asking one partition for
-   theirs means choosing a partition, which is the search itself. */
+/* The columns as buttons. */
 function chipsFrom(panel, schema) {
   const count = panel.querySelector('.count');
   const chips = panel.querySelector('.chips');
-  if (chips.children.length > 0) return;
+  /* An empty schema is not a file with no columns: it is a search that reached no
+     partition, and the answer carries nothing to describe. Writing "0 columns" over the
+     list would report the emptiness of the answer as a fact about the catalog. */
+  if (chips.children.length > 0 || schema.length === 0) return;
   count.textContent = counted(schema.length, 'column', 'columns') + ':';
   for (const column of schema) {
     chips.appendChild(chip(panel, column));
@@ -587,6 +592,11 @@ function fail(into, error) {
 const CATALOG = document.body.dataset.catalog || null;
 const MAX_RADIUS = Number(document.body.dataset.maxRadius);
 
+/* Where this catalog's columns can be read, or null for a catalog that has no such file —
+   in which case the chips arrive with the first answer instead, since every answer carries
+   its schema. */
+const SCHEMA = document.body.dataset.schema || null;
+
 if (CATALOG !== null) catalog();
 
 /* The cone search over the whole catalog, as a form.
@@ -604,7 +614,13 @@ function catalog() {
      which kind of request it is. */
   panel.dataset.url = CATALOG;
   panel.dataset.catalog = '';
+  /* The same order a file's panel is in — the columns to pick from, the query, the
+     buttons, the url, a client, the answer — with the circle where the query begins. One
+     panel read twice a day should not be laid out two ways. */
   panel.innerHTML =
+    '<div class="columns-of">' +
+    '<span class="count">' + (SCHEMA === null ? '' : 'reading the columns…') + '</span>' +
+    '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
     '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
     '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
     '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
@@ -618,8 +634,6 @@ function catalog() {
     (API === null ? '' : '<button class="run plan">Plan</button>') +
     '</span>' +
     '<p class="gate"></p>' +
-    '<div class="columns-of"><span class="count"></span>' +
-    '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
     '<div class="asked"></div>' +
     clients() +
     '<div class="result"></div>';
@@ -647,6 +661,9 @@ function catalog() {
   }
   address(panel);
   gate(panel);
+  /* Before anyone asks anything, the way a file's panel does it: the columns are what
+     someone writes a query out of, so they are of no use arriving with the answer. */
+  if (SCHEMA !== null) describe(panel, SCHEMA);
 }
 
 /* Which of the two things this circle is, said before it is asked for rather than after.
@@ -667,6 +684,13 @@ function gate(panel) {
     /* An anchor has no `disabled`, so the class is what both of them read. */
     button.classList.toggle('off', !written || wide);
     if (button.disabled !== undefined) button.disabled = !written || wide;
+  }
+  /* The plan is dimmed only where there is no circle at all. A wide one is exactly what it
+     is for — that is the whole reason the other two go and it stays. */
+  const plan = panel.querySelector('.plan');
+  if (plan) {
+    plan.classList.toggle('off', !written);
+    plan.disabled = !written;
   }
 }
 

@@ -17,7 +17,8 @@
 use std::io::Read as _;
 use std::path::Path;
 
-use super::properties;
+use super::partitions;
+use super::properties::{self, Properties};
 
 /// How much of a `properties` file is read to recognise it.
 ///
@@ -58,15 +59,22 @@ pub fn describes_a_catalog(dir: &Path) -> bool {
 /// so the question is whether it looks like a catalog's, and a parse failure on some other
 /// file called `properties` would be a refusal where the answer is simply "no".
 fn holds_catalog_keys(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
-    };
+    read(path).is_some_and(|text| {
+        text.lines()
+            .any(|line| line.trim_start().starts_with(PREFIX))
+    })
+}
+
+/// The front of a file, or `None` for anything that is not a readable text file — a
+/// directory of that name included, which is what `properties` may well be.
+fn read(path: &Path) -> Option<String> {
     let mut text = String::new();
-    if file.take(PEEK).read_to_string(&mut text).is_err() {
-        return false;
-    }
-    text.lines()
-        .any(|line| line.trim_start().starts_with(PREFIX))
+    std::fs::File::open(path)
+        .ok()?
+        .take(PEEK)
+        .read_to_string(&mut text)
+        .ok()?;
+    Some(text)
 }
 
 /// How many levels above `dir` its catalog is, or `None` if there is no catalog over it.
@@ -92,6 +100,48 @@ pub fn enclosing(dir: &Path, depth: usize) -> Option<usize> {
         at = at.parent()?;
     }
     None
+}
+
+/// The little a page says about a catalog before anyone asks it anything.
+///
+/// Every field is optional and none of it is checked against anything: this is a catalog
+/// introducing itself, so a key it does not carry is a line the page does not write, and a
+/// key that will not parse is the same. Reading it is one small file — the properties file
+/// is a few hundred bytes — against a directory somebody is already looking at.
+#[derive(Debug, Default, Clone)]
+pub struct About {
+    /// `obs_collection`, which is what a catalog calls itself.
+    pub name: Option<String>,
+    /// `hats_nrows`, the catalog's own count. Not summed from anywhere and not checked
+    /// against anything: it is what the catalog says.
+    pub rows: Option<u64>,
+    /// `hats_order`, the order the catalog says it is partitioned at. The page is the one
+    /// place this is read rather than the partition list — nothing is being planned on it.
+    pub order: Option<u8>,
+    /// Whether `dataset/_common_metadata` is there, which is where the page gets the
+    /// catalog's columns without choosing a partition to ask.
+    pub has_schema: bool,
+}
+
+/// What this catalog says about itself, from whichever of its files describes it.
+pub fn about(dir: &Path) -> About {
+    let mut about = About {
+        has_schema: dir.join(partitions::COMMON_METADATA).is_file(),
+        ..About::default()
+    };
+    let properties = properties::NAMES
+        .iter()
+        .chain([&properties::COLLECTION])
+        .find_map(|name| read(&dir.join(name)))
+        .and_then(|text| Properties::parse(text.as_bytes()).ok());
+    if let Some(properties) = properties {
+        about.name = properties.name().map(str::to_owned);
+        // A key that will not parse is a key the page leaves out. Nothing is being decided
+        // on these, so a broken one is worth less than a refusal would cost.
+        about.rows = properties.rows().ok().flatten();
+        about.order = properties.order().ok().flatten();
+    }
+    about
 }
 
 /// Whether a directory name is one of a catalog's own layers.

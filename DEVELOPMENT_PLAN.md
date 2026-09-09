@@ -513,9 +513,11 @@ if anyone asks for it.
 client walking a mount has to recognise a catalog from the names in the listing the way this
 service does. A `catalog` field in the JSON is the obvious answer and nothing needs it yet.
 
-**The columns arrive with the first answer.** A catalog has no schema of its own to read, so
-the page's column chips appear after the first preview rather than with the form. Asking one
-partition for its schema means choosing a partition, which is the search.
+**A catalog with no `dataset/_common_metadata` has no cheap schema.** That file is where the
+page reads a catalog's columns without choosing a partition, and a catalog that does not
+carry one — a collection, whose own directory has no `dataset/` — falls back to the schema on
+the first answer. A collection could be followed to its primary table for this, which is one
+more read on a page load and nothing needs it yet.
 
 ## 6. Phase 5 — caching
 
@@ -1045,7 +1047,24 @@ Run `cargo deny` (advisories + licences) in CI.
    refuses as expression kinds. Either they stay refused — leaving a feature registered
    but unreachable, which needs saying in the error rather than a bare "not supported" —
    or the lambda arms are reconsidered, which is a wider decision than this item.
-8. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+8. **A projection into a nested column returns that column.** `columns=lightcurve.mag,
+   lightcurve.mjd` must come back as one `lightcurve` column carrying those two fields, the
+   way `pyarrow` reads a subset of a struct — not as two columns beside each other, and not
+   flattened.
+
+   The shape of the answer is the point. A row's light curve is one value, and a client that
+   asked for less of it still has a light curve; splitting it into `mag` and `mjd` hands back
+   something the reader above — `nested_pandas`, `astropy` — has to put together again, and
+   which no longer matches the file's own schema. It also has to compose: naming
+   `lightcurve.mag` and `object_id` returns the struct and the scalar, and naming
+   `lightcurve` whole returns every field.
+
+   `select` is the same question in the wider vocabulary and has to agree — an expression
+   over a subfield is not this, but a bare `lightcurve.mag` in a select list is. Which is why
+   this belongs in `sql.rs` with the rest of what a projection means, rather than in the
+   route that took the parameter.
+
+9. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap` so each is usable without the others.
 
    `hats` is the catalog itself, not this service's use of it: the properties file, the

@@ -187,7 +187,8 @@ panel on it: the columns are fetched from the file when the panel is opened, and
 runs against the same url a client would write by hand.
 
 A directory that is a catalog — or that is inside one, `dataset/Norder=5/Dir=0` included —
-gets the cone search over the whole catalog above it, with the request written out for
+gets the cone search over the whole catalog above it: the catalog's name, what it says about
+its own size, its columns read from `dataset/_common_metadata`, the request written out for
 `curl` and for the Python readers, and a **Plan** button for a search too wide to return in
 one answer.
 

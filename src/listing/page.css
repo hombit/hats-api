@@ -84,7 +84,11 @@ body.js .without-js { display: none; }
    the same reason a file's panel does — it is a thing to fill in rather than something to
    read — but it is a block of its own rather than a row wedged between two striped ones. */
 section.catalog { margin: 0.9rem 0 0.2rem; }
-section.catalog h2 { font-size: 0.9rem; font-weight: 600; margin: 0 0 0.3rem; }
+section.catalog h2 { font-size: 0.9rem; font-weight: 600; margin: 0; }
+section.catalog h2 code { font-size: 0.95em; }
+/* Which catalog and how big, under the heading rather than in it: the name is what is
+   being queried and these are how to tell it from another release of the same thing. */
+.about { margin: 0 0 0.35rem; font: 0.75rem var(--mono); }
 section.catalog .panel-body {
   background: var(--surface);
   border: 1px solid var(--line);
