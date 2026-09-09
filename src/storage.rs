@@ -386,7 +386,7 @@ impl StorageOptions {
             return match self.is_empty() {
                 true => Ok(()),
                 false => Err(ApiError::bad_request(format!(
-                    "storage options are not accepted for {scheme:?} urls, which have none"
+                    "{scheme:?} urls take no storage options"
                 ))),
             };
         }
@@ -809,8 +809,7 @@ fn authority(url: &Url) -> Result<String, ApiError> {
 fn refuse_userinfo(url: &Url) -> Result<(), ApiError> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(ApiError::bad_request(format!(
-            "url {}://{} carries credentials in its authority, which this server does \
-             not read them from; {}",
+            "url {}://{} carries credentials in its authority; {}",
             url.scheme(),
             // Not `file_url`: that keeps the userinfo, which is the thing to not echo.
             url.host_str().unwrap_or_default(),
@@ -841,8 +840,8 @@ fn refuse_query_string(url: &Url) -> Result<(), ApiError> {
 fn refuse_port_on_a_bucket(url: &Url, backend: Backend) -> Result<(), ApiError> {
     match url.port() {
         Some(port) if backend.has_provider() => Err(ApiError::bad_request(format!(
-            "url {} names port {port}, but a {} url's host is a bucket rather than a \
-             server; the server goes in the endpoint option",
+            "url {} names port {port}; a {} url's host is a bucket, so the server goes \
+             in the endpoint option",
             file_url(url),
             url.scheme()
         ))),
@@ -933,8 +932,7 @@ fn require_label<'a>(name: &str, value: &'a str, extra: &str) -> Result<HostLabe
     match ok {
         true => Ok(HostLabel(value)),
         false => Err(ApiError::bad_request(format!(
-            "{name} {value:?} is not a name this backend has: it becomes part of a \
-             hostname, so it may only hold lowercase letters, digits{}",
+            "{name} {value:?} may only hold lowercase letters, digits{}",
             match extra.is_empty() {
                 true => String::new(),
                 false => format!(" and {extra:?}"),
@@ -1160,8 +1158,7 @@ fn gcs_builder(
     builder = match (&options.service_account_key, &options.access_token) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(
-                "service_account_key and access_token are two ways to say who is asking; \
-                 give one",
+                "send service_account_key or access_token, not both",
             ));
         }
         (Some(key), None) => {
@@ -1215,7 +1212,7 @@ fn azblob_builder(
     builder = match (&options.access_key, &options.sas_token) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(
-                "access_key and sas_token are two ways to say who is asking; give one",
+                "send access_key or sas_token, not both",
             ));
         }
         (Some(key), None) => builder.account_key(key.expose_secret()),
@@ -1630,7 +1627,10 @@ mod tests {
                 matches!(error, ApiError::BadRequest(_)),
                 "{option}: {error}"
             );
-            assert!(error.to_string().contains("hostname"), "{option}: {error}");
+            assert!(
+                error.to_string().contains("lowercase letters"),
+                "{option}: {error}"
+            );
         }
     }
 
@@ -1674,7 +1674,7 @@ mod tests {
         ] {
             let url = parse_url(raw).unwrap();
             let error = open(&url, &options(option)).unwrap_err();
-            assert!(error.to_string().contains("give one"), "{raw}: {error}");
+            assert!(error.to_string().contains("not both"), "{raw}: {error}");
         }
     }
 
@@ -1835,7 +1835,7 @@ mod tests {
         let url = Url::from_file_path(&path).unwrap();
         let credentials = options(serde_json::json!({"secret_access_key": SECRET}));
         let error = open(&url, &credentials).unwrap_err();
-        assert!(error.to_string().contains("not accepted"), "{error}");
+        assert!(error.to_string().contains("no storage options"), "{error}");
         assert!(!error.to_string().contains(SECRET), "leaked: {error}");
     }
 
@@ -2253,10 +2253,7 @@ mod tests {
         let url = parse_url("s3://bucket:9000/key.parquet").unwrap();
         let error = open(&url, &no_options()).unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
-        assert!(
-            error.to_string().contains("bucket rather than a"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("host is a bucket"), "{error}");
     }
 
     /// The url is its own server, so there is nothing for `endpoint` to point elsewhere

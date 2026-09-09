@@ -190,7 +190,7 @@ pub fn coordinate_column(schema: &DFSchema, name: &str, field: &str) -> Result<E
     let (column, data_type) = named_column(schema, name, field)?;
     if !data_type.is_numeric() {
         return Err(ApiError::bad_request(format!(
-            "{field}: {name:?} holds {data_type:?}, and a coordinate is a number of degrees"
+            "{field}: {name:?} holds {data_type:?}; a coordinate must be a number"
         )));
     }
     Ok(column)
@@ -213,7 +213,7 @@ pub fn integer_column(
     let (column, data_type) = named_column(schema, name, field)?;
     if !data_type.is_integer() {
         return Err(ApiError::bad_request(format!(
-            "{field}: {name:?} holds {data_type:?}, and a HEALPix cell is a whole number"
+            "{field}: {name:?} holds {data_type:?}; a HEALPix cell must be a whole number"
         )));
     }
     Ok((column, data_type))
@@ -333,7 +333,7 @@ fn parse<T>(
     let parsed = parse(&mut parser).map_err(|error| refuse(&error))?;
     if parser.peek_token().token != Token::EOF {
         return Err(ApiError::bad_request(format!(
-            "{field} must be one expression, and this one does not end where it should"
+            "{field} must be one expression; this one does not end where it should"
         )));
     }
     Ok(parsed)

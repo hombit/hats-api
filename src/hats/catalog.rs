@@ -96,8 +96,8 @@ impl Catalog {
     pub fn columns(&self) -> Result<Columns<'_>, ApiError> {
         let (ra, dec) = self.properties.coordinate_columns().ok_or_else(|| {
             ApiError::bad_request(
-                "this catalog does not say which of its columns hold a position, so a \
-                 region search against it must name ra_column and dec_column",
+                "this catalog does not name its position columns; send ra_column and \
+                 dec_column",
             )
         })?;
         Ok(Columns {
@@ -151,8 +151,7 @@ async fn read_collection(dir: &RemoteDir) -> Result<Option<Properties>, ApiError
 fn primary_table(collection: &Properties) -> Result<&str, ApiError> {
     let refuse = |why: &str| {
         ApiError::bad_request(format!(
-            "this collection's hats_primary_table_url {why}; this service follows a \
-             collection only to a catalog inside it, so name that catalog's own url"
+            "this collection's hats_primary_table_url {why}; name the catalog's own url"
         ))
     };
     let named = collection

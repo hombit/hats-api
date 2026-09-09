@@ -395,8 +395,7 @@ impl AccessPolicy {
                     Some(url) => Endpoint::from_url(url)?,
                     None => backend.default_endpoint().ok_or_else(|| {
                         ApiError::bad_request(format!(
-                            "a {} url names its own server, so there is no default \
-                             endpoint to ask about",
+                            "a {} url names its own server and takes no endpoint option",
                             backend.schemes().join(" or ")
                         ))
                     })?,
@@ -442,8 +441,7 @@ impl AccessPolicy {
             _ => unreachable!("provider-backed backends returned above"),
         };
         Err(ApiError::forbidden(format!(
-            "{endpoint} is cleartext http, so nothing guarantees the bytes came from \
-             the host it names; {change}, to change that"
+            "{endpoint} is cleartext http; {change}"
         )))
     }
 
@@ -463,8 +461,7 @@ impl AccessPolicy {
         // one is what keeps `file:///hats/x` the same address in both modes.
         if url.host().is_some() {
             return Err(ApiError::bad_request(format!(
-                "url {url} names a host; a local url is file:// followed by a path this \
-                 server publishes"
+                "url {url} names a host; a local url is file:// followed by a mount's path"
             )));
         }
         let Some((mount, relative)) = self.mounts.resolve(url.path()) else {

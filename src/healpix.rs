@@ -487,8 +487,7 @@ impl SpatialIndex {
     ) -> Result<Self, ApiError> {
         if order > MAX_ORDER {
             return Err(ApiError::bad_request(format!(
-                "{field}: {order} is past order {MAX_ORDER}, the deepest HEALPix order a \
-                 64-bit integer holds a cell of"
+                "{field}: {order} is past {MAX_ORDER}, the deepest HEALPix order"
             )));
         }
         let (column, cell_type) = sql::integer_column(schema, column, "healpix_column")?;
@@ -500,7 +499,7 @@ impl SpatialIndex {
                 order,
             }),
             _ => Err(ApiError::bad_request(format!(
-                "healpix_column: this column holds {cell_type:?}, which cannot hold the \
+                "healpix_column: this column holds {cell_type:?}, too narrow for the \
                  {cells} cells of HEALPix order {order}"
             ))),
         }
