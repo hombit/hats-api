@@ -333,7 +333,8 @@ function viaPyarrow(route, body) {
 
    `filters` does not carry across. Here it is SQL; `lsdb` takes pyarrow's pairs, and the two
    are different enough that translating one into the other is a job for a person rather than
-   for a line of JavaScript. The comment says so where a caller wrote one. */
+   for a line of JavaScript. So the snippet says that where a caller wrote one, in a fixed
+   line: a comment built from their own predicate would look like a translation of it. */
 function viaLsdb(route, body, got) {
   const at = got.split('?')[0];
   const circle = body.region === undefined ? undefined : body.region[0];
@@ -354,9 +355,7 @@ function viaLsdb(route, body, got) {
     'import lsdb\n\n' +
     (body.filters === undefined
       ? ''
-      : '# filters is SQL here; lsdb takes pyarrow pairs, so ' +
-        JSON.stringify(body.filters) + '\n# has to be rewritten as, say, ' +
-        'filters=[("mag", "<", 18)].\n') +
+      : '# filters is SQL here and pyarrow pairs there: filters=[("mag", "<", 18)]\n') +
     /* Opened and not computed. A catalog is lazy, and that is the point of it: `compute`
        belongs where someone has decided what they want, not in the line that opens one. */
     'catalog = lsdb.open_catalog(\n    ' + arguments_.join(',\n    ') + ',\n)'
