@@ -106,6 +106,16 @@ impl Properties {
     /// has no such column: [`crate::healpix::SpatialIndex::resolve`] asks the file's
     /// schema, and a column that is not there means the query runs on the geometry alone.
     /// A request naming its own column and order overrides this.
+    /// Whether the catalog names a HEALPix column of its own, as against
+    /// [`Self::healpix_column`] falling back to the recommended name.
+    ///
+    /// The difference is who is making the claim, and it decides what a file without that
+    /// column means: a catalog that named one and has not got it is broken, and a catalog
+    /// that named none simply has no index.
+    pub fn names_healpix_column(&self) -> bool {
+        self.get("hats_col_healpix").is_some()
+    }
+
     pub fn healpix_column(&self) -> Result<(&str, u8), ApiError> {
         Ok((
             self.get("hats_col_healpix")

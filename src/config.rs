@@ -138,6 +138,15 @@ pub struct LimitsConfig {
     /// list. Over this the partitions are listed instead, which costs the per-partition
     /// sizes and nothing else.
     pub max_catalog_metadata_bytes: ByteSize,
+    /// How many partitions of a catalog one request may read. Over this it is refused
+    /// rather than run.
+    ///
+    /// A count and not a size, because a count is what every catalog can answer: the
+    /// partition list comes from any of the three discovery sources, and the per-partition
+    /// bytes come only from `_metadata`. So it bounds the wrong thing — a thousand small
+    /// partitions pass where one large one does not — and it bounds it without a second
+    /// request.
+    pub max_partitions: usize,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -162,6 +171,10 @@ impl Default for LimitsConfig {
             // footer is the file. Generous enough for a real catalog and short of the
             // sizes that would be a download rather than a lookup.
             max_catalog_metadata_bytes: ByteSize::mib(256),
+            // A degree-wide cone over an order-8 catalog reaches a dozen partitions, and a
+            // band of declination across a dense one reaches thousands. This admits the
+            // second and refuses the region that would open a catalog whole.
+            max_partitions: 2_000,
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

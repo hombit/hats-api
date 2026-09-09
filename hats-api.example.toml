@@ -125,6 +125,11 @@ max_concurrent_materializations = 4
 # instead — the same partitions, without the per-partition sizes.
 max_catalog_metadata_bytes = "256MiB"
 
+# How many partitions of a catalog one request to "/api/v1/hats" may read. Over this it
+# is refused with 413. A count rather than a size: the partition list says how many there
+# are without a second request, and how large they are comes only from "_metadata".
+max_partitions = 2000
+
 # How much SQL one request may carry, in "select" and "where". Both bound the text the
 # caller wrote, not how many rows come back.
 

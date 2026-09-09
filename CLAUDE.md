@@ -507,6 +507,44 @@ Everything below is about reading a catalog, not about judging one.
   is sorted and deduplicated on that basis, and a catalog whose cells nest gets whatever
   falls out.
 
+## A request against a catalog
+
+`hats_query.rs` is where a request meets a catalog: it opens one, settles which columns
+hold a position, chooses the partitions, and reads them. `hats/` reads the catalog's files
+and decides nothing; `healpix.rs` answers questions about cells and knows nothing about a
+catalog's contents. Keep it that way — the decisions belong in the one module that has a
+request in front of it.
+
+- **A column nobody named is a candidate, and a candidate that is absent is not an error.**
+  `region::Absence` is which. A column the *request* named, or a catalog's own
+  `hats_col_healpix`, is a claim: a file without it contradicts what was said, and that is
+  a fault met on the way. The `_healpix_29` fallback is nobody's claim — HATS recommends it
+  and does not require it — so a file without it is a file with no index, queried on the
+  geometry alone. Getting this backwards refuses every catalog that took the
+  recommendation's absence for an answer.
+- **The coordinate columns are the region's requirement, not the catalog's.** They are
+  resolved only where a request carries a region. A catalog that names neither still
+  answers a query that asks no spatial question, and refusing one is refusing a request
+  that was never going to read a coordinate.
+- **A partition the region contains gets no spatial test at all.** That is what the inner
+  covering is for, and it is why `Coverage` is computed from both sides. `Selection.spatial`
+  is `None` for such a partition — not an empty region, which means something else.
+- **Partitions are read in the catalog's own order**, which is HEALPix order, and that is a
+  promise the catalog routes make and the single-file route does not. A cell's number is
+  where it is on the sky, so the order costs nothing — the partitions are enumerated anyway
+  — and it makes a `limit` a coherent piece of sky rather than an arbitrary sample. Order
+  *within* a partition is `query::Order`'s and is unchanged.
+- **One partition at a time, and a `limit` stops the read rather than trimming the answer.**
+  Reading them concurrently would pay off wherever there is no `limit`, since every chosen
+  partition is read anyway — but under one it reads partitions whose rows are discarded, so
+  the two cases want different code and only the simple one is written. A client that wants
+  the parallelism fans out over the plan route's entries.
+- **`limits.max_partitions` bounds by the wrong measure and is what there is.** A count
+  comes from the partition list, which every discovery source produces; bytes come only
+  from `_metadata`, which the tier chain skips whenever `partition_info.csv` answered. So a
+  thousand small partitions pass where one large one does not. A bound in bytes waits on
+  the per-partition sizes being read.
+
 ## What a caller's file is like
 
 **Nothing here may rely on how a HATS catalog happens to be written today.** Not the row

@@ -20,12 +20,13 @@ use crate::access::{self, AccessPolicy};
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
 use crate::error::ApiError;
+use crate::hats_query::{CatalogLimits, CatalogSelection, Requested, Search};
 use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{Healpix, Region, Spatial};
+use crate::region::{Absence, Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -42,6 +43,8 @@ pub struct Service {
     pub data_files: Arc<DataFiles>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
+    /// What a request against a whole catalog may spend.
+    pub catalog_limits: CatalogLimits,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -99,6 +102,7 @@ impl Service {
             mounts,
             data_files: Arc::new(data_files),
             sql_limits: limits.into(),
+            catalog_limits: limits.into(),
             show_version: server.show_version,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -144,7 +148,10 @@ pub fn router(service: Service) -> Router {
             // way. A body also has no url-length limit — a long `IN` list and a wide
             // select list both run past nginx's 8 KB header buffer — and needs no url
             // nested inside a url.
-            .route(&route(&prefix, "parquet"), post(query_parquet));
+            .route(&route(&prefix, "parquet"), post(query_parquet))
+            // The same body, against a catalog instead of a file: the url names a HATS
+            // directory and this chooses the partitions to read out of it.
+            .route(&route(&prefix, "hats"), post(query_hats));
     }
     router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -470,21 +477,63 @@ impl QueryRequest {
     /// they differ, and quietly picking either would be answering the question they got
     /// wrong.
     fn selection(&self) -> Result<Selection<'_>, ApiError> {
+        let (projection, predicate) = self.expressions()?;
         Ok(Selection {
-            projection: match (self.select.as_deref(), self.columns.as_deref()) {
-                (Some(_), Some(_)) => return Err(one_of_two("select", "columns")),
-                (Some(sql), None) => Projection::Select(sql),
-                (None, Some(list)) => Projection::Columns(list),
-                (None, None) => Projection::All,
-            },
-            predicate: match (self.r#where.as_deref(), self.filters.as_deref()) {
-                (Some(_), Some(_)) => return Err(one_of_two("where", "filters")),
-                (Some(sql), None) => Predicate::Where(sql),
-                (None, Some(text)) => Predicate::Filters(text),
-                (None, None) => Predicate::All,
-            },
+            projection,
+            predicate,
             spatial: self.spatial()?,
             limit: self.limit,
+        })
+    }
+
+    /// The projection and the predicate, in whichever of the two vocabularies was used.
+    ///
+    /// Both routes read them the same way, which is the point: a field means one thing
+    /// whichever route the request arrived on, and there is one place that decides what.
+    fn expressions(&self) -> Result<(Projection<'_>, Predicate<'_>), ApiError> {
+        let projection = match (self.select.as_deref(), self.columns.as_deref()) {
+            (Some(_), Some(_)) => return Err(one_of_two("select", "columns")),
+            (Some(sql), None) => Projection::Select(sql),
+            (None, Some(list)) => Projection::Columns(list),
+            (None, None) => Projection::All,
+        };
+        let predicate = match (self.r#where.as_deref(), self.filters.as_deref()) {
+            (Some(_), Some(_)) => return Err(one_of_two("where", "filters")),
+            (Some(sql), None) => Predicate::Where(sql),
+            (None, Some(text)) => Predicate::Filters(text),
+            (None, None) => Predicate::All,
+        };
+        Ok((projection, predicate))
+    }
+
+    /// The column names this request supplies for itself, for a target that can fill in
+    /// what it leaves out.
+    ///
+    /// Where [`Self::spatial`] refuses a region with no columns beside it, this does not: a
+    /// catalog says which of its columns hold a position, so a request against one need not.
+    /// What it may not do is name one coordinate and leave the other to the catalog — that
+    /// is a pair of columns nobody chose, and it would be tested against without either the
+    /// caller or the catalog having asked for it.
+    fn requested_columns(&self) -> Result<Requested<'_>, ApiError> {
+        let coordinates = match (self.ra_column.as_deref(), self.dec_column.as_deref()) {
+            (None, None) => None,
+            (Some(ra), Some(dec)) => Some((ra, dec)),
+            _ => return Err(ApiError::bad_request(COORDINATE_PAIR)),
+        };
+        let healpix = match (self.healpix_column.as_deref(), self.healpix_order) {
+            (None, None) => None,
+            // The caller wrote it, so a file without it is their mistake and not a file
+            // that happens to have no index.
+            (Some(column), Some(order)) => Some(Healpix {
+                column,
+                order,
+                absence: Absence::Refuse,
+            }),
+            _ => return Err(ApiError::bad_request(HEALPIX_PAIR)),
+        };
+        Ok(Requested {
+            coordinates,
+            healpix,
         })
     }
 
@@ -504,19 +553,18 @@ impl QueryRequest {
     fn spatial(&self) -> Result<Option<Spatial<'_>>, ApiError> {
         let healpix = match (self.healpix_column.as_deref(), self.healpix_order) {
             (None, None) => None,
-            (Some(column), Some(order)) => Some(Healpix { column, order }),
-            _ => {
-                return Err(ApiError::bad_request(
-                    "healpix_column and healpix_order travel together: a HEALPix index \
-                     column may be called anything and be written at any order, so the \
-                     order is what says which cell a value is",
-                ));
-            }
+            // The caller wrote it, so a file without it is their mistake and not a file
+            // that happens to have no index.
+            (Some(column), Some(order)) => Some(Healpix {
+                column,
+                order,
+                absence: Absence::Refuse,
+            }),
+            _ => return Err(ApiError::bad_request(HEALPIX_PAIR)),
         };
         if self.region.is_none() && healpix.is_some() {
             return Err(ApiError::bad_request(
-                "healpix_column speeds up a region search, and this request carries no \
-                 region; a query on that column alone is a filters or where expression",
+                "healpix_column needs a region; to filter on that column alone, use where",
             ));
         }
         match (
@@ -530,23 +578,33 @@ impl QueryRequest {
                 ra_column,
                 dec_column,
                 healpix,
+                // A url naming one file names no catalog, so nothing here says the file is
+                // a partition of one. The HATS routes fill this in.
+                partition: None,
             })),
             (Some(_), _, _) => Err(ApiError::bad_request(
-                "region is tested against two columns of the file, so a request carrying \
-                 one must also name ra_column and dec_column",
+                "region needs ra_column and dec_column",
             )),
             (None, _, _) => Err(ApiError::bad_request(
-                "ra_column and dec_column say which columns a region is tested against, \
-                 and this request carries no region",
+                "ra_column and dec_column need a region",
             )),
         }
     }
 }
 
+/// Half of the pair is not half a request. The column may be called anything and be written
+/// at any order, so the order is what says which cell a value names — and reading a column
+/// at the wrong order puts every bound where no row is, which returns nothing rather than
+/// failing. None of which the caller needs; they need to send the other field.
+const HEALPIX_PAIR: &str = "healpix_column and healpix_order must be given together";
+
+/// Likewise: one coordinate named and the other left to the catalog is a pair neither the
+/// caller nor the catalog chose, and the rows would be tested against it without either
+/// having asked.
+const COORDINATE_PAIR: &str = "ra_column and dec_column must be given together";
+
 fn one_of_two(one: &str, other: &str) -> ApiError {
-    ApiError::bad_request(format!(
-        "{one} and {other} are two ways of saying the same thing; send one of them"
-    ))
+    ApiError::bad_request(format!("send {one} or {other}, not both"))
 }
 
 /// What the caller wants back.
@@ -639,6 +697,21 @@ struct Column {
     r#type: String,
 }
 
+/// A catalog's answer: [`SelectResponse`] plus which partitions it came out of.
+///
+/// The count is what says whether the region pruned. Without it a caller cannot tell a
+/// region that reached four partitions from one that read the whole catalog and matched the
+/// same rows — the same failure `data_bytes_read` answers one file at a time.
+#[derive(Debug, Serialize)]
+struct HatsResponse {
+    num_rows: usize,
+    num_partitions: usize,
+    schema: Vec<Column>,
+    data_bytes_read: u64,
+    elapsed_ms: u128,
+    rows: Vec<serde_json::Value>,
+}
+
 #[derive(Debug, Serialize)]
 struct SelectResponse {
     num_rows: usize,
@@ -726,6 +799,161 @@ async fn query_parquet(
     Ok(response)
 }
 
+/// How many partitions of the catalog the answer was read from, which is the number that
+/// says whether a region pruned. A parquet body has no room for it, so it travels beside the
+/// other three.
+const NUM_PARTITIONS_HEADER: &str = "x-hats-num-partitions";
+
+/// A query against a catalog: the url names a HATS directory, and the partitions to read
+/// are chosen from the region rather than named by the caller.
+///
+/// The body is the same one [`query_parquet`] takes, and every field means what it means
+/// there. What differs is what the catalog can answer for itself — `ra_column`,
+/// `dec_column` and the HEALPix pair are all optional here, because a catalog's `properties`
+/// says which of its columns are a position and a lone parquet file does not.
+async fn query_hats(
+    State(service): State<Service>,
+    body: Result<Json<QueryRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let started = Instant::now();
+    let format = Format::parse(params.format.as_deref(), Format::Json)?;
+    let (projection, predicate) = params.expressions()?;
+    let requested = params.requested_columns()?;
+    let url = parse_url(params.url.as_str())?;
+    // A directory rather than an object: `open_dir` drops only the refusal of a url naming
+    // no object, and every policy check `open` makes still runs. There is no `[data]`
+    // question to ask of the url either — the caller names a catalog, and which files inside
+    // it are read is the catalog's own answer.
+    let dir = storage::open_dir(&url, &params.storage, &service.policy, &service.transfers)?;
+    let on_disk = dir.url.to_file_path().ok();
+    let hide_the_path = |error: ApiError| match &on_disk {
+        Some(path) => error.from_mount(path),
+        None => error,
+    };
+
+    let search = Search::resolve(
+        dir,
+        params.region.as_deref(),
+        requested,
+        service.catalog_limits,
+    )
+    .await
+    .map_err(&hide_the_path)?;
+    let chosen = search.chosen().len();
+    if chosen > service.catalog_limits.max_partitions {
+        return Err(ApiError::too_much_work(format!(
+            "this request reaches {chosen} partitions; this server reads at most {} in one \
+             request",
+            service.catalog_limits.max_partitions
+        )));
+    }
+    let selection = CatalogSelection {
+        projection,
+        predicate,
+        regions: params.region.as_deref(),
+        limit: params.limit,
+    };
+    let result = search
+        .run(&selection, service.data_files_for(&url), service.sql_limits)
+        .await
+        .map_err(&hide_the_path)?;
+
+    let num_rows = result.rows.num_rows();
+    let data_bytes_read = result.rows.data_bytes_read;
+    let partitions_read = result.partitions_read;
+    let response = hats_answer(&result, format, started)
+        .await
+        .map_err(&hide_the_path)?;
+    tracing::info!(
+        // The catalog's url, not the parameter, which may carry credentials.
+        url = %search.catalog().dir().url,
+        partitions = search.catalog().partitions().len(),
+        source = search.catalog().partitions().source().name(),
+        chosen,
+        partitions_read,
+        selected = params.select.is_some() || params.columns.is_some(),
+        filtered = params.r#where.is_some() || params.filters.is_some(),
+        // How many shapes, not what they were: logging the numbers would be logging the
+        // caller's own coordinates for no purpose the count does not already serve.
+        regions = params.region.as_ref().map_or(0, Vec::len),
+        format = format.name(),
+        num_rows,
+        data_bytes_read,
+        elapsed_ms = started.elapsed().as_millis(),
+        "catalog query"
+    );
+    Ok(response)
+}
+
+/// The catalog's answer, in whichever encoding was asked for.
+///
+/// A parquet body copies its layout from one of the partitions actually read, which is the
+/// nearest thing to "the source file" a catalog has. A request that read nothing gets the
+/// writer's own defaults, there being no file to copy from.
+async fn hats_answer(
+    result: &crate::hats_query::CatalogResult,
+    format: Format,
+    started: Instant,
+) -> Result<Response, ApiError> {
+    let num_rows = result.rows.num_rows();
+    match format {
+        Format::Json => {
+            let rows = query::to_json(&result.rows)?;
+            let schema = columns_of(&result.rows);
+            Ok(Json(HatsResponse {
+                num_rows: rows.len(),
+                num_partitions: result.partitions_read,
+                schema,
+                data_bytes_read: result.rows.data_bytes_read,
+                elapsed_ms: started.elapsed().as_millis(),
+                rows,
+            })
+            .into_response())
+        }
+        Format::Parquet => {
+            let layout = match &result.source {
+                Some(file) => parquet_out::read_layout(file).await?,
+                None => parquet_out::SourceLayout::default(),
+            };
+            let body = parquet_out::encode(&result.rows, &layout)?;
+            Ok((
+                [
+                    (header::CONTENT_TYPE, PARQUET_CONTENT_TYPE.to_owned()),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"selection.parquet\"".to_owned(),
+                    ),
+                ],
+                [
+                    (NUM_ROWS_HEADER, num_rows.to_string()),
+                    (NUM_PARTITIONS_HEADER, result.partitions_read.to_string()),
+                    (
+                        DATA_BYTES_READ_HEADER,
+                        result.rows.data_bytes_read.to_string(),
+                    ),
+                    (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
+                ],
+                body,
+            )
+                .into_response())
+        }
+    }
+}
+
+/// The columns of an answer, as the schema describes them.
+fn columns_of(result: &QueryResult) -> Vec<Column> {
+    result
+        .schema
+        .fields()
+        .iter()
+        .map(|field| Column {
+            name: field.name().clone(),
+            r#type: field.data_type().to_string(),
+        })
+        .collect()
+}
+
 /// The result, in whichever encoding was asked for. Both modes answer through here, so
 /// the same query returns the same bytes whichever one carried it.
 async fn answer(
@@ -742,15 +970,7 @@ async fn answer(
 
 fn json_response(result: &QueryResult, started: Instant) -> Result<Response, ApiError> {
     let rows = query::to_json(result)?;
-    let schema = result
-        .schema
-        .fields()
-        .iter()
-        .map(|field| Column {
-            name: field.name().clone(),
-            r#type: field.data_type().to_string(),
-        })
-        .collect();
+    let schema = columns_of(result);
     Ok(Json(SelectResponse {
         num_rows: rows.len(),
         schema,
@@ -1407,6 +1627,126 @@ mod tests {
         let status = response.status();
         let body = response.into_body().collect().await.unwrap().to_bytes();
         (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    async fn ask_hats(service: Service, body: serde_json::Value) -> (StatusCode, String) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/hats")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    /// The route end to end: a body naming a catalog by a mount's path comes back with the
+    /// rows the region holds, and with the count of partitions they came out of.
+    ///
+    /// What `hats_query` tests is which partitions get read and which rows come back. What
+    /// this adds is that the request shape reaches it — the same body the parquet route
+    /// takes, with the column names left to the catalog.
+    #[tokio::test]
+    async fn the_hats_route_answers_a_region_over_a_catalog() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[0];
+        let expected = crate::hats_query::tests::inside(&region);
+        assert!(!expected.is_empty(), "the cone selects nothing");
+
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///",
+                "columns": "id",
+                "region": [region],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], expected.len());
+        assert_eq!(
+            answer["num_partitions"], 1,
+            "a cone inside one partition read others: {body}"
+        );
+        let ids: Vec<i64> = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    /// A catalog that says nothing about its position columns, and a request that says
+    /// nothing either, is refused rather than answered without a spatial test.
+    ///
+    /// Only where there is a region: the same catalog answers a request that asks no spatial
+    /// question, since the columns it cannot name are ones such a request never reads.
+    #[tokio::test]
+    async fn a_region_needs_columns_from_somewhere() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hats.properties"), "obs_collection=x\n").unwrap();
+        std::fs::write(dir.path().join("partition_info.csv"), "Norder,Npix\n0,0\n").unwrap();
+
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///",
+                "region": [{"type": "circle", "ra": 0.0, "dec": 0.0, "radius_deg": 1.0}],
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("ra_column"), "{body}");
+    }
+
+    /// A url that is not a catalog is a 404, the same as a missing file: the caller named a
+    /// place this server can reach and there is nothing of the kind at it.
+    #[tokio::test]
+    async fn a_directory_that_is_not_a_catalog_is_not_found() {
+        // No properties file under any of its names, which is the whole of what makes a
+        // directory not a catalog.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+
+    /// A region reaching more partitions than the server will read is refused, and says the
+    /// two numbers rather than failing part way through.
+    #[tokio::test]
+    async fn a_request_over_too_many_partitions_is_refused() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 2,
+            ..LimitsConfig::default()
+        };
+        let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
+        let policy =
+            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
+                .unwrap();
+        let service = Service::new(
+            policy,
+            &limits,
+            mounts,
+            &ApiConfig::default(),
+            &DataConfig::default(),
+            &ServerConfig::default(),
+        )
+        .unwrap();
+
+        let (status, body) = ask_hats(service, serde_json::json!({"url": "file:///"})).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(body.contains("at most 2"), "{body}");
     }
 
     /// `serve` is what the file server needs and the API does not, and `path` is the

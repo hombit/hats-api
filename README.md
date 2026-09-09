@@ -175,8 +175,12 @@ The caller names the data in the request body. The route is under `[api] prefix`
 
 ```
 POST /api/v1/parquet
+POST /api/v1/hats
 GET  /api/v1/health
 ```
+
+`parquet` takes a url naming one file. `hats` takes a url naming a catalog directory and
+chooses the files itself — [below](#querying-a-whole-catalog). The body is the same.
 
 ```json
 {
@@ -236,6 +240,51 @@ file's. A `limit` is still reproducible: the same request against the same file 
 the same rows, in whatever order they arrive.
 
 An error is a status code and a one-field body, `{"error": "…"}`.
+
+### Querying a whole catalog
+
+`POST /api/v1/hats` takes the same body, with `url` naming a HATS catalog directory rather
+than a file in it:
+
+```json
+{
+  "url": "s3://survey-data/catalog",
+  "region": [{ "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_deg": 0.5 }],
+  "columns": "objectid, ra, dec",
+  "limit": 1000
+}
+```
+
+The catalog's `properties` supplies what a lone file cannot, so `ra_column`, `dec_column`,
+`healpix_column` and `healpix_order` are all optional here. A request naming them overrides
+the catalog; `ra_column` and `dec_column` are given together or not at all.
+
+The answer is a `parquet`-route answer with one more field:
+
+```json
+{ "num_rows": 412, "num_partitions": 3, "schema": [], "data_bytes_read": 8241938,
+  "elapsed_ms": 380, "rows": [] }
+```
+
+`num_partitions` is how many of the catalog's partitions were read. Next to
+`data_bytes_read` it is what says the region pruned: a cone that touches three partitions
+of a hundred thousand reads three.
+
+**Rows come back in HEALPix order** — partition by partition, in the order the catalog's
+cells fall on the sky, so neighbouring rows arrive near each other and a `limit` is a
+coherent piece of sky. Within one partition nothing is promised, as everywhere else in API
+mode.
+
+**Omitting `region` reads the whole catalog**, bounded by `limits.max_partitions`. A
+request over more partitions than that is refused with `413` rather than run.
+
+The catalog's own files are read first: `hats.properties` or `properties`, then
+`partition_info.csv`, `dataset/_metadata` or a listing of `dataset/`, whichever answers
+first. Nothing is cached between requests yet, so that is two extra `GET`s per query.
+
+A catalog whose partitions are directories of files (`hats_npix_suffix = "/"`) needs a
+listing to read one, so such a catalog cannot be served over `http(s)://` — the names
+inside a partition appear in none of its metadata.
 
 ### Selecting a region of the sky
 

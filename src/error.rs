@@ -37,6 +37,11 @@ pub enum ApiError {
     /// every route has the same answer to a verb that would write.
     #[error("{0}")]
     MethodNotAllowed(String),
+    /// The request is well formed and asks for more work than this service will do. Not a
+    /// [`Self::BadRequest`]: nothing about it is wrong, and the same request against a
+    /// smaller region — or against a deployment configured to allow more — is answered.
+    #[error("{0}")]
+    TooMuchWork(String),
     /// Something on this side went wrong. The message is ours, and says nothing about
     /// the machine it happened on.
     #[error("{0}")]
@@ -80,6 +85,10 @@ impl ApiError {
 
     pub fn method_not_allowed(message: impl Into<String>) -> Self {
         Self::MethodNotAllowed(message.into())
+    }
+
+    pub fn too_much_work(message: impl Into<String>) -> Self {
+        Self::TooMuchWork(message.into())
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -136,6 +145,7 @@ impl ApiError {
             | Self::Forbidden(_)
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_)
+            | Self::TooMuchWork(_)
             | Self::Internal(_)) => ours,
             // Getting the bytes, or reading them as parquet. These are the failures the
             // one sentence is for, and the ones whose messages name the path.
@@ -167,6 +177,7 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
+            Self::TooMuchWork(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ObjectStore(error) => object_store_status(error),
             Self::Storage(error) => storage_status(error),

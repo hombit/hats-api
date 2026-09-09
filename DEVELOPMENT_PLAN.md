@@ -30,8 +30,8 @@ which.
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
-| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: a row covering per partition order among the boundary partitions, `moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names, and `Coverage::reaches` chooses from it |
-| 5.3 | two endpoints, rows and plan | todo | |
+| 5.2 | spatial predicate | part | The machinery is built: the covering chooses the partitions, each boundary partition gets its own row prefilter, and the rows come back. What is left is the `moc` shape — `region::Region` is `circle` and `box` and nothing else. `polygon` is §9 |
+| 5.3 | two endpoints, rows and plan | part | `{api.prefix}/hats` reads rows and `max_partitions` bounds it. Left: the plan route, the per-partition sizes §5.1 names and the `max_scanned_bytes` they allow, and making the over-limit 413 carry a plan rather than a message |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -434,71 +434,42 @@ pays two `GET`s before it reads a row.
 `region` (§3.3) is one field of an ordinary request, beside `where` and `select`. Which
 of the two HATS endpoints it is sent to controls delivery (§5.3).
 
-**Execution, HATS target:**
+Rules this leaves behind live in `CLAUDE.md`. What is still open:
 
-1. `region` → MOC → intersect with the partition list. This is free, needs no column in
-   the data, and already separates two cases:
-   - **partitions fully inside the region** — every row qualifies, no spatial test at all;
-   - **partitions the region only partly covers** — rows need a per-row test.
-2. Per surviving partition, push down the `where` clauses that map onto its columns, fused
-   with whatever spatial predicate step 3 produces, so a partition whose statistics rule out
-   `filterid = 2` is never read.
-3. Row-level refinement, **for boundary partitions only**. Where the catalog has a spatial
-   index column (`_healpix_29`, usual but not guaranteed), prefilter on it — see below;
-   otherwise go straight to the geometric test against `ra`/`dec`, read into the scan and
-   dropped unless `select` asked for them.
-4. Union, project to `select`, return.
+**The `moc` shape, which is not written.** `region::Region` has `circle` and `box`; §3.3's
+table is the third. Two pieces: the request shape — `ascii`, or `url`, which is a
+caller-named fetch through §8.3 — and a `Shape::Moc` whose `covering` returns the caller's
+own cells as both the inner and the outer set.
 
-**Partitions come out in HEALPix order, never in the order their names sort.** A pixel's
-number is where it is on the sky, so ordering by it puts neighbouring rows near each other
-and makes a `limit` a coherent piece of sky rather than an arbitrary sample. Sorting the
-names instead puts `Npix=1000` before `Npix=2`, which is neither spatial nor numeric — it
-is the accident of how a number was spelled. Mixed orders sort by each cell's order-29
-start, which nests correctly: an order-4 partition sorts among the order-8 ones that would
-have subdivided it.
+**The caller's MOC is used as given.** No re-covering at a depth of ours, and no range
+budget: it is not an approximation of a shape, it *is* the shape, so a depth chosen here
+could only make the answer wrong. It is exact from both sides, and no row reaches any
+geometry.
 
-That applies wherever partitions are listed, not just to rows: §5.3's plan mode emits its
-`requests` in the same order, so a client fanning out and concatenating gets the same
-sequence a `sync` answer would have given.
+That is what the remaining decision turns on. `ROW_RANGE_BUDGET` drops a covering that
+grew too long for a row expression, which is safe for `circle` and `box` because the
+haversine behind it is the answer either way — the covering is only ever a saving. A MOC
+has nothing behind it, so a dropped covering is every row returned. **The budget must not
+apply to a MOC**, and a file with no HEALPix column has no cheap answer at all: either the
+cells become a hash per row on `ra`/`dec`, or such a file is refused. Decide which; the
+refusal is honest and the hash is a `ScalarUDF` this crate does not have.
 
-Ordering the partitions is what lets the API's answer be ordered at all — §4.2's rule is
-that API mode promises nothing about order, which was written when a request named one
-file. It can promise more than that here, and should: the order is free, since the
-partitions have to be enumerated anyway. What it cannot promise for free is order *within*
-a partition, which is `query::Order`'s business and unchanged.
+**Partitions are ordered wherever they are listed, not only where rows are.** §5.3's plan
+mode emits its `requests` in the same order the rows come back in, so a client fanning out
+and concatenating gets the sequence a single request would have given.
 
-Steps 1 and 3 are `healpix::Coverage`'s to answer — `reaches` for the first, `within` to
-narrow the ranges to one partition and `prefilter` to build the expression for the third —
-so what is left in this step is the code that has a catalog to ask about.
-`hats::Catalog::columns` is where the
-coordinate columns and the HEALPix pair come from against a catalog; a request naming its
-own still overrides them, which is the only way to query a lone parquet file.
+**Reading them concurrently is not built.** Where there is no `limit` every chosen
+partition is read anyway, so a bounded window of them in flight is free speed; under a
+`limit` it reads partitions whose rows are then discarded. Two cases, and only the
+sequential one is written. Worth doing with §7.2's streaming rather than before it, since
+that is what decides whether a partition's rows can leave before the next one is opened.
 
-Step 1 and step 3 need **two coverings, not one**: `healpix::Detail::Partitions` for the
-first, whose depth follows the catalog's order, and `Detail::Rows` for the third, whose
-range count is budgeted because every range is arithmetic on every row. Building one and
-using it for both is the mistake this is arranged to prevent.
-
-Step 3's covering takes `partition_order`, and a catalog with partitions at several
-`Norder` levels therefore needs one per level among its boundary partitions — a handful,
-built once each and then `within`-ed per partition, not one per partition.
+**A partition that is a directory cannot be read over `http(s)://`,** and says so as
+whatever the listing failed with rather than as a refusal naming the reason. §5.1 says why
+the case exists.
 
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
 still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.
-
-`moc` still needs adding, and it is the cheap one: a MOC is cells already, so its covering
-is exact and the inner and outer sets coincide. What it needs is the covering step and a
-depth policy — a caller's MOC may be at order 29, and the row expression's range budget is
-what decides how much of it a partition's rows are tested against.
-
-**Parquet target:** steps 1 and 3's prefilter do not apply — there is one file and no
-`_healpix_29` to lean on — leaving the geometric test against the two columns the request
-names. That part is built: `circle` compares haversines and `box` is a range in each
-coordinate, each carrying whatever coordinate bounds can be pruned on.
-
-What the HATS target adds over it: the covering step every shape needs, the partition
-intersection, the interior/boundary split, and the `_healpix_29` range sets. `moc` arrives
-with the covering step, since that is the half it is missing.
 
 Nearest-object lookup is a `circle` plus ordering and `limit: 1`, not a predicate, and
 waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.

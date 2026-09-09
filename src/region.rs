@@ -25,7 +25,7 @@ use datafusion::common::DFSchema;
 use datafusion::functions::math::expr_fn::{cos, sin};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::lit;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 use crate::{healpix, sql};
@@ -58,7 +58,11 @@ const PAD: f64 = 1e-9;
 const NEAR_ONE: f64 = 1e-6;
 
 /// One shape on the sky.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+///
+/// It serializes as well as deserializes so that a shape can be written back out in the
+/// spelling the caller used — the radius in the unit they gave it in, rather than one
+/// converted on their behalf.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Region {
     /// The cone search, under ADQL's name for it: everything within the radius of a point.
@@ -67,7 +71,11 @@ pub enum Region {
     Circle {
         ra: f64,
         dec: f64,
+        /// The radius the caller did not give is left out rather than written as `null`, so
+        /// that what goes out is a body that could have come in.
+        #[serde(skip_serializing_if = "Option::is_none")]
         radius_deg: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         radius_arcsec: Option<f64>,
     },
     /// A range in each coordinate — `ra: [349.5, 10.5], dec: [-20, -10]` — inclusive at
@@ -135,6 +143,17 @@ pub struct Spatial<'a> {
     /// a file that happens to have a column of that name says nothing about what is in it.
     /// Absent means every row reaches the trigonometry.
     pub healpix: Option<Healpix<'a>>,
+    /// The catalog cell this file *is*, where it is a partition of one.
+    ///
+    /// Two things follow from knowing it, and neither is available for a lone parquet file.
+    /// The covering gets a floor under its depth — a region far larger than the partition
+    /// would otherwise be covered at a scale that cannot tell one part of it from another —
+    /// and the covering is then cut to the partition, which is what brings a covering built
+    /// that fine back inside the range budget.
+    ///
+    /// It says nothing about which rows qualify. A partition the region contains whole
+    /// carries no [`Spatial`] at all rather than an empty one.
+    pub partition: Option<(u8, u64)>,
 }
 
 /// A HEALPix index column: which column, and what order its values are at.
@@ -148,6 +167,24 @@ pub struct Spatial<'a> {
 pub struct Healpix<'a> {
     pub column: &'a str,
     pub order: u8,
+    pub absence: Absence,
+}
+
+/// What it means for a file not to have the HEALPix column it was offered.
+///
+/// The two differ in who said the column was there, and the answer is the same either way —
+/// the column is an accelerator, so a query that cannot use it returns the same rows on the
+/// geometry alone. What differs is whether anyone should be told.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Absence {
+    /// Somebody named this column — the request, or a catalog's `hats_col_healpix`. A file
+    /// without it contradicts what they said, which is a fault met on the way and reported
+    /// where it is met.
+    Refuse,
+    /// Nobody named it: this is the `_healpix_29` default, which HATS recommends and does
+    /// not require. It is a candidate rather than a claim, so a file without it is a file
+    /// with no index and is queried on the geometry alone.
+    Ignore,
 }
 
 /// The union of every shape, as one predicate over the file's columns.
@@ -158,18 +195,9 @@ pub struct Healpix<'a> {
 /// The geometric test is the answer; a named HEALPix column only puts cheaper tests in
 /// front of it, and [`crate::healpix`] is where that happens.
 pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiError> {
-    if spatial.regions.is_empty() {
-        return Err(ApiError::bad_request(format!(
-            "{FIELD} is empty, so it constrains nothing; omit it to select every row"
-        )));
-    }
+    let shapes = shapes(spatial.regions)?;
     let ra = sql::coordinate_column(schema, spatial.ra_column, "ra_column")?;
     let dec = sql::coordinate_column(schema, spatial.dec_column, "dec_column")?;
-    let shapes = spatial
-        .regions
-        .iter()
-        .map(Region::shape)
-        .collect::<Result<Vec<_>, _>>()?;
     let exact = shapes
         .iter()
         .map(|shape| shape.predicate(&ra, &dec))
@@ -177,17 +205,51 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
         .unwrap_or_else(|| unreachable!("the array was checked to be non-empty"));
     match spatial.healpix {
         None => Ok(exact),
-        Some(Healpix { column, order }) => {
-            let index = healpix::SpatialIndex::resolve(schema, column, order, "healpix_order")?;
-            // A request names one file and says nothing about a catalog above it, so there
-            // is no partition order to put a floor under the covering.
+        Some(Healpix {
+            column,
+            order,
+            absence,
+        }) => {
+            let resolved = healpix::SpatialIndex::resolve(schema, column, order, "healpix_order");
+            let index = match (resolved, absence) {
+                (Ok(index), _) => index,
+                (Err(error), Absence::Refuse) => return Err(error),
+                // A guess that does not fit this file is not used. Every way it can fail —
+                // no such column, or one too narrow for the order — says the same thing
+                // about a column nobody named: this is not the index it was taken for.
+                (Err(error), Absence::Ignore) => {
+                    tracing::debug!(%error, "no usable HEALPix column, testing the geometry alone");
+                    return Ok(exact);
+                }
+            };
+            // A request naming one file says nothing about a catalog above it, and then
+            // there is no partition order to put a floor under the covering; a partition of
+            // a catalog says exactly that, and is cut to as well.
             let detail = healpix::Detail::Rows {
-                partition_order: None,
+                partition_order: spatial.partition.map(|(order, _)| order),
             };
             let coverage = healpix::Coverage::of(&shapes, detail);
-            Ok(coverage.prefilter(None, &index, exact))
+            Ok(coverage.prefilter(spatial.partition, &index, exact))
         }
     }
+}
+
+/// Every shape of a request, checked.
+///
+/// An empty array is refused rather than read as "no constraint". It constrains nothing, so
+/// honouring it would return every row — which a caller cannot tell from a region that
+/// contained them all, and which is not what someone who wrote the field meant. Omitting the
+/// field is how a request says it has no region, and that is a different value.
+///
+/// Shared by the predicate and by the covering, which is the point: two readings of one
+/// field is how the two come to disagree about what a request asked for.
+pub fn shapes(regions: &[Region]) -> Result<Vec<Shape>, ApiError> {
+    if regions.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "{FIELD} is empty; omit it to select every row"
+        )));
+    }
+    regions.iter().map(Region::shape).collect()
 }
 
 impl Region {
@@ -216,7 +278,7 @@ impl Region {
                 if dec_from > dec_to {
                     return Err(ApiError::bad_request(format!(
                         "{FIELD}: dec runs from the first value to the second, so the \
-                         first cannot be the greater of the two"
+                         first must be the smaller"
                     )));
                 }
                 let ra_span = eastward_span(ra_from, ra_to)?;
@@ -252,8 +314,7 @@ fn radius(degrees: Option<f64>, arcseconds: Option<f64>) -> Result<f64, ApiError
     let radius = match (degrees, arcseconds) {
         (Some(_), Some(_)) => {
             return Err(ApiError::bad_request(format!(
-                "{FIELD}: radius_deg and radius_arcsec are two ways of saying the same \
-                 thing; send one of them"
+                "{FIELD}: send radius_deg or radius_arcsec, not both"
             )));
         }
         (Some(degrees), None) => degrees,
@@ -266,7 +327,7 @@ fn radius(degrees: Option<f64>, arcseconds: Option<f64>) -> Result<f64, ApiError
     };
     if !radius.is_finite() || radius <= 0.0 || radius > 180.0 {
         return Err(ApiError::bad_request(format!(
-            "{FIELD}: a radius is greater than 0 and at most 180 degrees"
+            "{FIELD}: radius must be greater than 0 and at most 180 degrees"
         )));
     }
     Ok(radius)
@@ -286,8 +347,8 @@ fn eastward_span(from: f64, to: f64) -> Result<f64, ApiError> {
     let span = (to - from).rem_euclid(360.0);
     if span == 0.0 {
         return Err(ApiError::bad_request(format!(
-            "{FIELD}: ra runs eastward from the first value to the second, and these are \
-             the same point on the sky; write [0, 360] for every right ascension"
+            "{FIELD}: ra runs eastward from the first value to the second, and these name \
+             the same point; write [0, 360] for the whole sky"
         )));
     }
     Ok(span)
@@ -439,7 +500,7 @@ fn declination(name: &str, value: f64) -> Result<(), ApiError> {
     match (-90.0..=90.0).contains(&value) {
         true => Ok(()),
         false => Err(ApiError::bad_request(format!(
-            "{FIELD}: {name} is a declination in degrees, so it lies between -90 and 90"
+            "{FIELD}: {name} must be a declination between -90 and 90 degrees"
         ))),
     }
 }
@@ -783,7 +844,9 @@ mod tests {
                 healpix: healpix_column.map(|column| Healpix {
                     column,
                     order: FIXTURE_ORDER,
+                    absence: Absence::Refuse,
                 }),
+                partition: None,
             }),
             limit: None,
         };
@@ -891,6 +954,7 @@ mod tests {
                     ra_column: "objRA",
                     dec_column: "objDec",
                     healpix,
+                    partition: None,
                 }),
                 limit: None,
             };
@@ -904,6 +968,7 @@ mod tests {
         let (same_rows, pruned) = read(Some(Healpix {
             column: DEFAULT_HEALPIX_COLUMN_NAME,
             order: FIXTURE_ORDER,
+            absence: Absence::Refuse,
         }))
         .await;
 
@@ -1184,6 +1249,7 @@ mod tests {
                 ra_column: "ra",
                 dec_column: "dec",
                 healpix: None,
+                partition: None,
             },
         )
     }
@@ -1223,7 +1289,7 @@ mod tests {
             radius_deg,
             radius_arcsec,
         };
-        assert!(refuse(circle(Some(1.0), Some(3600.0))).contains("one of them"));
+        assert!(refuse(circle(Some(1.0), Some(3600.0))).contains("not both"));
         assert!(refuse(circle(None, None)).contains("radius_deg or radius_arcsec"));
         assert!(refuse(circle(None, Some(0.0))).contains("radius"));
     }
