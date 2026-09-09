@@ -630,25 +630,29 @@ function catalog() {
      A file's panel asks two things and a catalog's asks five, and five fields running one
      into the next say nothing about which of them go together.
 
-     The cone is a `fieldset` because that is what one is: three fields that are one value,
+     The chips write into `columns`, so nothing goes between them: the cone follows the two
+     fields a file's panel has rather than preceding them, however much it is the thing this
+     panel is for.
+
+     It is a `fieldset` because that is what a cone is here: three fields that are one value,
      and its legend is the only place that can say so *and* say it is optional. Without the
-     grouping the radius reads as a third thing to fill in beside `columns`. */
+     grouping the radius reads as a third thing to fill in beside `filters`. */
   panel.innerHTML =
     '<div class="columns-of">' +
     '<span class="count">' + (SCHEMA === null ? '' : 'reading the columns…') + '</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
-    '<fieldset class="cone"><legend>Cone search (optional)</legend>' +
-    '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
-    '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
-    '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
-    '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
-    '</fieldset>' +
     '<div class="row">' +
     '<label><span>columns</span><textarea class="columns" rows="1" ' +
     'placeholder="all of them"></textarea></label>' +
     '<label><span>filters</span><textarea class="filters" rows="1" ' +
     'placeholder="every row"></textarea></label>' +
     '</div>' +
+    '<fieldset class="cone"><legend>Cone search (optional)</legend>' +
+    '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
+    '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
+    '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
+    '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
+    '</fieldset>' +
     '<div class="row">' +
     '<span class="buttons">' +
     '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
@@ -722,30 +726,205 @@ function gate(panel) {
 
 /* The work this search fans out into, from the API's plan route: the requests a client would
    send, one per partition. It reads the catalog's own files and no rows, so it answers a
-   search of any size — which is what it is here for. */
+   search of any size — which is what it is here for.
+
+   It opens a window of its own. A plan is a page's worth of code and JSON rather than a
+   result to glance at, and it is the thing someone takes away to run — so it wants a tab
+   they can keep, scroll and print, not a panel that closes when the next query is asked. */
 function planned(panel) {
   const {route, body} = request(panel);
+  /* Opened in the click and not after the fetch: a window opened from a promise is a popup
+     as far as the browser is concerned, and gets blocked. Where it is blocked anyway, the
+     panel below is the fallback. */
+  const opened = window.open('', '_blank');
   const into = panel.querySelector('.result');
   into.textContent = 'planning…';
+  if (opened) opened.document.write('planning…');
   fetch(route + '/plan', {
     method: 'POST',
     headers: {'content-type': 'application/json'},
     body: JSON.stringify(body),
   })
     .then(response => response.text().then(text => ({response, body: parse(text)})))
-    .then(({response, body}) => {
-      if (!response.ok) throw new Error(body.error || response.status);
+    .then(({response, body: plan}) => {
+      if (!response.ok) throw new Error(plan.error || response.status);
       into.textContent = '';
       const summary = document.createElement('p');
-      summary.textContent =
-        counted(body.num_partitions, 'partition', 'partitions') + ', ' +
-        counted(body.requests.length, 'request', 'requests') +
-        (body.requires_credentials ? ', each needing your storage options attached' : '');
+      summary.textContent = counts(plan);
+      into.appendChild(summary);
+      if (opened) {
+        page(opened, plan, route, body);
+        return;
+      }
       const written = document.createElement('pre');
       written.className = 'client-code';
-      written.textContent = JSON.stringify(body, null, 2);
-      into.appendChild(summary);
+      written.textContent = JSON.stringify(plan, null, 2);
       into.appendChild(written);
     })
-    .catch(error => fail(into, error));
+    .catch(error => {
+      if (opened) opened.close();
+      fail(into, error);
+    });
+}
+
+function counts(plan) {
+  return (
+    counted(plan.num_partitions, 'partition', 'partitions') + ', ' +
+    counted(plan.requests.length, 'request', 'requests') +
+    (plan.requires_credentials ? ', each needing your storage options attached' : '')
+  );
+}
+
+/* The plan as a page: what it is, the code that runs it, and the plan itself.
+
+   Built with DOM calls rather than as markup, so nothing here has to escape a catalog's
+   name or a caller's own predicate on the way into a document. The style sheet is this
+   page's own, copied across — the window is `about:blank` and same-origin, so it has no
+   other way to get one, and inventing a second one would leave two to keep in step. */
+function page(opened, plan, route, body) {
+  const doc = opened.document;
+  /* `open` first: the window was given something to say while the plan was being fetched,
+     and a `write` into a document still open appends to it rather than replacing it. */
+  doc.open();
+  doc.write('<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>');
+  doc.close();
+  /* The path the reader is browsing, not `plan.catalog` — that is the `file://` url the
+     request carried, which names the same directory in a spelling nobody typed. */
+  doc.title = 'Plan for ' + CATALOG;
+  const style = doc.createElement('style');
+  style.textContent = document.querySelector('style').textContent;
+  doc.head.appendChild(style);
+  doc.body.className = 'js plan-page';
+
+  const heading = doc.createElement('h1');
+  heading.textContent = 'Plan for ' + CATALOG;
+  const summary = doc.createElement('p');
+  summary.textContent = counts(plan);
+  doc.body.appendChild(heading);
+  doc.body.appendChild(summary);
+
+  const said = doc.createElement('p');
+  said.textContent =
+    'Each request reads one partition, and they are in the catalog\u2019s order. ' +
+    'Concatenating the answers in that order gives what one request would have returned' +
+    (body.limit === undefined && plan.requests.some(one => one.body.limit !== undefined)
+      ? ', of which the first ' + plan.requests[0].body.limit + ' rows are the answer.'
+      : '.');
+  doc.body.appendChild(said);
+
+  for (const {title, note, code} of runners(plan, route, body)) {
+    const name = doc.createElement('h2');
+    name.textContent = title;
+    doc.body.appendChild(name);
+    if (note) {
+      const why = doc.createElement('p');
+      why.textContent = note;
+      doc.body.appendChild(why);
+    }
+    doc.body.appendChild(block(doc, code));
+  }
+}
+
+/* One titled block, with the button that copies it. Written from the parent window, which
+   can reach into a same-origin document it opened. */
+function block(doc, code) {
+  const holder = doc.createElement('div');
+  holder.className = 'clients';
+  const tabs = doc.createElement('div');
+  tabs.className = 'client-tabs';
+  const copy = doc.createElement('button');
+  copy.className = 'client-copy';
+  copy.textContent = 'copy';
+  tabs.appendChild(copy);
+  const written = doc.createElement('pre');
+  written.className = 'client-code';
+  written.textContent = code;
+  copy.addEventListener('click', () => {
+    navigator.clipboard.writeText(code).then(
+      () => {
+        copy.textContent = 'copied';
+        setTimeout(() => (copy.textContent = 'copy'), 1200);
+      },
+      () => (copy.textContent = 'press \u2318C')
+    );
+  });
+  holder.appendChild(tabs);
+  holder.appendChild(written);
+  return holder;
+}
+
+/* What running the plan looks like in each client.
+
+   Not the single-request snippets with a loop around them: those name one file, and these
+   ask for the plan and follow it, so a client that runs one of these does not have to know
+   what a plan is. `nested_pandas` is absent for the reason it is present on a file's panel —
+   it takes a url, and a plan's entries are bodies. */
+function runners(plan, route, body) {
+  const base = new URL('/', location.href).href.replace(/\/$/, '');
+  const asked = python(JSON.stringify(body, null, 4));
+  return [
+    {
+      title: 'Python',
+      note: 'The rows, as JSON. One request per partition, in order.',
+      code:
+        '# pip install requests\n' +
+        'import requests\n\n' +
+        'BASE = ' + text(base) + '\n\n' +
+        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'plan.raise_for_status()\n\n' +
+        'rows = []\n' +
+        'for request in plan.json()["requests"]:\n' +
+        '    answer = requests.post(\n' +
+        '        BASE + request["path"],\n' +
+        '        json={**request["body"], "format": "json"},\n' +
+        '    )\n' +
+        '    answer.raise_for_status()\n' +
+        '    rows += answer.json()["rows"]\n\n' +
+        'print(len(rows), "rows")',
+    },
+    {
+      title: 'pyarrow',
+      note: 'The same, as parquet, so the types are the file\u2019s rather than JSON\u2019s.',
+      code:
+        '# pip install pyarrow requests\n' +
+        'import io\n\n' +
+        'import pyarrow as pa\nimport pyarrow.parquet as pq\nimport requests\n\n' +
+        'BASE = ' + text(base) + '\n\n' +
+        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'plan.raise_for_status()\n\n' +
+        'tables = []\n' +
+        'for request in plan.json()["requests"]:\n' +
+        '    answer = requests.post(\n' +
+        '        BASE + request["path"],\n' +
+        '        json={**request["body"], "format": "parquet"},\n' +
+        '    )\n' +
+        '    answer.raise_for_status()\n' +
+        '    tables.append(pq.read_table(io.BytesIO(answer.content)))\n\n' +
+        'table = pa.concat_tables(tables)',
+    },
+    {
+      title: 'Shell',
+      note: 'Needs jq. Writes one parquet file per partition.',
+      code:
+        'curl -sS -X POST ' + route + '/plan \\\n' +
+        "  -H 'content-type: application/json' \\\n" +
+        '  -d ' + quoted(JSON.stringify(body)) + ' > plan.json\n\n' +
+        /* `format` is merged in here for the reason the two Python snippets merge it in:
+           an entry's body carries what the caller asked for and nothing else, and the API
+           answers JSON where nothing says otherwise — so without this the loop writes JSON
+           into files called `.parquet`. */
+        'jq -r \'.requests[] | "\\(.order)-\\(.pixel)\\t\\(.path)\\t' +
+        '\\(.body + {format: "parquet"} | tojson)"\' plan.json |\n' +
+        'while IFS=$\'\\t\' read -r name path request; do\n' +
+        '  curl -sS -X POST ' + base + '"$path" \\\n' +
+        "    -H 'content-type: application/json' \\\n" +
+        '    -d "$request" > "part-$name.parquet"\n' +
+        'done',
+    },
+    {
+      title: 'The plan',
+      note: 'What the code above fetches, as it stands now.',
+      code: JSON.stringify(plan, null, 2),
+    },
+  ];
 }

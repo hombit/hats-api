@@ -272,6 +272,13 @@ a.run:hover { text-decoration: none; }
      indented Python body read as a different one. */
   white-space: pre;
 }
+/* The plan, in a window of its own: a page's worth of code and JSON rather than a result to
+   glance at, and the thing someone takes away to run. It borrows this page's style sheet
+   whole, so all it needs is the headings between the blocks. */
+.plan-page { max-width: 62rem; }
+.plan-page h2 { font-size: 0.9rem; font-weight: 600; margin: 1.4rem 0 0.2rem; }
+.plan-page .clients { margin-top: 0.3rem; }
+
 /* `min-width` because a flex item is otherwise as wide as its content, which would put
    the scrollbar on the page rather than on the table. */
 .result { min-width: 0; overflow-x: auto; }
