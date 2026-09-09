@@ -33,7 +33,7 @@ pub const PARTITION_INFO: &str = "partition_info.csv";
 /// One partition: a HEALPix cell, and what the source that found it could say about its
 /// size.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Partition {
+pub struct HatsPartition {
     pub order: u8,
     pub pixel: u64,
     /// Rows in the partition, when the source knew. Only `_metadata` does.
@@ -43,7 +43,7 @@ pub struct Partition {
     pub bytes: Option<u64>,
 }
 
-impl Partition {
+impl HatsPartition {
     pub fn new(order: u8, pixel: u64) -> Self {
         Self {
             order,
@@ -94,25 +94,25 @@ impl Source {
 
 /// A catalog's partitions, sorted and ready to be searched into.
 #[derive(Debug, Clone)]
-pub struct Partitions {
-    /// Sorted by [`Partition::span`]'s start, and disjoint — which is what
+pub struct HatsPartitionList {
+    /// Sorted by [`HatsPartition::span`]'s start, and disjoint — which is what
     /// [`Self::overlapping`] relies on.
-    cells: Vec<Partition>,
+    cells: Vec<HatsPartition>,
     source: Source,
 }
 
-impl Partitions {
+impl HatsPartitionList {
     /// Sort by where each cell begins, and drop a cell named twice.
     ///
     /// The deduplication is not a repair: a cell listed twice is one partition named twice,
     /// which is the same claim and the same file.
-    fn new(mut cells: Vec<Partition>, source: Source) -> Self {
+    pub(crate) fn new(mut cells: Vec<HatsPartition>, source: Source) -> Self {
         cells.sort_by_key(|cell| (cell.span().start, cell.order));
         cells.dedup_by_key(|cell| (cell.order, cell.pixel));
         Self { cells, source }
     }
 
-    pub fn cells(&self) -> &[Partition] {
+    pub fn cells(&self) -> &[HatsPartition] {
         &self.cells
     }
 
@@ -149,7 +149,7 @@ impl Partitions {
     /// Both bounds take the partitions for a tiling — disjoint, which is what a catalog's
     /// partitions are. Nothing checks it: a catalog whose cells nest gets a slice that may
     /// leave one out, the way anything reading a broken catalog gets a broken answer.
-    pub fn overlapping(&self, range: &Range<u64>) -> &[Partition] {
+    pub fn overlapping(&self, range: &Range<u64>) -> &[HatsPartition] {
         let from = self
             .cells
             .partition_point(|cell| cell.span().end <= range.start);
@@ -167,15 +167,18 @@ impl Partitions {
 /// saying something wrong rather than saying nothing. The exception is `_metadata` being
 /// too large, which is a size this service declines to fetch rather than a fault in the
 /// file — that one falls through.
-pub async fn discover(dir: &RemoteDir, max_metadata_bytes: u64) -> Result<Partitions, ApiError> {
+pub async fn discover(
+    dir: &RemoteDir,
+    max_metadata_bytes: u64,
+) -> Result<HatsPartitionList, ApiError> {
     if let Some(bytes) = dir.read_if_present(PARTITION_INFO).await? {
-        return Ok(Partitions::new(
+        return Ok(HatsPartitionList::new(
             from_partition_info(&bytes)?,
             Source::PartitionInfo,
         ));
     }
     if let Some(cells) = read_metadata(dir, max_metadata_bytes).await? {
-        return Ok(Partitions::new(cells, Source::Metadata));
+        return Ok(HatsPartitionList::new(cells, Source::Metadata));
     }
     let listing = dir.list(DATASET_DIR).await.map_err(|error| {
         tracing::debug!(%error, "cannot list a catalog's dataset directory");
@@ -188,7 +191,7 @@ pub async fn discover(dir: &RemoteDir, max_metadata_bytes: u64) -> Result<Partit
         .iter()
         .filter_map(|entry| cell_from_path(&entry.name))
         .collect();
-    Ok(Partitions::new(cells, Source::Listing))
+    Ok(HatsPartitionList::new(cells, Source::Listing))
 }
 
 /// `Norder,Npix`, and whatever else a writer put beside them.
@@ -196,7 +199,7 @@ pub async fn discover(dir: &RemoteDir, max_metadata_bytes: u64) -> Result<Partit
 /// The two columns are found by name rather than by position: the header is what the
 /// format specifies, and a writer that adds a third column ahead of them is not a writer
 /// whose catalog should be misread a column at a time.
-fn from_partition_info(bytes: &[u8]) -> Result<Vec<Partition>, ApiError> {
+fn from_partition_info(bytes: &[u8]) -> Result<Vec<HatsPartition>, ApiError> {
     let mut reader = csv::ReaderBuilder::new()
         .trim(csv::Trim::All)
         .from_reader(bytes);
@@ -240,7 +243,7 @@ fn from_partition_info(bytes: &[u8]) -> Result<Vec<Partition>, ApiError> {
 async fn read_metadata(
     dir: &RemoteDir,
     max_bytes: u64,
-) -> Result<Option<Vec<Partition>>, ApiError> {
+) -> Result<Option<Vec<HatsPartition>>, ApiError> {
     let Some(size) = dir.size(METADATA).await? else {
         return Ok(None);
     };
@@ -259,7 +262,7 @@ async fn read_metadata(
     Ok(Some(from_metadata(&bytes)?))
 }
 
-fn from_metadata(bytes: &bytes::Bytes) -> Result<Vec<Partition>, ApiError> {
+fn from_metadata(bytes: &bytes::Bytes) -> Result<Vec<HatsPartition>, ApiError> {
     let metadata = ParquetMetaDataReader::new()
         .parse_and_finish(bytes)
         .map_err(ApiError::SourceMetadata)?;
@@ -283,7 +286,7 @@ fn from_metadata(bytes: &bytes::Bytes) -> Result<Vec<Partition>, ApiError> {
     }
     Ok(totals
         .into_iter()
-        .map(|((order, pixel), (rows, bytes))| Partition {
+        .map(|((order, pixel), (rows, bytes))| HatsPartition {
             order,
             pixel,
             rows: Some(rows),
@@ -299,7 +302,7 @@ fn from_metadata(bytes: &bytes::Bytes) -> Result<Vec<Partition>, ApiError> {
 /// `Npix=` is a directory. A path missing either is not a partition — `_common_metadata`
 /// and a catalog's `point_map.fits` sit in the same tree — and is skipped rather than
 /// refused.
-fn cell_from_path(path: &str) -> Option<Partition> {
+fn cell_from_path(path: &str) -> Option<HatsPartition> {
     let (mut order, mut pixel) = (None, None);
     for component in path.split('/') {
         let Some((key, value)) = component.split_once('=') else {
@@ -328,7 +331,7 @@ fn cell_from_path(path: &str) -> Option<Partition> {
 /// A pixel outside its order is not a partition that reads as empty — it is a partition
 /// whose span would be computed from arithmetic that overflowed, so it would claim a
 /// stretch of sky belonging to a real partition and shadow it in every search.
-fn cell(order: u64, pixel: u64) -> Result<Partition, ApiError> {
+fn cell(order: u64, pixel: u64) -> Result<HatsPartition, ApiError> {
     let order = u8::try_from(order)
         .ok()
         .filter(|order| *order <= healpix::MAX_ORDER)
@@ -345,7 +348,7 @@ fn cell(order: u64, pixel: u64) -> Result<Partition, ApiError> {
             cdshealpix::nested::n_hash(order)
         )));
     }
-    Ok(Partition::new(order, pixel))
+    Ok(HatsPartition::new(order, pixel))
 }
 
 fn malformed(file: &str, error: &dyn std::fmt::Display) -> ApiError {
@@ -356,11 +359,11 @@ fn malformed(file: &str, error: &dyn std::fmt::Display) -> ApiError {
 mod tests {
     use super::*;
 
-    fn cells(pairs: &[(u8, u64)]) -> Partitions {
-        Partitions::new(
+    fn cells(pairs: &[(u8, u64)]) -> HatsPartitionList {
+        HatsPartitionList::new(
             pairs
                 .iter()
-                .map(|(order, pixel)| Partition::new(*order, *pixel))
+                .map(|(order, pixel)| HatsPartition::new(*order, *pixel))
                 .collect(),
             Source::Listing,
         )
@@ -369,10 +372,13 @@ mod tests {
     #[test]
     fn partition_info_is_read_by_column_name() {
         let list = from_partition_info(b"Norder,Npix\n0,11\n3,264\n").unwrap();
-        assert_eq!(list, vec![Partition::new(0, 11), Partition::new(3, 264)]);
+        assert_eq!(
+            list,
+            vec![HatsPartition::new(0, 11), HatsPartition::new(3, 264)]
+        );
         // And in whatever order a writer put the columns, beside whatever else.
         let swapped = from_partition_info(b"Npix, Dir, Norder\n264, 0, 3\n").unwrap();
-        assert_eq!(swapped, vec![Partition::new(3, 264)]);
+        assert_eq!(swapped, vec![HatsPartition::new(3, 264)]);
     }
 
     #[test]
@@ -397,7 +403,11 @@ mod tests {
             "Norder=3/Dir=0/Npix=264/part0.parquet",
             "dataset/Norder=3/Dir=0/Npix=264.parquet",
         ] {
-            assert_eq!(cell_from_path(path), Some(Partition::new(3, 264)), "{path}");
+            assert_eq!(
+                cell_from_path(path),
+                Some(HatsPartition::new(3, 264)),
+                "{path}"
+            );
         }
         for path in [
             "_common_metadata",
@@ -414,11 +424,11 @@ mod tests {
     #[test]
     fn a_partition_names_its_own_file() {
         assert_eq!(
-            Partition::new(5, 12_240).path(".parquet"),
+            HatsPartition::new(5, 12_240).path(".parquet"),
             "dataset/Norder=5/Dir=10000/Npix=12240.parquet"
         );
         assert_eq!(
-            Partition::new(0, 11).path("/"),
+            HatsPartition::new(0, 11).path("/"),
             "dataset/Norder=0/Dir=0/Npix=11/"
         );
     }

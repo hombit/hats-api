@@ -46,6 +46,7 @@ use moc::qty::Hpx;
 use moc::ranges::SNORanges;
 
 use crate::error::ApiError;
+use crate::hats::{HatsPartition, HatsPartitionList};
 use crate::region::Shape;
 use crate::sql;
 
@@ -229,6 +230,15 @@ pub enum Cover {
     Inside,
 }
 
+/// One partition a region reaches, and how much of that partition it covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reached<'a> {
+    pub partition: &'a HatsPartition,
+    /// Never [`Cover::Outside`]: a partition is reached because the outer covering
+    /// intersects its cell, which is the same question [`Coverage::cover`] answers.
+    pub cover: Cover,
+}
+
 impl Coverage {
     /// The covering of a union of shapes.
     ///
@@ -273,6 +283,44 @@ impl Coverage {
         } else {
             Cover::Outside
         }
+    }
+
+    /// The partitions of a catalog this region reaches, in the list's own order.
+    ///
+    /// **Driven from the covering, not from the partition list.** Asking [`Self::cover`]
+    /// about every partition is a pass over the whole catalog to find the handful a region
+    /// touches — a hundred thousand classifications to keep four. A covering has tens of
+    /// ranges, and the list is sorted by [`HatsPartition::span`]'s start, so each range is
+    /// answered by searching into it. `cover` stays what classifies a candidate once found;
+    /// it is the loop around it that should not be the catalog.
+    ///
+    /// The searches resume from where the last one landed, so the whole walk crosses the
+    /// list once rather than once per range. That is also what keeps a partition coarser
+    /// than the covering — one cell overlapping several ranges — out of the answer twice.
+    ///
+    /// The list is taken for a tiling, which is what a catalog's partitions are. Nothing
+    /// checks it: a catalog whose cells nest gets whatever falls out, the way anything
+    /// reading a broken catalog does.
+    pub fn reaches<'a>(&self, partitions: &'a HatsPartitionList) -> Vec<Reached<'a>> {
+        let cells = partitions.cells();
+        let mut reached = Vec::new();
+        let mut cursor = 0;
+        for range in self.outer.moc_ranges().0.0.iter() {
+            let from = gallop(cells, cursor, |cell| cell.span().end <= range.start);
+            let to = gallop(cells, from, |cell| cell.span().start < range.end);
+            reached.extend(
+                cells
+                    .get(from..to)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|partition| Reached {
+                        partition,
+                        cover: self.cover(partition.order, partition.pixel),
+                    }),
+            );
+            cursor = to;
+        }
+        reached
     }
 
     /// This covering restricted to one cell — a catalog partition.
@@ -359,6 +407,39 @@ impl Coverage {
             None => outer.and(exact),
         }
     }
+}
+
+/// The first index at or after `from` where `still` stops holding.
+///
+/// `still` has to be true for a stretch of the list and false past it, which a list sorted
+/// by [`HatsPartition::span`]'s start and disjoint gives both of [`Coverage::reaches`]'s
+/// bounds.
+///
+/// **It doubles out from `from` before it searches**, so what a search costs is the gap it
+/// actually crosses rather than the length of the list. Three ways to answer a covering's
+/// ranges against a catalog, for tens of ranges over a hundred thousand partitions: a merge
+/// cannot skip and walks all hundred thousand; a plain binary search per range pays the full
+/// `log P` however near the last answer was; doubling pays the log of the distance travelled,
+/// which summed over the ranges is what a merge would cost if it were allowed to skip. A
+/// merge only overtakes when the covering has about as many ranges as the catalog has
+/// partitions, and a region that large is one where most of the catalog is being opened
+/// anyway.
+fn gallop(cells: &[HatsPartition], from: usize, still: impl Fn(&HatsPartition) -> bool) -> usize {
+    let rest = cells.get(from..).unwrap_or_default();
+    // Everything below `low` satisfies `still`; `step` is how far the next probe reaches
+    // past it. Probing at `low + step - 1` rather than scanning is what makes the skipped
+    // entries free: the list is monotone under `still`, so one probe that holds carries
+    // every entry behind it.
+    let mut low = 0;
+    let mut step = 1;
+    while rest.get(low + step - 1).is_some_and(&still) {
+        low += step;
+        step *= 2;
+    }
+    // The probe that failed — or the end of the list — is the far side of the answer.
+    let high = (low + step - 1).min(rest.len());
+    let window = rest.get(low..high).unwrap_or_default();
+    from + low + window.partition_point(|cell| still(cell))
 }
 
 /// A file's HEALPix column: which column, what it holds, and what order it is at.
@@ -822,6 +903,8 @@ fn depth_for(perimeter: f64) -> u8 {
 mod tests {
     use super::*;
 
+    use crate::hats::partitions::Source;
+
     /// The sky, as the covering of a circle that reaches every part of it.
     fn all_sky() -> Coverage {
         Coverage::of(
@@ -1113,16 +1196,11 @@ mod tests {
         assert_eq!(depth_for(f64::INFINITY), 0, "a shape larger than the sky");
     }
 
-    /// A covering has to bracket the shape it covers, at every scale and everywhere on the
-    /// sky — including the poles, where the cells are a different shape, and the meridian,
-    /// where the longitudes wrap.
-    ///
-    /// Checked by asking where a point is twice: once of the coverings, and once of the
-    /// geometry itself. A point the outer covering rejects must be outside; a point the
-    /// inner covering accepts must be inside. Both errors are only allowed the other way.
-    #[test]
-    fn a_covering_brackets_its_shape() {
-        let shapes = [
+    /// Shapes picked for the places a covering goes wrong: the meridian, both poles, a disk
+    /// wider than a hemisphere, edges lying on the seams where base cells meet, and the whole
+    /// sky written two ways.
+    fn awkward_shapes() -> Vec<Shape> {
+        vec![
             Shape::Circle {
                 ra: 0.0,
                 dec: 0.0,
@@ -1226,8 +1304,37 @@ mod tests {
                 dec_from: -90.0,
                 dec_to: 90.0,
             },
-        ];
-        for shape in shapes {
+        ]
+    }
+
+    /// A mixed-order tiling of the whole sky: every order-1 cell, one in three of them split
+    /// into its sixteen order-3 children.
+    ///
+    /// Mixed orders are what make a search into the list a test rather than a coincidence. A
+    /// coarse partition spans several of a fine covering's ranges, so a walk over the ranges
+    /// meets it more than once — and a walk that resumes where the last search landed is the
+    /// thing that has to return it exactly once.
+    fn tiling() -> HatsPartitionList {
+        let mut cells = Vec::new();
+        for pixel in 0..n_hash(1) {
+            match pixel % 3 {
+                0 => cells.extend((pixel << 4..(pixel + 1) << 4).map(|c| HatsPartition::new(3, c))),
+                _ => cells.push(HatsPartition::new(1, pixel)),
+            }
+        }
+        HatsPartitionList::new(cells, Source::Listing)
+    }
+
+    /// A covering has to bracket the shape it covers, at every scale and everywhere on the
+    /// sky — including the poles, where the cells are a different shape, and the meridian,
+    /// where the longitudes wrap.
+    ///
+    /// Checked by asking where a point is twice: once of the coverings, and once of the
+    /// geometry itself. A point the outer covering rejects must be outside; a point the
+    /// inner covering accepts must be inside. Both errors are only allowed the other way.
+    #[test]
+    fn a_covering_brackets_its_shape() {
+        for shape in awkward_shapes() {
             let coverage = Coverage::of(
                 &[shape],
                 Detail::Rows {
@@ -1250,6 +1357,66 @@ mod tests {
                         "{shape:?} does not cover ({ra}, {dec}), which is inside it"
                     );
                 }
+            }
+        }
+    }
+
+    /// Searching into the partition list finds exactly what a pass over it would.
+    ///
+    /// That is the whole claim [`Coverage::reaches`] makes. It is driven from the covering
+    /// rather than from the catalog, it skips stretches of the list without looking at them,
+    /// and each of its searches starts where the last one stopped — and none of that may
+    /// change which partitions come back, what each is classified as, or the order they
+    /// arrive in.
+    #[test]
+    fn a_search_into_the_partitions_finds_what_a_pass_would() {
+        let partitions = tiling();
+        for shape in awkward_shapes() {
+            // Both sides of the catalog's own order, so the covering is coarser than some
+            // partitions and finer than others.
+            for catalog_order in [0_u8, 1, 3, 6] {
+                let coverage = Coverage::of(&[shape], Detail::Partitions { catalog_order });
+                let expected = partitions
+                    .cells()
+                    .iter()
+                    .map(|cell| (cell, coverage.cover(cell.order, cell.pixel)))
+                    .filter(|&(_, cover)| cover != Cover::Outside)
+                    .collect::<Vec<_>>();
+                let reached = coverage
+                    .reaches(&partitions)
+                    .into_iter()
+                    .map(|reached| (reached.partition, reached.cover))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    reached, expected,
+                    "{shape:?} against a catalog at order {catalog_order}"
+                );
+            }
+        }
+    }
+
+    /// Doubling out and then searching lands where a search over the whole list would.
+    ///
+    /// Checked from every starting point, since the gap a search crosses is what the doubling
+    /// is sized against and a resumed search starts anywhere.
+    #[test]
+    fn galloping_lands_where_a_plain_search_would() {
+        let partitions = tiling();
+        let cells = partitions.cells();
+        for boundary in 0..=cells.len() {
+            let still = |cell: &HatsPartition| {
+                cell.span().start
+                    < cells
+                        .get(boundary)
+                        .map_or(u64::MAX, |cell| cell.span().start)
+            };
+            let expected = cells.partition_point(&still);
+            for from in 0..=expected {
+                assert_eq!(
+                    gallop(cells, from, still),
+                    expected,
+                    "resuming from {from} with the answer at {expected}"
+                );
             }
         }
     }

@@ -350,6 +350,12 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   partition is covered at a scale that cannot tell one part of that partition from another,
   and what survives `within` is a single range no row can fail. A change that makes one of
   these better at the other's expense has made something worse.
+- **Choosing partitions is driven from the covering, never from the partition list.**
+  `Coverage::reaches` walks the covering's ranges and searches into the list, resuming each
+  search where the last one landed. Asking `cover` about every partition instead is a pass
+  over the whole catalog to find the four partitions a region touches, and a walk that does
+  not resume returns a partition coarser than the covering once per range it spans. `cover`
+  classifies a candidate once found; it is the loop around it that must not be the catalog.
 - **A range set is not a cheap membership test.** It lowers to `h BETWEEN … OR h BETWEEN …`,
   which DataFusion evaluates as two comparison kernels and an `OR` per range over every
   batch — linear in the ranges, no tree and no search. Sixty of them are more arithmetic per
@@ -623,6 +629,17 @@ statuses. `a_data_file_that_is_not_parquet_is_the_callers_mistake` carries all t
 the last one has to be built from a file with more data than footer — strip a ten-row
 fixture and the offsets still land inside what is left, so nothing reads past the end and
 the test passes without the guarantee.
+
+## Names
+
+**A type and its collection never differ by one character.** `Noun` and `Nouns` read alike
+at a use site and mistaking one for the other compiles until it does not, so the collection
+is spelled out: `HatsPartition` and `HatsPartitionList`.
+
+That pair carries its prefix for a second reason. DataFusion already owns "partition" here
+— `collect_partitioned`, `target_partitions`, `partition_count` are the scan's parallel
+partitions and have nothing to do with a catalog's cells. Where a word is already taken,
+say which one is meant.
 
 ## Comments
 

@@ -4,7 +4,7 @@ use crate::data::DataFiles;
 use crate::error::ApiError;
 use crate::storage::{RemoteDir, RemoteFile};
 
-use super::partitions::{self, Partition, Partitions};
+use super::partitions::{self, HatsPartition, HatsPartitionList};
 use super::properties::{self, Properties};
 
 /// An opened catalog.
@@ -12,7 +12,7 @@ use super::properties::{self, Properties};
 pub struct Catalog {
     dir: RemoteDir,
     properties: Properties,
-    partitions: Partitions,
+    partitions: HatsPartitionList,
     collection: Option<Properties>,
 }
 
@@ -61,7 +61,7 @@ impl Catalog {
         &self.properties
     }
 
-    pub fn partitions(&self) -> &Partitions {
+    pub fn partitions(&self) -> &HatsPartitionList {
         &self.partitions
     }
 
@@ -79,7 +79,7 @@ impl Catalog {
     /// `hats_npix_suffix` decides which, and `/` — a directory — is what a catalog large
     /// enough to split a partition writes. It is not a rare shape: ZTF DR24's object
     /// catalog is one. So nothing may assume a partition is a single object.
-    pub fn partition(&self, partition: &Partition) -> Result<Partitioned, ApiError> {
+    pub fn partition(&self, partition: &HatsPartition) -> Result<Partitioned, ApiError> {
         let suffix = self.properties.npix_suffix();
         let path = partition.path(suffix);
         match self.properties.partition_is_a_directory() {
@@ -293,7 +293,7 @@ mod tests {
         }
         let mut written = Vec::new();
         for (order, pixel) in CELLS {
-            let cell = Partition::new(order, pixel);
+            let cell = HatsPartition::new(order, pixel);
             let path = cell.path(".parquet");
             let file = root.join(&path);
             fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -523,8 +523,8 @@ hats_order=3
         for (order, pixel) in CELLS {
             let one = dir
                 .path()
-                .join(Partition::new(order, pixel).path(".parquet"));
-            let many = dir.path().join(Partition::new(order, pixel).path("/"));
+                .join(HatsPartition::new(order, pixel).path(".parquet"));
+            let many = dir.path().join(HatsPartition::new(order, pixel).path("/"));
             fs::create_dir_all(&many).unwrap();
             fs::rename(&one, many.join("part0.parquet")).unwrap();
             fs::copy(many.join("part0.parquet"), many.join("part1.parquet")).unwrap();

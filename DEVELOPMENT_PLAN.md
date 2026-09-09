@@ -30,7 +30,7 @@ which.
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
-| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: calling `Coverage::cover` per partition, `Coverage::within` per boundary partition, `polygon`/`moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names |
+| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: a row covering per partition order among the boundary partitions, `polygon`/`moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names, and `Coverage::reaches` chooses from it |
 | 5.3 | two endpoints, rows and plan | todo | |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
@@ -465,9 +465,10 @@ file. It can promise more than that here, and should: the order is free, since t
 partitions have to be enumerated anyway. What it cannot promise for free is order *within*
 a partition, which is `query::Order`'s business and unchanged.
 
-Steps 1 and 3 are `healpix::Coverage`'s to answer — `cover` for a partition, `within` to
-narrow the ranges to one, `prefilter` to build the expression — so what is left in this step
-is the code that has a catalog to ask about. `hats::Catalog::columns` is where the
+Steps 1 and 3 are `healpix::Coverage`'s to answer — `reaches` for the first, `within` to
+narrow the ranges to one partition and `prefilter` to build the expression for the third —
+so what is left in this step is the code that has a catalog to ask about.
+`hats::Catalog::columns` is where the
 coordinate columns and the HEALPix pair come from against a catalog; a request naming its
 own still overrides them, which is the only way to query a lone parquet file.
 
@@ -479,24 +480,6 @@ using it for both is the mistake this is arranged to prevent.
 Step 3's covering takes `partition_order`, and a catalog with partitions at several
 `Norder` levels therefore needs one per level among its boundary partitions — a handful,
 built once each and then `within`-ed per partition, not one per partition.
-
-**Drive step 1 from the region, not from the partition list.** Asking `cover` about every
-partition is a pass over the whole catalog to find the handful a region touches — a hundred
-thousand classifications to keep four. The region's covering has tens of ranges, and
-`Partitions::overlapping` answers each one with two binary searches into a list already
-sorted by each partition's order-29 start. So what this step walks is the covering. `cover`
-stays the thing that classifies a candidate once found — it is the loop around it that
-should not be the catalog.
-
-**Search into the partition list; do not merge with it.** Both sides are sorted, which
-invites a merge, but they are nowhere near the same length: tens of ranges against a
-catalog's hundred thousand partitions. A merge is `O(R + P)` because it cannot skip, and a
-search is `O(R log P)` — for 30 ranges over 100,000 partitions, a hundred thousand steps
-against five hundred. Better still is to gallop, resuming each search from where the last
-one landed, which is `O(R log(P/R))` and is what a merge would be if it were allowed to
-skip. A plain merge only overtakes when the covering has about as many ranges as the
-catalog has partitions, and a region that large is one where most of the catalog is being
-opened anyway.
 
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
 still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.

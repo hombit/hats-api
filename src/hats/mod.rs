@@ -24,5 +24,5 @@ pub mod partitions;
 pub mod properties;
 
 pub use catalog::{Catalog, Columns, Partitioned};
-pub use partitions::{Partition, Partitions};
+pub use partitions::{HatsPartition, HatsPartitionList};
 pub use properties::Properties;
