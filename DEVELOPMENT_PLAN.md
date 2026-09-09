@@ -30,7 +30,7 @@ which.
 | 4.3 | what the engine costs | done | every shipped setting is measured and kept; `target_partitions` under a `limit` is the one knob a request would want to set for itself |
 | 4.4 | a directory page worth looking at | done | |
 | 5.1 | HATS catalog metadata | done | the per-partition sizes are the one thing not read; §5.1 says where they belong |
-| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: a row covering per partition order among the boundary partitions, `polygon`/`moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names, and `Coverage::reaches` chooses from it |
+| 5.2 | spatial predicate | part | What is left needs the catalog wired to a request: a row covering per partition order among the boundary partitions, `moc`, and the two endpoints §5.3 names. §5.1's `Catalog` supplies the partition list and the column names, and `Coverage::reaches` chooses from it |
 | 5.3 | two endpoints, rows and plan | todo | |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
@@ -259,17 +259,19 @@ of one, and the array is a union. `ra_column` and `dec_column` are required alon
 a lone parquet file says nothing about which of its columns are a position. A catalog's
 `properties` (§5.1) does, which is what will make them optional for a HATS target.
 
-The two shapes still to add:
+The shape still to add:
 
 | `type` | fields |
 |---|---|
-| `polygon` | `vertices: [[ra, dec], …]` |
 | `moc` | `ascii`, or `url` — an IVOA MOC given directly |
 
 - **`moc: {url: …}` is a caller-named fetch** and goes through §8.3 like any other.
 - **Every shape has to lower to a MOC** for §5.2's partition pruning. `circle` and `box`
-  do; `polygon` and `moc` arrive needing both that and a per-row predicate.
+  do. `moc` is already cells, so it is the one shape whose exact test *is* its covering:
+  the outer and inner sets are the same set, and no row reaches any geometry.
 - **Intersection and difference** are cheap to add as explicit combinators over the array.
+
+`polygon` is §9. It is the one shape whose per-row test is not a formula.
 
 ### 3.4 The file-server request shape
 
@@ -484,10 +486,10 @@ built once each and then `within`-ed per partition, not one per partition.
 This reduces bytes read per row, not rows per query. A region over a dense catalog can
 still select terabytes, which is what §5.3's `max_scanned_bytes` and plan mode are for.
 
-`polygon` and `moc` still need adding. Each needs a per-row geometric test of its own, and
-that is the harder half: `cdshealpix` covers a polygon, but a point-in-spherical-polygon
-test has to become a `datafusion` `Expr` over two columns, and a covering alone cannot
-answer a request exactly.
+`moc` still needs adding, and it is the cheap one: a MOC is cells already, so its covering
+is exact and the inner and outer sets coincide. What it needs is the covering step and a
+depth policy — a caller's MOC may be at order 29, and the row expression's range budget is
+what decides how much of it a partition's rows are tested against.
 
 **Parquet target:** steps 1 and 3's prefilter do not apply — there is one file and no
 `_healpix_29` to lean on — leaving the geometric test against the two columns the request
@@ -495,8 +497,8 @@ names. That part is built: `circle` compares haversines and `box` is a range in 
 coordinate, each carrying whatever coordinate bounds can be pruned on.
 
 What the HATS target adds over it: the covering step every shape needs, the partition
-intersection, the interior/boundary split, and the `_healpix_29` range sets. `polygon` and
-`moc` arrive with the covering step, since that is the half they are missing.
+intersection, the interior/boundary split, and the `_healpix_29` range sets. `moc` arrives
+with the covering step, since that is the half it is missing.
 
 Nearest-object lookup is a `circle` plus ordering and `limit: 1`, not a predicate, and
 waits for ordering. `crossmatch` is out of scope — `lsdb`'s job.
@@ -845,12 +847,12 @@ from the router side but is an order of magnitude less used and still pre-1.0.
   to enumerate: every url under a mount is a data path. The listing response and the
   query parameters are describable, "any path below this prefix" is not, so the README
   stays the document for that half rather than OpenAPI pretending to cover it.
-- **Not before §5.** §5.2 still adds `polygon` and `moc` to `region` and brings
+- **Not before §5.** §5.2 still adds `moc` to `region` and brings
   `POST /api/v1/hats`, and §5.3 adds the sync / plan / auto modes. Describing the API
   before those land describes a shape that then changes — the reason §4.1 waits, applied to the document that is harder to correct
   because clients will have generated code from it.
 - IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
-  `/availability`, arriving with TAP in §9.5. Nothing here should make serving both
+  `/availability`, arriving with TAP in §9.6. Nothing here should make serving both
   awkward: they are two renderings of one description, not two descriptions.
 
 ## 8. Security requirements
@@ -1034,16 +1036,44 @@ Run `cargo deny` (advisories + licences) in CI.
    not what it may reach. It takes §3.4's `columns`/`filters`, which by then every other
    shape speaks. One thing left to settle when it is built: where it sits in the url
    space, given a url nested in a url needs encoding either way.
-3. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
+3. **A `polygon` region.** `vertices: [[ra, dec], …]`, alongside `circle` and `box`.
+
+   Every other shape is a formula: a point is inside a circle or a box by an arithmetic
+   test on two numbers, which is one `datafusion` `Expr` and prunes on the coordinate
+   columns. A polygon is not, and four separate things have to be settled before it is:
+
+   - **A closed loop on a sphere bounds two regions, and the vertex list does not say
+     which.** There is no "outside" on a sphere to be the other one. So the reading has to
+     be stated — winding order, or the smaller of the two — and a caller who writes the
+     vertices the other way round gets the complement of what they meant, which is a wrong
+     answer rather than an error. Refusing the ambiguous case is not available either: both
+     readings are legal polygons.
+   - **What an edge is has to be stated too.** Two vertices at the same declination are
+     joined by a great circle or by a parallel of declination, and the two differ by
+     degrees at high declination. A caller writing a "rectangle" means the second and
+     `cdshealpix` means the first.
+   - **The per-row test is a loop, not an expression.** Point-in-spherical-polygon is a
+     crossing count over the edges, so as an `Expr` it is `N` edge tests per row with `N`
+     the caller's to choose — the one region shape whose cost per row the request sets.
+     That wants a UDF rather than an expression tree, and a UDF is a thing `sql.rs`'s
+     volatility rule and §5.2's pruning both have to be taught about.
+   - **Self-intersecting and degenerate input.** Duplicate vertices, a loop that crosses
+     itself, three collinear points, fewer than three vertices — each of which the covering
+     and the row test can disagree about.
+
+   `cdshealpix` supplies the covering, which is the half that is done. The exact test,
+   the two conventions and the refusals are the work.
+
+4. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
    already executes (§3.5), rather than opening a second execution path. ADQL's `CONTAINS`,
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
    settles the lowering and the rejection messages before the IVOA grammar.
-4. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
+5. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
    `VOTable` output, the UWS job model. `/async` is a real job system with state, and is
    where §5.3's and §7.2's no-job-queue decision is revisited.
-5. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
+6. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.
-6. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
+7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today.
 
    The obstacle is not the expression rules: an operation over one row's list is a scalar
@@ -1062,7 +1092,7 @@ Run `cargo deny` (advisories + licences) in CI.
    refuses as expression kinds. Either they stay refused — leaving a feature registered
    but unreachable, which needs saying in the error rather than a bare "not supported" —
    or the lambda arms are reconsidered, which is a wider decision than this item.
-7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+8. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap` so each is usable without the others.
 
    `hats` is the catalog itself, not this service's use of it: the properties file, the
