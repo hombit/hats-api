@@ -153,9 +153,9 @@ tr.panel > td {
 a.run { display: inline-block; text-decoration: none; }
 a.run:hover { text-decoration: none; }
 
-/* Each of these takes the whole width: the column list is long, a url wraps, and a
-   result table scrolls sideways rather than widening the page. */
-.columns-of, .asked, .result { flex-basis: 100%; }
+/* Each of these takes the whole width: the column list is long, a url wraps, a snippet
+   is lines of code, and a result table scrolls sideways rather than widening the page. */
+.columns-of, .asked, .clients, .result { flex-basis: 100%; }
 .columns-of { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; font-size: 0.75rem; color: var(--fg); }
 /* A survey catalog is a couple of hundred columns, so the list gets a bounded box to
    scroll in rather than pushing the query fields off the screen. */
@@ -179,6 +179,40 @@ a.run:hover { text-decoration: none; }
    its own when the fields beside them are wide. */
 .buttons { display: flex; gap: 0.5rem; }
 .asked { font: 0.72rem var(--mono); word-break: break-all; }
+/* The same query as a request a client sends. `min-width` for the same reason as the
+   result table: a flex item is otherwise as wide as its content, and a long line of
+   `curl` would widen the page instead of scrolling in its own box. */
+.clients { min-width: 0; }
+.client-tabs { display: flex; gap: 0.3rem; align-items: center; }
+/* The copy button sits at the far end, away from the tabs, so that reaching for one
+   language does not land on it. */
+.client-copy { margin-left: auto; }
+.client-tab, .client-copy {
+  padding: 0.1rem 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--edge);
+  border-radius: 0.25rem;
+  font: 0.72rem/1.4 system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+}
+.client-tab:hover, .client-copy:hover { background: var(--hover); border-color: var(--link); }
+/* The chosen one is filled rather than merely outlined: an outline that differs only in
+   shade is not a state anyone reads at a glance. */
+.client-tab.on { background: var(--link); border-color: var(--link); color: var(--bg); }
+.client-code {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  font: 0.72rem/1.5 var(--mono);
+  color: var(--fg);
+  overflow-x: auto;
+  /* A snippet is written with its own line breaks, and wrapping them would make an
+     indented Python body read as a different one. */
+  white-space: pre;
+}
 /* `min-width` because a flex item is otherwise as wide as its content, which would put
    the scrollbar on the page rather than on the table. */
 .result { min-width: 0; overflow-x: auto; }

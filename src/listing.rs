@@ -200,16 +200,35 @@ impl Listing {
     /// script is an improvement on markup that is already complete without it — which is
     /// why the button it wires up is hidden until it runs, while the prose that says the
     /// same thing about the url is served either way.
-    pub fn to_html(&self, data_files: &DataFiles, show_version: bool) -> String {
+    /// `api_prefix` is the API's own subtree when API mode is on. The page writes the
+    /// request a client would send against it; with `None` there is no such request to
+    /// write, and the page says nothing about one rather than describing a route that
+    /// answers 404.
+    pub fn to_html(
+        &self,
+        data_files: &DataFiles,
+        api_prefix: Option<&str>,
+        show_version: bool,
+    ) -> String {
         let title = html_escape::encode_text(&self.path);
         let mut html = format!(
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-             <title>Index of {title}</title>\n<style>\n{STYLE}</style>\n</head>\n<body>\n\
+             <title>Index of {title}</title>\n<style>\n{STYLE}</style>\n</head>\n\
+             <body{api}>\n\
              <h1>Index of {breadcrumb}</h1>\n<p class=\"summary\">{summary}</p>\n\
              <table class=\"listing\">\n\
              <thead><tr><th>Name</th><th class=\"ask-cell\"></th>\
              <th class=\"size\">Size</th><th>Last modified</th></tr></thead>\n<tbody>\n",
+            // An attribute rather than a line of generated script: the prefix is
+            // configuration, and the script is a static file that reads it.
+            api = match api_prefix {
+                Some(prefix) => format!(
+                    " data-api=\"{}\"",
+                    html_escape::encode_double_quoted_attribute(prefix)
+                ),
+                None => String::new(),
+            },
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
         );
@@ -280,6 +299,9 @@ impl Listing {
         html.push_str("</tbody>\n</table>\n");
         if queryable {
             html.push_str(QUERY_NOTE);
+            if let Some(prefix) = api_prefix {
+                html.push_str(&api_note(prefix));
+            }
         }
         if show_version {
             let _ = writeln!(html, "<p class=\"footer\">{SERVER}</p>");
@@ -362,6 +384,35 @@ const QUERY_NOTE: &str = "<p><span class=\"without-js\">Files marked \u{25c6}</s
 <span class=\"with-js\">Files with a query button</span> answer a query on their own url: \
 <code>?columns=ra,dec&amp;filters=ra&gt;10 AND dec&lt;20</code>, with \
 <code>&amp;format=parquet</code> and <code>&amp;limit=</code>.</p>\n";
+
+/// The same question as a request to the API, which is what a client writes rather than
+/// a browser. Prose, and the address is written out rather than linked: an `<a href>`
+/// below this directory would be scraped as an entry by a client reading the markup for
+/// one.
+///
+/// The url in the body is this page's own path with a `file://` in front of it, because
+/// a mount's `path` is its address in both modes. There is nothing to look up.
+///
+/// Written into the markup rather than filled in by the script, so that the sentence is
+/// complete on a page whose script did not run.
+fn api_note(prefix: &str) -> String {
+    format!(
+        "<p>The same question as an API request: <code>POST {route}</code> with a JSON \
+         body naming the file as <code>file://\u{2026}</code> — this page's own path. A \
+         file's panel writes the request out for <code>curl</code> and for the Python \
+         readers, each with the <code>pip install</code> line it needs.</p>\n",
+        route = html_escape::encode_text(&route(prefix, "parquet")),
+    )
+}
+
+/// One API route under the prefix. The root prefix already ends in the separator, so
+/// joining it the way any other is joined would give `//parquet`.
+fn route(prefix: &str, name: &str) -> String {
+    match prefix {
+        "/" => format!("/{name}"),
+        _ => format!("{prefix}/{name}"),
+    }
+}
 
 /// The directory above, or `None` at the top of the mount — which is as far up as a
 /// listing goes, whatever is above it on disk. Derived from the two urls rather than
@@ -458,6 +509,9 @@ mod tests {
 
     use super::*;
 
+    /// The API's own subtree, as `[api] prefix` defaults to it.
+    const API: &str = "/api/v1";
+
     fn accepting(accept: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, accept.parse().unwrap());
@@ -524,7 +578,7 @@ mod tests {
         // A time is UTC in the answer and UTC on the page, and the page says which:
         // a local time is a different instant for every reader and the same text for
         // all of them.
-        let html = listing(&dir).to_html(&DataFiles::default(), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
         assert!(html.contains(" UTC</time>"), "{html}");
         assert!(!html.contains("toLocaleString"), "{html}");
 
@@ -607,11 +661,11 @@ mod tests {
     fn a_file_that_can_be_queried_says_so() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("properties"), b"x").unwrap();
-        let plain = listing(&dir).to_html(&DataFiles::default(), true);
+        let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
         assert!(!plain.contains("columns="), "{plain}");
 
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default(), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
         assert!(html.contains("columns="), "{html}");
         assert!(
             html.contains("<a class=\"data\" href=\"/part0.parquet\""),
@@ -623,7 +677,7 @@ mod tests {
         assert_eq!(html.matches("class=\"ask\"").count(), 1, "{html}");
         // The page says what generated it, unless the operator would rather it did not.
         assert!(html.contains(env!("CARGO_PKG_VERSION")), "{html}");
-        let unsigned = listing(&dir).to_html(&DataFiles::default(), false);
+        let unsigned = listing(&dir).to_html(&DataFiles::default(), Some(API), false);
         assert!(!unsigned.contains(env!("CARGO_PKG_VERSION")), "{unsigned}");
         assert!(
             html.contains("<button class=\"ask\" data-url=\"/part0.parquet\">"),
@@ -641,7 +695,7 @@ mod tests {
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1", false).unwrap();
 
-        let html = listing.to_html(&DataFiles::default(), true);
+        let html = listing.to_html(&DataFiles::default(), Some(API), true);
         let scraped: Vec<&str> = html
             .split("<a")
             .skip(1)
@@ -662,12 +716,46 @@ mod tests {
         fs::write(dir.path().join("<script>alert(1)<script>"), b"x").unwrap();
         fs::write(dir.path().join("a\"b.parquet"), b"x").unwrap();
 
-        let html = listing(&dir).to_html(&DataFiles::default(), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
         // The page has a `<script>` of its own, so what says the name did not become
         // markup is that no tag opened where the name is.
         assert!(!html.contains("<script>alert"), "{html}");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         // And the quote does not end the href it sits in.
         assert!(html.contains("href=\"/a%22b.parquet\""), "{html}");
+    }
+
+    /// The script writes the API request out, and it reads the route off the page rather
+    /// than being generated with it in. So the attribute is what carries API mode to the
+    /// panel, and a page served with the API off must not offer a route that answers 404.
+    #[test]
+    fn the_api_route_reaches_the_page_only_when_the_api_is_on() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
+
+        let on = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        assert!(on.contains("data-api=\"/api/v1\""), "{on}");
+        assert!(on.contains("POST /api/v1/parquet"), "{on}");
+
+        let off = listing(&dir).to_html(&DataFiles::default(), None, true);
+        assert!(!off.contains("data-api"), "{off}");
+        assert!(!off.contains("/parquet</code>"), "{off}");
+        // The file server's own query surface is not the API's, and is described either
+        // way: a mount answers a query string whether or not API mode is on.
+        for html in [&on, &off] {
+            assert!(html.contains("?columns=ra,dec"), "{html}");
+        }
+    }
+
+    /// A mount at the root and an API at `/` are both spelled with the one separator the
+    /// route already ends in, so joining them the way any other prefix is joined would
+    /// give `//parquet`.
+    #[test]
+    fn the_root_api_prefix_does_not_double_its_separator() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
+        let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), true);
+        assert!(html.contains("POST /parquet"), "{html}");
+        assert!(!html.contains("//parquet"), "{html}");
     }
 }

@@ -404,7 +404,12 @@ async fn list_directory(
             })?;
 
     Ok(match listing::wants_html(&request.headers) {
-        true => Html(listing.to_html(mount.data_files(), service.show_version)).into_response(),
+        true => Html(listing.to_html(
+            mount.data_files(),
+            service.api_prefix.as_deref(),
+            service.show_version,
+        ))
+        .into_response(),
         false => Json(listing).into_response(),
     })
 }

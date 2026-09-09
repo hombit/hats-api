@@ -69,9 +69,16 @@ function build(url) {
     '<span class="buttons">' +
     '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
     '<a class="run download">Download parquet</a></span>' +
-    '<div class="asked"></div><div class="result"></div></div>';
+    '<div class="asked"></div>' +
+    clients() +
+    '<div class="result"></div></div>';
   row.dataset.url = url;
   cell.querySelector('.preview').addEventListener('click', () => run(row));
+  for (const tab of cell.querySelectorAll('.client-tab')) {
+    tab.addEventListener('click', () => choose(row, tab.dataset.client));
+  }
+  const copy = cell.querySelector('.client-copy');
+  if (copy) copy.addEventListener('click', () => copied(row));
   /* A predicate over several columns is long enough to want more than a line, so Enter
      writes one and the modifier runs the query — the shape every editor and console
      already uses for a box you can type a newline into. */
@@ -83,11 +90,183 @@ function build(url) {
       }
     });
     /* The download is a link, so its address has to be right before it is clicked
-       rather than worked out on the way. */
+       rather than worked out on the way. The snippets are read and copied, which is the
+       same requirement. */
     field.addEventListener('input', () => address(row));
   }
   address(row);
   return row;
+}
+
+/* The API's own subtree, or null when API mode is off — in which case there is no
+   request to write and the panel does not offer one. */
+const API = document.body.dataset.api || null;
+
+/* Which of the snippets was last looked at. One choice for the page rather than one per
+   panel: someone who writes Python opens the next file's panel wanting Python. */
+let client = 'curl';
+
+/* Each snippet asks the same question, and they differ in what they hand back and in how
+   the file is named. Two shapes:
+
+   - a POST to the API, whose body names the file as `file://` and this page's own path.
+     Anything that reads bytes takes this one.
+   - a GET on the file's own url with the query on it, for a reader that takes a url and
+     fetches it. Not every reader can: a query answer is generated rather than served off
+     the disk, so it carries no `accept-ranges`, and one that reads parquet by asking for
+     the footer's byte range refuses it outright rather than reading the whole body.
+
+   `pip` names, not import names — `nested-pandas` is installed with a hyphen and
+   imported with an underscore, and the line is there to be pasted. Alphabetical, because
+   the order says nothing and one that drifts is one more thing to read. `aiohttp` is what
+   `fsspec` fetches a url with, and is named because nothing else pulls it in. */
+const CLIENTS = {
+  curl: {},
+  requests: {pip: 'requests', write: viaRequests},
+  nested_pandas: {pip: 'aiohttp nested-pandas requests', write: viaNestedPandas},
+  astropy: {pip: 'astropy pyarrow requests', write: viaAstropy},
+  pyarrow: {pip: 'pyarrow requests', write: viaPyarrow},
+};
+
+function clients() {
+  if (API === null) return '';
+  return (
+    '<div class="clients"><div class="client-tabs">' +
+    Object.keys(CLIENTS)
+      .map(
+        name =>
+          '<button class="client-tab" data-client="' + name + '">' + name + '</button>'
+      )
+      .join('') +
+    '<button class="client-copy" title="Copy to the clipboard">copy</button>' +
+    '</div><pre class="client-code"></pre></div>'
+  );
+}
+
+function choose(panel, name) {
+  client = name;
+  snippet(panel);
+}
+
+/* The request this query is, as a client would send it. The file is named by this page's
+   own path with `file://` in front — a mount's `path` is its address in both modes, so
+   there is nothing here to look up and nothing that says where the file is on the disk.
+
+   Built as text rather than as a link: an <a href> below this directory in the markup is
+   an entry to a client scraping the page. */
+function snippet(panel) {
+  const code = panel.querySelector('.client-code');
+  if (!code) return;
+  for (const tab of panel.querySelectorAll('.client-tab')) {
+    tab.classList.toggle('on', tab.dataset.client === client);
+  }
+  const route = new URL(API.replace(/\/$/, '') + '/parquet', location.href).href;
+  const body = {url: 'file://' + panel.dataset.url};
+  const {columns, filters} = asked(panel);
+  if (columns !== '') body.columns = columns;
+  if (filters !== '') body.filters = filters;
+  /* The file's own url with the query on it, which is the other way to ask the same
+     question — and the one a reader that takes a url can be handed directly. */
+  const got = new URL(
+    url(panel.dataset.url, {...asked(panel), format: 'parquet'}),
+    location.href
+  ).href;
+  code.textContent = write(route, body, got);
+}
+
+function write(route, body, got) {
+  const {pip, write: writer} = CLIENTS[client];
+  if (writer === undefined) return curl(route, body);
+  return '# pip install ' + pip + '\n' + writer(route, body, got);
+}
+
+/* Single-quoted, so the shell leaves the JSON alone; `format` is asked for by name
+   because the API answers JSON by default and this is the shape a shell can read. */
+function curl(route, body) {
+  return (
+    'curl -sS -X POST ' + route + ' \\\n' +
+    "  -H 'content-type: application/json' \\\n" +
+    '  -d ' + quoted(JSON.stringify({...body, format: 'json'}))
+  );
+}
+
+function viaRequests(route, body) {
+  return (
+    'import requests\n\n' +
+    post(route, body) +
+    'rows = answer.json()["rows"]'
+  );
+}
+
+/* Parquet back, and read without touching the disk: the answer is a file, and the point
+   of asking for it is to keep the types the JSON body spells as text. */
+function viaPyarrow(route, body) {
+  return (
+    'import io\n\nimport pyarrow.parquet as pq\nimport requests\n\n' +
+    post(route, {...body, format: 'parquet'}) +
+    'table = pq.read_table(io.BytesIO(answer.content))'
+  );
+}
+
+/* The file's own url is the whole request: `read_parquet` takes one and `fsspec` fetches
+   it, so there is no client to write. A HATS row holds a whole light curve in one column,
+   and `nested_pandas` is what reads that as a frame rather than as a column of lists. */
+function viaNestedPandas(route, body, got) {
+  return 'import nested_pandas as npd\n\nframe = npd.read_parquet(\n    ' + text(got) + '\n)';
+}
+
+/* Through `pyarrow` rather than `Table.read`, which needs `pandas` for a parquet file
+   whatever else is installed. The columns go across as a dict, so nothing here is a
+   second copy of the types. */
+function viaAstropy(route, body) {
+  return (
+    'import io\n\nimport pyarrow.parquet as pq\nimport requests\nfrom astropy.table import Table\n\n' +
+    post(route, {...body, format: 'parquet'}) +
+    'table = Table(pq.read_table(io.BytesIO(answer.content)).to_pydict())'
+  );
+}
+
+/* The POST every reader above makes, and the `raise_for_status` that turns a refusal into
+   an exception rather than into a parse error further down. */
+function post(route, body) {
+  return (
+    'answer = requests.post(\n' +
+    '    ' + text(route) + ',\n' +
+    '    json=' + python(JSON.stringify(body, null, 4)) + ',\n' +
+    ')\nanswer.raise_for_status()\n'
+  );
+}
+
+/* One argument to the shell, whatever is in it. A single-quoted string ends at the first
+   quote, and `band = 'g'` is an ordinary predicate here — so a quote is closed, escaped
+   and reopened, which is the only thing a single-quoted shell string cannot carry. */
+function quoted(text) {
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+/* A Python string literal. `JSON.stringify` escapes the quote and the backslash the same
+   way Python does, and a url has nothing else in it that either language reads. */
+function text(value) {
+  return JSON.stringify(value);
+}
+
+/* JSON is very nearly a Python literal, and the difference here is only the indentation:
+   the body has no `true`, `false` or `null` in it, since every value is a string this
+   panel put there. */
+function python(json) {
+  return json.replace(/\n/g, '\n    ');
+}
+
+function copied(panel) {
+  const code = panel.querySelector('.client-code');
+  const button = panel.querySelector('.client-copy');
+  navigator.clipboard.writeText(code.textContent).then(
+    () => {
+      button.textContent = 'copied';
+      setTimeout(() => (button.textContent = 'copy'), 1200);
+    },
+    () => (button.textContent = 'press ⌘C')
+  );
 }
 
 /* Where the download link points, from the fields as they read now. It takes no limit:
@@ -95,6 +274,7 @@ function build(url) {
 function address(panel) {
   panel.querySelector('.download').href =
     url(panel.dataset.url, {...asked(panel), format: 'parquet'});
+  snippet(panel);
 }
 
 /* What columns the file has, which is one query with no rows in it. The answer's schema
@@ -144,6 +324,9 @@ function chip(panel, column) {
       names.splice(at, 1);
     }
     columns.value = names.join(', ');
+    /* Setting `value` from a script fires no `input` event, so the download link and the
+       snippets would go on describing the query as it was before the chip was clicked. */
+    address(panel);
   });
   return button;
 }
