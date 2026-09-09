@@ -800,12 +800,15 @@ mod tests {
     fn a_file_that_can_be_queried_says_so() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("properties"), b"x").unwrap();
+        // The note itself, not a substring of it: the script is inlined into every page and
+        // writes query strings of its own, so a bare `columns=` is on any page at all.
+        const NOTE: &str = "?columns=ra,dec";
         let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
-        assert!(!plain.contains("columns="), "{plain}");
+        assert!(!plain.contains(NOTE), "{plain}");
 
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
         let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
-        assert!(html.contains("columns="), "{html}");
+        assert!(html.contains(NOTE), "{html}");
         assert!(
             html.contains("<a class=\"data\" href=\"/part0.parquet\""),
             "{html}"

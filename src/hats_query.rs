@@ -392,10 +392,13 @@ impl Search {
     /// such partition and the ordinary catalog pays none.
     pub async fn entries(&self, data: &DataFiles) -> Result<Vec<Entry>, ApiError> {
         let suffix = self.catalog.properties().npix_suffix();
+        // The hop a collection made, which is empty for a catalog named directly. Every path
+        // here is joined onto the url the caller wrote, and that url is the collection's.
+        let within = self.catalog.within();
         let mut entries = Vec::new();
         for chosen in &self.chosen {
             let partition = &chosen.partition;
-            let path = partition.path(suffix);
+            let path = format!("{within}{}", partition.path(suffix));
             match self.catalog.partition(partition)? {
                 Partitioned::One(_) => entries.push(Entry {
                     order: partition.order,

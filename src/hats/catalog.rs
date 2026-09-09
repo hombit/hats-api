@@ -14,6 +14,13 @@ pub struct Catalog {
     properties: Properties,
     partitions: HatsPartitionList,
     collection: Option<Properties>,
+    /// The path from the url the caller named down to this catalog, empty unless a
+    /// collection was followed to get here.
+    ///
+    /// Everything that names a file to a caller is built from the url they wrote, so the hop
+    /// a collection made has to be carried rather than dropped: a plan entry built as if the
+    /// collection's own directory held the partitions names a path that is not there.
+    within: String,
 }
 
 impl Catalog {
@@ -27,13 +34,14 @@ impl Catalog {
     /// other two. A collection opens as the catalog it calls its primary table, which it
     /// may only name as a path inside itself.
     pub async fn open(dir: RemoteDir, max_catalog_metadata_bytes: u64) -> Result<Self, ApiError> {
-        let (dir, properties, collection) = match read_properties(&dir).await? {
-            Some(properties) => (dir, properties, None),
+        let (dir, properties, collection, within) = match read_properties(&dir).await? {
+            Some(properties) => (dir, properties, None, String::new()),
             None => {
                 let collection = read_collection(&dir).await?.ok_or_else(not_a_catalog)?;
-                let inside = dir.subdir(primary_table(&collection)?)?;
+                let table = primary_table(&collection)?.trim_end_matches('/').to_owned();
+                let inside = dir.subdir(&table)?;
                 let properties = read_properties(&inside).await?.ok_or_else(not_a_catalog)?;
-                (inside, properties, Some(collection))
+                (inside, properties, Some(collection), format!("{table}/"))
             }
         };
         let partitions = partitions::discover(&dir, max_catalog_metadata_bytes).await?;
@@ -42,11 +50,22 @@ impl Catalog {
             properties,
             partitions,
             collection,
+            within,
         })
     }
 
     pub fn dir(&self) -> &RemoteDir {
         &self.dir
+    }
+
+    /// The path from the url the caller named down to this catalog — empty for a catalog
+    /// named directly, and the primary table's path for one reached through a collection.
+    ///
+    /// What it is for is building a name a caller can send back. Everything this service
+    /// hands out is spelled in the caller's own url, and joining a path below the *catalog*
+    /// onto the url of the *collection* skips exactly this hop.
+    pub fn within(&self) -> &str {
+        &self.within
     }
 
     /// The collection this catalog was reached through, if it was.

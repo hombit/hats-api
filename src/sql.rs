@@ -158,10 +158,10 @@ pub fn columns(
 }
 
 /// The row predicate as the file-server vocabulary spells it — [`predicate`]'s language,
-/// with `&&` accepted for `AND`.
+/// with `&&`, `,` and `;` accepted for `AND`, `AND` and `OR`.
 ///
 /// The two fields mean the same thing, so they parse and plan through the same code and
-/// reach the same allowlist. All that differs is the one spelling.
+/// reach the same allowlist. All that differs is the spellings.
 pub fn filters(
     state: &SessionState,
     schema: &DFSchema,
@@ -170,7 +170,7 @@ pub fn filters(
 ) -> Result<Expr, ApiError> {
     const FIELD: &str = "filters";
 
-    let tokens = ands_written_as_ampersands(tokenize(text, FIELD)?);
+    let tokens = separators_written_as_operators(tokenize(text, FIELD)?);
     plan_predicate(state, schema, tokens, FIELD, limits)
 }
 
@@ -251,7 +251,8 @@ fn plan_predicate(
     )
 }
 
-/// Rewrite `&&` into `AND`, on the tokens rather than on the text.
+/// Rewrite `&&` into `AND`, and a top-level `,` and `;` into `AND` and `OR`, on the tokens
+/// rather than on the text.
 ///
 /// Rewriting the text would be a parser written by accident: inside a string literal
 /// `&&` is two characters of data, and nothing working on the characters can tell that
@@ -263,18 +264,47 @@ fn plan_predicate(
 /// Left alone it plans as an overlap and fails as an unsupported operator, which is a
 /// confusing way to be told that a spelling is not understood.
 ///
+/// **`,` and `;` are what `lsdb` sends.** Reading a HATS catalog over `http(s)://`, it
+/// pushes its predicate down as a query string in disjunctive normal form —
+/// `_healpix_29>=a,_healpix_29<b;_healpix_29>=c,_healpix_29<d` — with `,` joining a
+/// conjunction and `;` separating the alternatives. Refusing that spelling is refusing
+/// every read `lsdb` makes, since it attaches one to every partition it fetches. SQL's own
+/// precedence is what makes the plain rewrite correct: `AND` binds tighter than `OR`, so
+/// the alternatives come out grouped the way the caller meant them.
+///
+/// **Only outside parentheses.** A comma inside one belongs to an `IN` list or a function's
+/// arguments, where it is not a separator between predicates and rewriting it would change
+/// what the caller asked. Depth is counted here rather than guessed from the text.
+///
 /// `||` gets no such treatment. It is SQL's string concatenation, and reading it as `OR`
 /// would leave one spelling with two meanings and no way to ask for the other. `OR` is
 /// written out.
-fn ands_written_as_ampersands(tokens: Vec<TokenWithSpan>) -> Vec<TokenWithSpan> {
+fn separators_written_as_operators(tokens: Vec<TokenWithSpan>) -> Vec<TokenWithSpan> {
+    let mut depth = 0i32;
     tokens
         .into_iter()
-        .map(|token| match token.token {
-            Token::Overlap => TokenWithSpan {
-                token: Token::make_keyword("AND"),
-                span: token.span,
-            },
-            _ => token,
+        .map(|token| {
+            let keyword = match token.token {
+                Token::LParen => {
+                    depth += 1;
+                    None
+                }
+                Token::RParen => {
+                    depth -= 1;
+                    None
+                }
+                Token::Overlap => Some("AND"),
+                Token::Comma if depth == 0 => Some("AND"),
+                Token::SemiColon if depth == 0 => Some("OR"),
+                _ => None,
+            };
+            match keyword {
+                Some(keyword) => TokenWithSpan {
+                    token: Token::make_keyword(keyword),
+                    span: token.span,
+                },
+                None => token,
+            }
         })
         .collect()
 }
@@ -664,6 +694,44 @@ mod tests {
         let planned = filters_of(text).unwrap();
         assert_eq!(planned, filter(text).unwrap());
         assert!(planned.contains("a && b"), "{planned}");
+    }
+
+    /// What `lsdb` sends: its predicate in disjunctive normal form, `,` joining a
+    /// conjunction and `;` separating the alternatives.
+    ///
+    /// It attaches one to every partition it reads over `http(s)://`, so a spelling refused
+    /// here is every read refused. SQL's own precedence is what groups the alternatives:
+    /// `AND` binds tighter than `OR`.
+    #[test]
+    fn filters_spells_and_and_or_the_way_lsdb_sends_them() {
+        let expected = filter("objectid >= 1 AND objectid < 2").unwrap();
+        assert_eq!(filters_of("objectid>=1,objectid<2").unwrap(), expected);
+
+        let expected =
+            filter("objectid >= 1 AND objectid < 2 OR objectid >= 5 AND objectid < 6").unwrap();
+        assert_eq!(
+            filters_of("objectid>=1,objectid<2;objectid>=5,objectid<6").unwrap(),
+            expected
+        );
+    }
+
+    /// A comma inside parentheses belongs to what it is inside — an `IN` list, a function's
+    /// arguments — and is not a separator between predicates. Rewriting it would ask a
+    /// different question and get an answer nobody could tell from the right one.
+    #[test]
+    fn commas_inside_parentheses_are_not_separators() {
+        for text in [
+            "objectid IN (1, 2, 3)",
+            "objra > 1 AND objectid IN (1, 2, 3)",
+            "coalesce(objectid, 0) > 1",
+        ] {
+            assert_eq!(filters_of(text).unwrap(), filter(text).unwrap(), "{text}");
+        }
+        // And the two together: a top-level comma joins, the ones inside the list do not.
+        assert_eq!(
+            filters_of("objectid IN (1, 2, 3),objra > 1").unwrap(),
+            filter("objectid IN (1, 2, 3) AND objra > 1").unwrap()
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ function build(url) {
     '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
     '<a class="run download">Download parquet</a></span>' +
     '<div class="asked"></div>' +
-    clients() +
+    clients(false) +
     '<div class="result"></div></div>';
   row.dataset.url = url;
   cell.querySelector('.preview').addEventListener('click', () => run(row));
@@ -132,17 +132,29 @@ const CLIENTS = {
   Body: {write: (route, body) => JSON.stringify(body, null, 2)},
   curl: {write: curl},
   requests: {pip: 'requests', write: viaRequests},
+  /* The one client that is not a request to this service at all: `lsdb` reads a HATS
+     catalog's own files, so it is offered where there is a catalog and nowhere else. */
+  lsdb: {pip: 'lsdb', write: viaLsdb, only: 'catalog'},
   nested_pandas: {pip: 'aiohttp nested-pandas requests', write: viaNestedPandas},
   astropy: {pip: 'astropy pyarrow requests', write: viaAstropy},
   pyarrow: {pip: 'pyarrow requests', write: viaPyarrow},
 };
 
-function clients() {
+/* Which of them this panel offers. A file has no catalog to hand `lsdb`, and a tab that
+   wrote a snippet naming a directory the caller did not ask about would be worse than one
+   that is not there. */
+function offered(catalog) {
+  return Object.keys(CLIENTS).filter(
+    name => CLIENTS[name].only === undefined || (CLIENTS[name].only === 'catalog' && catalog)
+  );
+}
+
+function clients(catalog) {
   if (API === null) return '';
   return (
     '<div class="clients"><div class="client-tabs">' +
     '<span class="block-title">API request</span>' +
-    Object.keys(CLIENTS)
+    offered(catalog)
       .map(
         name =>
           '<button class="client-tab" data-client="' + name + '">' + name + '</button>'
@@ -224,8 +236,13 @@ function choose(panel, name) {
 function snippet(panel) {
   const code = panel.querySelector('.client-code');
   if (!code) return;
+  /* The choice is the page's, and not every panel offers every client — someone who read
+     `lsdb` on a catalog and then opens a file's panel gets the first one that panel has
+     rather than a tab that is not there. */
+  const names = offered(panel.dataset.catalog !== undefined);
+  const chosen = names.includes(client) ? client : names[0];
   for (const tab of panel.querySelectorAll('.client-tab')) {
-    tab.classList.toggle('on', tab.dataset.client === client);
+    tab.classList.toggle('on', tab.dataset.client === chosen);
   }
   const {route, body} = running(panel);
   /* The same question as a url with the query on it, which is the other way to ask it —
@@ -234,7 +251,7 @@ function snippet(panel) {
     url(panel.dataset.url, {...asked(panel), format: 'parquet'}),
     location.href
   ).href;
-  code.textContent = write(route, body, got);
+  code.textContent = write(chosen, route, body, got);
 }
 
 /* The API request a panel's fields are, as a route and a body. Two routes over one body
@@ -275,8 +292,8 @@ function running(panel) {
   return {route, body};
 }
 
-function write(route, body, got) {
-  const {pip, write: writer} = CLIENTS[client];
+function write(chosen, route, body, got) {
+  const {pip, write: writer} = CLIENTS[chosen];
   const code = writer(route, body, got);
   return pip === undefined ? code : '# pip install ' + pip + '\n' + code;
 }
@@ -307,6 +324,50 @@ function viaPyarrow(route, body) {
     post(route, {...body, format: 'parquet'}) +
     'table = pq.read_table(io.BytesIO(answer.content))'
   );
+}
+
+/* `lsdb` does not use this service's API. It reads the catalog's own files off the file
+   server — the listing, the properties, the partitions — and pushes its own predicate down
+   as the query string this mode already answers. So the snippet names the catalog's url and
+   nothing else, and what it exercises is the static side rather than the route above.
+
+   `filters` does not carry across. Here it is SQL; `lsdb` takes pyarrow's pairs, and the two
+   are different enough that translating one into the other is a job for a person rather than
+   for a line of JavaScript. The comment says so where a caller wrote one. */
+function viaLsdb(route, body, got) {
+  const at = got.split('?')[0];
+  const circle = body.region === undefined ? undefined : body.region[0];
+  const arguments_ = [text(at)];
+  if (body.columns !== undefined) {
+    arguments_.push('columns=[' + listed(body.columns).map(bare).join(', ') + ']');
+  }
+  /* The search goes into the open rather than onto the catalog afterwards: it is what
+     decides which partitions are read, and a catalog opened without it has already agreed
+     to read them all. */
+  if (circle !== undefined) {
+    arguments_.push(
+      'search_filter=lsdb.ConeSearch(' +
+        circle.ra + ', ' + circle.dec + ', ' + circle.radius_arcsec + ')'
+    );
+  }
+  return (
+    'import lsdb\n\n' +
+    (body.filters === undefined
+      ? ''
+      : '# filters is SQL here; lsdb takes pyarrow pairs, so ' +
+        JSON.stringify(body.filters) + '\n# has to be rewritten as, say, ' +
+        'filters=[("mag", "<", 18)].\n') +
+    /* Opened and not computed. A catalog is lazy, and that is the point of it: `compute`
+       belongs where someone has decided what they want, not in the line that opens one. */
+    'catalog = lsdb.open_catalog(\n    ' + arguments_.join(',\n    ') + ',\n)'
+  );
+}
+
+/* A column as `lsdb` wants it: the name itself, not the SQL spelling of it. A name that
+   needs quoting in a select list is a plain string in a Python list. */
+function bare(name) {
+  const written = name.startsWith('"') ? name.slice(1, -1).replace(/""/g, '"') : name;
+  return text(written);
 }
 
 /* The file's own url is the whole request: `read_parquet` takes one and `fsspec` fetches
@@ -752,7 +813,7 @@ function catalog() {
     '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
     '</fieldset>' +
     '<div class="asked"></div>' +
-    clients();
+    clients(true);
   section.appendChild(panel);
 
   /* Two answers, two boxes, each headed by the button that fills it — so both are on the
@@ -856,19 +917,22 @@ function planned(panel) {
       if (!response.ok) throw new Error(plan.error || response.status);
       into.textContent = '';
       const summary = document.createElement('p');
-      summary.textContent =
-        counts(plan) + '. Each reads one partition, in the catalog’s order, so their ' +
-        'answers concatenated are what one request would have returned.';
+      summary.textContent = counts(plan);
       into.appendChild(summary);
       into.appendChild(tabs('Follow it', runners(plan, route, body)));
     })
     .catch(error => fail(into, error));
 }
 
+/* How much work it is. One request per partition is the ordinary shape and says itself; a
+   partition written as a directory of files is several, and then the two numbers differ and
+   both are worth having. */
 function counts(plan) {
+  const requests = counted(plan.requests.length, 'request', 'requests');
   return (
-    counted(plan.num_partitions, 'partition', 'partitions') + ', ' +
-    counted(plan.requests.length, 'request', 'requests') +
+    (plan.requests.length === plan.num_partitions
+      ? requests + ', one per partition'
+      : requests + ' over ' + counted(plan.num_partitions, 'partition', 'partitions')) +
     (plan.requires_credentials ? ', each needing your storage options attached' : '')
   );
 }
@@ -878,9 +942,12 @@ function counts(plan) {
    The plan itself is the first tab: it is what came back, and every tab after it is a way of
    using that. The rest are not the single-request snippets with a loop around them \u2014 those
    name one file, and these ask for the plan and follow it, so a client running one does not
-   have to know what a plan is. `nested_pandas` is absent for the reason it is present on a
-   file's panel: it takes a url, and a plan's entries are bodies. */
+   have to know what a plan is.
 
+   `nested_pandas` reads from bytes here rather than from a url. On a file's panel it is
+   handed the file's own address and fetches it itself; a plan's entries are bodies, and
+   nothing that takes a path can send one \u2014 `fsspec` and `UPath` address a resource and have
+   nowhere to put a request body. */
 function runners(plan, route, body) {
   const base = new URL('/', location.href).href.replace(/\/$/, '');
   const asked = python(JSON.stringify(body, null, 4));
@@ -908,6 +975,26 @@ function runners(plan, route, body) {
         '    answer.raise_for_status()\n' +
         '    rows += answer.json()["rows"]\n\n' +
         'print(len(rows), "rows")',
+    },
+    {
+      name: 'nested_pandas',
+      note: 'One frame, with a HATS row\u2019s light curve kept as a light curve.',
+      code:
+        '# pip install nested-pandas requests\n' +
+        'import io\n\n' +
+        'import nested_pandas as npd\nimport pandas as pd\nimport requests\n\n' +
+        'BASE = ' + text(base) + '\n\n' +
+        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'plan.raise_for_status()\n\n' +
+        'frames = []\n' +
+        'for request in plan.json()["requests"]:\n' +
+        '    answer = requests.post(\n' +
+        '        BASE + request["path"],\n' +
+        '        json={**request["body"], "format": "parquet"},\n' +
+        '    )\n' +
+        '    answer.raise_for_status()\n' +
+        '    frames.append(npd.read_parquet(io.BytesIO(answer.content)))\n\n' +
+        'frame = pd.concat(frames, ignore_index=True)',
     },
     {
       name: 'pyarrow',

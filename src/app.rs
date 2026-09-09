@@ -2628,6 +2628,65 @@ mod tests {
         (status, serde_json::from_str(&body).unwrap())
     }
 
+    /// A collection is followed one hop down to its primary table, and every url handed back
+    /// has to carry that hop.
+    ///
+    /// The entries are built from the url the *caller* wrote, which is the collection's, while
+    /// the partitions are found below the *catalog's* — so a path joined on without the hop
+    /// names a file that is not there, and the client discovers it one 404 at a time.
+    #[tokio::test]
+    async fn a_plan_for_a_collection_names_the_catalog_inside_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("collection.properties"),
+            "obs_collection=c\nhats_primary_table_url=inside\n",
+        )
+        .unwrap();
+        let inside = dir.path().join("inside");
+        std::fs::create_dir(&inside).unwrap();
+        let fixture = crate::hats_query::tests::fixture(true);
+        for name in std::fs::read_dir(fixture.path()).unwrap() {
+            let name = name.unwrap().path();
+            let to = inside.join(name.file_name().unwrap());
+            match name.is_dir() {
+                true => copy_tree(&name, &to),
+                false => std::fs::copy(&name, &to).map(|_| ()).unwrap(),
+            }
+        }
+
+        let region = crate::hats_query::tests::regions()[0].clone();
+        let (status, plan) = ask_plan(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///", "region": [region]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+
+        let url = plan["requests"][0]["body"]["url"].as_str().unwrap();
+        assert!(url.contains("/inside/dataset/"), "{url}");
+        // And it is a url this service answers, which is the whole of what an entry is for.
+        let (status, body) = ask(
+            mounted(dir.path(), &ApiConfig::default()),
+            plan["requests"][0]["body"].clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap().path();
+            let into = to.join(entry.file_name().unwrap());
+            match entry.is_dir() {
+                true => copy_tree(&entry, &into),
+                false => {
+                    std::fs::copy(&entry, &into).unwrap();
+                }
+            }
+        }
+    }
+
     /// The plan is the same work as separate requests, and every url in it is one the caller
     /// could send back to this service.
     ///
