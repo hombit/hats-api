@@ -164,6 +164,18 @@ pub struct LimitsConfig {
     /// also what decides how far `max_bytes_fetched` can overshoot, since the reads already
     /// in flight when it trips are not stopped.
     pub max_concurrent_partitions: usize,
+    /// The widest circle a query string may ask for, in arcseconds.
+    ///
+    /// The file-server mode's bound and not the API's. A url is something a browser follows
+    /// and a page offers, so what it asks for has to be answerable in one response — while a
+    /// wide cone against a catalog is a fan-out, which is what the API's plan route hands
+    /// back and a query string has no way to express.
+    ///
+    /// The other three bounds still apply behind it; this is the one that acts on the
+    /// request's own numbers rather than on what reading it turns out to cost. Raising it is
+    /// how an operator opens the file server up to wider searches, and `0` closes the
+    /// circle surface entirely, no radius being smaller than none.
+    pub max_query_radius_arcsec: f64,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -196,6 +208,10 @@ impl Default for LimitsConfig {
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             max_concurrent_partitions: 4,
+            // A minute of arc: wide enough for the cross-match a browser is actually doing
+            // — a source, its neighbours, and what a survey put at the same position — and
+            // narrow enough that a dense catalog answers it out of a couple of partitions.
+            max_query_radius_arcsec: 60.0,
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

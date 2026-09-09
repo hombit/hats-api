@@ -105,6 +105,20 @@ pub struct Listing {
     root: String,
 }
 
+/// The catalog this directory belongs to, as the page needs to describe it.
+///
+/// A catalog is browsed from the inside — `dataset/Norder=5/Dir=0` is where the files are —
+/// so the url here is the catalog's own and not this directory's, and a reader who has
+/// climbed down into a partition is still offered the search over the whole thing.
+#[derive(Debug, Clone, Copy)]
+pub struct Catalog<'a> {
+    /// `None` where this directory is neither a catalog nor inside one.
+    pub url: Option<&'a str>,
+    /// The widest circle that url will answer, which is what the page must not offer more
+    /// than: a form that writes a request the service refuses is worse than no form.
+    pub max_radius_arcsec: f64,
+}
+
 impl Listing {
     /// Read `dir`, which is `path` in the url space, below the mount published at `root`.
     ///
@@ -208,6 +222,7 @@ impl Listing {
         &self,
         data_files: &DataFiles,
         api_prefix: Option<&str>,
+        catalog: &Catalog<'_>,
         show_version: bool,
     ) -> String {
         let title = html_escape::encode_text(&self.path);
@@ -215,8 +230,9 @@ impl Listing {
             "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
              <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
              <title>Index of {title}</title>\n<style>\n{STYLE}</style>\n</head>\n\
-             <body{api}>\n\
+             <body{api}{catalog}>\n\
              <h1>Index of {breadcrumb}</h1>\n<p class=\"summary\">{summary}</p>\n\
+             {cone}\
              <table class=\"listing\">\n\
              <thead><tr><th>Name</th><th class=\"ask-cell\"></th>\
              <th class=\"size\">Size</th><th>Last modified</th></tr></thead>\n<tbody>\n",
@@ -229,6 +245,18 @@ impl Listing {
                 ),
                 None => String::new(),
             },
+            catalog = match catalog.url {
+                Some(url) => format!(
+                    " data-catalog=\"{url}\" data-max-radius=\"{radius}\"",
+                    url = html_escape::encode_double_quoted_attribute(url),
+                    radius = catalog.max_radius_arcsec,
+                ),
+                None => String::new(),
+            },
+            cone = catalog
+                .url
+                .map(|url| cone_note(url, catalog.max_radius_arcsec))
+                .unwrap_or_default(),
             breadcrumb = self.breadcrumb(),
             summary = self.summary(),
         );
@@ -385,6 +413,33 @@ const QUERY_NOTE: &str = "<p><span class=\"without-js\">Files marked \u{25c6}</s
 <code>?columns=ra,dec&amp;filters=ra&gt;10 AND dec&lt;20</code>, with \
 <code>&amp;format=parquet</code> and <code>&amp;limit=</code>.</p>\n";
 
+/// What a catalog's url answers, written where a reader browsing one can see it.
+///
+/// The section is the whole of what the page says about searching a catalog when the script
+/// did not run, and the anchor for the form when it did. It says the url form rather than
+/// describing the form, for the same reason [`QUERY_NOTE`] does: the url is what someone
+/// pastes into a client, and it is all there is without a script.
+///
+/// The catalog's own url is written out rather than linked. It is this directory or one
+/// above, so `fsspec` would drop it either way — but a page whose ancestors are linked
+/// somewhere other than the breadcrumb is a page with two answers to where they are.
+fn cone_note(url: &str, max_radius_arcsec: f64) -> String {
+    format!(
+        "<section class=\"catalog\">\n\
+         <h2>HATS catalog</h2>\n\
+         <p class=\"without-js\">This directory is inside a HATS catalog, whose url \
+         answers a cone search: \
+         <code>{url}?ra=45.6&amp;dec=-3.2&amp;radius_arcsec=10</code> — with \
+         <code>&amp;columns=</code>, <code>&amp;filters=</code>, <code>&amp;limit=</code> \
+         and <code>&amp;format=json</code>, parquet otherwise. The catalog names its own \
+         position columns and chooses which of its partitions to read. The radius reaches \
+         {max_radius_arcsec}\u{2033}; a wider search is the API's, whose plan route hands \
+         back the requests it fans out into.</p>\n\
+         </section>\n",
+        url = html_escape::encode_text(url),
+    )
+}
+
 /// The same question as a request to the API, which is what a client writes rather than
 /// a browser. Prose, and the address is written out rather than linked: an `<a href>`
 /// below this directory would be scraped as an entry by a client reading the markup for
@@ -512,6 +567,12 @@ mod tests {
     /// The API's own subtree, as `[api] prefix` defaults to it.
     const API: &str = "/api/v1";
 
+    /// A directory with no catalog over it, which is what most of these are.
+    const NO_CATALOG: Catalog<'static> = Catalog {
+        url: None,
+        max_radius_arcsec: 60.0,
+    };
+
     fn accepting(accept: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, accept.parse().unwrap());
@@ -578,7 +639,7 @@ mod tests {
         // A time is UTC in the answer and UTC on the page, and the page says which:
         // a local time is a different instant for every reader and the same text for
         // all of them.
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         assert!(html.contains(" UTC</time>"), "{html}");
         assert!(!html.contains("toLocaleString"), "{html}");
 
@@ -661,11 +722,11 @@ mod tests {
     fn a_file_that_can_be_queried_says_so() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("properties"), b"x").unwrap();
-        let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         assert!(!plain.contains("columns="), "{plain}");
 
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         assert!(html.contains("columns="), "{html}");
         assert!(
             html.contains("<a class=\"data\" href=\"/part0.parquet\""),
@@ -677,7 +738,7 @@ mod tests {
         assert_eq!(html.matches("class=\"ask\"").count(), 1, "{html}");
         // The page says what generated it, unless the operator would rather it did not.
         assert!(html.contains(env!("CARGO_PKG_VERSION")), "{html}");
-        let unsigned = listing(&dir).to_html(&DataFiles::default(), Some(API), false);
+        let unsigned = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, false);
         assert!(!unsigned.contains(env!("CARGO_PKG_VERSION")), "{unsigned}");
         assert!(
             html.contains("<button class=\"ask\" data-url=\"/part0.parquet\">"),
@@ -685,9 +746,45 @@ mod tests {
         );
     }
 
+    /// The catalog's search is offered on the catalog's own url, which is where the walk up
+    /// from this directory landed rather than the directory itself.
+    #[test]
+    fn a_catalog_s_page_says_what_its_url_answers() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
+        let listing = Listing::read(dir.path(), "/hats", "/hats/dr1/dataset", false).unwrap();
+        let html = listing.to_html(
+            &DataFiles::default(),
+            Some(API),
+            &Catalog {
+                url: Some("/hats/dr1"),
+                max_radius_arcsec: 60.0,
+            },
+            true,
+        );
+
+        // The url the search goes to, for the script and for the reader, and the bound the
+        // form must not offer past.
+        assert!(html.contains("data-catalog=\"/hats/dr1\""), "{html}");
+        assert!(html.contains("data-max-radius=\"60\""), "{html}");
+        assert!(html.contains("<code>/hats/dr1?ra="), "{html}");
+        // Said as a url, which is the whole of what the page offers with no script — so it
+        // is written for a reader rather than hidden behind one.
+        assert!(html.contains("radius_arcsec=10"), "{html}");
+        assert!(html.contains("60\u{2033}"), "{html}");
+
+        // A directory with no catalog over it says none of it.
+        let plain = listing.to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        assert!(!plain.contains("data-catalog"), "{plain}");
+        assert!(!plain.contains("HATS catalog"), "{plain}");
+    }
+
     /// `fsspec` reads this page by keeping every href below the url it asked for, so a
     /// link that is not an entry — the breadcrumb, the parent — has to point elsewhere,
     /// and a link offering a query on an entry would read as a file that is not there.
+    ///
+    /// The catalog's section is the case that makes this worth re-asking: it names a url in
+    /// its prose, and a url named in prose is one word away from being linked.
     #[test]
     fn the_only_links_below_this_directory_are_its_entries() {
         let dir = TempDir::new().unwrap();
@@ -695,7 +792,15 @@ mod tests {
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1", false).unwrap();
 
-        let html = listing.to_html(&DataFiles::default(), Some(API), true);
+        let html = listing.to_html(
+            &DataFiles::default(),
+            Some(API),
+            &Catalog {
+                url: Some("/hats/dr1"),
+                max_radius_arcsec: 60.0,
+            },
+            true,
+        );
         let scraped: Vec<&str> = html
             .split("<a")
             .skip(1)
@@ -716,7 +821,7 @@ mod tests {
         fs::write(dir.path().join("<script>alert(1)<script>"), b"x").unwrap();
         fs::write(dir.path().join("a\"b.parquet"), b"x").unwrap();
 
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         // The page has a `<script>` of its own, so what says the name did not become
         // markup is that no tag opened where the name is.
         assert!(!html.contains("<script>alert"), "{html}");
@@ -733,11 +838,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
 
-        let on = listing(&dir).to_html(&DataFiles::default(), Some(API), true);
+        let on = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         assert!(on.contains("data-api=\"/api/v1\""), "{on}");
         assert!(on.contains("POST /api/v1/parquet"), "{on}");
 
-        let off = listing(&dir).to_html(&DataFiles::default(), None, true);
+        let off = listing(&dir).to_html(&DataFiles::default(), None, &NO_CATALOG, true);
         assert!(!off.contains("data-api"), "{off}");
         assert!(!off.contains("/parquet</code>"), "{off}");
         // The file server's own query surface is not the API's, and is described either
@@ -754,7 +859,7 @@ mod tests {
     fn the_root_api_prefix_does_not_double_its_separator() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), &NO_CATALOG, true);
         assert!(html.contains("POST /parquet"), "{html}");
         assert!(!html.contains("//parquet"), "{html}");
     }

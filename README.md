@@ -7,7 +7,7 @@ Two interfaces:
 
 - **File-server mode** publishes a local directory over HTTP. Without a query string it
   is an ordinary static file server; with one, a parquet file answers a question about
-  itself.
+  itself and a HATS catalog answers a cone search over its partitions.
 - **API mode** filters a file the caller names in the request: a local one, or a remote
   one in S3, GCS, Azure Blob, a WebDAV server, or any HTTP server that honours `Range` —
   subject to rules the operator writes.
@@ -130,8 +130,11 @@ curl -G http://localhost:8080/dataset/Norder=0/Dir=0/Npix=11.parquet \
 | `filters` | one row predicate; `&&` spells `AND`. Absent returns every row. |
 | `limit` | most rows to return. |
 | `format` | `parquet` (the default here) or `json`. |
+| `ra`, `dec` | the centre of a cone, in degrees. |
+| `radius_arcsec`, `radius_deg` | its radius; exactly one of the two. |
+| `ra_column`, `dec_column` | which columns hold the position. Required with a cone against a file, refused against a catalog. |
 
-This interface is made to be compatible with
+`columns`, `filters`, `limit` and `format` are made to be compatible with
 [https://vizcat.cds.unistra.fr/hats/](https://vizcat.cds.unistra.fr/hats/).
 
 The response is a parquet file laid out like the one it came from, with the row count, the
@@ -150,11 +153,47 @@ named. Naming the columns is the thing that makes a query cheap: on a 335 MiB, 1
 Gaia partition, ten rows of everything read 335 MiB and ten rows of one column read 3.8
 MiB. `x-hats-data-bytes-read`, and `data_bytes_read` in a JSON answer, is where that shows.
 
+### Searching a catalog by its own url
+
+A HATS catalog's directory answers a cone search on its url. The catalog chooses which of
+its partitions to read and names its own position columns, so the request is the circle:
+
+```
+GET /small_sky_order3_source?ra=348.077&dec=-29.339&radius_arcsec=30&columns=source_id,mag
+```
+
+The answer is the same body as the API's catalog route — parquet by default here, with the
+partition count in `x-hats-num-partitions` — and `format=json` gives the rows with
+`num_partitions` beside them.
+
+**The radius is capped, at 60″ by default.** A url is followed rather than fanned out, so
+what it asks for has to fit in one answer; a wider search is the API's, whose plan route
+hands back the requests it takes. `[limits] max_query_radius_arcsec` is the operator's
+knob, and `0` closes the surface entirely.
+
+```toml
+[limits]
+max_query_radius_arcsec = 60
+```
+
+Without a circle the url is a directory listing as it always was, and the other parameters
+are ignored: a request for the whole catalog is a fan-out, which is the thing a url cannot
+say.
+
+### The page
+
 A browser gets a page for a directory, and a file this service reads as data gets a query
 panel on it: the columns are fetched from the file when the panel is opened, and the query
-runs against the same url a client would write by hand. It is an addition to the markup
-rather than a replacement for it — with the script blocked, the listing and its links are
-exactly what they were.
+runs against the same url a client would write by hand.
+
+A directory that is a catalog — or that is inside one, `dataset/Norder=5/Dir=0` included —
+gets the cone search over the whole catalog above it, with the request written out for
+`curl` and for the Python readers, and a **Plan** button for a search too wide to return in
+one answer.
+
+Both are additions to the markup rather than replacements for it: with the script blocked,
+the listing and its links are exactly what they were, and what the page says about querying
+it says as a url.
 
 Which files are data is one configured list of filename globs, `[data] filenames`,
 defaulting to what a HATS catalog contains:
@@ -301,6 +340,10 @@ part-way: a truncated answer is one a caller cannot tell from a complete one.
 
 **Over a limit is `413`, and the body is the plan.** So the answer to "that is more than I
 will do at once" is the list of requests that would do it.
+
+The three bind a catalog reached by its own url in file-server mode too, where a `413`
+carries the sentence rather than the plan — a url has no way to express a fan-out, which is
+also what `max_query_radius_arcsec` is about.
 
 ### Planning instead of running
 

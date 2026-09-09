@@ -233,9 +233,35 @@ everything about what SQL means here is decided there.
   `Service::data_files` where a mount governs the file makes the two modes disagree about
   what one file is.
 
+  **A directory draws the same line twice.** It has to be a catalog, and the url has to
+  carry a circle; anything else is the listing it has always been, parameters and all. The
+  second half is not a convenience — no region means the whole catalog, which is a fan-out,
+  and a fan-out is exactly what a url has no way to express.
+
 Adding a scalar function feature to the `datafusion` dependency adds everything it
 registers to what a caller may call. That is the decision being made; make it
 deliberately.
+
+## A circle in a url
+
+`ra`, `dec` and one radius are the one shape a query string carries: a `box` is two ordered
+pairs and a `moc` is a document, and neither is a parameter. It is built into a `Region` and
+checked by `Region::shape`, so a circle means the same thing in a url as in a body rather
+than being validated twice.
+
+- **The cap is the file-server mode's alone.** `[limits] max_query_radius_arcsec` acts on
+  the request's own numbers, before anything is opened. The other three bounds act on what
+  reading turns out to cost and answer with a plan; a url has no plan to answer with, so the
+  bound that can refuse early is the one that has to.
+- **A catalog under a mount refuses `ra_column` and `dec_column`**, and a lone file requires
+  them. That is the same split the API's two routes make, for the same reason, and it is why
+  both vocabularies lower to one `Selection` rather than each deciding.
+- **`hats::local` is a hint and never the answer.** It recognises a catalog from a filename
+  and one small read, because a page has to know before anyone asks; everything it says yes
+  to is opened by `Catalog::open` a moment later, and a directory that lied gets the refusal
+  any other would. Its walk upwards climbs only a catalog's own layers — `dataset`,
+  `Norder=`, `Dir=`, `Npix=` — so a directory beside a catalog is not offered the catalog's
+  query, and it stops at the mount, a listing going no higher than one.
 
 ## The order of the rows
 
@@ -654,7 +680,10 @@ has one, otherwise every entry, ordered by name. No paging, no cap, no sort para
   stays a plain `<a href>` an expression can find, rather than a link a script assembles;
   and nothing else on the page may point below the directory. The breadcrumb and the
   parent row point upwards and are dropped, but a link offering a query on an entry would
-  arrive at a client as a file that does not exist. Say such a thing in prose.
+  arrive at a client as a file that does not exist. Say such a thing in prose. The catalog's
+  own url is the case that tests the rule from the other side: it is this directory or one
+  above, so a link to it would survive the scrape — and would put an ancestor somewhere other
+  than the breadcrumb, which is where a reader looks for one.
 - **The page carries everything it needs.** No CDN, no webfont, no framework: a page that
   is blank on the network this service is built for is worse than a plain one. Inline the
   CSS, and let any script be small enough to inline and optional enough that the markup is

@@ -20,6 +20,7 @@
 //! than anything of ours.
 
 mod catalog;
+pub mod local;
 pub mod partitions;
 pub mod properties;
 

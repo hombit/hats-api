@@ -160,18 +160,36 @@ function snippet(panel) {
   for (const tab of panel.querySelectorAll('.client-tab')) {
     tab.classList.toggle('on', tab.dataset.client === client);
   }
-  const route = new URL(API.replace(/\/$/, '') + '/parquet', location.href).href;
-  const body = {url: 'file://' + panel.dataset.url};
-  const {columns, filters} = asked(panel);
-  if (columns !== '') body.columns = columns;
-  if (filters !== '') body.filters = filters;
-  /* The file's own url with the query on it, which is the other way to ask the same
-     question — and the one a reader that takes a url can be handed directly. */
+  const {route, body} = request(panel);
+  /* The same question as a url with the query on it, which is the other way to ask it —
+     and the one a reader that takes a url can be handed directly. */
   const got = new URL(
     url(panel.dataset.url, {...asked(panel), format: 'parquet'}),
     location.href
   ).href;
   code.textContent = write(route, body, got);
+}
+
+/* The API request a panel's fields are, as a route and a body. Two routes over one body
+   shape: a file names itself and a catalog names itself and a shape on the sky, and the
+   column names are the catalog's own to answer — which is why they appear in neither. */
+function request(panel) {
+  const {ra, dec, radius_arcsec, ...rest} = asked(panel);
+  const catalog = panel.dataset.catalog !== undefined;
+  const body = {url: 'file://' + panel.dataset.url, ...rest};
+  if (catalog) {
+    /* Numbers, not the strings the fields hold: the body is JSON, and `"45.6"` is a string
+       where a coordinate is expected. An empty field leaves the region out entirely, so a
+       half-written circle is not sent as one. */
+    const circle = [ra, dec, radius_arcsec].map(Number);
+    if (circle.every(value => Number.isFinite(value))) {
+      body.region = [{type: 'circle', ra: circle[0], dec: circle[1], radius_arcsec: circle[2]}];
+    }
+  }
+  return {
+    route: new URL(API.replace(/\/$/, '') + (catalog ? '/hats' : '/parquet'), location.href).href,
+    body: body,
+  };
 }
 
 function write(route, body, got) {
@@ -270,39 +288,69 @@ function copied(panel) {
 }
 
 /* Where the download link points, from the fields as they read now. It takes no limit:
-   asking for parquet is asking for the rows that matched. */
+   asking for parquet is asking for the rows that matched.
+
+   The url shown beside it follows the fields too, rather than only the last query that ran.
+   It is the thing on this panel someone copies into a client or sends to a colleague, and
+   one that lags the fields describes a different question than the one on the screen. */
 function address(panel) {
   panel.querySelector('.download').href =
     url(panel.dataset.url, {...asked(panel), format: 'parquet'});
+  const into = panel.querySelector('.asked');
+  /* A catalog's url without a circle on it is a directory listing rather than a query, so
+     showing one would offer a link that answers something else entirely. */
+  if (whole(panel)) {
+    show(into, url(panel.dataset.url, preview(panel)));
+  } else {
+    into.textContent = '';
+  }
   snippet(panel);
+}
+
+/* Whether the fields describe a request at all. A file's panel always does — every field
+   on it is optional. A catalog's needs its circle, all three of it. */
+function whole(panel) {
+  if (panel.dataset.catalog === undefined) return true;
+  const {ra, dec, radius_arcsec} = asked(panel);
+  return [ra, dec, radius_arcsec].every(
+    value => value !== undefined && Number.isFinite(Number(value))
+  );
 }
 
 /* What columns the file has, which is one query with no rows in it. The answer's schema
    is the file's own, since this asks for no projection. */
 function describe(panel) {
   const count = panel.querySelector('.count');
-  const chips = panel.querySelector('.chips');
   ask(panel.dataset.url, {limit: '0', format: 'json'})
-    .then(answer => {
-      count.textContent = counted(answer.schema.length, 'column', 'columns') + ':';
-      for (const column of answer.schema) {
-        chips.appendChild(chip(panel, column));
-      }
-      /* A survey catalog runs to a couple of hundred columns, which is more than anyone
-         reads down. Past a screenful the list gets a box of its own to scroll in and
-         something to search it with. */
-      if (answer.schema.length > 12) {
-        const find = panel.querySelector('.find');
-        find.hidden = false;
-        find.addEventListener('input', () => {
-          const wanted = find.value.trim().toLowerCase();
-          for (const button of chips.children) {
-            button.hidden = !button.textContent.toLowerCase().includes(wanted);
-          }
-        });
-      }
-    })
+    .then(answer => chipsFrom(panel, answer.schema))
     .catch(error => fail(count.parentElement, error));
+}
+
+/* The columns as buttons. Every answer carries its schema, so a panel that cannot ask for
+   one cheaply gets its columns from the first answer it does receive — which is the
+   catalog's case: a catalog has no schema of its own to read, and asking one partition for
+   theirs means choosing a partition, which is the search itself. */
+function chipsFrom(panel, schema) {
+  const count = panel.querySelector('.count');
+  const chips = panel.querySelector('.chips');
+  if (chips.children.length > 0) return;
+  count.textContent = counted(schema.length, 'column', 'columns') + ':';
+  for (const column of schema) {
+    chips.appendChild(chip(panel, column));
+  }
+  /* A survey catalog runs to a couple of hundred columns, which is more than anyone
+     reads down. Past a screenful the list gets a box of its own to scroll in and
+     something to search it with. */
+  if (schema.length > 12) {
+    const find = panel.querySelector('.find');
+    find.hidden = false;
+    find.addEventListener('input', () => {
+      const wanted = find.value.trim().toLowerCase();
+      for (const button of chips.children) {
+        button.hidden = !button.textContent.toLowerCase().includes(wanted);
+      }
+    });
+  }
 }
 
 /* A column, as a button that writes its own name into the projection. Astronomy column
@@ -364,14 +412,27 @@ function listed(value) {
 
 /* What the fields say, as query parameters. Written over several lines and sent as one:
    a newline is nothing to SQL but noise in a url, and this url is shown, copied and
-   linked to. */
+   linked to.
+
+   Every field a panel might have, and a panel has the ones it has: the catalog's carries a
+   circle and a file's does not. An empty one is left out rather than sent empty, since
+   `filters=` is a predicate that parses as nothing. */
+const FIELDS = ['ra', 'dec', 'radius_arcsec', 'columns', 'filters'];
+
 function asked(panel) {
-  const value = selector => panel.querySelector(selector).value.replace(/\s+/g, ' ').trim();
-  return {columns: value('.columns'), filters: value('.filters')};
+  const parameters = {};
+  for (const name of FIELDS) {
+    const field = panel.querySelector('.' + name);
+    if (field === null) continue;
+    const value = field.value.replace(/\s+/g, ' ').trim();
+    if (value !== '') parameters[name] = value;
+  }
+  return parameters;
 }
 
-function run(panel) {
-  const parameters = {
+/* What the preview asks for, which is also what the url beside it shows. */
+function preview(panel) {
+  return {
     ...asked(panel),
     /* The table here is a preview, so it is the front of the file and stays that size
        whatever the query. */
@@ -381,11 +442,17 @@ function run(panel) {
        it and reading the body as JSON parses a parquet file. */
     format: 'json',
   };
-  show(panel.querySelector('.asked'), url(panel.dataset.url, parameters));
+}
+
+function run(panel) {
+  const parameters = preview(panel);
   const result = panel.querySelector('.result');
   result.textContent = 'running…';
   ask(panel.dataset.url, parameters)
-    .then(answer => render(result, answer))
+    .then(answer => {
+      chipsFrom(panel, answer.schema);
+      render(result, answer);
+    })
     .catch(error => fail(result, error));
 }
 
@@ -443,6 +510,11 @@ function render(into, answer) {
     (answer.num_rows === PREVIEW
       ? 'first ' + counted(PREVIEW, 'row', 'rows')
       : counted(answer.num_rows, 'row', 'rows')) +
+    /* A catalog says how many of its partitions were read, which is the number that says
+       whether the region pruned; a file has one and does not mention it. */
+    (answer.num_partitions === undefined
+      ? ''
+      : ' from ' + counted(answer.num_partitions, 'partition', 'partitions')) +
     ', ' + bytes(answer.data_bytes_read) + ' read, ' + answer.elapsed_ms + ' ms';
   into.appendChild(summary);
   if (answer.rows.length === 0) return;
@@ -507,4 +579,127 @@ function fail(into, error) {
   said.className = 'failed';
   said.textContent = error.message || String(error);
   into.appendChild(said);
+}
+
+/* The catalog this directory belongs to, and the widest circle its url will answer. Both
+   are the server's, read off the body rather than written into the script: one of them is
+   configuration and the other is where the walk up from this directory landed. */
+const CATALOG = document.body.dataset.catalog || null;
+const MAX_RADIUS = Number(document.body.dataset.maxRadius);
+
+if (CATALOG !== null) catalog();
+
+/* The cone search over the whole catalog, as a form.
+
+   Always open, unlike a file's: a directory has one catalog and the search over it is the
+   reason someone is looking at this page. The prose it replaces stays in the markup for a
+   page whose script did not run — it says the same thing as a url, which is the part that
+   works without any of this. */
+function catalog() {
+  const section = document.querySelector('section.catalog');
+  if (section === null) return;
+  const panel = document.createElement('div');
+  panel.className = 'panel-body';
+  /* Both, because the shared helpers read `url` to build a request and `catalog` to decide
+     which kind of request it is. */
+  panel.dataset.url = CATALOG;
+  panel.dataset.catalog = '';
+  panel.innerHTML =
+    '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
+    '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
+    '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
+    '<label><span>columns</span><textarea class="columns" rows="1" ' +
+    'placeholder="all of them"></textarea></label>' +
+    '<label><span>filters</span><textarea class="filters" rows="1" ' +
+    'placeholder="every row"></textarea></label>' +
+    '<span class="buttons">' +
+    '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
+    '<a class="run download">Download parquet</a>' +
+    (API === null ? '' : '<button class="run plan">Plan</button>') +
+    '</span>' +
+    '<p class="gate"></p>' +
+    '<div class="columns-of"><span class="count"></span>' +
+    '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
+    '<div class="asked"></div>' +
+    clients() +
+    '<div class="result"></div>';
+  section.appendChild(panel);
+
+  panel.querySelector('.preview').addEventListener('click', () => run(panel));
+  const plan = panel.querySelector('.plan');
+  if (plan) plan.addEventListener('click', () => planned(panel));
+  for (const tab of panel.querySelectorAll('.client-tab')) {
+    tab.addEventListener('click', () => choose(panel, tab.dataset.client));
+  }
+  const copy = panel.querySelector('.client-copy');
+  if (copy) copy.addEventListener('click', () => copied(panel));
+  for (const field of panel.querySelectorAll('input.ra, input.dec, input.radius_arcsec, textarea')) {
+    field.addEventListener('input', () => {
+      address(panel);
+      gate(panel);
+    });
+    field.addEventListener('keydown', event => {
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        run(panel);
+      }
+    });
+  }
+  address(panel);
+  gate(panel);
+}
+
+/* Which of the two things this circle is, said before it is asked for rather than after.
+
+   A radius over the cap is a request the url refuses, and one with a field missing is not a
+   circle at all — so neither offers a download, and the message says which it is. The plan
+   stays available for both, and is the answer to the first: it reads the catalog's own files
+   and no data, so a search too wide to return is one it can still describe. */
+function gate(panel) {
+  const written = whole(panel);
+  const wide = written && Number(asked(panel).radius_arcsec) > MAX_RADIUS;
+  const note = panel.querySelector('.gate');
+  note.textContent =
+    !written ? 'A cone search takes a centre and a radius.'
+    : wide ? 'Wider than ' + MAX_RADIUS + '″, which is more than one answer carries. Plan hands back the requests it fans out into.'
+    : '';
+  for (const button of panel.querySelectorAll('.preview, .download')) {
+    /* An anchor has no `disabled`, so the class is what both of them read. */
+    button.classList.toggle('off', !written || wide);
+    if (button.disabled !== undefined) button.disabled = !written || wide;
+  }
+}
+
+/* The work this search fans out into, from the API's plan route: the requests a client would
+   send, one per partition. It reads the catalog's own files and no rows, so it answers a
+   search of any size — which is what it is here for. */
+function planned(panel) {
+  const {route, body} = request(panel);
+  const into = panel.querySelector('.result');
+  if (body.region === undefined) {
+    fail(into, new Error('A cone search takes a centre and a radius.'));
+    return;
+  }
+  into.textContent = 'planning…';
+  fetch(route + '/plan', {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify(body),
+  })
+    .then(response => response.text().then(text => ({response, body: parse(text)})))
+    .then(({response, body}) => {
+      if (!response.ok) throw new Error(body.error || response.status);
+      into.textContent = '';
+      const summary = document.createElement('p');
+      summary.textContent =
+        counted(body.num_partitions, 'partition', 'partitions') + ', ' +
+        counted(body.requests.length, 'request', 'requests') +
+        (body.requires_credentials ? ', each needing your storage options attached' : '');
+      const written = document.createElement('pre');
+      written.className = 'client-code';
+      written.textContent = JSON.stringify(body, null, 2);
+      into.appendChild(summary);
+      into.appendChild(written);
+    })
+    .catch(error => fail(into, error));
 }

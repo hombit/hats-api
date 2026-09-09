@@ -827,6 +827,15 @@ pub fn open_mounted(path: &FilePath) -> Result<RemoteFile, ApiError> {
     local_file(path)
 }
 
+/// The same, for a directory the file-server mode resolved — a catalog under a mount.
+///
+/// The trailing separator is the whole of the difference, as it is between [`open`] and
+/// [`open_dir`]: a name inside the directory then joins onto its url rather than replacing
+/// its last segment.
+pub fn open_mounted_dir(path: &FilePath) -> Result<RemoteDir, ApiError> {
+    Ok(RemoteDir::new(local_file(path)?))
+}
+
 /// A file on this machine, already resolved and allowed by the policy. The url is
 /// rebuilt from the canonical path, so what the rest of the service reads and logs is
 /// the file that was actually opened, not the way the caller spelled it.

@@ -32,6 +32,7 @@ which.
 | 5.1 | HATS catalog metadata | done | |
 | 5.2 | spatial predicate | done | `polygon` is §9; `moc` takes no `url` yet, which §3.3 says why |
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
+| 5.4 | a catalog under a mount | done | a circle only; a plan there is still §5.3's open question |
 | 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -487,10 +488,34 @@ instead; rules this leaves behind live in `CLAUDE.md`. What is still open:
 slow origin hits long before any of the three counters do.
 
 **A file-server plan has no route.** `method` and `path` are separate fields so that entries
-could be `GET`s under a mount, and nothing emits them; whether a mount wants a plan at all
-is undecided, the caller there already knowing the paths.
+could be `GET`s under a mount, and nothing emits them: a plan is a document, and the
+file-server mode's request is a url. The catalog page's Plan button posts to the API's plan
+route instead, so a mount with the API off offers no plan at all — which is what a route of
+`GET` entries would fix, if anyone wants one.
 
 No job queue, job ids or polling: the plan is a list of stateless requests. See §7.2.
+
+### 5.4 A catalog under a mount
+
+`GET {mount}/{catalog}?ra=&dec=&radius_arcsec=` runs the same search `POST {api}/hats` does,
+and the directory page carries a form for it — for the catalog above whichever of its own
+layers is being browsed. `[limits] max_query_radius_arcsec` bounds it, on the request's own
+numbers rather than on what reading it costs, because the three counters answer a fan-out
+and a url cannot carry one.
+
+What is still open:
+
+**Only a circle.** A `box` is two ordered pairs and a `moc` is a document, so neither reads
+as a query parameter; a caller who wants one uses the API. A `box` would fit as four numbers
+if anyone asks for it.
+
+**The JSON listing says nothing about the catalog.** The page carries `data-catalog`, and a
+client walking a mount has to recognise a catalog from the names in the listing the way this
+service does. A `catalog` field in the JSON is the obvious answer and nothing needs it yet.
+
+**The columns arrive with the first answer.** A catalog has no schema of its own to read, so
+the page's column chips appear after the first preview rather than with the form. Asking one
+partition for its schema means choosing a partition, which is the search.
 
 ## 6. Phase 5 — caching
 

@@ -79,6 +79,33 @@ body.js a.data::after { content: none; }
 body.js .with-js { display: inline; }
 body.js .without-js { display: none; }
 
+/* The catalog's own search, above the listing: this is what someone browsing a catalog
+   came for, and the table below it is how they got here. It takes the panel's surface for
+   the same reason a file's panel does — it is a thing to fill in rather than something to
+   read — but it is a block of its own rather than a row wedged between two striped ones. */
+section.catalog { margin: 0.9rem 0 0.2rem; }
+section.catalog h2 { font-size: 0.9rem; font-weight: 600; margin: 0 0 0.3rem; }
+section.catalog .panel-body {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--link);
+  border-radius: 0 0.3rem 0.3rem 0;
+  padding: 0.6rem 0.7rem 0.8rem;
+  font: 0.85rem system-ui, -apple-system, sans-serif;
+}
+/* A centre is short next to a predicate and not short in itself: a position read off a
+   catalog is written to the microarcsecond, and a field that scrolls its own front off the
+   left is one nobody can check. */
+section.catalog input.ra, section.catalog input.dec { width: 11rem; }
+section.catalog input.radius_arcsec { width: 5rem; }
+/* What the fields as they stand will and will not answer, on a line of its own so that it
+   does not move the buttons about as it appears and goes. */
+.gate { flex-basis: 100%; margin: 0; min-height: 1.1em; font-size: 0.75rem; }
+/* A button whose request the service would refuse. Dimmed rather than removed: what is
+   missing is a field above it, and a control that vanishes is one nobody looks for. The
+   anchor needs `pointer-events`, having no `disabled` of its own. */
+.run.off { opacity: 0.45; pointer-events: none; cursor: default; }
+
 /* Everything below is the query panel, which exists only where the script ran: the
    button is hidden until it says so, so nothing on the page offers what it cannot do. */
 /* `font: inherit` would put a button in the monospace of the cell it sits in, on the

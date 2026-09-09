@@ -20,6 +20,7 @@ use crate::access::{self, AccessPolicy};
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
 use crate::error::ApiError;
+use crate::hats;
 use crate::hats_query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
 use crate::healpix::Cover;
 use crate::listing::{self, Listing};
@@ -27,7 +28,7 @@ use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{Healpix, Region, Spatial};
+use crate::region::{self, Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
 
@@ -46,6 +47,9 @@ pub struct Service {
     pub sql_limits: sql::Limits,
     /// What a request against a whole catalog may spend.
     pub catalog_limits: CatalogLimits,
+    /// The widest circle a query string may ask for. The file-server mode's bound alone: a
+    /// url is followed rather than fanned out, so what it asks for has to fit in one answer.
+    max_query_radius_arcsec: f64,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -104,6 +108,7 @@ impl Service {
             data_files: Arc::new(data_files),
             sql_limits: limits.into(),
             catalog_limits: limits.into(),
+            max_query_radius_arcsec: limits.max_query_radius_arcsec,
             show_version: server.show_version,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -217,10 +222,20 @@ async fn serve_mounted(
         return Err(ApiError::not_found(format!("{path} is not a route")));
     };
     let segments = mount::path_segments(relative)?;
+    let radius = service.max_query_radius_arcsec;
     let mut requested = mount.source().to_owned();
     requested.extend(&segments);
     let mut file = access::authorize_mounted(mount, &requested)?;
     if file.is_dir() {
+        // A catalog is the one directory that answers a question about itself, and the
+        // question comes before the page: a directory with an `index.html` still has
+        // partitions to search, and serving the page instead would drop the query.
+        if hats::local::describes_a_catalog(&file)
+            && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
+            && query.region.is_some()
+        {
+            return query_catalog_mounted(&service, mount, &file, &query, &parts).await;
+        }
         // A directory that publishes its own page says what it wants said about itself,
         // and the generated listing is only the fallback. Through `authorize_mounted`
         // like any other file, so a link the mount does not follow is not followed here
@@ -234,7 +249,7 @@ async fn serve_mounted(
     // going out verbatim, parameters and all: a file server that has no use for a
     // parameter ignores it, and `index.html?v=3` is a request for `index.html`.
     if mount.data_files().matches_path(&file)
-        && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default())?
+        && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
     {
         return query_mounted(&service, &file, &query, &parts).await;
     }
@@ -267,12 +282,26 @@ async fn serve_mounted(
 ///
 /// `format` and `limit` have no vizcat equivalent and so take names of our own, which is
 /// what keeps a name from meaning two things depending on which service answered.
+///
+/// The circle is the API's `region` flattened into a query string — the one shape a url can
+/// carry, since it is four numbers rather than a structure. The rest of the shapes stay with
+/// the API: a `box` is two ordered pairs and a `moc` is a document, and neither reads as a
+/// parameter. What a url gains in return is that it can be linked to, pasted and handed to a
+/// reader that takes one, which is what the file-server mode is for.
 #[derive(Debug, Default)]
 struct FileQuery {
     columns: Option<String>,
     filters: Option<String>,
     format: Option<String>,
     limit: Option<String>,
+    /// The circle, built and checked at parse time so that everything downstream can borrow
+    /// it — a [`Selection`] holds the shapes rather than owning them. One element: a query
+    /// string names one centre, and the union the API's array expresses needs a body.
+    region: Option<Vec<Region>>,
+    /// Which columns hold the position, for a file. Refused against a catalog, which names
+    /// its own.
+    ra_column: Option<String>,
+    dec_column: Option<String>,
 }
 
 impl FileQuery {
@@ -282,8 +311,13 @@ impl FileQuery {
     /// Anything unrecognised is ignored rather than refused, the way an ordinary HTTP
     /// server ignores what it has no use for. The last of a repeated parameter wins,
     /// which is what a browser and a form both produce.
-    fn parse(raw: &str) -> Result<Option<Self>, ApiError> {
+    ///
+    /// `max_radius_arcsec` is the operator's ceiling on the circle. It is applied here, on
+    /// the request's own numbers, rather than left to the bounds that watch what a read
+    /// costs: those answer a fan-out, and a url has no way to express one.
+    fn parse(raw: &str, max_radius_arcsec: f64) -> Result<Option<Self>, ApiError> {
         let mut query = Self::default();
+        let mut circle = Circle::default();
         let mut asked = false;
         for (name, value) in form_urlencoded::parse(raw.as_bytes()) {
             let field = match name.as_ref() {
@@ -291,32 +325,36 @@ impl FileQuery {
                 "filters" => &mut query.filters,
                 "format" => &mut query.format,
                 "limit" => &mut query.limit,
+                "ra_column" => &mut query.ra_column,
+                "dec_column" => &mut query.dec_column,
+                "ra" => &mut circle.ra,
+                "dec" => &mut circle.dec,
+                "radius_deg" => &mut circle.radius_deg,
+                "radius_arcsec" => &mut circle.radius_arcsec,
                 _ => continue,
             };
             *field = Some(value.into_owned());
             asked = true;
         }
-        match asked {
-            true => Ok(Some(query)),
-            false => Ok(None),
+        if !asked {
+            return Ok(None);
         }
+        query.region = circle.region(max_radius_arcsec)?;
+        Ok(Some(query))
     }
 
-    fn selection(&self) -> Result<Selection<'_>, ApiError> {
-        Ok(Selection {
-            projection: match self.columns.as_deref() {
+    /// The projection, the predicate and the limit, which every route reads the same way.
+    fn common(&self) -> Result<(Projection<'_>, Predicate<'_>, Option<usize>), ApiError> {
+        Ok((
+            match self.columns.as_deref() {
                 Some(list) => Projection::Columns(list),
                 None => Projection::All,
             },
-            predicate: match self.filters.as_deref() {
+            match self.filters.as_deref() {
                 Some(text) => Predicate::Filters(text),
                 None => Predicate::All,
             },
-            // Spatial selection here is by path — a request names `Norder=k/Npix=p`
-            // itself. A caller who wants the catalog to choose partitions uses the API
-            // against the same data.
-            spatial: None,
-            limit: match self.limit.as_deref() {
+            match self.limit.as_deref() {
                 // Said as a number rather than left to mean "no limit": a caller who
                 // wrote one and got every row would have no way to notice.
                 Some(raw) => Some(raw.parse().map_err(|_| {
@@ -324,8 +362,145 @@ impl FileQuery {
                 })?),
                 None => None,
             },
+        ))
+    }
+
+    /// What to read from one file of a mount.
+    ///
+    /// A file says nothing about which of its columns are a position, so a circle here needs
+    /// both column names — the same rule, and the same message, as the API's single-file
+    /// route. A request that names a partition itself and asks no spatial question is the
+    /// ordinary case and unchanged.
+    fn selection(&self) -> Result<Selection<'_>, ApiError> {
+        let (projection, predicate, limit) = self.common()?;
+        let spatial = match &self.region {
+            None => {
+                if self.ra_column.is_some() || self.dec_column.is_some() {
+                    return Err(ApiError::bad_request(NEEDS_A_CIRCLE));
+                }
+                None
+            }
+            Some(regions) => {
+                if self.ra_column.is_none() || self.dec_column.is_none() {
+                    return Err(ApiError::bad_request(
+                        "a circle over a file needs ra_column and dec_column; a catalog's \
+                         own url names them for you",
+                    ));
+                }
+                Some(Spatial {
+                    regions,
+                    ra_column: self.ra_column.as_deref(),
+                    dec_column: self.dec_column.as_deref(),
+                    // The `_healpix_29` a HATS partition carries is found in the file's own
+                    // schema, so the accelerator costs a url nothing. An index column under
+                    // any other name has to be named along with its order, which is a pair
+                    // this vocabulary does not carry — the API's route takes it.
+                    healpix: None,
+                    // A url naming one file names no catalog above it.
+                    partition: None,
+                })
+            }
+        };
+        Ok(Selection {
+            projection,
+            predicate,
+            spatial,
+            limit,
         })
     }
+
+    /// What to read from a catalog, whose own properties answer for the columns.
+    fn catalog_selection(&self) -> Result<CatalogSelection<'_>, ApiError> {
+        let (projection, predicate, limit) = self.common()?;
+        // Refused rather than ignored, for the reason the API's catalog route refuses them:
+        // a dropped one returns rows tested against columns the caller did not write, which
+        // they cannot tell from the ones they asked for.
+        let named = [
+            ("ra_column", self.ra_column.is_some()),
+            ("dec_column", self.dec_column.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, given)| given.then_some(name))
+        .collect::<Vec<_>>();
+        if !named.is_empty() {
+            return Err(ApiError::bad_request(format!(
+                "{} not accepted against a catalog, which names its own columns; to choose \
+                 them, query one of its files",
+                named.join(", ")
+            )));
+        }
+        Ok(CatalogSelection {
+            projection,
+            predicate,
+            regions: self.region.as_deref(),
+            limit,
+        })
+    }
+}
+
+/// A column named with no circle to test with it. It accelerates nothing and constrains
+/// nothing, so a request carrying one is a caller who believes otherwise.
+const NEEDS_A_CIRCLE: &str = "ra_column and dec_column need ra, dec and a radius";
+
+/// The circle as it arrives: four parameters, each of them text.
+#[derive(Debug, Default)]
+struct Circle {
+    ra: Option<String>,
+    dec: Option<String>,
+    radius_deg: Option<String>,
+    radius_arcsec: Option<String>,
+}
+
+impl Circle {
+    /// The shape these four spell, or `None` where none of them was written.
+    ///
+    /// Validated through [`Region::shape`] rather than field by field, so a circle means the
+    /// same thing whether it arrived in a url or in a body — including which radius spellings
+    /// are legal and what a radius may be.
+    fn region(&self, max_radius_arcsec: f64) -> Result<Option<Vec<Region>>, ApiError> {
+        let given = [&self.ra, &self.dec, &self.radius_deg, &self.radius_arcsec];
+        if given.iter().all(|value| value.is_none()) {
+            return Ok(None);
+        }
+        let region = Region::Circle {
+            ra: number("ra", self.ra.as_deref())?,
+            dec: number("dec", self.dec.as_deref())?,
+            radius_deg: optional_number("radius_deg", self.radius_deg.as_deref())?,
+            radius_arcsec: optional_number("radius_arcsec", self.radius_arcsec.as_deref())?,
+        };
+        // Which also settles the radius in degrees, whichever spelling carried it.
+        let region::Shape::Circle { radius, .. } = region.shape()? else {
+            return Err(ApiError::internal("a circle did not resolve to a circle"));
+        };
+        let asked = radius * 3600.0;
+        if asked > max_radius_arcsec {
+            return Err(ApiError::bad_request(format!(
+                "a radius of {asked}\u{2033} is wider than this url answers, which is \
+                 {max_radius_arcsec}\u{2033}; the API's catalog route takes a larger one, \
+                 and its plan route answers one too large to run"
+            )));
+        }
+        Ok(Some(vec![region]))
+    }
+}
+
+/// One parameter of the circle, which the other three make required.
+fn number(name: &str, raw: Option<&str>) -> Result<f64, ApiError> {
+    let raw = raw.ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "a circle takes ra, dec and one radius; {name} is missing"
+        ))
+    })?;
+    optional_number(name, Some(raw))?.ok_or_else(|| ApiError::internal("a number went missing"))
+}
+
+fn optional_number(name: &str, raw: Option<&str>) -> Result<Option<f64>, ApiError> {
+    raw.map(|raw| {
+        raw.trim()
+            .parse()
+            .map_err(|_| ApiError::bad_request(format!("{name} takes a number")))
+    })
+    .transpose()
 }
 
 /// A parquet file under a mount, asked for less of itself.
@@ -379,6 +554,88 @@ async fn query_mounted(
     Ok(response)
 }
 
+/// A catalog under a mount, asked for the rows inside a circle.
+///
+/// The same work [`query_hats`] does, reached by a url rather than by a body: the catalog
+/// chooses its partitions from the region, names its own position columns, and reads them
+/// several at a time. What a url cannot carry is a fan-out — so a request too large for one
+/// answer is refused here rather than answered with a work list, and the message says which
+/// route hands one back.
+///
+/// **A circle is what makes this a query.** Without one the request is the whole catalog,
+/// which is the shape a url has no way to express, so the directory is listed and the other
+/// parameters are ignored the way any file server ignores what it has no use for.
+async fn query_catalog_mounted(
+    service: &Service,
+    mount: &Mount,
+    dir: &Path,
+    query: &FileQuery,
+    request: &Parts,
+) -> Result<Response, ApiError> {
+    if !matches!(request.method, Method::GET | Method::HEAD) {
+        return Err(ApiError::method_not_allowed("a query is read, not written"));
+    }
+    let started = Instant::now();
+    // Parquet, as it is for a file: adding a query string to a url should not change what
+    // media type it answers with, and the page asks for JSON by name.
+    let format = Format::parse(query.format.as_deref(), Format::Parquet)?;
+    let selection = query.catalog_selection()?;
+    // Every message from here down names the operator's directory, this being a local store.
+    let hide_the_path = |error: ApiError| error.from_mount(dir);
+
+    let opened = storage::open_mounted_dir(dir)?;
+    let search = Search::resolve(opened, selection.regions, service.catalog_limits)
+        .await
+        .map_err(hide_the_path)?;
+    let outcome = search
+        .run(
+            &selection,
+            mount.data_files(),
+            service.sql_limits,
+            service.catalog_limits,
+        )
+        .await
+        .map_err(hide_the_path)?;
+    let result = match outcome {
+        Outcome::Rows(result) => result,
+        Outcome::TooMuchWork(why) => return Err(too_much_for_a_url(&why)),
+    };
+
+    let num_rows = result.rows.num_rows();
+    let data_bytes_read = result.rows.data_bytes_read;
+    let partitions_read = result.partitions_read;
+    let response = hats_answer(&result, format, started)
+        .await
+        .map_err(hide_the_path)?;
+    tracing::info!(
+        // The url path, not the local path: what is on disk is the operator's business.
+        path = request.uri.path(),
+        partitions = search.catalog().partitions().len(),
+        chosen = search.chosen().len(),
+        partitions_read,
+        projected = query.columns.is_some(),
+        filtered = query.filters.is_some(),
+        format = format.name(),
+        num_rows,
+        data_bytes_read,
+        elapsed_ms = started.elapsed().as_millis(),
+        "catalog query"
+    );
+    Ok(response)
+}
+
+/// A bound reached on a route that has no work list to hand back.
+///
+/// The API's catalog route answers this with the plan, which is the useful answer and the
+/// reason the bound exists. A url cannot carry one — a plan is a document — so what this can
+/// do is say which bound was reached and where the request that fans out is written.
+fn too_much_for_a_url(why: &Exceeded) -> ApiError {
+    ApiError::too_much_work(format!(
+        "{why}; narrow the radius, or send this to the API's catalog route, whose plan \
+         route hands back the requests it takes"
+    ))
+}
+
 /// A directory, as a page or as JSON. Which one is [`listing::wants_html`]'s decision.
 async fn list_directory(
     service: &Service,
@@ -399,26 +656,42 @@ async fn list_directory(
     let root = mount.prefix().to_owned();
 
     let (dir, follow_symlinks) = (dir.to_owned(), mount.follow_symlinks());
+    // How far the mount's root is, which is as far up as the catalog may be looked for:
+    // a listing goes no higher than its mount, and neither does what it offers.
+    let depth = segments.len();
     // `read_dir` and a `stat` per entry are blocking calls, and a HATS `Dir=` level is
-    // ten thousand of them.
-    let listing =
-        tokio::task::spawn_blocking(move || Listing::read(&dir, &root, &path, follow_symlinks))
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, "listing a directory panicked");
-                ApiError::internal("cannot read this directory")
-            })?
-            .map_err(|error| {
-                // The path is the operator's business and not the caller's, so what comes back
-                // is the same answer as for a directory that is not published at all.
-                tracing::warn!(%error, mount = mount.prefix(), "cannot list");
-                ApiError::not_found("no such directory")
-            })?;
+    // ten thousand of them. The catalog probe is a handful more, on the same thread.
+    let read = tokio::task::spawn_blocking(move || {
+        let listing = Listing::read(&dir, &root, &path, follow_symlinks)?;
+        Ok::<_, std::io::Error>((listing, hats::local::enclosing(&dir, depth)))
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "listing a directory panicked");
+        ApiError::internal("cannot read this directory")
+    })?;
+    let (listing, levels) = read.map_err(|error| {
+        // The path is the operator's business and not the caller's, so what comes back
+        // is the same answer as for a directory that is not published at all.
+        tracing::warn!(%error, mount = mount.prefix(), "cannot list");
+        ApiError::not_found("no such directory")
+    })?;
+    // The catalog's own url, which is this directory's with as many levels trimmed off it as
+    // the walk climbed. Built from the decoded segments the same way this directory's was, so
+    // the two agree on how a name is spelled in a url.
+    let catalog = levels.and_then(|levels| {
+        let above = segments.get(..segments.len().checked_sub(levels)?)?;
+        Some(listing::url(mount.prefix(), above))
+    });
 
     Ok(match listing::wants_html(&request.headers) {
         true => Html(listing.to_html(
             mount.data_files(),
             service.api_prefix.as_deref(),
+            &listing::Catalog {
+                url: catalog.as_deref(),
+                max_radius_arcsec: service.max_query_radius_arcsec,
+            },
             service.show_version,
         ))
         .into_response(),
@@ -1553,13 +1826,22 @@ mod tests {
 
     /// One `[[mount]]`, and a service built around it.
     fn with_mount(config: crate::config::MountConfig, api: &ApiConfig) -> Service {
+        with_limits(config, api, &LimitsConfig::default())
+    }
+
+    /// The same, for the cases that are about a bound rather than about a route.
+    fn with_limits(
+        config: crate::config::MountConfig,
+        api: &ApiConfig,
+        limits: &LimitsConfig,
+    ) -> Service {
         let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
         let policy =
             AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
                 .unwrap();
         Service::new(
             policy,
-            &LimitsConfig::default(),
+            limits,
             mounts,
             api,
             &DataConfig::default(),
@@ -1985,6 +2267,238 @@ mod tests {
                 assert!(body.contains(field), "{route} {field}: {body}");
             }
         }
+    }
+
+    /// The centre of the fixture's first cone, which is where its rows are.
+    fn centre() -> (f64, f64) {
+        let Region::Circle { ra, dec, .. } = crate::hats_query::tests::regions()[0] else {
+            unreachable!("the fixture's regions are circles")
+        };
+        (ra, dec)
+    }
+
+    /// A service over the fixture whose query strings may ask for a cone this wide.
+    fn catalog_server(dir: &Path, max_radius_arcsec: f64) -> Service {
+        with_limits(
+            serving(dir),
+            &ApiConfig::default(),
+            &LimitsConfig {
+                max_query_radius_arcsec: max_radius_arcsec,
+                ..LimitsConfig::default()
+            },
+        )
+    }
+
+    /// The catalog's own url answers the same search the API's route does, and picks the
+    /// same partitions to answer it from.
+    ///
+    /// The vocabularies differ — a url carries one circle where a body carries an array of
+    /// shapes — but they lower to the same request, so what this holds is that the rows are
+    /// the geometry's and not the route's.
+    #[tokio::test]
+    async fn a_catalog_url_answers_a_cone_search() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[0].clone();
+        let expected = crate::hats_query::tests::inside(&region);
+        assert!(!expected.is_empty(), "the cone selects nothing");
+        let (ra, dec) = centre();
+
+        let response = respond(
+            // The fixture's cone is a degree across, which is well past what a deployment
+            // offers by default; the bound itself is what the next test is about.
+            catalog_server(dir.path(), 3600.0),
+            Request::builder().uri(format!(
+                "/?ra={ra}&dec={dec}&radius_arcsec=3600&columns=id&format=json"
+            )),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], expected.len(), "{body}");
+        assert_eq!(
+            answer["num_partitions"], 1,
+            "a cone inside one partition read others: {body}"
+        );
+        let ids: Vec<i64> = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    /// A url answers what fits in one answer, and says where a wider search goes.
+    ///
+    /// Checked on the request's own numbers rather than on what reading it costs: the other
+    /// bounds answer a fan-out, which is exactly what a url cannot carry. Both spellings of
+    /// the radius are the same radius, so both are measured against it.
+    #[tokio::test]
+    async fn a_cone_wider_than_the_url_answers_is_refused() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let (ra, dec) = centre();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for radius in ["radius_arcsec=120", "radius_deg=1"] {
+            let response = respond(
+                service(),
+                Request::builder().uri(format!("/?ra={ra}&dec={dec}&{radius}")),
+            )
+            .await;
+            let status = response.status();
+            let body = body_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{radius}: {body}");
+            assert!(body.contains("60"), "{radius}: {body}");
+            assert!(body.contains("plan route"), "{radius}: {body}");
+        }
+
+        // And what is inside the bound is answered, so the refusal is the radius and not
+        // the route.
+        let response = respond(
+            service(),
+            Request::builder().uri(format!("/?ra={ra}&dec={dec}&radius_arcsec=60&format=json")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// The catalog names its own position columns, so a url naming them is refused for the
+    /// reason the API's body is: a dropped one tests the rows against columns the caller
+    /// did not write, and they cannot tell that from the ones they asked for.
+    #[tokio::test]
+    async fn a_catalog_url_refuses_the_column_names() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let (ra, dec) = centre();
+        for field in ["ra_column", "dec_column"] {
+            let response = respond(
+                mounted(dir.path(), &ApiConfig::default()),
+                Request::builder().uri(format!(
+                    "/?ra={ra}&dec={dec}&radius_arcsec=10&{field}=whatever"
+                )),
+            )
+            .await;
+            let status = response.status();
+            let body = body_of(response).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {body}");
+            assert!(body.contains(field), "{field}: {body}");
+        }
+    }
+
+    /// A circle is what makes a directory's url a query. Without one the request is the
+    /// whole catalog, which is the shape a url cannot express — so the directory is listed
+    /// and the rest of the parameters are ignored, the way any file server ignores what it
+    /// has no use for.
+    #[tokio::test]
+    async fn a_directory_is_listed_unless_the_url_asks_a_spatial_question() {
+        let catalog = crate::hats_query::tests::fixture(true);
+        let plain = tempfile::TempDir::new().unwrap();
+        std::fs::write(plain.path().join("part0.parquet"), b"x").unwrap();
+        let (ra, dec) = centre();
+
+        for (dir, query) in [
+            // A catalog, asked something that is not a search.
+            (catalog.path(), "?columns=id&limit=3"),
+            // Not a catalog, asked one that is: nothing here answers it, and the listing
+            // is what this url has always been.
+            (
+                plain.path(),
+                &*format!("?ra={ra}&dec={dec}&radius_arcsec=10"),
+            ),
+        ] {
+            let response = respond(
+                mounted(dir, &ApiConfig::default()),
+                Request::builder().uri(format!("/{query}")),
+            )
+            .await;
+            let status = response.status();
+            let body = body_of(response).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            let listing: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(listing["entries"].is_array(), "{query}: {body}");
+        }
+    }
+
+    /// One file of a catalog answers the same circle, and needs to be told which columns
+    /// hold a position — a parquet file says nothing about that, and the catalog that would
+    /// have is not what this url named.
+    #[tokio::test]
+    async fn a_parquet_url_answers_a_cone_search_when_it_is_told_the_columns() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let (ra, dec) = centre();
+        let file = format!("/{}", hats::HatsPartition::new(3, 64).path(".parquet"));
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let response = respond(
+            service(),
+            Request::builder().uri(format!(
+                "{file}?ra={ra}&dec={dec}&radius_arcsec=60&ra_column=ra&dec_column=dec\
+                 &columns=id&format=json"
+            )),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(answer["num_rows"].as_u64().is_some(), "{body}");
+
+        // Without them there is nothing to test the circle against, and answering every row
+        // would be indistinguishable from a circle that held them all.
+        let response = respond(
+            service(),
+            Request::builder().uri(format!("{file}?ra={ra}&dec={dec}&radius_arcsec=60")),
+        )
+        .await;
+        let status = response.status();
+        let body = body_of(response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("ra_column"), "{body}");
+    }
+
+    /// A catalog is browsed from the inside, so its page carries the search wherever in it
+    /// the reader is standing — and the url the search goes to is the catalog's, not the
+    /// directory's.
+    #[tokio::test]
+    async fn a_catalog_s_page_offers_the_search_from_anywhere_inside_it() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let plain = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(plain.path().join("Norder=3")).unwrap();
+
+        for (mount, path) in [
+            // The catalog's own directory, and every layer of the layout below it.
+            (dir.path(), "/"),
+            (dir.path(), "/dataset"),
+            (dir.path(), "/dataset/Norder=3"),
+            (dir.path(), "/dataset/Norder=3/Dir=0"),
+        ] {
+            let response = respond(
+                mounted(mount, &ApiConfig::default()),
+                Request::builder()
+                    .uri(path)
+                    .header(header::ACCEPT, "text/html"),
+            )
+            .await;
+            let body = body_of(response).await;
+            assert!(body.contains("data-catalog=\"/\""), "{path}: {body}");
+            assert!(body.contains("HATS catalog"), "{path}: {body}");
+            // What the page offers without a script, which is the url itself.
+            assert!(body.contains("radius_arcsec=10"), "{path}: {body}");
+            assert!(body.contains("data-max-radius=\"60\""), "{path}: {body}");
+        }
+
+        // A directory named like one of the layers, with no catalog over it, is an ordinary
+        // directory: the walk climbs the layout looking for a catalog and does not assume
+        // one from the names alone.
+        let response = respond(
+            mounted(plain.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/Norder=3")
+                .header(header::ACCEPT, "text/html"),
+        )
+        .await;
+        let body = body_of(response).await;
+        assert!(!body.contains("data-catalog"), "{body}");
+        assert!(!body.contains("HATS catalog"), "{body}");
     }
 
     async fn ask_plan(
