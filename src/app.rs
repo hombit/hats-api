@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -9,6 +11,7 @@ use axum::{
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
@@ -142,26 +145,19 @@ impl Service {
 pub fn router(service: Service) -> Router {
     let mut router = Router::new();
     if let Some(prefix) = service.api_prefix.clone() {
-        router = router
-            .route(&route(&prefix, "health"), get(health))
-            // The path names the target, and the predicate never appears in it: a
-            // spatial constraint is one clause of a query, so a `{target}/{predicate}`
-            // path set would grow as the product of the predicate kinds rather than
-            // their sum.
-            //
-            // `POST`, not `GET`: the request carries credentials, and a query string is
-            // written to every proxy's access log and the caller's shell history on the
-            // way. A body also has no url-length limit — a long `IN` list and a wide
-            // select list both run past nginx's 8 KB header buffer — and needs no url
-            // nested inside a url.
-            .route(&route(&prefix, "parquet"), post(query_parquet))
-            // The same body, against a catalog instead of a file: the url names a HATS
-            // directory and this chooses the partitions to read out of it.
-            .route(&route(&prefix, "hats"), post(query_hats))
-            // The same body again, resolved and not run. Two routes rather than one with a
-            // mode: rows and a work list are different kinds of thing, and a field saying
-            // which arrived is one more value a caller has to look at the body to trust.
-            .route(&route(&prefix, "hats/plan"), post(query_hats_plan));
+        router = router.route(&route(&prefix, "health"), get(health));
+        // Two axes, and each is a segment of its own: the vocabulary the body is written in,
+        // and what the url names. The spatial constraint is in neither — it is one clause of
+        // a query, so a `{target}/{predicate}` path set would grow as the product of the
+        // predicate kinds rather than their sum.
+        //
+        // The vocabulary is a path segment rather than a pair of fields the body may or may
+        // not carry, so that "which of these did the caller mean" is answered by which route
+        // they sent it to. What that costs is a route per target per vocabulary; what it
+        // buys is that adding one is an implementation and three lines here, rather than a
+        // wider body and another pairwise refusal everywhere the fields are read.
+        router = with_dialect::<Expr>(router, &prefix);
+        router = with_dialect::<Simple>(router, &prefix);
     }
     router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -180,6 +176,29 @@ pub fn router(service: Service) -> Router {
                 )
             }),
         )
+}
+
+/// One vocabulary's three routes.
+///
+/// They are registered together because they are the same request against three targets, and
+/// a vocabulary that answered on only some of them would be one a caller has to remember the
+/// exceptions to.
+///
+/// `POST`, not `GET`: the request carries credentials, and a query string is written to
+/// every proxy's access log and the caller's shell history on the way. A body also has no
+/// url-length limit — a long `IN` list and a wide select list both run past nginx's 8 KB
+/// header buffer — and needs no url nested inside a url.
+fn with_dialect<D: Dialect>(router: Router<Service>, prefix: &str) -> Router<Service> {
+    let path = |target| route(prefix, &format!("{}/{target}", D::SEGMENT));
+    router
+        .route(&path("parquet"), post(query_parquet::<D>))
+        // The same body, against a catalog instead of a file: the url names a HATS
+        // directory and this chooses the partitions to read out of it.
+        .route(&path("hats"), post(query_hats::<D>))
+        // The same body again, resolved and not run. Two routes rather than one with a
+        // mode: rows and a work list are different kinds of thing, and a field saying
+        // which arrived is one more value a caller has to look at the body to trust.
+        .route(&path("hats/plan"), post(query_hats_plan::<D>))
 }
 
 /// One route under a prefix. The root prefix already ends in the separator, so joining
@@ -295,8 +314,10 @@ async fn serve_mounted(
 /// reader that takes one, which is what the file-server mode is for.
 #[derive(Debug, Default)]
 struct FileQuery {
-    columns: Option<String>,
-    filters: Option<String>,
+    /// The same pair the `simple` route takes, and the reason that vocabulary exists: it is
+    /// what a query string can carry. One type, so a name means the same thing in a url as
+    /// in a body rather than being two fields that happen to agree.
+    simple: Simple,
     format: Option<String>,
     limit: Option<String>,
     /// The circle, built and checked at parse time so that everything downstream can borrow
@@ -326,8 +347,8 @@ impl FileQuery {
         let mut asked = false;
         for (name, value) in form_urlencoded::parse(raw.as_bytes()) {
             let field = match name.as_ref() {
-                "columns" => &mut query.columns,
-                "filters" => &mut query.filters,
+                "columns" => &mut query.simple.columns,
+                "filters" => &mut query.simple.filters,
                 "format" => &mut query.format,
                 "limit" => &mut query.limit,
                 "ra_column" => &mut query.ra_column,
@@ -351,14 +372,8 @@ impl FileQuery {
     /// The projection, the predicate and the limit, which every route reads the same way.
     fn common(&self) -> Result<(Projection<'_>, Predicate<'_>, Option<usize>), ApiError> {
         Ok((
-            match self.columns.as_deref() {
-                Some(list) => Projection::Columns(list),
-                None => Projection::All,
-            },
-            match self.filters.as_deref() {
-                Some(text) => Predicate::Filters(text),
-                None => Predicate::All,
-            },
+            self.simple.projection(),
+            self.simple.predicate(),
             match self.limit.as_deref() {
                 // Said as a number rather than left to mean "no limit": a caller who
                 // wrote one and got every row would have no way to notice.
@@ -546,8 +561,8 @@ async fn query_mounted(
         // Both parameters are the caller's own text and can be megabytes of `IN` list,
         // so what is logged is that they were there.
         path = request.uri.path(),
-        projected = query.columns.is_some(),
-        filtered = query.filters.is_some(),
+        projected = query.simple.columns.is_some(),
+        filtered = query.simple.filters.is_some(),
         format = format.name(),
         num_rows,
         // What the pruning was worth, next to the time it took. Free to record and the
@@ -620,8 +635,8 @@ async fn query_catalog_mounted(
         partitions = search.catalog().partitions().len(),
         chosen = search.chosen().len(),
         partitions_read,
-        projected = query.columns.is_some(),
-        filtered = query.filters.is_some(),
+        projected = query.simple.columns.is_some(),
+        filtered = query.simple.filters.is_some(),
         format = format.name(),
         num_rows,
         data_bytes_read,
@@ -745,9 +760,119 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
     (StatusCode::OK, Json(HealthResponse { status: "ok" }))
 }
 
+/// One of the vocabularies a request may be written in, which is what the first segment of
+/// the path names.
+///
+/// Both say the same thing and lower to the same planned expression; they differ in what a
+/// field may hold. Putting them on separate routes is what lets each be a plain pair of
+/// fields — a body carrying a field of both is not a request this service has to have an
+/// opinion about, because no route accepts one.
+///
+/// A third vocabulary is a third implementation and three more route lines, rather than two
+/// more fields and another pairwise refusal in every body that reads them.
+// `Sync` as well as `Send`: a handler holds `&QueryRequest<Self>` across an await, and a
+// shared reference is only `Send` where what it points at is `Sync`.
+trait Dialect: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static {
+    /// The path segment this vocabulary is reached at. A plan's entries name it too: they
+    /// are written in the vocabulary the request that produced them was written in.
+    const SEGMENT: &'static str;
+
+    fn projection(&self) -> Projection<'_>;
+
+    fn predicate(&self) -> Predicate<'_>;
+
+    /// Whether the caller narrowed the answer, which is what the log records. Read off the
+    /// lowered form rather than from the fields, so a vocabulary cannot report this
+    /// differently from how it is actually planned.
+    fn selects(&self) -> bool {
+        !matches!(self.projection(), Projection::All)
+    }
+
+    fn filtered(&self) -> bool {
+        !matches!(self.predicate(), Predicate::All)
+    }
+}
+
+/// Expressions: each field is one SQL expression, and nothing wider.
+///
+/// Named for what a field holds rather than for SQL, because a statement is refused —
+/// [`crate::sql`] parses each field on its own and requires the parser to reach the end of
+/// the string, so `SELECT … FROM …` is not a longer form of this that happens to be
+/// rejected, it is a different thing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Expr {
+    /// The projection, as a SQL select list, so `mag - 0.1 AS mag_corr` works. Absent
+    /// returns every column.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    select: Option<String>,
+    /// One boolean SQL expression over this file's columns. Absent returns every row.
+    ///
+    /// The raw identifier is the field name in both directions: serde reads and writes it as
+    /// `where`, which is what a caller sends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#where: Option<String>,
+}
+
+impl Dialect for Expr {
+    const SEGMENT: &'static str = "expr";
+
+    fn projection(&self) -> Projection<'_> {
+        match self.select.as_deref() {
+            Some(sql) => Projection::Select(sql),
+            None => Projection::All,
+        }
+    }
+
+    fn predicate(&self) -> Predicate<'_> {
+        match self.r#where.as_deref() {
+            Some(sql) => Predicate::Where(sql),
+            None => Predicate::All,
+        }
+    }
+}
+
+/// Names and a narrower filter form — the vocabulary a url query string can carry, which is
+/// why the file-server mode reads the same pair out of one.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct Simple {
+    /// The projection as plain column names. The narrower of the two: it takes names, never
+    /// expressions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    columns: Option<String>,
+    /// The row predicate in the same vocabulary, which additionally spells `AND` as `&&`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filters: Option<String>,
+}
+
+impl Dialect for Simple {
+    const SEGMENT: &'static str = "simple";
+
+    fn projection(&self) -> Projection<'_> {
+        match self.columns.as_deref() {
+            Some(list) => Projection::Columns(list),
+            None => Projection::All,
+        }
+    }
+
+    fn predicate(&self) -> Predicate<'_> {
+        match self.filters.as_deref() {
+            Some(text) => Predicate::Filters(text),
+            None => Predicate::All,
+        }
+    }
+}
+
+/// Which vocabulary each dialect-specific field belongs to, so that a body sent to the wrong
+/// route is told where the field goes rather than only that it is not here.
+const ELSEWHERE: &[(&str, &str)] = &[
+    ("select", Expr::SEGMENT),
+    ("where", Expr::SEGMENT),
+    ("columns", Simple::SEGMENT),
+    ("filters", Simple::SEGMENT),
+];
+
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct QueryRequest {
+struct QueryRequest<D> {
     /// Where the data is, treated as opaque: whatever query string it has belongs to
     /// the origin, not to us.
     url: SourceUrl,
@@ -755,17 +880,9 @@ struct QueryRequest {
     /// public object read anonymously, which is the common case.
     #[serde(default)]
     storage: StorageOptions,
-    /// The projection, as a SQL select list, so `mag - 0.1 AS mag_corr` works. Absent
-    /// returns every column.
-    select: Option<String>,
-    /// One boolean SQL expression over this file's columns. Absent returns every row.
-    r#where: Option<String>,
-    /// The projection as plain column names, which is what a file-server client writes.
-    /// The narrower of the two: it takes names, never expressions.
-    columns: Option<String>,
-    /// The row predicate in the same vocabulary, which additionally spells `AND` as
-    /// `&&`.
-    filters: Option<String>,
+    /// The projection and the predicate, in this route's own vocabulary.
+    #[serde(flatten)]
+    query: D,
     /// A shape on the sky, or several. A row inside any of them qualifies — the array is
     /// a union — and the whole field is conjoined with the predicate.
     region: Option<Vec<Region>>,
@@ -793,43 +910,55 @@ struct QueryRequest {
     /// which is most of them — never has to think about it.
     #[serde(default)]
     return_storage: bool,
+    /// Every key the body carried that this route has no field for.
+    ///
+    /// `deny_unknown_fields` cannot say this: serde does not apply it to a struct that has a
+    /// flattened field, and a `flatten` with nothing to catch the leftovers drops them in
+    /// silence. A `filters` dropped on the expression route would return every row, which
+    /// the caller cannot tell from a predicate that matched them all — the failure this
+    /// service keeps finding in a new place. So the leftovers are collected and refused, and
+    /// having them by name is also what lets the refusal say which route does take one.
+    #[serde(flatten)]
+    unknown: BTreeMap<String, IgnoredAny>,
 }
 
-impl QueryRequest {
-    /// The one pair of fields this request actually used.
-    ///
-    /// Both pairs say the same thing, so a caller may write either. Not both: a body
-    /// carrying `select` and `columns` together is one written by someone who thinks
-    /// they differ, and quietly picking either would be answering the question they got
-    /// wrong.
+impl<D: Dialect> QueryRequest<D> {
+    /// What to read, in this route's vocabulary.
     fn selection(&self) -> Result<Selection<'_>, ApiError> {
-        let (projection, predicate) = self.expressions()?;
         Ok(Selection {
-            projection,
-            predicate,
+            projection: self.query.projection(),
+            predicate: self.query.predicate(),
             spatial: self.spatial()?,
             limit: self.limit,
         })
     }
 
-    /// The projection and the predicate, in whichever of the two vocabularies was used.
+    /// Refuse a body written in another route's vocabulary, and anything else unrecognised.
     ///
-    /// Both routes read them the same way, which is the point: a field means one thing
-    /// whichever route the request arrived on, and there is one place that decides what.
-    fn expressions(&self) -> Result<(Projection<'_>, Predicate<'_>), ApiError> {
-        let projection = match (self.select.as_deref(), self.columns.as_deref()) {
-            (Some(_), Some(_)) => return Err(one_of_two("select", "columns")),
-            (Some(sql), None) => Projection::Select(sql),
-            (None, Some(list)) => Projection::Columns(list),
-            (None, None) => Projection::All,
-        };
-        let predicate = match (self.r#where.as_deref(), self.filters.as_deref()) {
-            (Some(_), Some(_)) => return Err(one_of_two("where", "filters")),
-            (Some(sql), None) => Predicate::Where(sql),
-            (None, Some(text)) => Predicate::Filters(text),
-            (None, None) => Predicate::All,
-        };
-        Ok((projection, predicate))
+    /// Every route calls this before it does anything, since a request this service cannot
+    /// read as written is not one it may answer part of.
+    fn refuse_unknown(&self) -> Result<(), ApiError> {
+        if self.unknown.is_empty() {
+            return Ok(());
+        }
+        let named = self
+            .unknown
+            .keys()
+            .map(|name| {
+                match ELSEWHERE
+                    .iter()
+                    .find(|(field, segment)| field == name && *segment != D::SEGMENT)
+                {
+                    Some((_, segment)) => format!("{name} (the {segment} vocabulary's)"),
+                    None => name.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        Err(ApiError::bad_request(format!(
+            "not accepted here: {}; this route takes the {} vocabulary",
+            named.join(", "),
+            D::SEGMENT
+        )))
     }
 
     /// The four column names a catalog answers for itself, refused rather than honoured.
@@ -924,10 +1053,6 @@ impl QueryRequest {
 /// at the wrong order puts every bound where no row is, which returns nothing rather than
 /// failing. None of which the caller needs; they need to send the other field.
 const HEALPIX_PAIR: &str = "healpix_column and healpix_order must be given together";
-
-fn one_of_two(one: &str, other: &str) -> ApiError {
-    ApiError::bad_request(format!("send {one} or {other}, not both"))
-}
 
 /// What the caller wants back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1054,12 +1179,13 @@ const NUM_ROWS_HEADER: &str = "x-hats-num-rows";
 const DATA_BYTES_READ_HEADER: &str = "x-hats-data-bytes-read";
 const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
-async fn query_parquet(
+async fn query_parquet<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest>, JsonRejection>,
+    body: Result<Json<QueryRequest<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
+    params.refuse_unknown()?;
     // Refused rather than ignored: this route answers with rows and never with a plan, so
     // there is nothing here for it to have done.
     if params.return_storage {
@@ -1111,8 +1237,9 @@ async fn query_parquet(
         // expressions are the caller's own text and can be megabytes of `IN` list, so
         // what is logged is that they were there.
         url = %file.url,
-        selected = params.select.is_some(),
-        filtered = params.r#where.is_some(),
+        vocabulary = D::SEGMENT,
+        selected = params.query.selects(),
+        filtered = params.query.filtered(),
         // How many shapes, not what they were: a region is small, but logging the
         // numbers would be logging the caller's own coordinates for no purpose the
         // count does not already serve.
@@ -1146,7 +1273,10 @@ struct Opened {
     format: Format,
 }
 
-async fn open_catalog(service: &Service, params: &QueryRequest) -> Result<Opened, ApiError> {
+async fn open_catalog<D: Dialect>(
+    service: &Service,
+    params: &QueryRequest<D>,
+) -> Result<Opened, ApiError> {
     let format = Format::parse(params.format.as_deref(), Format::Json)?;
     params.refuse_catalog_columns()?;
     let url = parse_url(params.url.as_str())?;
@@ -1175,13 +1305,13 @@ async fn open_catalog(service: &Service, params: &QueryRequest) -> Result<Opened
 /// The body is the same one [`query_parquet`] takes, and every field means what it means
 /// there. What differs is the four column names, which the catalog answers for itself and
 /// this route therefore refuses.
-async fn query_hats(
+async fn query_hats<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest>, JsonRejection>,
+    body: Result<Json<QueryRequest<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
-    let (projection, predicate) = params.expressions()?;
+    params.refuse_unknown()?;
     let Opened {
         search,
         url,
@@ -1194,8 +1324,8 @@ async fn query_hats(
     };
 
     let selection = CatalogSelection {
-        projection,
-        predicate,
+        projection: params.query.projection(),
+        predicate: params.query.predicate(),
         regions: params.region.as_deref(),
         limit: params.limit,
     };
@@ -1233,8 +1363,9 @@ async fn query_hats(
         source = search.catalog().partitions().source().name(),
         chosen = search.chosen().len(),
         partitions_read,
-        selected = params.select.is_some() || params.columns.is_some(),
-        filtered = params.r#where.is_some() || params.filters.is_some(),
+        vocabulary = D::SEGMENT,
+        selected = params.query.selects(),
+        filtered = params.query.filtered(),
         // How many shapes, not what they were: logging the numbers would be logging the
         // caller's own coordinates for no purpose the count does not already serve.
         regions = params.region.as_ref().map_or(0, Vec::len),
@@ -1251,15 +1382,16 @@ async fn query_hats(
 ///
 /// It reads the catalog's own files and no data at all, so the limits that bound
 /// [`query_hats`] do not apply: the whole point is to answer a request too large to run.
-async fn query_hats_plan(
+async fn query_hats_plan<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest>, JsonRejection>,
+    body: Result<Json<QueryRequest<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
     let started = Instant::now();
-    // Planned, not run — but the expressions still have to parse, or the plan would hand
-    // back entries every one of which is a 400 the client discovers one at a time.
-    params.expressions()?;
+    // Planned, not run — but a body this route cannot read as written is refused here all
+    // the same, or the plan would hand back entries every one of which is a 400 the client
+    // discovers one at a time.
+    params.refuse_unknown()?;
     let Opened { search, .. } = open_catalog(&service, &params).await?;
     let plan = plan_of(&service, &search, &params, None).await?;
     tracing::info!(
@@ -1276,7 +1408,7 @@ async fn query_hats_plan(
 
 /// A work list: the requests this one resolves to, for a client to send itself.
 #[derive(Debug, Serialize)]
-struct PlanResponse {
+struct PlanResponse<D> {
     /// Why this came back instead of rows, where it did. Absent on the plan route, which
     /// was asked for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1292,12 +1424,12 @@ struct PlanResponse {
     /// secret into a body that gets logged, cached and pasted enables nothing the client
     /// cannot already do, since it is the client's own secret. This says to re-attach them.
     requires_credentials: bool,
-    requests: Vec<PlanRequest>,
+    requests: Vec<PlanRequest<D>>,
 }
 
 /// One entry: a request against this service, for one file of the catalog.
 #[derive(Debug, Serialize)]
-struct PlanRequest {
+struct PlanRequest<D> {
     order: u8,
     pixel: u64,
     /// Separate fields so that a file-server entry, which is a `GET` under a mount, has the
@@ -1306,24 +1438,23 @@ struct PlanRequest {
     path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_bytes: Option<u64>,
-    body: PlanBody,
+    body: PlanBody<D>,
 }
 
 /// The body of one entry, which is an ordinary [`query_parquet`] request.
 ///
 /// Every field the caller wrote that still applies, and the column names they were refused
 /// — because the single-file route has no catalog to ask and needs them stated.
+///
+/// Written in the vocabulary the request was, and sent to that vocabulary's own route: a
+/// plan a client can send back unchanged is the whole point of one, and translating it into
+/// another vocabulary on the way out would make the entries say something the caller did not
+/// write.
 #[derive(Debug, Serialize)]
-struct PlanBody {
+struct PlanBody<D> {
     url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    select: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    columns: Option<String>,
-    #[serde(rename = "where", skip_serializing_if = "Option::is_none")]
-    where_: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    filters: Option<String>,
+    #[serde(flatten)]
+    query: D,
     /// Only where the region does not contain this partition whole. An entry without it is
     /// one whose every row qualifies, and testing them again would only cost time.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1350,12 +1481,12 @@ struct PlanBody {
     storage: Option<serde_json::Value>,
 }
 
-async fn plan_of(
+async fn plan_of<D: Dialect>(
     service: &Service,
     search: &Search,
-    params: &QueryRequest,
+    params: &QueryRequest<D>,
     reason: Option<Exceeded>,
-) -> Result<PlanResponse, ApiError> {
+) -> Result<PlanResponse<D>, ApiError> {
     let url = parse_url(params.url.as_str())?;
     let data = service.data_files_for(&url);
     let entries = search.entries(data).await?;
@@ -1364,7 +1495,7 @@ async fn plan_of(
     let path = service
         .api_prefix
         .as_deref()
-        .map(|prefix| route(prefix, "parquet"))
+        .map(|prefix| route(prefix, &format!("{}/parquet", D::SEGMENT)))
         .ok_or_else(|| ApiError::internal("the API has no prefix"))?;
 
     let columns = search.columns();
@@ -1400,10 +1531,7 @@ async fn plan_of(
                 estimated_bytes: entry.estimated_bytes,
                 body: PlanBody {
                     url: below(&url, &entry.path)?,
-                    select: params.select.clone(),
-                    columns: params.columns.clone(),
-                    where_: params.r#where.clone(),
-                    filters: params.filters.clone(),
+                    query: params.query.clone(),
                     region,
                     ra_column: named.map(|columns| columns.ra.clone()),
                     dec_column: named.map(|columns| columns.dec.clone()),
@@ -1609,13 +1737,13 @@ mod tests {
         send(Request::builder().uri(uri), Body::empty()).await
     }
 
-    /// A `POST /api/v1/parquet` with the given body, under a policy that allows
+    /// A `POST /api/v1/expr/parquet` with the given body, under a policy that allows
     /// everything — what the policy allows is `access.rs`'s business.
     async fn select_with(body: serde_json::Value) -> (StatusCode, String) {
         send(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/parquet")
+                .uri("/api/v1/expr/parquet")
                 .header("content-type", "application/json"),
             Body::from(body.to_string()),
         )
@@ -1648,7 +1776,7 @@ mod tests {
     /// parameters in a url.
     #[tokio::test]
     async fn the_query_endpoint_is_not_a_get() {
-        let (status, _) = get("/api/v1/parquet?url=s3://b/k.parquet&where=x%3D1").await;
+        let (status, _) = get("/api/v1/expr/parquet?url=s3://b/k.parquet&where=x%3D1").await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
@@ -1752,7 +1880,7 @@ mod tests {
         let (status, body) = send(
             Request::builder()
                 .method("POST")
-                .uri("/api/v1/parquet")
+                .uri("/api/v1/expr/parquet")
                 .header("content-type", "application/json"),
             Body::from(format!("{{\"url\": \"{SECRET}\"")),
         )
@@ -1842,10 +1970,10 @@ mod tests {
                 secret_access_key: Some(SECRET.to_owned().into()),
                 ..Default::default()
             },
-            select: None,
-            r#where: Some("objectid = 1".to_owned()),
-            columns: None,
-            filters: None,
+            query: Expr {
+                select: None,
+                r#where: Some("objectid = 1".to_owned()),
+            },
             region: None,
             ra_column: None,
             dec_column: None,
@@ -1854,6 +1982,7 @@ mod tests {
             format: None,
             limit: None,
             return_storage: false,
+            unknown: BTreeMap::new(),
         };
         let shown = format!("{params:?}");
         assert!(!shown.contains(SECRET), "leaked: {shown}");
@@ -2181,11 +2310,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    /// A `POST` of `body` to a service's own API route, as JSON.
-    async fn ask(service: Service, body: serde_json::Value) -> (StatusCode, String) {
+    /// A `POST` of `body` to one route of a service's own API, as JSON.
+    ///
+    /// The path is given rather than assumed, because which vocabulary a body is written in
+    /// is now which route it goes to — a test that sends `columns` to an `expr` route is
+    /// asking a different question than it means to.
+    async fn post_json(
+        service: Service,
+        path: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
         let request = Request::builder()
             .method("POST")
-            .uri("/api/v1/parquet")
+            .uri(path)
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
@@ -2195,17 +2332,13 @@ mod tests {
         (status, String::from_utf8(body.to_vec()).unwrap())
     }
 
+    /// A `POST` of `body` to a service's own API route, as JSON.
+    async fn ask(service: Service, body: serde_json::Value) -> (StatusCode, String) {
+        post_json(service, "/api/v1/expr/parquet", body).await
+    }
+
     async fn ask_hats(service: Service, body: serde_json::Value) -> (StatusCode, String) {
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/hats")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
-        let response = router(service).oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        (status, String::from_utf8(body.to_vec()).unwrap())
+        post_json(service, "/api/v1/expr/hats", body).await
     }
 
     /// The route end to end: a body naming a catalog by a mount's path comes back with the
@@ -2225,7 +2358,7 @@ mod tests {
             mounted(dir.path(), &ApiConfig::default()),
             serde_json::json!({
                 "url": "file:///",
-                "columns": "id",
+                "select": "id",
                 "region": [region],
             }),
         )
@@ -2285,7 +2418,7 @@ mod tests {
                 "healpix_order" => serde_json::json!(29),
                 _ => serde_json::json!("whatever"),
             };
-            for route in ["hats", "hats/plan"] {
+            for route in ["expr/hats", "expr/hats/plan"] {
                 let request = Request::builder()
                     .method("POST")
                     .uri(format!("/api/v1/{route}"))
@@ -2614,17 +2747,10 @@ mod tests {
 
     async fn ask_plan(
         service: Service,
+        path: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        let request = Request::builder()
-            .method("POST")
-            .uri("/api/v1/hats/plan")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .unwrap();
-        let response = router(service).oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = body_of(response).await;
+        let (status, body) = post_json(service, path, body).await;
         (status, serde_json::from_str(&body).unwrap())
     }
 
@@ -2657,6 +2783,7 @@ mod tests {
         let region = crate::hats_query::tests::regions()[0].clone();
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/expr/hats/plan",
             serde_json::json!({"url": "file:///", "region": [region]}),
         )
         .await;
@@ -2699,6 +2826,7 @@ mod tests {
         let region = crate::hats_query::tests::regions()[1].clone();
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/simple/hats/plan",
             serde_json::json!({"url": "file:///", "columns": "id", "region": [region]}),
         )
         .await;
@@ -2720,7 +2848,10 @@ mod tests {
         let source = dir.path().display().to_string();
         for entry in requests {
             assert_eq!(entry["method"], "POST");
-            assert_eq!(entry["path"], "/api/v1/parquet");
+            // The vocabulary the request was written in, which is the one the entry is
+            // written in: a plan a client can send back unchanged has to name a route that
+            // reads the fields it carries.
+            assert_eq!(entry["path"], "/api/v1/simple/parquet");
             let url = entry["body"]["url"].as_str().unwrap();
             assert!(url.starts_with("file:///dataset/Norder="), "{url}");
             assert!(
@@ -2746,11 +2877,20 @@ mod tests {
         let expected = crate::hats_query::tests::inside(&region);
         let body = serde_json::json!({"url": "file:///", "columns": "id", "region": [region]});
 
-        let (_, plan) = ask_plan(mounted(dir.path(), &ApiConfig::default()), body.clone()).await;
+        let (_, plan) = ask_plan(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/simple/hats/plan",
+            body.clone(),
+        )
+        .await;
         let mut ids = Vec::new();
         for entry in plan["requests"].as_array().unwrap() {
-            let (status, answer) = ask(
+            // Sent to the route the entry itself names, which is what a client following a
+            // plan does. Naming the route here instead would let an entry point somewhere
+            // that cannot read it and the test would never notice.
+            let (status, answer) = post_json(
                 mounted(dir.path(), &ApiConfig::default()),
+                entry["path"].as_str().unwrap(),
                 entry["body"].clone(),
             )
             .await;
@@ -2784,10 +2924,10 @@ mod tests {
                 secret_access_key: Some(SECRET.to_owned().into()),
                 ..Default::default()
             },
-            select: None,
-            r#where: None,
-            columns: Some("id".to_owned()),
-            filters: None,
+            query: Simple {
+                columns: Some("id".to_owned()),
+                filters: None,
+            },
             region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
             ra_column: None,
             dec_column: None,
@@ -2796,6 +2936,7 @@ mod tests {
             format: None,
             limit: None,
             return_storage: false,
+            unknown: BTreeMap::new(),
         };
         let url = parse_url(params.url.as_str()).unwrap();
         let dir_handle = storage::open_dir(
@@ -2834,10 +2975,10 @@ mod tests {
             let params = QueryRequest {
                 url: "file:///".to_owned().into(),
                 storage,
-                select: None,
-                r#where: None,
-                columns: Some("id".to_owned()),
-                filters: None,
+                query: Simple {
+                    columns: Some("id".to_owned()),
+                    filters: None,
+                },
                 region: None,
                 ra_column: None,
                 dec_column: None,
@@ -2846,6 +2987,7 @@ mod tests {
                 format: None,
                 limit: None,
                 return_storage,
+                unknown: BTreeMap::new(),
             };
             let url = parse_url(params.url.as_str()).unwrap();
             let opened = storage::open_dir(
@@ -2933,7 +3075,7 @@ mod tests {
 
         let request = Request::builder()
             .method("POST")
-            .uri("/api/v1/hats")
+            .uri("/api/v1/expr/hats")
             .header("content-type", "application/json")
             .body(Body::from(
                 serde_json::json!({"url": "file:///"}).to_string(),
@@ -3141,20 +3283,42 @@ mod tests {
         assert!(error.contains("nothing to serve"), "{error}");
     }
 
-    /// The two vocabularies are two ways of saying one thing, so a body carrying both
-    /// halves of one pair is a caller who thinks otherwise.
+    /// A field of the other vocabulary is refused, and the refusal says where it belongs.
+    ///
+    /// This is the whole of what the split buys, and it is the one thing serde cannot say
+    /// for us: `deny_unknown_fields` is ignored on a struct with a flattened field, so
+    /// without the catch-all a `filters` sent here would be dropped and every row returned —
+    /// which the caller cannot tell from a predicate that matched them all.
     #[tokio::test]
-    async fn the_api_body_refuses_both_spellings_at_once() {
-        for (one, other) in [("select", "columns"), ("where", "filters")] {
-            let (status, body) = select_with(serde_json::json!({
-                "url": "s3://b/k.parquet",
-                one: "objectid",
-                other: "objectid",
-            }))
+    async fn a_field_of_the_other_vocabulary_is_refused_and_placed() {
+        for (route, field, belongs_to) in [
+            ("/api/v1/expr/parquet", "columns", "simple"),
+            ("/api/v1/expr/parquet", "filters", "simple"),
+            ("/api/v1/simple/parquet", "select", "expr"),
+            ("/api/v1/simple/parquet", "where", "expr"),
+        ] {
+            let (status, body) = post_json(
+                api_only(),
+                route,
+                serde_json::json!({"url": "s3://b/k.parquet", field: "objectid"}),
+            )
             .await;
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{one}/{other}");
-            assert!(body.contains(one) && body.contains(other), "{body}");
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {field}: {body}");
+            assert!(body.contains(field), "{route} {field}: {body}");
+            assert!(body.contains(belongs_to), "{route} {field}: {body}");
         }
+    }
+
+    /// A field of no vocabulary at all is named too, rather than ignored.
+    #[tokio::test]
+    async fn an_unknown_field_is_named_rather_than_dropped() {
+        let (status, body) = select_with(serde_json::json!({
+            "url": "s3://b/k.parquet",
+            "wehre": "objectid = 1",
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("wehre"), "{body}");
     }
 
     /// A query string on a mounted parquet file is a question about it, and the answer

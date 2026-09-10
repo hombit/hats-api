@@ -517,7 +517,9 @@ fn api_note(prefix: &str) -> String {
          body naming the file as <code>file://\u{2026}</code> — this page's own path. A \
          file's panel writes the request out for <code>curl</code> and for the Python \
          readers, each with the <code>pip install</code> line it needs.</p>\n",
-        route = html_escape::encode_text(&route(prefix, "parquet")),
+        // The vocabulary the panel's own fields are written in, so that the sentence and the
+        // request the panel builds name one route.
+        route = html_escape::encode_text(&route(prefix, "simple/parquet")),
     )
 }
 
@@ -937,7 +939,7 @@ mod tests {
 
         let on = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
         assert!(on.contains("data-api=\"/api/v1\""), "{on}");
-        assert!(on.contains("POST /api/v1/parquet"), "{on}");
+        assert!(on.contains("POST /api/v1/simple/parquet"), "{on}");
 
         let off = listing(&dir).to_html(&DataFiles::default(), None, &NO_CATALOG, true);
         assert!(!off.contains("data-api"), "{off}");
@@ -951,13 +953,13 @@ mod tests {
 
     /// A mount at the root and an API at `/` are both spelled with the one separator the
     /// route already ends in, so joining them the way any other prefix is joined would
-    /// give `//parquet`.
+    /// give `//simple/parquet`.
     #[test]
     fn the_root_api_prefix_does_not_double_its_separator() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
         let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), &NO_CATALOG, true);
-        assert!(html.contains("POST /parquet"), "{html}");
-        assert!(!html.contains("//parquet"), "{html}");
+        assert!(html.contains("POST /simple/parquet"), "{html}");
+        assert!(!html.contains("//simple"), "{html}");
     }
 }

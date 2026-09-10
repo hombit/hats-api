@@ -313,8 +313,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
             "secret_access_key": SECRET_ACCESS_KEY,
             "allow_http": true,
         },
-        "column": "objectid",
-        "value": "1",
+        "where": "objectid = 1",
     });
 
     let router = app::router(
@@ -332,7 +331,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         .oneshot(
             http::Request::builder()
                 .method("POST")
-                .uri("/api/v1/select")
+                .uri("/api/v1/expr/parquet")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(body.to_string()))
                 .expect("request"),
@@ -348,6 +347,11 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         .expect("body")
         .to_bytes();
     let body = String::from_utf8_lossy(&body);
+
+    // The request has to have reached the handler for any of this to be a test of it: a
+    // route that does not exist answers 404 without ever seeing the body, and every
+    // assertion below then passes while checking nothing.
+    assert_eq!(status, http::StatusCode::OK, "{body}");
 
     // Whatever the outcome, neither the response nor the logs may carry the secret.
     assert_no_secret(&body, &format!("the {status} response body"));

@@ -207,13 +207,27 @@ everything about what SQL means here is decided there.
   the page index and a bloom filter can all prune on. Compared as a string it reads the
   whole file and returns nothing — a slow wrong answer rather than an error.
 
-- **Two vocabularies, one meaning.** `select`/`where` take expressions and
+- **Two vocabularies, one meaning, and a route each.** `select`/`where` take expressions and
   `columns`/`filters` take the narrower forms a query string can carry, but both lower to
-  the same planned expression and meet the same allowlist, and a request may use either
-  pair and not both. A difference in what they mean is a bug, not a feature — so a change
-  to one is a change to `sql.rs`, where they share the code, rather than a second path
-  beside it. `columns` stays narrower: it takes names, and a caller who wants an
-  expression writes `select`.
+  the same planned expression and meet the same allowlist. A difference in what they mean is
+  a bug, not a feature — so a change to one is a change to `sql.rs`, where they share the
+  code, rather than a second path beside it. `columns` stays narrower: it takes names, and a
+  caller who wants an expression writes `select`.
+
+  **Which vocabulary a body is written in is which route it was sent to**, not a pair of
+  fields that may or may not be there: `app::Dialect` is the vocabulary, its `SEGMENT` is
+  the first path segment, and `QueryRequest<D>` is every route's body. That is what keeps
+  "the caller wrote both" from being a case at all, and it is why a third vocabulary is an
+  implementation and three route lines rather than two more fields and another pairwise
+  refusal everywhere the fields are read. A vocabulary answers on every target or the
+  exceptions become something a caller has to remember, so they are registered together.
+
+  **The body stays flat on the wire.** `{url, select, where, region}`, never a nested query
+  object — which is why `QueryRequest` flattens its dialect. `flatten` is why the struct
+  cannot use `deny_unknown_fields`: serde ignores it there and drops unmatched keys in
+  silence, so the leftovers are collected into `unknown` and refused by `refuse_unknown`,
+  which also names the route a stray `filters` belongs to. Anything added to that struct
+  must keep both halves — flat outside, nothing dropped.
 - **A parameter this service acts on is honoured or refused, never dropped.** A `filters`
   that does not parse, or that names a column the file has not got, is a 400. Ignoring it
   returns every row, which the caller cannot tell from a predicate that matched every row
@@ -260,8 +274,8 @@ than being validated twice.
   moment it is opened, and the circle is what a reader adds — and nothing may go back to
   treating the circle as the thing that makes a query a query.
 - **A catalog under a mount refuses `ra_column` and `dec_column`**, and a lone file requires
-  them. That is the same split the API's two routes make, for the same reason, and it is why
-  both vocabularies lower to one `Selection` rather than each deciding.
+  them. That is the same split the API's `parquet` and `hats` targets make, for the same
+  reason, and it is why both vocabularies lower to one `Selection` rather than each deciding.
 - **`hats::local` is a hint and never the answer.** It recognises a catalog from a filename
   and one small read, because a page has to know before anyone asks; everything it says yes
   to is opened by `Catalog::open` a moment later, and a directory that lied gets the refusal

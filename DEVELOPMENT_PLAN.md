@@ -327,14 +327,17 @@ the language `where` already speaks, which is the one that needs no second parse
 #### The same two languages in the API body
 
 `columns`/`filters` is a second way of saying what `select`/`where` say, so a caller who
-knows one should not have to learn the other to move between the modes. The API body
-accepts either pair — `{select, where}` or `{columns, filters}` — and refuses a request
-carrying fields from both, which is a caller who thinks they mean different things.
+knows one should not have to learn the other to move between the modes.
 
-This is one endpoint with two vocabularies, not two endpoints: the transport, the
-policy, the target and the output are identical, and only the wording of the projection
-and the predicate differ. It is also not a query string. The `GET` shape is a separate
-question and stays where it is (§9.2), for the reason §3.3 is a `POST` at all.
+Each vocabulary is its own path segment — `/expr/…` and `/simple/…` — over one body shape,
+so which pair a request meant is answered by the route it arrived on rather than by which
+fields it carried. The transport, the policy, the target and the output are identical; only
+the wording of the projection and the predicate differ, and the body stays flat. What the
+segment buys is room for a third: a language that is a whole statement rather than a pair of
+fields has nothing to conflict with, and adding one does not widen every existing body.
+
+It is also not a query string. The `GET` shape is a separate question and stays where it is
+(§9.2), for the reason §3.3 is a `POST` at all.
 
 - **The narrower language stays narrower.** `select` takes expressions and aliases;
   `columns` takes names. Accepting `columns` in the API body does not widen it to

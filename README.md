@@ -223,15 +223,39 @@ The caller names the data in the request body. The route is under `[api] prefix`
 `/api/v1` by default:
 
 ```
-POST /api/v1/parquet
-POST /api/v1/hats
-POST /api/v1/hats/plan
+POST /api/v1/expr/parquet     POST /api/v1/simple/parquet
+POST /api/v1/expr/hats        POST /api/v1/simple/hats
+POST /api/v1/expr/hats/plan   POST /api/v1/simple/hats/plan
 GET  /api/v1/health
 ```
 
-`parquet` takes a url naming one file. `hats` takes a url naming a catalog directory and
-chooses the files itself; `hats/plan` takes the same body and returns the work rather than
-doing it — [below](#querying-a-whole-catalog). All three take the same body.
+Two segments, and each names one thing. The **second** is what the url names: `parquet`
+takes a url naming one file, `hats` takes a url naming a catalog directory and chooses the
+files itself, and `hats/plan` takes the same body and returns the work rather than doing it
+— [below](#querying-a-whole-catalog).
+
+The **first** is the vocabulary the body is written in:
+
+| | projection | predicate |
+|---|---|---|
+| `expr` | `select` — a SQL select list, so `mag - 0.1 AS mag_corr` works | `where` — one boolean SQL expression |
+| `simple` | `columns` — comma-separated names, never expressions | `filters` — one predicate, `&&` spelling `AND` |
+
+Both lower to the same planned expression, so the two answer identically; they differ in
+what a field may hold. `simple` is what a url query string can carry, which is why
+file-server mode reads the same pair out of one, and it is what
+[vizcat](https://vizcat.cds.unistra.fr/hats/) clients write.
+
+`expr` is named for what a field holds and not for SQL, because a *statement* is refused:
+each field is parsed on its own and the parser must reach the end of the string, so
+`SELECT … FROM …` is a different thing rather than a longer form of this.
+
+**A field of the other vocabulary is refused, not ignored** — `filters` sent to an `expr`
+route is a `400` naming the field and the vocabulary it belongs to. Dropping it would return
+every row, which a caller cannot tell from a predicate that matched them all.
+
+Everything else — `url`, `storage`, `region`, `limit`, `format`, the column names — is the
+same in both, and the body stays flat either way.
 
 ```json
 {
@@ -282,8 +306,6 @@ write to every proxy's access log, and a body has no url-length limit.
 `region` and its two column names are the API's alone; a mounted file takes no spatial
 parameter, since a request there selects a region by naming `Norder=k/Npix=p` in the path.
 
-`select` and `where` take SQL expressions. `columns` and `filters` are also accepted and
-mean what they mean in file-server mode; a request may use either pair and not both.
 `format` defaults to `json` here and to `parquet` in file-server mode.
 
 Rows come back in no particular order — unlike file-server mode, which preserves the
@@ -294,8 +316,8 @@ An error is a status code and a one-field body, `{"error": "…"}`.
 
 ### Querying a whole catalog
 
-`POST /api/v1/hats` takes the same body, with `url` naming a HATS catalog directory rather
-than a file in it:
+`POST /api/v1/{expr,simple}/hats` takes the same body, with `url` naming a HATS catalog
+directory rather than a file in it — here in the `simple` vocabulary:
 
 ```json
 {
@@ -363,7 +385,8 @@ also what `max_query_radius_arcsec` is about.
 
 ### Planning instead of running
 
-`POST /api/v1/hats/plan` takes the same body and resolves it without reading a row:
+`POST /api/v1/{expr,simple}/hats/plan` takes the same body and resolves it without reading
+a row:
 
 ```json
 {
@@ -375,7 +398,7 @@ also what `max_query_radius_arcsec` is about.
     {
       "order": 3, "pixel": 264,
       "method": "POST",
-      "path": "/api/v1/parquet",
+      "path": "/api/v1/simple/parquet",
       "estimated_bytes": 380375000,
       "body": {
         "url": "s3://survey-data/catalog/dataset/Norder=3/Dir=0/Npix=264.parquet",
@@ -395,10 +418,12 @@ also what `max_query_radius_arcsec` is about.
 With `"return_storage": true` in the request, each `body` also carries the `storage` object
 that request was sent with.
 
-Each entry is a request against this service. The client sends them with its own
-concurrency and retries and concatenates the answers **in the order given**, which is the
-same rows the `hats` route would have returned. A `limit` is carried on each entry, so the
-client takes the first `limit` rows of the concatenation.
+Each entry is a request against this service, written in the vocabulary the plan was asked
+for in and naming that vocabulary's own `parquet` route in `path` — so an entry can be sent
+back exactly as it stands. The client sends them with its own concurrency and retries and
+concatenates the answers **in the order given**, which is the same rows the `hats` route
+would have returned. A `limit` is carried on each entry, so the client takes the first
+`limit` rows of the concatenation.
 
 The column names the `hats` route refuses are written into each entry, because the
 single-file route has no catalog to ask.

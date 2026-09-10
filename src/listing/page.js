@@ -280,7 +280,12 @@ function snippet(panel) {
 
 /* The API request a panel's fields are, as a route and a body. Two routes over one body
    shape: a file names itself and a catalog names itself and a shape on the sky, and the
-   column names are the catalog's own to answer — which is why they appear in neither. */
+   column names are the catalog's own to answer — which is why they appear in neither.
+
+   Both sit under `simple`, which is the vocabulary the panel's fields are: `columns` takes
+   names and `filters` spells `AND` as `&&`, the same pair a url carries. The `expr` routes
+   take one SQL expression per field instead, and a body written for one is refused by the
+   other rather than half-read. */
 function request(panel) {
   const {ra, dec, radius_arcsec, ...rest} = asked(panel);
   const catalog = panel.dataset.catalog !== undefined;
@@ -295,7 +300,10 @@ function request(panel) {
     }
   }
   return {
-    route: new URL(API.replace(/\/$/, '') + (catalog ? '/hats' : '/parquet'), location.href).href,
+    route: new URL(
+      API.replace(/\/$/, '') + (catalog ? '/simple/hats' : '/simple/parquet'),
+      location.href,
+    ).href,
     body: body,
   };
 }
