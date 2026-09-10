@@ -601,6 +601,50 @@ pub(crate) mod tests {
         buffer
     }
 
+    /// A file with a struct column, which is how a HATS catalog carries a light curve: one
+    /// row per object, and the measurements packed into a field per column.
+    ///
+    /// `sources.mjd` is the spelling that reaches one, so this is what a test of nested
+    /// names needs. The struct holds a list and a scalar, since a caller's reason for
+    /// reaching into one is usually the list.
+    pub(crate) fn nested_fixture() -> Vec<u8> {
+        use datafusion::arrow::array::{ArrayRef, Float64Builder, ListBuilder, StructArray};
+        use datafusion::arrow::datatypes::{DataType, Field};
+
+        let mut mjd = ListBuilder::new(Float64Builder::new());
+        for row in 0..3 {
+            for point in 0..3 {
+                mjd.values().append_value(f64::from(row * 10 + point));
+            }
+            mjd.append(true);
+        }
+        let mjd: ArrayRef = Arc::new(mjd.finish());
+        let band: ArrayRef = Arc::new(StringArray::from_iter_values(["g", "r", "i"]));
+        let sources: ArrayRef = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new(
+                    "mjd",
+                    DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                    true,
+                )),
+                mjd,
+            ),
+            (Arc::new(Field::new("band", DataType::Utf8, true)), band),
+        ]));
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..3));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("sources", sources, true),
+        ])
+        .expect("the nested fixture batch");
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
+
     /// How a fixture is written, for the cases that care.
     ///
     /// Every field here changes what the engine has to work with rather than what the

@@ -1138,6 +1138,24 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
 struct Column {
     name: String,
     r#type: String,
+    /// A struct column's own fields, one level down and no further.
+    ///
+    /// A HATS catalog carrying light curves has them packed into a struct per row — the
+    /// column is `sources` and what a reader wants is `sources.mjd` — and that spelling is
+    /// one both vocabularies already plan, as a compound identifier. What was missing was
+    /// any way to learn the names: the type string spells them, but a client would have to
+    /// parse arrow's own `Display` to get at them, so they are named here instead.
+    ///
+    /// **Each name is its own, not the path.** `sources.mjd` is two identifiers and quotes
+    /// per part where a part needs them — `"sources"."mjd"` resolves and `"sources.mjd"` is
+    /// a column no file has got. Joining them here would hand a caller a string that only
+    /// works while every part happens to need no quoting.
+    ///
+    /// One level, because that is the level that is addressable this way and because a
+    /// deeper walk is a page of names nobody asked for. A field that is itself a struct is
+    /// listed and its own fields are not.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    fields: Vec<Column>,
 }
 
 /// A catalog's answer: [`SelectResponse`] plus which partitions it came out of.
@@ -1623,15 +1641,33 @@ async fn hats_answer(
 
 /// The columns of an answer, as the schema describes them.
 fn columns_of(result: &QueryResult) -> Vec<Column> {
-    result
-        .schema
-        .fields()
-        .iter()
-        .map(|field| Column {
-            name: field.name().clone(),
-            r#type: field.data_type().to_string(),
-        })
-        .collect()
+    result.schema.fields().iter().map(column_of).collect()
+}
+
+/// One field, with a struct's own fields under it.
+///
+/// Only a struct: `sources.mjd` is planned as a compound identifier, and that resolves
+/// through a struct and through nothing else. A list of structs holds the same names and is
+/// not reachable by writing one, so listing its fields would offer a name that does not
+/// answer — worse than not listing it, since the caller cannot tell which kind they have
+/// without reading the type.
+fn column_of(field: &datafusion::arrow::datatypes::FieldRef) -> Column {
+    Column {
+        name: field.name().clone(),
+        r#type: field.data_type().to_string(),
+        fields: match field.data_type() {
+            datafusion::arrow::datatypes::DataType::Struct(fields) => fields
+                .iter()
+                .map(|inner| Column {
+                    name: inner.name().clone(),
+                    r#type: inner.data_type().to_string(),
+                    // One level. The walk stops here rather than recursing.
+                    fields: Vec::new(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+    }
 }
 
 /// The result, in whichever encoding was asked for. Both modes answer through here, so
@@ -3455,6 +3491,65 @@ mod tests {
         let projected = asked("/part0.parquet?columns=band&limit=1&format=json").await;
         assert_eq!(projected["schema"].as_array().unwrap().len(), 1);
         assert_eq!(projected["schema"][0]["name"], "band");
+    }
+
+    /// A struct column names its own fields, and the name that is built out of them
+    /// resolves.
+    ///
+    /// Both halves matter and neither is enough alone. A HATS catalog packs a light curve
+    /// into a struct, so the column is `sources` and what a reader wants is `sources.mjd`;
+    /// the names are in the type string, but reading them off it means parsing arrow's
+    /// `Display`, so they are named in `fields` instead. And a field's name is its own
+    /// rather than the path: the parts are quoted one at a time, because `"sources"."mjd"`
+    /// names the field while `"sources.mjd"` names a column no file has got.
+    #[tokio::test]
+    async fn a_struct_column_names_its_fields_and_they_can_be_asked_for() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("part0.parquet"),
+            query::tests::nested_fixture(),
+        )
+        .unwrap();
+        let asked = |uri: String| {
+            let service = mounted(dir.path(), &ApiConfig::default());
+            async move {
+                let response = respond(service, Request::builder().uri(uri.as_str())).await;
+                assert_eq!(response.status(), StatusCode::OK);
+                serde_json::from_str::<serde_json::Value>(&body_of(response).await).unwrap()
+            }
+        };
+
+        let described = asked("/part0.parquet?limit=0&format=json".to_owned()).await;
+        let columns = described["schema"].as_array().unwrap();
+        // A scalar names no fields at all rather than an empty list, which would read as a
+        // struct that has none.
+        assert_eq!(columns[0]["name"], "objectid");
+        assert!(columns[0]["fields"].is_null(), "{described}");
+        assert_eq!(columns[1]["name"], "sources");
+        let fields = columns[1]["fields"].as_array().unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0]["name"], "mjd");
+        assert_eq!(fields[1]["name"], "band");
+        // One level: a field lists no fields of its own.
+        assert!(fields[0]["fields"].is_null(), "{described}");
+
+        // The spelling the page builds out of those two names, quoted a part at a time.
+        let picked =
+            asked("/part0.parquet?columns=%22sources%22.%22mjd%22&limit=1&format=json".to_owned())
+                .await;
+        assert_eq!(picked["schema"].as_array().unwrap().len(), 1);
+        assert_eq!(picked["schema"][0]["name"], "sources.mjd");
+        assert_eq!(picked["rows"][0]["sources.mjd"][0], 0.0);
+
+        // And the path quoted whole is a different name, which the file has not got. It is
+        // refused rather than answered, so a page that got this wrong could not look right.
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let response = respond(
+            service,
+            Request::builder().uri("/part0.parquet?columns=%22sources.mjd%22&limit=1&format=json"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     /// The point of taking the parameter names rather than the behaviour: a predicate

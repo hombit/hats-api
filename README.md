@@ -291,6 +291,22 @@ columns where it did not. It is there because rows do not describe themselves: a
 that matched nothing looks like a file without the column, so `limit=0` is how to ask what
 a file holds, and it reads no data at all.
 
+A struct column also carries `fields`, its own fields one level down — a HATS catalog packs
+a light curve into one, so the column is `sources` and what a reader wants is `sources.mjd`.
+Both vocabularies plan that spelling. **Each name is its own, not the path**, so a part that
+needs quoting is quoted on its own: `"sources"."mjd"` names the field, while
+`"sources.mjd"` names a column no file has got and is refused.
+
+```json
+{ "name": "sources", "type": "Struct(...)",
+  "fields": [{ "name": "mjd", "type": "List(Float64)" },
+             { "name": "mag", "type": "List(Float64)" }] }
+```
+
+Only a struct: a list of structs holds the same names and a compound identifier does not
+reach into one, so listing its fields would offer a name that does not answer. A scalar
+column carries no `fields` key at all rather than an empty list.
+
 **Every row carries every column, and a value JSON cannot spell is a string.** A null is
 written as `null` rather than left out, so a row's keys are the answer's columns and not
 whatever that row happened to have. `NaN`, `Infinity` and `-Infinity` come back as those

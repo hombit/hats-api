@@ -533,7 +533,12 @@ function describe(panel, at) {
     .catch(error => fail(count.parentElement, error));
 }
 
-/* The columns as buttons. */
+/* The columns as buttons, each struct column followed by its own fields.
+
+   A catalog carrying light curves packs them into a struct per row, so the column is
+   `sources` and what a reader wants is `sources.mjd` — a spelling both vocabularies already
+   plan. The names were the missing part: they are in the type, and reading them off it would
+   mean parsing arrow's own `Display`, so the server names them in `fields` instead. */
 function chipsFrom(panel, schema) {
   const count = panel.querySelector('.count');
   const chips = panel.querySelector('.chips');
@@ -541,14 +546,25 @@ function chipsFrom(panel, schema) {
      partition, and the answer carries nothing to describe. Writing "0 columns" over the
      list would report the emptiness of the answer as a fact about the catalog. */
   if (chips.children.length > 0 || schema.length === 0) return;
-  count.textContent = counted(schema.length, 'column', 'columns') + ':';
+  let nested = 0;
   for (const column of schema) {
-    chips.appendChild(chip(panel, column));
+    chips.appendChild(chip(panel, [column.name], column));
+    for (const field of column.fields || []) {
+      chips.appendChild(chip(panel, [column.name, field.name], field));
+      nested += 1;
+    }
   }
+  /* The file's own columns, and the fields under them said separately. Counting them
+     together would report a file of six columns as a file of eighteen. */
+  count.textContent =
+    counted(schema.length, 'column', 'columns') +
+    (nested === 0 ? '' : ', ' + counted(nested, 'nested field', 'nested fields')) +
+    ':';
   /* A survey catalog runs to a couple of hundred columns, which is more than anyone
      reads down. Past a screenful the list gets a box of its own to scroll in and
-     something to search it with. */
-  if (schema.length > 12) {
+     something to search it with. Measured against what is on show rather than against the
+     top level, since the fields are what make a short list long. */
+  if (chips.children.length > 12) {
     const find = panel.querySelector('.find');
     find.hidden = false;
     find.addEventListener('input', () => {
@@ -562,16 +578,20 @@ function chipsFrom(panel, schema) {
 
 /* A column, as a button that writes its own name into the projection. Astronomy column
    names are mixed-case and easy to mistype, and the service refuses a name it does not
-   have rather than ignoring it. */
-function chip(panel, column) {
+   have rather than ignoring it.
+
+   `path` is the parts of the name, which for a struct's field is two. They are quoted one
+   at a time: `"sources"."mjd"` names the field and `"sources.mjd"` names a column no file
+   has got, so a path quoted whole is a 400 rather than the thing the reader clicked. */
+function chip(panel, path, column) {
+  const spelled = path.map(written).join('.');
   const button = document.createElement('button');
-  button.className = 'chip';
-  button.textContent = column.name;
+  button.className = path.length > 1 ? 'chip nested' : 'chip';
+  button.textContent = path.join('.');
   button.title = cut(column.type, TYPE);
   button.addEventListener('click', () => {
     const columns = panel.querySelector('.columns');
     const names = listed(columns.value);
-    const spelled = written(column.name);
     const at = names.indexOf(spelled);
     if (at === -1) {
       names.push(spelled);

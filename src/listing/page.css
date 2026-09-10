@@ -234,6 +234,10 @@ a.run:hover { text-decoration: none; }
   border-radius: 0.6rem;
   font: 0.72rem var(--mono);
 }
+/* A struct's own field, set apart from the columns so that a list of them does not read as
+   a file with three times as many columns as it has. Dashed rather than indented: the chips
+   wrap, so a field is not reliably on the same line as the column it belongs to. */
+.chip.nested { border-style: dashed; color: var(--muted); }
 /* The two run together or wrap together, rather than one of them dropping to a line of
    its own when the fields beside them are wide. */
 .buttons { display: flex; gap: 0.5rem; }
