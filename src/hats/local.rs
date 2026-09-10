@@ -17,8 +17,8 @@
 use std::io::Read as _;
 use std::path::Path;
 
-use super::partitions;
 use super::properties::{self, Properties};
+use super::{catalog, partitions};
 
 /// How much of a `properties` file is read to recognise it.
 ///
@@ -118,17 +118,22 @@ pub struct About {
     /// `hats_order`, the order the catalog says it is partitioned at. The page is the one
     /// place this is read rather than the partition list — nothing is being planned on it.
     pub order: Option<u8>,
-    /// Whether `dataset/_common_metadata` is there, which is where the page gets the
-    /// catalog's columns without choosing a partition to ask.
-    pub has_schema: bool,
+    /// Where this catalog's columns can be read, as the path below the directory the page is
+    /// for — `dataset/_common_metadata`, which is every partition's columns and no rows, so
+    /// the page gets them without choosing a partition to ask.
+    ///
+    /// Segments rather than a joined string, because a url is built out of these and the
+    /// encoding of a name belongs to `listing`. A collection's is one segment longer: the
+    /// file is in the primary table, and the collection's own directory has no `dataset`.
+    ///
+    /// `None` where the file is not there. A catalog without one is answered by the page a
+    /// different way rather than offered a url that is a 404.
+    pub schema: Option<Vec<String>>,
 }
 
 /// What this catalog says about itself, from whichever of its files describes it.
 pub fn about(dir: &Path) -> About {
-    let mut about = About {
-        has_schema: dir.join(partitions::COMMON_METADATA).is_file(),
-        ..About::default()
-    };
+    let mut about = About::default();
     let properties = properties::NAMES
         .iter()
         .chain([&properties::COLLECTION])
@@ -140,8 +145,37 @@ pub fn about(dir: &Path) -> About {
         // on these, so a broken one is worth less than a refusal would cost.
         about.rows = properties.rows().ok().flatten();
         about.order = properties.order().ok().flatten();
+        about.schema = schema(dir, &properties);
     }
     about
+}
+
+/// The path to the file the page reads this catalog's columns from, checked to be there.
+///
+/// A collection has no `dataset` of its own: its partitions are the primary table's, and so
+/// is the file that describes them. Without the hop the page finds nothing and shows a
+/// catalog with no columns, which reads as a catalog that has none.
+///
+/// The hop is [`super::catalog::primary_table`]'s to allow, not this module's to repeat: a
+/// collection is followed one hop and only ever downwards, and a second copy of that rule is
+/// one that can come to disagree with the first. Here it is a hint rather than a request, so
+/// a refusal is simply a page with no column list — the same answer as a missing file.
+fn schema(dir: &Path, properties: &Properties) -> Option<Vec<String>> {
+    // Split rather than kept whole: a primary table may be named as more than one level, and
+    // a `/` left inside a segment is percent-encoded into the name when the url is built.
+    let below = |within: &str| {
+        let path: Vec<String> = within
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .chain(partitions::COMMON_METADATA.split('/'))
+            .map(str::to_owned)
+            .collect();
+        let at = path
+            .iter()
+            .fold(dir.to_path_buf(), |at, segment| at.join(segment));
+        at.is_file().then_some(path)
+    };
+    below("").or_else(|| below(catalog::primary_table(properties).ok()?))
 }
 
 /// Whether a directory name is one of a catalog's own layers.
@@ -238,5 +272,77 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
         assert_eq!(enclosing(dir.path(), 4), None);
+    }
+
+    /// The columns file, for a catalog that holds one directly and for a collection that
+    /// holds one in its primary table.
+    ///
+    /// A collection has no `dataset` of its own, so looking only below its own directory
+    /// finds nothing and the page shows a catalog with no columns — which a reader cannot
+    /// tell from a catalog that has none.
+    #[test]
+    fn a_collection_s_columns_are_found_in_its_primary_table() {
+        let plain = TempDir::new().unwrap();
+        fs::write(plain.path().join("hats.properties"), "hats_order=1\n").unwrap();
+        fs::create_dir_all(plain.path().join("dataset")).unwrap();
+        fs::write(plain.path().join(partitions::COMMON_METADATA), b"x").unwrap();
+        assert_eq!(
+            about(plain.path()).schema.as_deref(),
+            Some(["dataset".to_owned(), "_common_metadata".to_owned()].as_slice())
+        );
+
+        let collection = TempDir::new().unwrap();
+        fs::write(
+            collection.path().join("collection.properties"),
+            "obs_collection=c\nhats_primary_table_url=inside\n",
+        )
+        .unwrap();
+        fs::create_dir_all(collection.path().join("inside/dataset")).unwrap();
+        fs::write(
+            collection
+                .path()
+                .join("inside")
+                .join(partitions::COMMON_METADATA),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(
+            about(collection.path()).schema.as_deref(),
+            Some(
+                [
+                    "inside".to_owned(),
+                    "dataset".to_owned(),
+                    "_common_metadata".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    /// A collection whose primary table points outside itself is not followed, and the page
+    /// simply has no column list.
+    ///
+    /// The hop is the same one the API allows and no wider: a url built from an absolute
+    /// path or a `..` would leave the mount, and it would be built out of a name a file this
+    /// service read rather than out of anything the caller wrote.
+    #[test]
+    fn a_collection_pointing_outside_itself_offers_no_columns() {
+        for named in ["/etc", "../sibling", "https://example.com/x"] {
+            let dir = TempDir::new().unwrap();
+            fs::write(
+                dir.path().join("collection.properties"),
+                format!("obs_collection=c\nhats_primary_table_url={named}\n"),
+            )
+            .unwrap();
+            assert_eq!(about(dir.path()).schema, None, "{named}");
+        }
+    }
+
+    /// A catalog with no such file offers no url for one, rather than one that is a 404.
+    #[test]
+    fn a_catalog_without_the_file_offers_no_columns() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("hats.properties"), "hats_order=1\n").unwrap();
+        assert_eq!(about(dir.path()).schema, None);
     }
 }

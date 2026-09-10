@@ -592,11 +592,21 @@ pub fn url(prefix: &str, segments: &[String]) -> String {
 /// A url one level below `base`. The root ends in the separator already, so joining it
 /// the way any other directory is joined would give `//name`.
 fn child(base: &str, name: &str) -> String {
-    format!(
-        "{}/{}",
-        base.trim_end_matches('/'),
-        utf8_percent_encode(name, SEGMENT)
-    )
+    below(base, std::slice::from_ref(&name))
+}
+
+/// A url some levels below `base`, each segment encoded as a name.
+///
+/// The segments are names off the disk — a catalog's own primary table is one — so they are
+/// encoded here rather than by whoever knows the path. Nothing outside this module builds a
+/// url out of a name, and a `/` or a `%` reaching one literally is how that rule gets broken.
+pub fn below<S: AsRef<str>>(base: &str, segments: &[S]) -> String {
+    let mut url = base.trim_end_matches('/').to_owned();
+    for segment in segments {
+        url.push('/');
+        url.push_str(&utf8_percent_encode(segment.as_ref(), SEGMENT).to_string());
+    }
+    url
 }
 
 /// RFC 3339 in UTC, to the second. The filesystem's resolution is finer than that, and

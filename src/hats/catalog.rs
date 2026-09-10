@@ -167,7 +167,7 @@ async fn read_collection(dir: &RemoteDir) -> Result<Option<Properties>, ApiError
 /// So a collection is followed one hop, downwards, and anything else is refused with a
 /// message saying the caller may name the catalog directly. That costs a collection whose
 /// members are published apart from it, which is not a shape a collection is written in.
-fn primary_table(collection: &Properties) -> Result<&str, ApiError> {
+pub(super) fn primary_table(collection: &Properties) -> Result<&str, ApiError> {
     let refuse = |why: &str| {
         ApiError::bad_request(format!(
             "this collection's hats_primary_table_url {why}; name the catalog's own url"

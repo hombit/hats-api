@@ -716,20 +716,16 @@ async fn list_directory(
         ),
         None => (None, None),
     };
-    // Where the catalog's columns are, as a url under this mount. Only where the catalog
-    // has the file: a catalog without one is answered by the page a different way rather
-    // than offered a url that is a 404.
+    // Where the catalog's columns are, as a url under this mount. Only where the catalog has
+    // the file: one without it is answered by the page a different way rather than offered a
+    // url that is a 404. The path is the catalog's to give — a collection's is inside its
+    // primary table — and the encoding is `listing`'s.
     let schema = catalog
         .as_deref()
         .zip(about.as_ref())
         .and_then(|(at, about)| {
-            about.has_schema.then(|| {
-                format!(
-                    "{}/{}",
-                    at.trim_end_matches('/'),
-                    hats::partitions::COMMON_METADATA
-                )
-            })
+            let path = about.schema.as_deref()?;
+            Some(listing::below(at, path))
         });
 
     Ok(match listing::wants_html(&request.headers) {
