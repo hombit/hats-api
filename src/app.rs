@@ -3533,13 +3533,19 @@ mod tests {
         // One level: a field lists no fields of its own.
         assert!(fields[0]["fields"].is_null(), "{described}");
 
-        // The spelling the page builds out of those two names, quoted a part at a time.
+        // The spelling the page builds out of those two names, quoted a part at a time. It
+        // comes back as the column it names into, holding the one field that was asked for:
+        // a row's light curve is one value, and this asked for less of that value rather
+        // than for a column beside it.
         let picked =
             asked("/part0.parquet?columns=%22sources%22.%22mjd%22&limit=1&format=json".to_owned())
                 .await;
         assert_eq!(picked["schema"].as_array().unwrap().len(), 1);
-        assert_eq!(picked["schema"][0]["name"], "sources.mjd");
-        assert_eq!(picked["rows"][0]["sources.mjd"][0], 0.0);
+        assert_eq!(picked["schema"][0]["name"], "sources");
+        let packed = picked["schema"][0]["fields"].as_array().unwrap();
+        assert_eq!(packed.len(), 1, "{picked}");
+        assert_eq!(packed[0]["name"], "mjd");
+        assert_eq!(picked["rows"][0]["sources"]["mjd"][0], 0.0);
 
         // And the path quoted whole is a different name, which the file has not got. It is
         // refused rather than answered, so a page that got this wrong could not look right.

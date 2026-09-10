@@ -207,6 +207,28 @@ everything about what SQL means here is decided there.
   the page index and a bloom filter can all prune on. Compared as a string it reads the
   whole file and returns nothing — a slow wrong answer rather than an error.
 
+- **A row's nested column is one value, and a projection into it returns that value.**
+  `columns=lightcurve.mag, lightcurve.mjd` comes back as one `lightcurve` holding those two
+  fields, the way `pyarrow` reads a subset of a struct — never as two columns beside each
+  other and never flattened. A client that asked for less of a light curve still has a light
+  curve; handing back `mag` and `mjd` separately makes the reader above — `nested_pandas`,
+  `astropy` — put the row together again, against a schema that no longer matches the file's.
+
+  `sql::regrouped` and `sql::packed` are where that happens, which is why it is in `sql.rs`
+  with the rest of what a projection means rather than in the route that took the parameter:
+  both vocabularies reach it, and a bare path means the same in either. Three rules go with
+  it, and each is a case someone will otherwise write the other way:
+
+  - **Only a bare path is a narrowing.** An alias makes it the caller's own output column —
+    `lightcurve.mag AS mag` asked for that name — and an expression over a subfield is a
+    computed value, not part of a column. Both are planned as written.
+  - **A name that reaches a whole column takes it whole.** `lightcurve` and `lightcurve.mag`
+    together are `lightcurve`, every field: the deeper name asks for part of what the
+    shallower one already returns, so the union is the column and neither is dropped.
+  - **The head of a path has to be one of the file's own fields.** A compound identifier
+    whose head is not is a qualified column reference and stays the planner's; treating it as
+    a path packs the column into a struct named after the table.
+
 - **Two vocabularies, one meaning, and a route each.** `select`/`where` take expressions and
   `columns`/`filters` take the narrower forms a query string can carry, but both lower to
   the same planned expression and meet the same allowlist. A difference in what they mean is

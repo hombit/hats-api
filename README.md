@@ -307,6 +307,24 @@ Only a struct: a list of structs holds the same names and a compound identifier 
 reach into one, so listing its fields would offer a name that does not answer. A scalar
 column carries no `fields` key at all rather than an empty list.
 
+**Asking for a field returns the column it is in, holding the fields you named.** A row's
+light curve is one value, so `sources.mjd, sources.mag` comes back as one `sources` with
+those two fields — the way `pyarrow` reads a subset of a struct, not as two columns beside
+each other and not flattened. A client that asked for less of a light curve still has a
+light curve, and it still matches the file's own schema.
+
+```
+columns=id, sources.mjd, sources.mag   ->  id, sources{mjd, mag}
+columns=sources                        ->  sources{every field}
+columns=sources, sources.mjd           ->  sources{every field}
+select=sources.mjd AS mjd              ->  mjd          (an alias is your own column)
+select=get_field(sources,'mjd') AS m   ->  m            (an expression, not part of sources)
+```
+
+The fields come back in the order you named them, and the column keeps the place where you
+first named it. Naming a column both whole and in part gives it whole: the deeper name asks
+for part of what the shallower one already returns, so nothing you wrote is dropped.
+
 **Every row carries every column, and a value JSON cannot spell is a string.** A null is
 written as `null` rather than left out, so a row's keys are the answer's columns and not
 whatever that row happened to have. `NaN`, `Infinity` and `-Infinity` come back as those

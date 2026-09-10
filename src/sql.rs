@@ -16,12 +16,17 @@
 //! function and a call to `random()` are all expressions. So what the planner returns is
 //! walked, and only the node kinds this service will actually run are let through.
 
+use std::collections::VecDeque;
 use std::ops::ControlFlow;
 
 use datafusion::arrow::datatypes::{DataType, Fields};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, DFSchema};
+use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::execution::context::SessionState;
+// The one function this module *builds* rather than lets through: packing a nested column's
+// fields back into it needs something that makes a struct. Imported rather than looked up in
+// the registry, so a build without it is a compile error instead of a request that fails.
+use datafusion::functions::core::expr_fn::named_struct;
 use datafusion::logical_expr::{Expr, UNNAMED_TABLE, Volatility};
 use datafusion::sql::sqlparser::ast::{
     Expr as SqlExpr, ExprWithAlias, Ident, visit_expressions_mut,
@@ -78,23 +83,24 @@ pub fn projection(
     let items = parse(tokenize(sql, FIELD)?, FIELD, limits, |parser| {
         parser.parse_comma_separated(Parser::parse_expr_with_alias)
     })?;
-    items
+    let parts = items
         .into_iter()
         .map(|mut item| {
             resolve_identifiers(&mut item.expr, schema);
-            // After resolving, so that the key is the file's spelling of the path rather
-            // than the caller's — which is what a plain column already comes back as.
-            let path = match item.alias {
-                Some(_) => None,
-                None => dotted_name(&item.expr),
-            };
-            let expr = plan(state, schema, item, FIELD, limits)?;
-            Ok(match path {
-                Some(name) => expr.alias(name),
-                None => expr,
-            })
+            // After resolving, so a path is grouped and named by the file's spelling rather
+            // than the caller's.
+            //
+            // An alias makes it the caller's own output column and not a piece of one:
+            // `lightcurve.mag AS mag` asked for that name, so it is planned as written. An
+            // expression over a subfield is likewise not a narrowing of the column — only a
+            // bare path into it is.
+            match (&item.alias, projected_path(&item.expr, schema)) {
+                (None, Some(path)) => Ok(Part::Path(path)),
+                _ => plan(state, schema, item, FIELD, limits).map(Part::Planned),
+            }
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    regrouped(state, schema, parts, FIELD, limits)
 }
 
 /// The row predicate: one boolean expression, no alias and no second expression after it.
@@ -131,30 +137,36 @@ pub fn columns(
     let items = parse(tokenize(list, FIELD)?, FIELD, limits, |parser| {
         parser.parse_comma_separated(Parser::parse_expr)
     })?;
-    items
+    let parts = items
         .into_iter()
         .map(|mut item| {
             resolve_identifiers(&mut item, schema);
-            // After resolving, so the output key is the file's spelling of the name
-            // rather than the caller's.
-            let Some(name) = column_path(&item) else {
-                return Err(ApiError::bad_request(format!(
+            // After resolving, so a path is grouped and named by the file's spelling rather
+            // than the caller's.
+            //
+            // A name this file has not got is planned rather than refused here, so that the
+            // message a caller gets is the planner's — which names the closest column it
+            // has — instead of this one saying they wrote an expression when they did not.
+            match projected_path(&item, schema) {
+                Some(path) => Ok(Part::Path(path)),
+                None if column_path(&item).is_some() => plan(
+                    state,
+                    schema,
+                    ExprWithAlias {
+                        expr: item,
+                        alias: None,
+                    },
+                    FIELD,
+                    limits,
+                )
+                .map(Part::Planned),
+                None => Err(ApiError::bad_request(format!(
                     "{FIELD} takes column names; write select for an expression"
-                )));
-            };
-            let expr = plan(
-                state,
-                schema,
-                ExprWithAlias {
-                    expr: item,
-                    alias: None,
-                },
-                FIELD,
-                limits,
-            )?;
-            Ok(expr.alias(name))
+                ))),
+            }
         })
-        .collect()
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    regrouped(state, schema, parts, FIELD, limits)
 }
 
 /// The row predicate as the file-server vocabulary spells it — [`predicate`]'s language,
@@ -324,15 +336,189 @@ fn column_path(expr: &SqlExpr) -> Option<String> {
     }
 }
 
-/// The dotted path a caller wrote, for a select item that is only a path.
+/// The path a caller named, when what they wrote is a name into *this file's* columns.
 ///
-/// A plain column is left out: DataFusion names it after itself already, and an alias to
-/// the name it has would be a node to count for nothing.
-fn dotted_name(expr: &SqlExpr) -> Option<String> {
-    match expr {
-        SqlExpr::CompoundIdentifier(_) => column_path(expr),
-        _ => None,
+/// The first segment has to be one of the file's own fields. A compound identifier whose
+/// head is not — a qualified column reference — is left to the planner, which is what
+/// already reads one; treating it as a path would put the qualifier where a column name
+/// goes and pack the column into a struct named after the table.
+fn projected_path(expr: &SqlExpr, schema: &DFSchema) -> Option<Vec<Ident>> {
+    let parts = match expr {
+        SqlExpr::Identifier(ident) => vec![ident.clone()],
+        SqlExpr::CompoundIdentifier(parts) => parts.clone(),
+        _ => return None,
+    };
+    // A path with no head is not a name, whatever the parser made of it. Taken rather than
+    // asserted, so that everything downstream has a column to group under.
+    let head = parts.first()?;
+    schema
+        .fields()
+        .iter()
+        .any(|field| field.name() == &head.value)
+        .then_some(parts)
+}
+
+/// One item of a projection, once it is known which of the two it is.
+enum Part {
+    /// A name into the file's columns, kept as its resolved segments so that the pieces
+    /// naming one column can be put back together under it. Never empty.
+    Path(Vec<Ident>),
+    /// Anything else: an expression, or a name the caller aliased. Already planned, and
+    /// named the way it was written.
+    Planned(Expr),
+}
+
+/// Where one output column comes from, in the order the caller reached it.
+enum Slot {
+    Planned(Expr),
+    /// A column packed from the names that reach into it. Carries no index: the roots are
+    /// built in the order their slots were made, so they are taken in that same order.
+    Packed,
+}
+
+/// The projection, with the pieces of a nested column packed back into it.
+///
+/// **A row's light curve is one value.** A caller who asks for `lightcurve.mag` and
+/// `lightcurve.mjd` has asked for less of that value, not for two columns beside it — so
+/// what comes back is one `lightcurve` holding those two fields, the way `pyarrow` reads a
+/// subset of a struct. Handing back `mag` and `mjd` flat would make the reader above —
+/// `nested_pandas`, `astropy` — put the row together again, against a schema that no longer
+/// matches the file's.
+///
+/// **A name that reaches a whole column takes it whole.** `lightcurve` and
+/// `lightcurve.mag` together are `lightcurve`, every field of it: the deeper name asks for
+/// part of what the shallower one already returns, so the union is the column itself and
+/// nothing the caller wrote is dropped.
+///
+/// The order is the caller's — a column appears where they first named it, and its fields
+/// in the order they wrote them — which is what a select list does everywhere else.
+fn regrouped(
+    state: &SessionState,
+    schema: &DFSchema,
+    parts: Vec<Part>,
+    field: &str,
+    limits: Limits,
+) -> Result<Vec<Expr>, ApiError> {
+    // One slot per output, in the order the caller reached it, so that a second mention of
+    // a column adds a field to where it already is rather than a column after it.
+    let mut slots: Vec<Slot> = Vec::new();
+    let mut roots: Vec<(Ident, Vec<Vec<Ident>>)> = Vec::new();
+    for part in parts {
+        match part {
+            Part::Planned(expr) => slots.push(Slot::Planned(expr)),
+            Part::Path(path) => {
+                let Some(head) = path.first().cloned() else {
+                    continue;
+                };
+                match roots.iter_mut().find(|(root, _)| root.value == head.value) {
+                    Some((_, paths)) => paths.push(path),
+                    None => {
+                        slots.push(Slot::Packed);
+                        roots.push((head, vec![path]));
+                    }
+                }
+            }
+        }
     }
+    let mut built = roots
+        .iter()
+        .map(|(root, paths)| {
+            let under: Vec<&[Ident]> = paths.iter().map(Vec::as_slice).collect();
+            packed(
+                state,
+                schema,
+                std::slice::from_ref(root),
+                &under,
+                field,
+                limits,
+            )
+        })
+        .collect::<Result<VecDeque<Expr>, ApiError>>()?;
+    // The slots and the roots were made in step, so taking from the front puts each column
+    // back where the caller first named it.
+    Ok(slots
+        .into_iter()
+        .filter_map(|slot| match slot {
+            Slot::Planned(expr) => Some(expr),
+            Slot::Packed => built.pop_front(),
+        })
+        .collect())
+}
+
+/// One column of the answer, from every name the caller wrote that reaches into it.
+///
+/// `prefix` is the path so far and `paths` are the full paths under it, each of which starts
+/// with `prefix`. A path that stops here asks for everything below it, so the whole value at
+/// `prefix` is the answer and the deeper names add nothing. Otherwise the fields named below
+/// are built back into a struct, and each of those is this same question one level down.
+fn packed(
+    state: &SessionState,
+    schema: &DFSchema,
+    prefix: &[Ident],
+    paths: &[&[Ident]],
+    field: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    // Named for the path it came from, spelled the way the *file* spells it since the
+    // segments have been resolved. Left alone only for a plain column, which DataFusion
+    // already names after itself; everything else it names after the access or the call it
+    // planned — `?table?.lightcurve[mag]`, `named_struct(Utf8("mag"),…)` — which is a key no
+    // caller could predict from what they wrote.
+    let named = |expr: Expr, plain: bool| match plain && prefix.len() == 1 {
+        true => expr,
+        false => expr.alias(dotted(prefix)),
+    };
+    // The fields named below this one, in the order the caller first named each. A path that
+    // has nothing below the prefix is a name for the whole value here, and the deeper names
+    // then add nothing — so it answers for all of them, wherever in the list it was written.
+    let mut fields: Vec<(Ident, Vec<&[Ident]>)> = Vec::new();
+    for path in paths {
+        let Some(next) = path.get(prefix.len()) else {
+            return plan_path(state, schema, prefix, field, limits).map(|expr| named(expr, true));
+        };
+        match fields.iter_mut().find(|(name, _)| name.value == next.value) {
+            Some((_, under)) => under.push(path),
+            None => fields.push((next.clone(), vec![path])),
+        }
+    }
+    let mut arguments = Vec::with_capacity(fields.len() * 2);
+    let mut at: Vec<Ident> = prefix.to_vec();
+    for (name, under) in fields {
+        arguments.push(Expr::Literal(ScalarValue::from(name.value.as_str()), None));
+        at.push(name);
+        arguments.push(packed(state, schema, &at, &under, field, limits)?.unalias());
+        at.pop();
+    }
+    Ok(named(named_struct(arguments), false))
+}
+
+/// A resolved path, as the caller would write it back.
+fn dotted(path: &[Ident]) -> String {
+    path.iter()
+        .map(|part| part.value.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// One path, planned as the access it is.
+fn plan_path(
+    state: &SessionState,
+    schema: &DFSchema,
+    path: &[Ident],
+    field: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    let expr = match path {
+        [one] => SqlExpr::Identifier(one.clone()),
+        parts => SqlExpr::CompoundIdentifier(parts.to_vec()),
+    };
+    plan(
+        state,
+        schema,
+        ExprWithAlias { expr, alias: None },
+        field,
+        limits,
+    )
 }
 
 /// The caller's text as tokens, which is as far as anything gets before the grammar has
@@ -653,14 +839,72 @@ mod tests {
     }
 
     /// The narrower vocabulary: names, in the file's own spelling of them.
+    ///
+    /// A name into a nested column comes back as that column — the row's light curve is one
+    /// value, and asking for part of it is asking for less of that value rather than for a
+    /// column beside it.
     #[test]
     fn columns_takes_names() {
         assert_eq!(
             column_names("objectid, lightcurve.mag, gmag").unwrap(),
-            ["objectid", "lightcurve.mag", "Gmag"]
+            ["objectid", "lightcurve", "Gmag"]
         );
         // A name SQL will not take unquoted is written the way SQL writes one.
         assert_eq!(column_names("\"Gmag\"").unwrap(), ["Gmag"]);
+    }
+
+    /// The pieces of a nested column come back as that column, and the two vocabularies
+    /// agree about it.
+    ///
+    /// A row's light curve is one value. A caller who names two of its fields has asked for
+    /// less of that value, so what comes back is one column carrying those two fields —
+    /// handing back `mag` and `mjd` flat would make the reader above put the row together
+    /// again, against a schema that no longer matches the file's.
+    #[test]
+    fn the_pieces_of_a_nested_column_come_back_as_that_column() {
+        for named in [column_names, names] {
+            // Two fields of one column are one column, and it keeps its place in the list.
+            assert_eq!(
+                named("objectid, lightcurve.mag, objra, lightcurve.mjd").unwrap(),
+                ["objectid", "lightcurve", "objra"]
+            );
+            // Naming it whole is every field, and naming it whole *and* in part is still
+            // every field: the deeper name asks for part of what the shallower one already
+            // returns, so neither is dropped and the union is the column.
+            assert_eq!(named("lightcurve").unwrap(), ["lightcurve"]);
+            assert_eq!(named("lightcurve.mag, lightcurve").unwrap(), ["lightcurve"]);
+            assert_eq!(named("lightcurve, lightcurve.mag").unwrap(), ["lightcurve"]);
+        }
+    }
+
+    /// The fields are the ones named, in the order they were named, and the column is a
+    /// struct of exactly those.
+    ///
+    /// Checked on the planned expression rather than only on the output name, since the
+    /// name alone would pass for a column that came back whole.
+    #[test]
+    fn a_packed_column_carries_only_the_fields_that_were_named() {
+        let one = &columns(&state(), &schema(), "lightcurve.mag", limits()).unwrap()[0];
+        let shown = one.to_string();
+        assert!(shown.contains("mag"), "{shown}");
+        assert!(!shown.contains("mjd"), "{shown}");
+
+        // Both, in the caller's order rather than the file's.
+        let two = &columns(
+            &state(),
+            &schema(),
+            "lightcurve.mjd, lightcurve.mag",
+            limits(),
+        )
+        .unwrap()[0];
+        let shown = two.to_string();
+        let mjd = shown.find("mjd").expect(&shown);
+        let mag = shown.find("mag").expect(&shown);
+        assert!(mjd < mag, "{shown}");
+
+        // Whole is the column itself and not a struct rebuilt from its fields.
+        let whole = &columns(&state(), &schema(), "lightcurve", limits()).unwrap()[0];
+        assert!(!whole.to_string().contains("named_struct"), "{whole}");
     }
 
     /// Narrower, and staying narrower: the field for an expression is `select`, and the
@@ -734,11 +978,17 @@ mod tests {
         );
     }
 
+    /// An alias is the caller naming their own output column, so it is planned as written
+    /// and never packed back into the column it came out of.
     #[test]
     fn a_select_list_keeps_the_names_the_caller_wrote() {
         assert_eq!(
             names("objectid, lightcurve.mag, objra AS ra").unwrap(),
-            ["objectid", "lightcurve.mag", "ra"]
+            ["objectid", "lightcurve", "ra"]
+        );
+        assert_eq!(
+            names("lightcurve.mag AS mag, objra AS ra").unwrap(),
+            ["mag", "ra"]
         );
     }
 
@@ -758,7 +1008,10 @@ mod tests {
         assert_eq!(filter("objectid = 1").unwrap(), "objectid = Int64(1)");
         // The output key is the file's spelling, not the caller's.
         assert_eq!(names("gmag").unwrap(), ["Gmag"]);
-        assert_eq!(names("lightcurve.mag").unwrap(), ["lightcurve.mag"]);
+        // Including the column a nested name is packed back into: written `LIGHTCURVE.MAG`
+        // it would resolve to neither, and written in either accepted casing the answer is
+        // the one the file spells.
+        assert_eq!(names("lightcurve.mag").unwrap(), ["lightcurve"]);
     }
 
     /// Every other casing is refused rather than resolved: which names a column answers
