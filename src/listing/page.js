@@ -40,7 +40,7 @@ for (const button of document.querySelectorAll('.ask')) {
 function toggle(button) {
   const row = button.closest('tr');
   const open = row.nextElementSibling;
-  if (open && open.classList.contains('panel')) {
+  if (open?.classList.contains('panel')) {
     open.remove();
     return;
   }
@@ -67,10 +67,12 @@ function build(url) {
     '<label><span>filters</span><textarea class="filters" rows="1" ' +
     'placeholder="every row"></textarea></label>' +
     '<span class="buttons">' +
-    '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
+    '<button class="run preview">Preview ' +
+    PREVIEW +
+    ' rows</button>' +
     '<a class="run download">Download parquet</a></span>' +
     '<div class="asked"></div>' +
-    clients(false) +
+    clients(opens(url, false)) +
     '<div class="result"></div></div>';
   row.dataset.url = url;
   cell.querySelector('.preview').addEventListener('click', () => run(row));
@@ -133,20 +135,43 @@ const CLIENTS = {
   curl: {write: curl},
   requests: {pip: 'requests', write: viaRequests},
   /* The one client that is not a request to this service at all: `lsdb` reads a HATS
-     catalog's own files, so it is offered where there is a catalog and nowhere else. */
-  lsdb: {pip: 'lsdb', write: viaLsdb, only: 'catalog'},
+     catalog's own files, so it is offered only where there is a catalog to name. */
+  lsdb: {pip: 'lsdb', write: viaLsdb, needs: 'catalog'},
   nested_pandas: {pip: 'aiohttp nested-pandas requests', write: viaNestedPandas},
   astropy: {pip: 'astropy pyarrow requests', write: viaAstropy},
   pyarrow: {pip: 'pyarrow requests', write: viaPyarrow},
 };
 
-/* Which of them this panel offers. A file has no catalog to hand `lsdb`, and a tab that
-   wrote a snippet naming a directory the caller did not ask about would be worse than one
-   that is not there. */
+/* Which of them this panel offers.
+
+   `lsdb` needs a catalog: the catalog panel is one, and so is a file that is a whole
+   partition of one, since the catalog is what `lsdb` opens and the partition is what it is
+   then asked for. Every other file has nothing to hand it, and a tab writing a snippet that
+   named a directory the caller did not ask about would be worse than one that is not
+   there. */
 function offered(catalog) {
   return Object.keys(CLIENTS).filter(
-    name => CLIENTS[name].only === undefined || (CLIENTS[name].only === 'catalog' && catalog)
+    name => CLIENTS[name].needs === undefined || (CLIENTS[name].needs === 'catalog' && catalog),
   );
+}
+
+/* Whether this url has a catalog behind it for `lsdb` to open: the catalog's own page, or a
+   file that is a whole partition of one. */
+function opens(url, catalog) {
+  return CATALOG !== null && (catalog || partition(url) !== null);
+}
+
+/* The cell a file is the whole of, or null for anything else.
+
+   Read off the url, which is where HATS puts it: `Norder=` on the way down and
+   `Npix=` on the file itself. A catalog whose `hats_npix_suffix` is `/` writes a partition
+   as a *directory* of files, and then the last segment is one of those files rather than
+   `Npix=…` — so it does not match here, which is right: such a file is a piece of a
+   partition and not the partition. */
+function partition(url) {
+  const order = /\/Norder=(\d+)\//.exec(url);
+  const pixel = /\/Npix=(\d+)\.[^/]+$/.exec(url);
+  return order && pixel ? {order: order[1], pixel: pixel[1]} : null;
 }
 
 function clients(catalog) {
@@ -155,10 +180,7 @@ function clients(catalog) {
     '<div class="clients"><div class="client-tabs">' +
     '<span class="block-title">API request</span>' +
     offered(catalog)
-      .map(
-        name =>
-          '<button class="client-tab" data-client="' + name + '">' + name + '</button>'
-      )
+      .map(name => '<button class="client-tab" data-client="' + name + '">' + name + '</button>')
       .join('') +
     '<button class="client-copy" title="Copy to the clipboard">copy</button>' +
     '</div><pre class="client-code"></pre></div>'
@@ -196,9 +218,13 @@ function tabs(title, items) {
   const show = at => {
     written.textContent = items[at].code;
     note.textContent = items[at].note || '';
-    buttons.forEach((button, index) => button.classList.toggle('on', index === at));
+    buttons.forEach((button, index) => {
+      button.classList.toggle('on', index === at);
+    });
   };
-  buttons.forEach((button, at) => button.addEventListener('click', () => show(at)));
+  buttons.forEach((button, at) => {
+    button.addEventListener('click', () => show(at));
+  });
   bar.appendChild(note);
 
   const copy = document.createElement('button');
@@ -211,7 +237,7 @@ function tabs(title, items) {
         copy.textContent = 'copied';
         setTimeout(() => (copy.textContent = 'copy'), 1200);
       },
-      () => (copy.textContent = 'press ⌘C')
+      () => (copy.textContent = 'press ⌘C'),
     );
   });
   bar.appendChild(copy);
@@ -239,7 +265,7 @@ function snippet(panel) {
   /* The choice is the page's, and not every panel offers every client — someone who read
      `lsdb` on a catalog and then opens a file's panel gets the first one that panel has
      rather than a tab that is not there. */
-  const names = offered(panel.dataset.catalog !== undefined);
+  const names = offered(opens(panel.dataset.url, panel.dataset.catalog !== undefined));
   const chosen = names.includes(client) ? client : names[0];
   for (const tab of panel.querySelectorAll('.client-tab')) {
     tab.classList.toggle('on', tab.dataset.client === chosen);
@@ -247,10 +273,8 @@ function snippet(panel) {
   const {route, body} = running(panel);
   /* The same question as a url with the query on it, which is the other way to ask it —
      and the one a reader that takes a url can be handed directly. */
-  const got = new URL(
-    url(panel.dataset.url, {...asked(panel), format: 'parquet'}),
-    location.href
-  ).href;
+  const got = new URL(url(panel.dataset.url, {...asked(panel), format: 'parquet'}), location.href)
+    .href;
   code.textContent = write(chosen, route, body, got);
 }
 
@@ -302,18 +326,17 @@ function write(chosen, route, body, got) {
    because the API answers JSON by default and this is the shape a shell can read. */
 function curl(route, body) {
   return (
-    'curl -sS -X POST ' + route + ' \\\n' +
+    'curl -sS -X POST ' +
+    route +
+    ' \\\n' +
     "  -H 'content-type: application/json' \\\n" +
-    '  -d ' + quoted(JSON.stringify({...body, format: 'json'}))
+    '  -d ' +
+    quoted(JSON.stringify({...body, format: 'json'}))
   );
 }
 
 function viaRequests(route, body) {
-  return (
-    'import requests\n\n' +
-    post(route, body) +
-    'rows = answer.json()["rows"]'
-  );
+  return 'import requests\n\n' + post(route, body) + 'rows = answer.json()["rows"]';
 }
 
 /* Parquet back, and read without touching the disk: the answer is a file, and the point
@@ -331,12 +354,23 @@ function viaPyarrow(route, body) {
    as the query string this mode already answers. So the snippet names the catalog's url and
    nothing else, and what it exercises is the static side rather than the route above.
 
-   `filters` does not carry across. Here it is SQL; `lsdb` takes pyarrow's pairs, and the two
-   are different enough that translating one into the other is a job for a person rather than
-   for a line of JavaScript. So the snippet says that where a caller wrote one, in a fixed
-   line: a comment built from their own predicate would look like a translation of it. */
+   The unit it works in is a catalog, never a file, which is why a partition's panel opens
+   the catalog above it and narrows to that one cell rather than naming the file. Same rows,
+   reached the way `lsdb` reaches them.
+
+   `filters` does not carry across, and the note says only that. `lsdb` has three places a
+   predicate can go and which one fits depends on the predicate: `filters=` takes pyarrow's
+   `column op value` triples and nothing else, `query` takes a pandas expression, and
+   anything past that is `map_partitions`. `mag*mag < 18` has no triple at all — so naming
+   one of the three, or writing the caller's own predicate into the note, would be claiming
+   a translation that may not exist. */
 function viaLsdb(route, body, got) {
-  const at = got.split('?')[0];
+  const url = got.split('?')[0];
+  /* A file's panel names one partition, and `lsdb` has no way to be handed one: it opens a
+     catalog. So the snippet opens the catalog this file is in and asks for the cell the file
+     is — which is the same rows, reached the way `lsdb` reaches them. */
+  const cell = partition(url);
+  const at = cell === null ? url : new URL(CATALOG, location.href).href;
   const circle = body.region === undefined ? undefined : body.region[0];
   const arguments_ = [text(at)];
   if (body.columns !== undefined) {
@@ -345,20 +379,29 @@ function viaLsdb(route, body, got) {
   /* The search goes into the open rather than onto the catalog afterwards: it is what
      decides which partitions are read, and a catalog opened without it has already agreed
      to read them all. */
-  if (circle !== undefined) {
+  if (cell !== null) {
+    arguments_.push('search_filter=lsdb.PixelSearch((' + cell.order + ', ' + cell.pixel + '))');
+  } else if (circle !== undefined) {
     arguments_.push(
       'search_filter=lsdb.ConeSearch(' +
-        circle.ra + ', ' + circle.dec + ', ' + circle.radius_arcsec + ')'
+        circle.ra +
+        ', ' +
+        circle.dec +
+        ', ' +
+        circle.radius_arcsec +
+        ')',
     );
   }
   return (
     'import lsdb\n\n' +
     (body.filters === undefined
       ? ''
-      : '# filters is SQL here and pyarrow pairs there: filters=[("mag", "<", 18)]\n') +
+      : '# filters does not carry over: redo it with filters=, .query() or .map_partitions()\n') +
     /* Opened and not computed. A catalog is lazy, and that is the point of it: `compute`
        belongs where someone has decided what they want, not in the line that opens one. */
-    'catalog = lsdb.open_catalog(\n    ' + arguments_.join(',\n    ') + ',\n)'
+    'catalog = lsdb.open_catalog(\n    ' +
+    arguments_.join(',\n    ') +
+    ',\n)'
   );
 }
 
@@ -392,8 +435,12 @@ function viaAstropy(route, body) {
 function post(route, body) {
   return (
     'answer = requests.post(\n' +
-    '    ' + text(route) + ',\n' +
-    '    json=' + python(JSON.stringify(body, null, 4)) + ',\n' +
+    '    ' +
+    text(route) +
+    ',\n' +
+    '    json=' +
+    python(JSON.stringify(body, null, 4)) +
+    ',\n' +
     ')\nanswer.raise_for_status()\n'
   );
 }
@@ -426,7 +473,7 @@ function copied(panel) {
       button.textContent = 'copied';
       setTimeout(() => (button.textContent = 'copy'), 1200);
     },
-    () => (button.textContent = 'press ⌘C')
+    () => (button.textContent = 'press ⌘C'),
   );
 }
 
@@ -437,8 +484,7 @@ function copied(panel) {
    It is the thing on this panel someone copies into a client or sends to a colleague, and
    one that lags the fields describes a different question than the one on the screen. */
 function address(panel) {
-  part(panel, '.download').href =
-    url(panel.dataset.url, {...asked(panel), format: 'parquet'});
+  part(panel, '.download').href = url(panel.dataset.url, {...asked(panel), format: 'parquet'});
   const into = panel.querySelector('.asked');
   /* Half a circle is not a request, and a url written from one would answer a question
      nobody asked. Every other state has a url worth showing. */
@@ -609,7 +655,6 @@ function run(panel) {
     .catch(error => fail(result, error));
 }
 
-
 /* The url this query is, as something to open, copy or send to someone. It is a link the
    script makes rather than one the page was served with: an <a href> below this directory
    in the markup would be scraped as an entry, and this one points at the same file with a
@@ -669,7 +714,11 @@ function render(into, answer) {
     (answer.num_partitions === undefined
       ? ''
       : ' from ' + counted(answer.num_partitions, 'partition', 'partitions')) +
-    ', ' + bytes(answer.data_bytes_read) + ' read, ' + answer.elapsed_ms + ' ms';
+    ', ' +
+    bytes(answer.data_bytes_read) +
+    ' read, ' +
+    answer.elapsed_ms +
+    ' ms';
   into.appendChild(summary);
   if (answer.rows.length === 0) return;
 
@@ -694,10 +743,12 @@ function render(into, answer) {
          be anything else. A `Utf8` column whose value really is the text "NaN" is a
          string like any other. */
       const special =
-        value === null || value === undefined ? 'null'
-        : column.type.startsWith('Float') &&
-          (value === 'NaN' || value === 'Infinity' || value === '-Infinity') ? value
-        : null;
+        value === null || value === undefined
+          ? 'null'
+          : column.type.startsWith('Float') &&
+              (value === 'NaN' || value === 'Infinity' || value === '-Infinity')
+            ? value
+            : null;
       if (special !== null) {
         cell.textContent = special;
         cell.className = 'special';
@@ -706,8 +757,11 @@ function render(into, answer) {
       /* A HATS row can hold a whole light curve in one column, so a value that is not
          scalar is shown as what it is rather than as [object Object]. */
       const shown =
-        value === undefined || value === null ? '' :
-        typeof value === 'object' ? JSON.stringify(value) : String(value);
+        value === undefined || value === null
+          ? ''
+          : typeof value === 'object'
+            ? JSON.stringify(value)
+            : String(value);
       cell.textContent = cut(shown, CELL);
       if (shown.length > CELL) {
         cell.title = cut(shown, TOOLTIP) + '\n\n' + shown.length + ' characters';
@@ -797,7 +851,9 @@ function catalog() {
   panel.innerHTML =
     '<h3 class="box-title">Query</h3>' +
     '<div class="columns-of">' +
-    '<span class="count">' + (SCHEMA === null ? '' : 'reading the columns…') + '</span>' +
+    '<span class="count">' +
+    (SCHEMA === null ? '' : 'reading the columns…') +
+    '</span>' +
     '<input class="find" placeholder="find a column" hidden><div class="chips"></div></div>' +
     '<div class="row">' +
     '<label><span>columns</span><textarea class="columns" rows="1" ' +
@@ -809,7 +865,9 @@ function catalog() {
     '<label><span>ra</span><input class="ra" placeholder="deg"></label>' +
     '<label><span>dec</span><input class="dec" placeholder="deg"></label>' +
     '<label><span>radius</span><input class="radius_arcsec" placeholder="arcsec"></label>' +
-    '<span class="unit">max ' + MAX_RADIUS + '″</span>' +
+    '<span class="unit">max ' +
+    MAX_RADIUS +
+    '″</span>' +
     '</fieldset>' +
     '<div class="asked"></div>' +
     clients(true);
@@ -822,16 +880,18 @@ function catalog() {
   panel.rows = box(
     section,
     '<span class="buttons">' +
-      '<button class="run preview">Preview ' + PREVIEW + ' rows</button>' +
+      '<button class="run preview">Preview ' +
+      PREVIEW +
+      ' rows</button>' +
       '<a class="run download">Download parquet</a>' +
-      '</span><p class="gate"></p>'
+      '</span><p class="gate"></p>',
   );
   if (API !== null) {
     panel.plan = box(
       section,
       '<button class="run plan">Plan</button>' +
         '<span class="plan-note">The requests this search fans out into, one per ' +
-        'partition, for a client to send itself.</span>'
+        'partition, for a client to send itself.</span>',
     );
   }
   /* Every control, wherever it ended up: the two answer boxes carry the buttons that fill
@@ -847,7 +907,9 @@ function catalog() {
   }
   const copy = panel.querySelector('.client-copy');
   if (copy) copy.addEventListener('click', () => copied(panel));
-  for (const field of panel.querySelectorAll('input.ra, input.dec, input.radius_arcsec, textarea')) {
+  for (const field of panel.querySelectorAll(
+    'input.ra, input.dec, input.radius_arcsec, textarea',
+  )) {
     field.addEventListener('input', () => {
       address(panel);
       gate(panel);
@@ -879,10 +941,13 @@ function gate(panel) {
   const at = state(panel);
   const note = part(panel, '.gate');
   note.textContent =
-    at === 'partial' ? 'A cone needs all three fields.'
-    : at === 'wide' ? 'Too wide for one answer. Plan lists the requests it would take.'
-    : at === 'none' ? 'First rows of the catalog. Download parquet needs a cone to keep the size down.'
-    : '';
+    at === 'partial'
+      ? 'A cone needs all three fields.'
+      : at === 'wide'
+        ? 'Too wide for one answer. Plan lists the requests it would take.'
+        : at === 'none'
+          ? 'First rows of the catalog. Download parquet needs a cone to keep the size down.'
+          : '';
   const off = {
     preview: at === 'partial' || at === 'wide',
     download: at !== 'ok',
@@ -943,10 +1008,16 @@ function counts(plan) {
    name one file, and these ask for the plan and follow it, so a client running one does not
    have to know what a plan is.
 
+   **The same names in the same order as the bar above**, so that a reader who found their
+   language once finds it in the same place. `Body` and `Response` are the same tab in the
+   two directions. `lsdb` is the only one missing, and it is missing because it reads a
+   catalog itself rather than following anybody's work list.
+
    `nested_pandas` reads from bytes here rather than from a url. On a file's panel it is
    handed the file's own address and fetches it itself; a plan's entries are bodies, and
    nothing that takes a path can send one \u2014 `fsspec` and `UPath` address a resource and have
-   nowhere to put a request body. */
+   nowhere to put a request body. `astropy` goes through `pyarrow` for the same reason it
+   does above: `Table.read` wants `pandas` for a parquet file whatever else is installed. */
 function runners(plan, route, body) {
   const base = new URL('/', location.href).href.replace(/\/$/, '');
   const asked = python(JSON.stringify(body, null, 4));
@@ -957,13 +1028,44 @@ function runners(plan, route, body) {
       code: JSON.stringify(plan, null, 2),
     },
     {
-      name: 'Python',
+      name: 'curl',
+      note: 'Needs jq. Writes one parquet file per partition.',
+      code:
+        'curl -sS -X POST ' +
+        route +
+        '/plan \\\n' +
+        "  -H 'content-type: application/json' \\\n" +
+        '  -d ' +
+        quoted(JSON.stringify(body)) +
+        ' > plan.json\n\n' +
+        /* `format` is merged in here for the reason the Python snippets merge it in: an
+           entry's body carries what the caller asked for and nothing else, and the API
+           answers JSON where nothing says otherwise — so without this the loop writes JSON
+           into files called `.parquet`. */
+        'jq -r \'.requests[] | "\\(.order)-\\(.pixel)\\t\\(.path)\\t' +
+        '\\(.body + {format: "parquet"} | tojson)"\' plan.json |\n' +
+        "while IFS=$'\\t' read -r name path request; do\n" +
+        '  curl -sS -X POST ' +
+        base +
+        '"$path" \\\n' +
+        "    -H 'content-type: application/json' \\\n" +
+        '    -d "$request" > "part-$name.parquet"\n' +
+        'done',
+    },
+    {
+      name: 'requests',
       note: 'The rows, as JSON. One request per partition, in order.',
       code:
         '# pip install requests\n' +
         'import requests\n\n' +
-        'BASE = ' + text(base) + '\n\n' +
-        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'BASE = ' +
+        text(base) +
+        '\n\n' +
+        'plan = requests.post(\n    ' +
+        text(route + '/plan') +
+        ',\n    json=' +
+        asked +
+        ',\n)\n' +
         'plan.raise_for_status()\n\n' +
         'rows = []\n' +
         'for request in plan.json()["requests"]:\n' +
@@ -982,8 +1084,14 @@ function runners(plan, route, body) {
         '# pip install nested-pandas requests\n' +
         'import io\n\n' +
         'import nested_pandas as npd\nimport pandas as pd\nimport requests\n\n' +
-        'BASE = ' + text(base) + '\n\n' +
-        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'BASE = ' +
+        text(base) +
+        '\n\n' +
+        'plan = requests.post(\n    ' +
+        text(route + '/plan') +
+        ',\n    json=' +
+        asked +
+        ',\n)\n' +
         'plan.raise_for_status()\n\n' +
         'frames = []\n' +
         'for request in plan.json()["requests"]:\n' +
@@ -996,14 +1104,46 @@ function runners(plan, route, body) {
         'frame = pd.concat(frames, ignore_index=True)',
     },
     {
+      name: 'astropy',
+      note: 'One Table, stacked in the catalog\u2019s order.',
+      code:
+        '# pip install astropy pyarrow requests\n' +
+        'import io\n\n' +
+        'import pyarrow.parquet as pq\nimport requests\nfrom astropy.table import Table, vstack\n\n' +
+        'BASE = ' +
+        text(base) +
+        '\n\n' +
+        'plan = requests.post(\n    ' +
+        text(route + '/plan') +
+        ',\n    json=' +
+        asked +
+        ',\n)\n' +
+        'plan.raise_for_status()\n\n' +
+        'tables = []\n' +
+        'for request in plan.json()["requests"]:\n' +
+        '    answer = requests.post(\n' +
+        '        BASE + request["path"],\n' +
+        '        json={**request["body"], "format": "parquet"},\n' +
+        '    )\n' +
+        '    answer.raise_for_status()\n' +
+        '    tables.append(Table(pq.read_table(io.BytesIO(answer.content)).to_pydict()))\n\n' +
+        'table = vstack(tables)',
+    },
+    {
       name: 'pyarrow',
       note: 'The same, as parquet, so the types are the file\u2019s rather than JSON\u2019s.',
       code:
         '# pip install pyarrow requests\n' +
         'import io\n\n' +
         'import pyarrow as pa\nimport pyarrow.parquet as pq\nimport requests\n\n' +
-        'BASE = ' + text(base) + '\n\n' +
-        'plan = requests.post(\n    ' + text(route + '/plan') + ',\n    json=' + asked + ',\n)\n' +
+        'BASE = ' +
+        text(base) +
+        '\n\n' +
+        'plan = requests.post(\n    ' +
+        text(route + '/plan') +
+        ',\n    json=' +
+        asked +
+        ',\n)\n' +
         'plan.raise_for_status()\n\n' +
         'tables = []\n' +
         'for request in plan.json()["requests"]:\n' +
@@ -1014,25 +1154,6 @@ function runners(plan, route, body) {
         '    answer.raise_for_status()\n' +
         '    tables.append(pq.read_table(io.BytesIO(answer.content)))\n\n' +
         'table = pa.concat_tables(tables)',
-    },
-    {
-      name: 'Shell',
-      note: 'Needs jq. Writes one parquet file per partition.',
-      code:
-        'curl -sS -X POST ' + route + '/plan \\\n' +
-        "  -H 'content-type: application/json' \\\n" +
-        '  -d ' + quoted(JSON.stringify(body)) + ' > plan.json\n\n' +
-        /* `format` is merged in here for the reason the two Python snippets merge it in:
-           an entry's body carries what the caller asked for and nothing else, and the API
-           answers JSON where nothing says otherwise — so without this the loop writes JSON
-           into files called `.parquet`. */
-        'jq -r \'.requests[] | "\\(.order)-\\(.pixel)\\t\\(.path)\\t' +
-        '\\(.body + {format: "parquet"} | tojson)"\' plan.json |\n' +
-        'while IFS=$\'\\t\' read -r name path request; do\n' +
-        '  curl -sS -X POST ' + base + '"$path" \\\n' +
-        "    -H 'content-type: application/json' \\\n" +
-        '    -d "$request" > "part-$name.parquet"\n' +
-        'done',
     },
   ];
 }

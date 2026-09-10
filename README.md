@@ -608,7 +608,10 @@ real server is a separate test binary that skips when its environment variables 
 absent.
 
 ```
-pre-commit run --all-files    # cargo fmt, clippy -D warnings, and the tests
+pre-commit run --all-files    # cargo fmt, clippy -D warnings, the tests, and biome
 ```
+
+The listing page's script and stylesheet are formatted and linted by
+[Biome](https://biomejs.dev), configured in `biome.jsonc`.
 
 `CLAUDE.md` is the conventions this codebase is held to.

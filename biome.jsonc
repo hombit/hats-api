@@ -1,0 +1,51 @@
+// Formats and lints the two front-end assets `src/listing` inlines into the page it
+// generates. `.jsonc` because a disabled rule needs its reason next to it.
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.9/schema.json",
+  // Named files, not a glob: everything else here is Rust, and a glob would take in
+  // `target/`.
+  "files": {
+    "includes": ["src/listing/page.js", "src/listing/page.css"]
+  },
+  "formatter": {
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single",
+      "arrowParentheses": "asNeeded",
+      "bracketSpacing": false
+    }
+  },
+  // Linted, not formatted: `page.css` writes a short rule on one line, and Biome expands
+  // every one of those to three with no setting to stop it.
+  "css": {
+    "formatter": { "enabled": false }
+  },
+  "linter": {
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        // What the tool is here for. `page.js` is one scope of top-level functions, so a
+        // call left behind by a rename is valid JavaScript that throws in the browser, and
+        // nothing else in this repository runs the script.
+        "noUndeclaredVariables": "error",
+        "noUnusedVariables": "error",
+        // `CLIENTS` dispatches on one signature, `write(route, body, got)`, and a client
+        // that needs two of the three is not an unfinished refactor.
+        "noUnusedFunctionParameters": "off"
+      },
+      "style": {
+        // The snippets are concatenated a line at a time so each fragment stays beside the
+        // code it belongs to; a template literal makes every one of them a single long line.
+        "useTemplate": "off",
+        // The pairs it reports cannot match the same elements: a panel row is not
+        // `tr.entry`. It compares specificity without asking that.
+        "noDescendingSpecificity": "off"
+      }
+    }
+  },
+  "assist": { "enabled": false }
+}
