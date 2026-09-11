@@ -33,7 +33,7 @@ which.
 | 5.2 | spatial predicate | done | `polygon` is §9; `moc` takes no `url` yet, which §3.3 says why |
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
 | 5.4 | a catalog under a mount | done | a limit or a circle; a plan there is still §5.3's open question |
-| 7.3 | serve the API description | done | `/openapi.json` and a page of this crate's own at `/docs`. The examples in it are placeholders and want revisiting |
+| 7.3 | serve the API description | done | `/openapi.json` and a page of this crate's own at `/docs` |
 | 7.4 | compress JSON responses, never parquet | todo | independent of the rest of §7 |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
@@ -777,12 +777,6 @@ Document the limitation: against a non-ranging origin holding a huge object, the
 request after a cold start times out, and prefetch is the way around it.
 
 ### 7.3 Serve the API description
-
-What is left of this step is the examples. Each route's runner starts from a body that is
-sent as-is, and they currently name one real catalog — ZTF DR24 over `s3://` — which makes
-the page's first impression depend on a bucket, a network and a few seconds of scanning.
-Worth deciding: a fixture the deployment itself serves, or examples that are illustrative
-and not runnable, or keeping the real ones and saying they cost a round trip.
 
 `region` may still gain `moc: {url}` (§3.3) and the combinators beside it, and §7.2's
 streaming would change how a large answer arrives. Both change the document, and clients

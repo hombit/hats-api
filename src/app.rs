@@ -284,7 +284,7 @@ fn describe_dialect<D: Dialect>(
             "Query one parquet file",
             D::SUMMARY,
             body.clone(),
-            example::<D>(EXAMPLE_PARTITION, false),
+            example::<D>(EXAMPLE_PARTITION, PARTITION_SELECT, PARTITION_WHERE, false),
             "The rows, or the file itself where `format` asked for parquet",
             rows,
         ),
@@ -297,7 +297,7 @@ fn describe_dialect<D: Dialect>(
             "Query a HATS catalog",
             D::SUMMARY,
             body.clone(),
-            example::<D>(EXAMPLE_CATALOG, true),
+            example::<D>(EXAMPLE_CATALOG, CATALOG_SELECT, CATALOG_WHERE, true),
             "The rows, in the catalog's own order, with the partitions they came from",
             catalog_rows,
         ),
@@ -310,40 +310,69 @@ fn describe_dialect<D: Dialect>(
             "Resolve a catalog query without running it",
             D::SUMMARY,
             body,
-            example::<D>(EXAMPLE_CATALOG, true),
+            example::<D>(EXAMPLE_CATALOG, CATALOG_SELECT, CATALOG_WHERE, true),
             "One request per partition, for the client to send itself",
             plan,
         ),
     );
 }
 
-/// ZTF DR24's light curves, which is a real catalog a reader can send the example at: a
-/// collection, published anonymously, and partitioned into directories rather than one file
-/// per pixel — so the two urls below are not the same shape and neither is invented.
-const EXAMPLE_CATALOG: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats";
-const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
-    ztf_dr24_lc-hats/dataset/Norder=3/Dir=0/Npix=385/part0.snappy.parquet";
+/// Gaia DR3, which a reader can send the catalog examples at as written: a real collection,
+/// published anonymously, all-sky, and with partitions even enough that a reader who moves the
+/// circle gets the same answer in the same time.
+const EXAMPLE_CATALOG: &str = "s3://stpubdata/gaia/gaia_dr3/public/hats";
+const CATALOG_SELECT: &str = "source_id, ra, dec, phot_g_mean_mag";
+const CATALOG_WHERE: &str = "parallax > 1";
 
-/// A body the route it is shown on will actually answer, in a few seconds: the url, this
+/// Anywhere will do — the catalog is all-sky — and this is away from the galactic plane, where
+/// a five-arcminute circle is a handful of rows rather than a crowd.
+const EXAMPLE_RA: f64 = 30.0;
+const EXAMPLE_DEC: f64 = 5.0;
+const EXAMPLE_RADIUS_ARCSEC: u32 = 300;
+
+/// One partition of ZTF DR24's light curves, which the catalogs above have nothing like: a
+/// `lightcurve` column holding every epoch of a source. That is what makes this the example
+/// worth spending on the single-file route — a dotted name reaching into a struct column is
+/// the one thing a reader cannot see demonstrated anywhere else on the page.
+///
+/// The smallest partition ZTF has, at 180 KB against nearly 4 GB for its largest. A partition
+/// is named outright here rather than reached through the catalog, so picking a small one
+/// costs the example nothing and buys it a second.
+const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
+    ztf_dr24_lc-hats/dataset/Norder=6/Dir=30000/Npix=34623/part0.snappy.parquet";
+const PARTITION_SELECT: &str = "objectid, objra, objdec, lightcurve.mag";
+const PARTITION_WHERE: &str = "nepochs > 10";
+
+/// A body the route it is shown on will actually answer, in about a second: the url, this
 /// vocabulary's own two fields, a limit, and for a catalog a circle.
 ///
-/// The url is a parameter because a target refuses what another requires, and the circle is
-/// there because without one a catalog query reads every partition. Against a real catalog —
-/// which is what these name — that is minutes, and a reader pressing the button would conclude
-/// the service was broken. One arcminute is one partition and a couple of seconds.
+/// Everything is a parameter because the two targets name different files: a catalog gets the
+/// circle, since without one a catalog query reads every partition — against a real catalog
+/// that is minutes, and a reader pressing the button would conclude the service was broken —
+/// and the single file gets the columns of the one catalog here with anything nested in it.
 ///
-/// A `limit` alone would not do it: it stops the read once enough rows are found, and a
-/// predicate that most partitions fail keeps it reading.
-fn example<D: Dialect>(url: &str, region: bool) -> serde_json::Value {
+/// A `limit` alone would not stand in for the circle: it stops the read once enough rows are
+/// found, and a predicate that most partitions fail keeps it reading.
+fn example<D: Dialect>(
+    url: &str,
+    projection: &str,
+    predicate: &str,
+    region: bool,
+) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("url".to_owned(), serde_json::Value::String(url.to_owned()));
-    if let serde_json::Value::Object(query) = D::example() {
+    if let serde_json::Value::Object(query) = D::example(projection, predicate) {
         body.extend(query);
     }
     if region {
         body.insert(
             "region".to_owned(),
-            serde_json::json!([{ "type": "circle", "ra": 180.0, "dec": 30.0, "radius_arcsec": 60 }]),
+            serde_json::json!([{
+                "type": "circle",
+                "ra": EXAMPLE_RA,
+                "dec": EXAMPLE_DEC,
+                "radius_arcsec": EXAMPLE_RADIUS_ARCSEC,
+            }]),
         );
     }
     body.insert("limit".to_owned(), serde_json::json!(10));
@@ -954,9 +983,16 @@ trait Dialect:
     /// third one added without either is a route nobody can find or read.
     const SUMMARY: &'static str;
 
-    /// This vocabulary's two fields, spelled so that the description's runner starts from a
-    /// request that returns rows rather than a 400.
-    fn example() -> serde_json::Value;
+    /// A projection and a predicate written in this vocabulary's own two fields, so that the
+    /// description's runner starts from a request that returns rows rather than a 400.
+    ///
+    /// The columns are the caller's because the two targets are different files. What stays
+    /// this method's business is the spelling — which pair of field names the body carries.
+    ///
+    /// **A few named columns.** What a request against a real catalog costs is the columns it
+    /// projects and not the rows it returns: a nested column holding every epoch of a light
+    /// curve is seconds where four flat ones are under one.
+    fn example(projection: &str, predicate: &str) -> serde_json::Value;
 
     fn projection(&self) -> Projection<'_>;
 
@@ -1010,11 +1046,8 @@ impl Dialect for Expr {
         boolean expression. Neither is a statement — each is parsed on its own and must \
         parse to its end.";
 
-    fn example() -> serde_json::Value {
-        serde_json::json!({
-            "select": "objectid, objra, objdec, lightcurve.mag",
-            "where": "nepochs > 10"
-        })
+    fn example(projection: &str, predicate: &str) -> serde_json::Value {
+        serde_json::json!({ "select": projection, "where": predicate })
     }
 
     fn projection(&self) -> Projection<'_> {
@@ -1060,11 +1093,8 @@ impl Dialect for Simple {
         carry: `columns` is a comma-separated list of names, `filters` spells `AND` as \
         `&&`. A caller who wants an expression uses the `expr` routes.";
 
-    fn example() -> serde_json::Value {
-        serde_json::json!({
-            "columns": "objectid, objra, objdec, lightcurve.mag",
-            "filters": "nepochs > 10"
-        })
+    fn example(projection: &str, predicate: &str) -> serde_json::Value {
+        serde_json::json!({ "columns": projection, "filters": predicate })
     }
 
     fn projection(&self) -> Projection<'_> {

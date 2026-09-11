@@ -912,6 +912,24 @@ both by compiling. Everything below is about keeping that true, and readable.
   defaults also route a try-it request through `proxy.scalar.com`, which on this API would send
   a caller's storage credentials to a third party from a page this service served.
 
+- **An example is a body that runs, and it is judged on what it costs.** Every operation's
+  example is sent as-is by the page's runner, so one that 400s or takes a minute is a page that
+  reads as broken. What a request against a real catalog costs is **the columns it projects**
+  and not the rows it returns — these catalogs are 150 to 370 columns wide, and asking for all
+  of them is ten to seventy seconds where four named ones are about one. So every example names
+  a few columns, and a catalog example carries a circle, without which the query reads every
+  partition. `Dialect::example` takes the projection and the predicate as arguments and decides
+  only which pair of field names the body spells them with; the columns belong to the target.
+
+  **The targets differ on purpose, and one of them is a single file.** The catalog examples
+  name Gaia DR3, which is all-sky and evenly partitioned, so a reader who moves the circle gets
+  the same answer in the same time — an example tuned to one lucky spot is worse than a slow
+  one. The single-file example names ZTF DR24's smallest partition because it is the only data
+  here with a nested column, and a dotted name reaching into a struct is a headline feature a
+  reader can see demonstrated nowhere else on the page. Naming a partition outright is what
+  makes picking a small one free: at 180 KB against nearly 4 GB for ZTF's largest, it costs the
+  example nothing and saves it a second.
+
 - **`utoipa`'s generics need naming by hand.** `ToSchema::schemas` composes the type argument
   into the name — `PlanBody_Expr` — while `ToSchema::name` drops it and answers `PlanBody` for
   every instantiation. Registering a generic under the latter puts both dialects at one key,
