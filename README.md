@@ -652,6 +652,27 @@ inside the HTTP client's own resolver. Redirects are not followed.
 A `file://` url names a mount's `path`, not a place on the disk. A path under no mount is
 refused whether or not anything is there.
 
+### Compressed responses
+
+A client that sends `Accept-Encoding` gets a compressed body — for the JSON answers, which
+repeat the same keys on every row, and for the generated directory pages, which inline
+their stylesheet and script. `gzip`, `br` and `zstd` are offered and the client's own
+header picks among them, which is how a browser gets brotli and a script gets gzip. A
+client that asks for nothing gets exactly what it got before.
+
+**A parquet body is never compressed**, whether it came off a mount or out of a query. It
+carries per-column compression already, so a second pass would spend CPU at both ends to
+save a percent or two on the largest answers here — and a client reading a partition by
+ranged requests needs the bytes and the `Content-Length` as they are.
+
+`curl` asks for nothing unless told to: `curl --compressed`. `requests` and `httpx` ask by
+default and decode transparently — gzip unless their brotli or zstd extras are installed —
+as does `fsspec` over `aiohttp`.
+
+The `x-hats-*` counters are unaffected. What does change for a compressed body is
+`Content-Length`: it is gone, the body arriving chunked, so a client that sized a buffer
+from it should ask for no encoding.
+
 ### Servers that ignore `Range`
 
 A parquet read is tens of ranged requests, and a plain HTTP server may answer one with

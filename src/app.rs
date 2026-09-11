@@ -13,6 +13,10 @@ use axum::{
 };
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
+use tower_http::compression::CompressionLayer;
+use tower_http::compression::predicate::{
+    And, DefaultPredicate, NotForContentType, Predicate as _,
+};
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
@@ -166,6 +170,7 @@ pub fn router(service: Service) -> Router {
         // at `/api/v1` divide the url space without either being nested in the other.
         .fallback(serve_mounted)
         .with_state(service)
+        .layer(compression())
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
         // something in.
@@ -178,6 +183,46 @@ pub fn router(service: Service) -> Router {
                 )
             }),
         )
+}
+
+/// Compress what is worth compressing, which is everything this service answers with
+/// except parquet.
+///
+/// A JSON answer is repetitive by construction — the same keys on every row — and a
+/// generated directory page inlines its whole stylesheet and script before it lists an
+/// entry. Both go over the wire many times smaller for a few hundred microseconds of CPU.
+///
+/// A parquet body is the exception, and it has to be named: it carries per-column
+/// compression of its own, so a second pass over it spends CPU at both ends to save a
+/// percent or two — on the largest answers produced here. [`DefaultPredicate`] excludes
+/// gRPC, images and `text/event-stream` and knows nothing about parquet. The rule is written
+/// against the response's own content type rather than against a route, which is what makes
+/// one line cover both a parquet file served off a mount and one encoded from a query.
+///
+/// A partial response needs no rule of its own: the layer leaves anything carrying a
+/// `Content-Range` alone, so a ranged read of a mounted file comes back as the bytes that
+/// were asked for whatever its type is.
+///
+/// Three encodings are offered, and the client's `Accept-Encoding` picks among them: gzip,
+/// which every client already asks for, and brotli and zstd, which browsers prefer and
+/// which compress a page or a row-heavy answer measurably smaller. The two extra ones are
+/// enabled because they are close to free here — `brotli` and `zstd` are already linked in,
+/// being what parquet and arrow-ipc read their own compressed blocks with, so turning on
+/// the feature adds no dependency and only the encoder wrappers to the binary. Deflate is
+/// left off: nothing asks for it that does not also ask for gzip.
+///
+/// Two consequences worth knowing. `Content-Length` goes where a body is compressed, the
+/// body becoming chunked — a client that sized a buffer from the header cannot any more,
+/// while the `x-hats-*` counters say exactly what they said before. And a compressed body
+/// that mixes a secret with attacker-chosen text is the shape BREACH exploits: the one such
+/// body here is a plan answered with `return_storage`, which echoes the caller's own storage
+/// options. What makes it not that attack is that the secret is the caller's own, returned
+/// on their own `POST`, over a route no third-party page can make a browser send with those
+/// options attached.
+fn compression() -> CompressionLayer<And<DefaultPredicate, NotForContentType>> {
+    CompressionLayer::new().compress_when(
+        DefaultPredicate::new().and(NotForContentType::const_new(PARQUET_CONTENT_TYPE)),
+    )
 }
 
 /// One vocabulary's three routes.
@@ -2375,6 +2420,112 @@ mod tests {
             .unwrap()
     }
 
+    /// A body a client asked for gzip on, and what the answer was in bytes.
+    ///
+    /// The encoding is read off the response rather than guessed from the request: a
+    /// predicate that declined leaves the body as it was and says nothing, which is the
+    /// case half of these tests are about.
+    async fn fetch(
+        service: Service,
+        uri: &str,
+        accept_encoding: Option<&str>,
+    ) -> (Response, Vec<u8>) {
+        let mut request = Request::builder().uri(uri);
+        if let Some(encoding) = accept_encoding {
+            request = request.header(header::ACCEPT_ENCODING, encoding);
+        }
+        let response = respond(service, request).await;
+        let (parts, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+        (Response::from_parts(parts, Body::empty()), bytes)
+    }
+
+    /// The two bytes a gzip member starts with. The point is that the body was actually
+    /// encoded, not merely labelled.
+    const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+    /// The JSON answers are the case this exists for: the same keys on every row, and a
+    /// description document that repeats a schema's vocabulary throughout.
+    #[tokio::test]
+    async fn json_is_compressed_for_a_client_that_asks() {
+        let uri = "/api/v1/openapi.json";
+        let (plain, identity) = fetch(api_only(), uri, None).await;
+        let (response, body) = fetch(api_only(), uri, Some("gzip")).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(body[..2], GZIP_MAGIC, "not gzip: {:?}", &body[..2]);
+        assert!(
+            body.len() < identity.len(),
+            "{} compressed is {} bytes",
+            identity.len(),
+            body.len()
+        );
+        // A compressed body is chunked, so the length a client would have sized a buffer
+        // from is gone — and is there for the client that did not ask.
+        assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+        assert!(!plain.headers().contains_key(header::CONTENT_ENCODING));
+        serde_json::from_slice::<serde_json::Value>(&identity).unwrap();
+    }
+
+    /// What a browser asks for, and what it gets: the encoding is negotiated rather than
+    /// fixed, so the three that are compiled in are the three a client may choose from.
+    #[tokio::test]
+    async fn the_encoding_is_the_clients_to_choose() {
+        for (accepted, chosen) in [("br", "br"), ("zstd", "zstd"), ("gzip", "gzip")] {
+            let (response, body) = fetch(api_only(), "/api/v1/openapi.json", Some(accepted)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()[header::CONTENT_ENCODING], chosen);
+            assert!(!body.is_empty(), "{chosen}: empty body");
+        }
+        // One this service does not offer, alongside one it does: the answer is the one it
+        // offers rather than an unencoded body.
+        let (response, _) = fetch(
+            api_only(),
+            "/api/v1/openapi.json",
+            Some("deflate;q=1.0, gzip;q=0.5"),
+        )
+        .await;
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+    }
+
+    /// The generated directory page, which inlines its own stylesheet and script before it
+    /// lists a single entry.
+    #[tokio::test]
+    async fn a_directory_page_is_compressed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"0123456789").unwrap();
+
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let (response, body) = fetch(service, "/", Some("gzip")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(body[..2], GZIP_MAGIC);
+    }
+
+    /// Parquet is the exclusion, and it is the response's content type that carries it —
+    /// so a file served off a mount and a query answered as parquet are one rule. The
+    /// bytes come back verbatim, which is what a client reading a footer depends on.
+    #[tokio::test]
+    async fn a_parquet_body_is_never_compressed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Long and repetitive, so that nothing but the predicate could be what declined:
+        // it is well over the size the default predicate ignores, and gzip would flatten it.
+        let contents = b"PAR1".repeat(1024);
+        std::fs::write(dir.path().join("part0.parquet"), &contents).unwrap();
+
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let (response, body) = fetch(service, "/part0.parquet", Some("gzip")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            PARQUET_CONTENT_TYPE
+        );
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "4096");
+        assert_eq!(body, contents);
+    }
+
     /// The bytes, the length, the type, and the header that says a client may ask for
     /// part of it — which is how an `lsdb` client reads one partition without
     /// downloading it.
@@ -2414,6 +2565,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(&body[..], b"6789");
+    }
+
+    /// A range is answered with the bytes that were asked for, whatever the file is and
+    /// whatever encoding the client would accept. The content-type exclusion does not
+    /// cover this — the file here is text, and text is what compresses best — so it is
+    /// the layer's own refusal to touch a partial response that holds.
+    #[tokio::test]
+    async fn a_ranged_read_is_not_compressed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "a".repeat(1024)).unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/notes.txt")
+                .header(header::RANGE, "bytes=-4")
+                .header(header::ACCEPT_ENCODING, "gzip"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body[..], b"aaaa");
     }
 
     /// Nothing about the filesystem comes back: a file outside the mount, one that is

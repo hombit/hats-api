@@ -763,6 +763,19 @@ nothing downstream reports it.
   blank cell that reads as nothing much. `null` is marked in any column; the three strings
   count only in a float column, since elsewhere a string is just a string.
 
+A body is compressed on the way out where the client asked for it, which is one layer over
+the whole router and two rules to keep:
+
+- **A body that is already compressed is excluded by its content type**, not by its route.
+  Parquet is the one today — `app::compression` names `PARQUET_CONTENT_TYPE` beside what
+  `DefaultPredicate` excludes — and that one line covers a file served off a mount and a
+  query encoded into one. A new response type carrying its own compression is another name
+  in that predicate; a route-shaped rule would already have missed one of parquet's two
+  ways out.
+- **A compressed body has no `Content-Length`.** Anything a client is told to size a buffer
+  from, or to seek in, has to be a body the predicate declines — which is what makes the
+  rule above about the ranged reads an `lsdb` client does, rather than about CPU.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it
