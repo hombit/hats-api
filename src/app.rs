@@ -29,6 +29,7 @@ use crate::healpix::Cover;
 use crate::listing::{self, Listing};
 use crate::materialize::Transfers;
 use crate::mount::{self, Mount, Mounts};
+use crate::openapi;
 use crate::parquet_out;
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::region::{self, Healpix, Region, Spatial};
@@ -158,6 +159,7 @@ pub fn router(service: Service) -> Router {
         // wider body and another pairwise refusal everywhere the fields are read.
         router = with_dialect::<Expr>(router, &prefix);
         router = with_dialect::<Simple>(router, &prefix);
+        router = with_description(router, &prefix);
     }
     router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -199,6 +201,178 @@ fn with_dialect<D: Dialect>(router: Router<Service>, prefix: &str) -> Router<Ser
         // mode: rows and a work list are different kinds of thing, and a field saying
         // which arrived is one more value a caller has to look at the body to trust.
         .route(&path("hats/plan"), post(query_hats_plan::<D>))
+}
+
+/// The two routes that describe the rest: the document, and a page rendering it.
+///
+/// The document is built per request rather than once, because it names the prefix and the
+/// prefix is the operator's. It is a few hundred microseconds of `serde_json` on a route
+/// nothing calls in a loop.
+fn with_description(router: Router<Service>, prefix: &str) -> Router<Service> {
+    let document = route(prefix, "openapi.json");
+    let page = openapi::page(&describe(prefix), &document);
+    router
+        .route(
+            &document,
+            get({
+                let prefix = prefix.to_owned();
+                move || {
+                    let prefix = prefix.clone();
+                    async move { Json(describe(&prefix)) }
+                }
+            }),
+        )
+        .route(
+            &route(prefix, "docs"),
+            get(move || {
+                let page = page.clone();
+                async move { Html(page) }
+            }),
+        )
+}
+
+/// The whole document: the health route, then every vocabulary's own.
+fn describe(prefix: &str) -> utoipa::openapi::OpenApi {
+    let mut paths = utoipa::openapi::Paths::new();
+    let mut schemas = Vec::new();
+    openapi::health(&mut paths, &route(prefix, "health"));
+    describe_dialect::<Expr>(&mut paths, &mut schemas, prefix);
+    describe_dialect::<Simple>(&mut paths, &mut schemas, prefix);
+    let components = utoipa::openapi::ComponentsBuilder::new()
+        .schemas_from_iter(schemas)
+        .build();
+    openapi::document(paths, components)
+}
+
+/// One vocabulary's three operations, alongside [`with_dialect`]'s three routes.
+///
+/// Generic over the same trait for the same reason: a vocabulary that was served and not
+/// described, or described and not served, would be a difference nobody notices until a
+/// caller does.
+fn describe_dialect<D: Dialect>(
+    paths: &mut utoipa::openapi::Paths,
+    schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>,
+    prefix: &str,
+) {
+    // Every named schema is registered and referred to by `$ref`, including the generic ones:
+    // the derive composes the argument into the name, so `QueryRequest<Expr>` and
+    // `QueryRequest<Simple>` are two components rather than one that is wrong for one route.
+    // Spelled the way utoipa spells a generic it composes itself, so the two kinds of name in
+    // the document read alike.
+    let of = |base: &str| format!("{base}_{}", <D as utoipa::ToSchema>::name());
+    // The vocabulary itself, which nothing else registers: it reaches the body through a
+    // `flatten` on a generic parameter, and walking a type's references does not cross one.
+    // Left out, every request body `$ref`s a component that is not in the document.
+    named::<D>(schemas, <D as utoipa::ToSchema>::name().to_string());
+    let body = named::<QueryRequest<D>>(schemas, of("QueryRequest"));
+    let plan = named::<PlanResponse<D>>(schemas, of("PlanResponse"));
+    let rows = named::<SelectResponse>(
+        schemas,
+        <SelectResponse as utoipa::ToSchema>::name().to_string(),
+    );
+    let catalog_rows = named::<HatsResponse>(
+        schemas,
+        <HatsResponse as utoipa::ToSchema>::name().to_string(),
+    );
+    let path = |target: &str| route(prefix, &format!("{}/{target}", D::SEGMENT));
+
+    openapi::post(
+        paths,
+        &path("parquet"),
+        openapi::operation(
+            D::SEGMENT,
+            "Query one parquet file",
+            D::SUMMARY,
+            body.clone(),
+            example::<D>(EXAMPLE_PARTITION, false),
+            "The rows, or the file itself where `format` asked for parquet",
+            rows,
+        ),
+    );
+    openapi::post(
+        paths,
+        &path("hats"),
+        openapi::operation(
+            D::SEGMENT,
+            "Query a HATS catalog",
+            D::SUMMARY,
+            body.clone(),
+            example::<D>(EXAMPLE_CATALOG, true),
+            "The rows, in the catalog's own order, with the partitions they came from",
+            catalog_rows,
+        ),
+    );
+    openapi::post(
+        paths,
+        &path("hats/plan"),
+        openapi::operation(
+            D::SEGMENT,
+            "Resolve a catalog query without running it",
+            D::SUMMARY,
+            body,
+            example::<D>(EXAMPLE_CATALOG, true),
+            "One request per partition, for the client to send itself",
+            plan,
+        ),
+    );
+}
+
+/// ZTF DR24's light curves, which is a real catalog a reader can send the example at: a
+/// collection, published anonymously, and partitioned into directories rather than one file
+/// per pixel — so the two urls below are not the same shape and neither is invented.
+const EXAMPLE_CATALOG: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats";
+const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
+    ztf_dr24_lc-hats/dataset/Norder=3/Dir=0/Npix=385/part0.snappy.parquet";
+
+/// A body the route it is shown on will actually answer, in a few seconds: the url, this
+/// vocabulary's own two fields, a limit, and for a catalog a circle.
+///
+/// The url is a parameter because a target refuses what another requires, and the circle is
+/// there because without one a catalog query reads every partition. Against a real catalog —
+/// which is what these name — that is minutes, and a reader pressing the button would conclude
+/// the service was broken. One arcminute is one partition and a couple of seconds.
+///
+/// A `limit` alone would not do it: it stops the read once enough rows are found, and a
+/// predicate that most partitions fail keeps it reading.
+fn example<D: Dialect>(url: &str, region: bool) -> serde_json::Value {
+    let mut body = serde_json::Map::new();
+    body.insert("url".to_owned(), serde_json::Value::String(url.to_owned()));
+    if let serde_json::Value::Object(query) = D::example() {
+        body.extend(query);
+    }
+    if region {
+        body.insert(
+            "region".to_owned(),
+            serde_json::json!([{ "type": "circle", "ra": 180.0, "dec": 30.0, "radius_arcsec": 60 }]),
+        );
+    }
+    body.insert("limit".to_owned(), serde_json::json!(10));
+    serde_json::Value::Object(body)
+}
+
+/// Register a type's schema under `name`, and everything it refers to, and hand back the
+/// reference to it.
+///
+/// A component and a `$ref` rather than the schema written into each operation: the same body
+/// is three routes' here, and a reader comparing two vocabularies wants to see one name twice.
+///
+/// The name is a parameter because a generic type has two of them. `ToSchema::schemas` composes
+/// the argument in — `PlanBody_Expr` — while `ToSchema::name` drops it and answers `PlanBody`
+/// for every instantiation. Registering a generic under the latter puts both dialects' schemas
+/// at one key, where the second silently replaces the first and every route ends up describing
+/// whichever was built last.
+fn named<T: utoipa::ToSchema>(
+    schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>,
+    name: String,
+) -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+    T::schemas(schemas);
+    schemas.push((name.clone(), <T as utoipa::PartialSchema>::schema()));
+    utoipa::openapi::Ref::from_schema_name(name).into()
+}
+
+/// The health response's schema, for the route that has no body to derive one from.
+pub fn health_schema() -> utoipa::openapi::RefOr<utoipa::openapi::Schema> {
+    <HealthResponse as utoipa::PartialSchema>::schema()
 }
 
 /// One route under a prefix. The root prefix already ends in the separator, so joining
@@ -747,7 +921,7 @@ async fn list_directory(
     })
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct HealthResponse {
     status: &'static str,
 }
@@ -768,10 +942,21 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
 /// more fields and another pairwise refusal in every body that reads them.
 // `Sync` as well as `Send`: a handler holds `&QueryRequest<Self>` across an await, and a
 // shared reference is only `Send` where what it points at is `Sync`.
-trait Dialect: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static {
+trait Dialect:
+    Debug + Clone + Serialize + DeserializeOwned + utoipa::ToSchema + Send + Sync + 'static
+{
     /// The path segment this vocabulary is reached at. A plan's entries name it too: they
     /// are written in the vocabulary the request that produced them was written in.
     const SEGMENT: &'static str;
+
+    /// One line saying what this vocabulary is, for the API description. Beside `SEGMENT`
+    /// because they are the two things a route set needs to know about a vocabulary, and a
+    /// third one added without either is a route nobody can find or read.
+    const SUMMARY: &'static str;
+
+    /// This vocabulary's two fields, spelled so that the description's runner starts from a
+    /// request that returns rows rather than a 400.
+    fn example() -> serde_json::Value;
 
     fn projection(&self) -> Projection<'_>;
 
@@ -795,22 +980,42 @@ trait Dialect: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'sta
 /// [`crate::sql`] parses each field on its own and requires the parser to reach the end of
 /// the string, so `SELECT … FROM …` is not a longer form of this that happens to be
 /// rejected, it is a different thing.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+// The `description`s are the caller's text and the doc comments are the next maintainer's.
+// Two audiences rather than two copies: a comment here says why the design is what it is,
+// which is the wrong thing to read when you are trying to write a request. What must not be
+// written twice is the shape — fields, types, which are required — and that is derived.
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[schema(description = "A projection and a predicate written as SQL expressions.")]
 struct Expr {
-    /// The projection, as a SQL select list, so `mag - 0.1 AS mag_corr` works. Absent
-    /// returns every column.
+    /// The select list that would follow `SELECT`: names, expressions over them, and aliases.
+    /// Leave it out to get every column. Write a column as the file spells it, in double quotes
+    /// where the spelling needs them — `"Gmag"`. Each expression is evaluated one row at a
+    /// time, so aggregates and window functions are refused.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "objectid, objra, objdec, lightcurve.mag")]
     select: Option<String>,
-    /// One boolean SQL expression over this file's columns. Absent returns every row.
-    ///
-    /// The raw identifier is the field name in both directions: serde reads and writes it as
-    /// `where`, which is what a caller sends.
+    /// One boolean expression over this file's columns: the condition that would follow a
+    /// `WHERE` keyword. Leave it out to get every row. Write a column as the file spells it, in
+    /// double quotes where the spelling needs them — `"Gmag" < 20`.
+    // The raw identifier is the field name in both directions: serde reads and writes it as
+    // `where`, which is what a caller sends.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "objdec > 60")]
     r#where: Option<String>,
 }
 
 impl Dialect for Expr {
     const SEGMENT: &'static str = "expr";
+    const SUMMARY: &'static str = "SQL expressions: `select` is a select list, `where` one \
+        boolean expression. Neither is a statement — each is parsed on its own and must \
+        parse to its end.";
+
+    fn example() -> serde_json::Value {
+        serde_json::json!({
+            "select": "objectid, objra, objdec, lightcurve.mag",
+            "where": "nepochs > 10"
+        })
+    }
 
     fn projection(&self) -> Projection<'_> {
         match self.select.as_deref() {
@@ -829,19 +1034,38 @@ impl Dialect for Expr {
 
 /// Names and a narrower filter form — the vocabulary a url query string can carry, which is
 /// why the file-server mode reads the same pair out of one.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, utoipa::ToSchema)]
+#[schema(
+    description = "A projection and a predicate in the narrower forms a url query string can \
+                   carry. The same meaning as the expression vocabulary, and the same limits."
+)]
 struct Simple {
-    /// The projection as plain column names. The narrower of the two: it takes names, never
-    /// expressions.
+    /// Column names, comma-separated: the select list that would follow `SELECT`, restricted to
+    /// plain names. For anything computed, use the expression vocabulary. Write a name as the
+    /// file spells it, in double quotes where the spelling needs them. A dotted name reaches
+    /// inside a struct column, and comes back as that column carrying the fields you named.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "objectid, objra, objdec, lightcurve.mag")]
     columns: Option<String>,
-    /// The row predicate in the same vocabulary, which additionally spells `AND` as `&&`.
+    /// The row condition, where `&&` may be written for `AND`. Otherwise the same expression
+    /// language as the other vocabulary's `where`.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(example = "objdec > 60 && nepochs > 100")]
     filters: Option<String>,
 }
 
 impl Dialect for Simple {
     const SEGMENT: &'static str = "simple";
+    const SUMMARY: &'static str = "Names and the narrower filter form a url query string can \
+        carry: `columns` is a comma-separated list of names, `filters` spells `AND` as \
+        `&&`. A caller who wants an expression uses the `expr` routes.";
+
+    fn example() -> serde_json::Value {
+        serde_json::json!({
+            "columns": "objectid, objra, objdec, lightcurve.mag",
+            "filters": "nepochs > 10"
+        })
+    }
 
     fn projection(&self) -> Projection<'_> {
         match self.columns.as_deref() {
@@ -867,43 +1091,67 @@ const ELSEWHERE: &[(&str, &str)] = &[
     ("filters", Simple::SEGMENT),
 ];
 
-#[derive(Debug, Deserialize)]
+/// What to read, and how to read it. The same body on every route.
+///
+/// A catalog names its own coordinate and index columns, so the `hats` routes refuse
+/// `ra_column`, `dec_column`, `healpix_column` and `healpix_order`. A single file given a
+/// `region` requires the first two.
+///
+/// Every field is either honoured or refused: a field belonging to the other vocabulary, or one
+/// this service does not know, is a 400 saying so.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 struct QueryRequest<D> {
-    /// Where the data is, treated as opaque: whatever query string it has belongs to
-    /// the origin, not to us.
+    /// The file or catalog to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`,
+    /// `webdav` or `file` — and which of those a deployment answers for is the operator's to
+    /// configure.
+    // Treated as opaque: whatever query string it has belongs to the origin, not to us.
+    #[schema(value_type = String, example = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats")]
     url: SourceUrl,
-    /// How to reach the store — a region, an endpoint, credentials. Absent means a
-    /// public object read anonymously, which is the common case.
+    /// How to reach the store: an endpoint, a region, credentials. Leave it out for a public
+    /// object read anonymously, which is the common case. Which options apply is decided by
+    /// the url's scheme, and one that does not apply is refused rather than ignored.
     #[serde(default)]
     storage: StorageOptions,
     /// The projection and the predicate, in this route's own vocabulary.
     #[serde(flatten)]
     query: D,
-    /// A shape on the sky, or several. A row inside any of them qualifies — the array is
-    /// a union — and the whole field is conjoined with the predicate.
+    /// One or more shapes on the sky. A row inside any of them qualifies — the array is a
+    /// union — and the whole field is ANDed with the predicate.
     region: Option<Vec<Region>>,
-    /// Which columns hold the position a `region` is tested against. Required alongside
-    /// one: a parquet file carries nothing that says which of its columns are a position.
+    /// Which column holds right ascension, in degrees. Required whenever `region` is given,
+    /// and refused for a catalog, which says so itself.
+    // A parquet file carries nothing that says which of its columns are a position, so a guess
+    // from conventional names would answer a different question than the one asked.
+    #[schema(example = "objra")]
     ra_column: Option<String>,
+    /// Which column holds declination, in degrees. Required alongside `ra_column`.
+    #[schema(example = "objdec")]
     dec_column: Option<String>,
-    /// The file's HEALPix index column, and the order its values are at — `_healpix_29`
-    /// and 29 for a HATS catalog that took the recommendation. Optional, and an
-    /// accelerator only: they change what a query costs and never which rows come back.
+    /// A HEALPix index column, if the file has one — `_healpix_29` for a HATS catalog that
+    /// took the recommendation. Purely an accelerator: it changes what a query costs and never
+    /// which rows come back. Give `healpix_order` with it.
+    #[schema(example = "_healpix_29")]
     healpix_column: Option<String>,
+    /// The order the values in `healpix_column` are written at. Never inferred from the
+    /// column's name — read at the wrong order, every bound is one no row satisfies, which
+    /// returns nothing rather than failing.
+    #[schema(example = 29)]
     healpix_order: Option<u8>,
-    /// `json` (the default) or `parquet`.
+    /// `json`, the default, or `parquet` for the answer as a parquet file. A parquet answer
+    /// carries its counts in `x-hats-*` response headers, there being no room in the body.
+    #[schema(example = "json")]
     format: Option<String>,
-    /// Most rows to return.
+    /// At most this many rows. Under the file server they are the file's first; through the
+    /// API the order is not promised, but the same request returns the same rows.
+    #[schema(example = 100)]
     limit: Option<usize>,
-    /// Whether a plan's entries carry `storage` — this request's own, credentials included
-    /// — so that they can be sent as they stand.
-    ///
-    /// **Off unless asked for, and only ever the caller's own secret handed back to them.**
-    /// It enables nothing they cannot already do: they sent it. What it costs is that the
-    /// plan becomes a document with a credential in it, and a plan is the sort of thing that
-    /// gets logged, cached and pasted into an issue. So the default writes the stripped url
-    /// and `requires_credentials`, and a client that would rather re-attach them itself —
-    /// which is most of them — never has to think about it.
+    /// Write this request's own `storage` — credentials included — into each entry of a plan,
+    /// so the entries can be sent as they stand. Plan routes only. Off by default: it
+    /// discloses nothing, being your own secret handed back to you, but it makes the plan a
+    /// document with a credential in it, and a plan is the sort of thing that gets logged,
+    /// cached and pasted into an issue.
+    // The default writes the stripped url and `requires_credentials`, so a client that would
+    // rather re-attach them itself — which is most of them — never has to think about it.
     #[serde(default)]
     return_storage: bool,
     /// Every key the body carried that this route has no field for.
@@ -914,7 +1162,12 @@ struct QueryRequest<D> {
     /// the caller cannot tell from a predicate that matched them all — the failure this
     /// service keeps finding in a new place. So the leftovers are collected and refused, and
     /// having them by name is also what lets the refusal say which route does take one.
+    ///
+    /// Hidden from the description: it is not a field a caller may send, it is where the
+    /// ones they should not have sent are caught. Left in, a generated client would offer
+    /// an `unknown` map that makes every request a 400.
     #[serde(flatten)]
+    #[schema(ignore)]
     unknown: BTreeMap<String, IgnoredAny>,
 }
 
@@ -1127,63 +1380,70 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
     }
 }
 
-/// One column of the answer, as the schema describes it.
-///
-/// What it is for is that rows do not describe themselves. An answer that matched
-/// nothing, and one asked for with `limit=0`, are the same shape as a file that has not
-/// got the column — so a caller reading column names off the first row learns nothing
-/// from either. The type is arrow's own spelling, which is what says whether a value
-/// needs quoting in a predicate.
-#[derive(Debug, Serialize)]
+/// One column of the answer. Sent even when no rows matched, so it is where the answer's shape
+/// can always be read.
+// Rows do not describe themselves, and an empty answer looks exactly like a file that has not
+// got the column — hence sending this for an empty answer and for `limit=0`.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct Column {
+    /// The column's name, spelled as the file spells it.
     name: String,
+    /// The arrow type, in arrow's own spelling — `Int64`, `Float32`,
+    /// `List(Float32, field: 'element')`. This is what says whether a value needs quoting
+    /// when you write it into a predicate.
     r#type: String,
-    /// A struct column's own fields, one level down and no further.
+    /// A struct column's own fields, one level down — the parts of a packed light curve, say.
     ///
-    /// A HATS catalog carrying light curves has them packed into a struct per row — the
-    /// column is `sources` and what a reader wants is `sources.mjd` — and that spelling is
-    /// one both vocabularies already plan, as a compound identifier. What was missing was
-    /// any way to learn the names: the type string spells them, but a client would have to
-    /// parse arrow's own `Display` to get at them, so they are named here instead.
-    ///
-    /// **Each name is its own, not the path.** `sources.mjd` is two identifiers and quotes
-    /// per part where a part needs them — `"sources"."mjd"` resolves and `"sources.mjd"` is
-    /// a column no file has got. Joining them here would hand a caller a string that only
-    /// works while every part happens to need no quoting.
-    ///
-    /// One level, because that is the level that is addressable this way and because a
-    /// deeper walk is a page of names nobody asked for. A field that is itself a struct is
-    /// listed and its own fields are not.
+    /// Ask for one by joining its name to the column's with a dot: `lightcurve.mag`. Quote each
+    /// part on its own where it needs quoting: `"lightcurve"."mag"`. A field that is itself a
+    /// struct is listed here; its own fields are not.
+    // Named rather than left to the type string, which spells them only in arrow's `Display`.
+    // One level is what a projection can address and what the value carries, and it is also
+    // what stops the schema, which is recursive, from being walked forever.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(no_recursion)]
     fields: Vec<Column>,
 }
 
-/// A catalog's answer: [`SelectResponse`] plus which partitions it came out of.
-///
-/// The count is what says whether the region pruned. Without it a caller cannot tell a
-/// region that reached four partitions from one that read the whole catalog and matched the
-/// same rows — the same failure `data_bytes_read` answers one file at a time.
-#[derive(Debug, Serialize)]
+/// A catalog's answer: the rows, and what it cost to find them.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct HatsResponse {
+    /// How many rows are in `rows`.
     num_rows: usize,
+    /// How many of the catalog's partitions were read.
+    ///
+    /// This is how to tell whether a `region` narrowed anything: four partitions and the whole
+    /// catalog can return the same rows, and only this says which of the two happened.
     num_partitions: usize,
+    /// The columns of the answer, in order.
     schema: Vec<Column>,
+    /// Bytes read from the store to answer this. Two queries that return the same rows can
+    /// read very different amounts, and this is where the difference shows.
     data_bytes_read: u64,
+    /// How long the query took, in milliseconds.
+    #[schema(value_type = u64)]
     elapsed_ms: u128,
+    /// One object per row, keyed by the names in `schema`.
+    #[schema(value_type = Vec<Object>)]
     rows: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+/// One file's answer: the rows, and what it cost to read them.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct SelectResponse {
+    /// How many rows are in `rows`.
     num_rows: usize,
-    /// The columns of the answer, which is the projection where the request made one and
-    /// the file's own schema where it did not.
+    /// The columns of the answer, in order: what the projection asked for, or the file's whole
+    /// schema if it did not ask.
     schema: Vec<Column>,
-    /// How much of the source file was read to answer this. What it is for is telling a
-    /// caller whether their predicate pruned: the same query written two ways returns the
-    /// same rows, and this is where the difference between them shows.
+    /// Bytes read from the file to answer this. Two queries that return the same rows can read
+    /// very different amounts, and this is where the difference shows.
     data_bytes_read: u64,
+    /// How long the query took, in milliseconds.
+    #[schema(value_type = u64)]
     elapsed_ms: u128,
+    /// One object per row, keyed by the names in `schema`.
+    #[schema(value_type = Vec<Object>)]
     rows: Vec<serde_json::Value>,
 }
 
@@ -1420,57 +1680,66 @@ async fn query_hats_plan<D: Dialect>(
     Ok(Json(plan).into_response())
 }
 
-/// A work list: the requests this one resolves to, for a client to send itself.
-#[derive(Debug, Serialize)]
+/// A work list: one request per partition, for you to send yourself.
+///
+/// Send them in the order given and concatenate the answers, and you get what the catalog
+/// route would have returned — but you choose the concurrency, and you can stop early.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct PlanResponse<D> {
-    /// Why this came back instead of rows, where it did. Absent on the plan route, which
-    /// was asked for.
+    /// Why a plan came back instead of rows. Present only when a catalog query was refused
+    /// for being too large; the plan routes, which were asked for a plan, leave it out.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
-    /// The catalog, spelled the way the caller spelled it.
+    /// The catalog, spelled the way you spelled it.
     catalog: String,
+    /// How many entries are in `requests`.
     num_partitions: usize,
-    /// The sum over the entries, where every one of them knew. Absent otherwise: a partial
-    /// sum would read as a total.
+    /// Roughly how many bytes the whole plan would read, summed over the entries. Left out
+    /// unless every entry knew its own size — a partial sum would read as a total.
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_bytes: Option<u64>,
-    /// Whether the original request carried credentials. The entries never do — copying a
-    /// secret into a body that gets logged, cached and pasted enables nothing the client
-    /// cannot already do, since it is the client's own secret. This says to re-attach them.
+    /// Whether the request that produced this plan carried credentials — meaning you must
+    /// attach your own `storage` to each entry before sending it.
+    ///
+    /// The entries do not carry them unless you asked with `return_storage`.
     requires_credentials: bool,
+    /// The entries, in the catalog's own order.
     requests: Vec<PlanRequest<D>>,
 }
 
-/// One entry: a request against this service, for one file of the catalog.
-#[derive(Debug, Serialize)]
+/// One entry of a plan: a request to send to this service, for one partition of the catalog.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct PlanRequest<D> {
+    /// The HEALPix order of the partition this reads.
     order: u8,
+    /// The HEALPix pixel of the partition this reads, at `order`.
     pixel: u64,
-    /// Separate fields so that a file-server entry, which is a `GET` under a mount, has the
-    /// same shape as this one.
+    /// The HTTP method to use — always `POST` here.
+    // A field rather than part of `path`, so a file-server entry, which is a `GET` under a
+    // mount, has the same shape as this one.
     method: &'static str,
+    /// The path on this service to send `body` to.
     path: String,
+    /// Roughly how many bytes this entry would read, where the catalog said.
     #[serde(skip_serializing_if = "Option::is_none")]
     estimated_bytes: Option<u64>,
+    /// The body to send.
     body: PlanBody<D>,
 }
 
-/// The body of one entry, which is an ordinary [`query_parquet`] request.
+/// The body of one plan entry: an ordinary single-file request, ready to send unchanged.
 ///
-/// Every field the caller wrote that still applies, and the column names they were refused
-/// — because the single-file route has no catalog to ask and needs them stated.
-///
-/// Written in the vocabulary the request was, and sent to that vocabulary's own route: a
-/// plan a client can send back unchanged is the whole point of one, and translating it into
-/// another vocabulary on the way out would make the entries say something the caller did not
-/// write.
-#[derive(Debug, Serialize)]
+/// It carries what you wrote that still applies, plus the coordinate and index column names the
+/// catalog supplied, and it is written in the vocabulary you used.
+// The column names are stated here because the single-file route has no catalog to ask.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct PlanBody<D> {
+    /// The partition's own url, below the catalog url you gave.
     url: String,
     #[serde(flatten)]
     query: D,
-    /// Only where the region does not contain this partition whole. An entry without it is
-    /// one whose every row qualifies, and testing them again would only cost time.
+    /// Present only where this partition straddles the region's edge. An entry without it is
+    /// one the region contains whole, so every row qualifies and no test is needed.
     #[serde(skip_serializing_if = "Option::is_none")]
     region: Option<Vec<Region>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1492,6 +1761,7 @@ struct PlanBody<D> {
     /// for them with `return_storage`. Absent is the default and means the client attaches
     /// what it already holds.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<Object>)]
     storage: Option<serde_json::Value>,
 }
 
@@ -1998,8 +2268,11 @@ mod tests {
         let params = QueryRequest {
             url: "s3://b/k.parquet".to_owned().into(),
             storage: StorageOptions {
-                region: Some("us-west-2".to_owned()),
-                secret_access_key: Some(SECRET.to_owned().into()),
+                s3: storage::S3Options {
+                    region: Some("us-west-2".to_owned()),
+                    secret_access_key: Some(SECRET.to_owned().into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             query: Expr {
@@ -2952,8 +3225,11 @@ mod tests {
         let params = QueryRequest {
             url: "file:///".to_owned().into(),
             storage: StorageOptions {
-                region: Some("us-west-2".to_owned()),
-                secret_access_key: Some(SECRET.to_owned().into()),
+                s3: storage::S3Options {
+                    region: Some("us-west-2".to_owned()),
+                    secret_access_key: Some(SECRET.to_owned().into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             query: Simple {
@@ -3035,8 +3311,11 @@ mod tests {
             serde_json::to_value(plan_of(&service, &search, &params, None).await.unwrap()).unwrap()
         };
         let given = || StorageOptions {
-            region: Some("us-west-2".to_owned()),
-            secret_access_key: Some(SECRET.to_owned().into()),
+            s3: storage::S3Options {
+                region: Some("us-west-2".to_owned()),
+                secret_access_key: Some(SECRET.to_owned().into()),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

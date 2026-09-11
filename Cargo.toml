@@ -58,6 +58,8 @@ percent-encoding = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 url = "2"
+# The OpenAPI document, derived from the same serde types the routes deserialize.
+utoipa = { version = "5", features = ["preserve_order"] }
 
 # Package-wide, so `tests/` gets these too. The lints that only suit the service —
 # no `unwrap` in a request path — are crate attributes in `src/lib.rs`.

@@ -1,0 +1,221 @@
+/* The API description, in the same hand as a directory listing: one column, a monospace
+   family for anything a caller types, and both colour schemes. Inlined, because a
+   stylesheet fetched from elsewhere is one this service's networks may not reach.
+
+   The tokens are the listing page's, deliberately. A reader crossing from a catalog page
+   to here has not left the service, and two palettes would say they had. */
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --surface: #eef2f8;
+  --stripe: #f4f6f8;
+  --fg: #16181b;
+  --muted: #4e545c;
+  --hover: #dde7f6;
+  --line: #c2c9d2;
+  --edge: #97a1ad;
+  --link: #0a53b5;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121517;
+    --surface: #1d232a;
+    --stripe: #191d21;
+    --fg: #eef1f4;
+    --muted: #aab3bd;
+    --hover: #27333f;
+    --line: #39424c;
+    --edge: #5a6672;
+    --link: #82b8ff;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  margin: 2rem 1.5rem;
+  font-family: system-ui, -apple-system, sans-serif;
+  max-width: 62rem;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--mono); font-size: 0.85em; }
+h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.1rem; }
+h1 .version { color: var(--muted); font: 0.8rem var(--mono); margin-left: 0.4rem; }
+p { color: var(--muted); font-size: 0.85rem; margin: 0.35rem 0; }
+.lede { max-width: 46rem; }
+
+/* What is on the page, before the page itself. The routes are collapsed and the types are a
+   long way down, so without this the only way to find either is to scroll. */
+nav.contents {
+  margin: 1.2rem 0 0.5rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 2.5rem;
+  align-items: flex-start;
+}
+.toc-group { min-width: 15rem; }
+.toc-group > h3 { font: 600 0.8rem var(--mono); margin: 0 0 0.25rem; }
+.toc-group > h3 a { color: var(--fg); }
+.toc-group ul { list-style: none; margin: 0; padding: 0; }
+.toc-group li { margin: 0.1rem 0; font-size: 0.78rem; line-height: 1.35; }
+.toc-method {
+  font: 600 0.62rem var(--mono);
+  color: var(--muted);
+  margin-right: 0.3rem;
+  vertical-align: 0.05em;
+}
+.toc-summary { color: var(--muted); }
+/* The type list is names only, so it reads as a column of chips rather than a list of rows. */
+ul.toc-types { columns: 2; column-gap: 1.5rem; }
+
+/* The two vocabularies are the page's top-level division, because choosing one is the
+   first thing a caller does and every route below is the same request in that spelling. */
+section.group { margin: 1.6rem 0 0; }
+section.group > h2 {
+  font: 600 0.9rem var(--mono);
+  margin: 0 0 0.15rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 2px solid var(--edge);
+}
+h2 a.anchor, h3 a.anchor { color: var(--edge); font-weight: 400; text-decoration: none; }
+/* A route linked to from the contents, so it is clear which one the link landed on. */
+details.op:target { border-color: var(--edge); box-shadow: 0 0 0 2px var(--hover); }
+.group-note { max-width: 46rem; margin-bottom: 0.7rem; }
+
+/* One route. Closed by default: seven of them open at once is a page nobody reads, and the
+   line that stays visible — method, path, summary — is what someone is scanning for. */
+details.op {
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  margin: 0.35rem 0;
+  background: var(--bg);
+}
+details.op[open] { background: var(--stripe); }
+details.op > summary {
+  cursor: pointer;
+  padding: 0.4rem 0.6rem;
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  border-radius: 0.35rem;
+}
+details.op > summary:hover { background: var(--hover); }
+.method {
+  font: 600 0.7rem var(--mono);
+  letter-spacing: 0.04em;
+  border: 1px solid var(--edge);
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.35rem;
+  color: var(--muted);
+}
+summary .path { font: 0.85rem var(--mono); color: var(--fg); }
+summary .summary { font-size: 0.8rem; color: var(--muted); }
+.op-body { padding: 0.1rem 0.7rem 0.7rem; }
+.op-body h4 {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: lowercase;
+  color: var(--muted);
+  margin: 0.9rem 0 0.25rem;
+}
+
+/* A schema is a table of what a caller may write, one row per field. The name is
+   monospace because it is typed literally; the description is not, because it is prose. */
+table.schema { border-collapse: collapse; width: 100%; margin: 0.2rem 0; }
+.schema th, .schema td { padding: 0.2rem 0.6rem 0.2rem 0; text-align: left; vertical-align: top; }
+.schema th {
+  border-bottom: 1px solid var(--line);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.schema td.name { font: 0.8rem var(--mono); white-space: nowrap; }
+.schema td.type { font: 0.75rem var(--mono); color: var(--muted); white-space: nowrap; }
+.schema td.about { font-size: 0.78rem; color: var(--muted); width: 100%; }
+.schema tbody tr:nth-of-type(even) { background: var(--stripe); }
+details.op[open] .schema tbody tr:nth-of-type(even) { background: var(--bg); }
+.req { color: var(--fg); font-weight: 600; }
+.req::after { content: " *"; color: var(--edge); }
+
+/* A `oneOf` is a list of shapes, and which one a body is comes from a field it carries.
+   Each gets its own heading rather than being merged, since merging is what makes every
+   field look optional. */
+.variant { margin: 0.5rem 0 0; }
+.variant > h5 { font: 600 0.78rem var(--mono); margin: 0.5rem 0 0.1rem; color: var(--fg); }
+.inherits { font-size: 0.78rem; margin: 0.3rem 0; }
+
+/* The runner. A textarea rather than a field per property: the body is JSON, a caller pastes
+   one, and a form that takes it apart into fifteen inputs is a form nobody can paste into. */
+form.try { margin: 0.3rem 0 0; }
+form.try textarea.body {
+  width: 100%;
+  box-sizing: border-box;
+  font: 0.8rem var(--mono);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--edge);
+  border-radius: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  resize: vertical;
+}
+.try-actions { display: flex; gap: 0.6rem; align-items: baseline; margin: 0.35rem 0; flex-wrap: wrap; }
+button.send {
+  font: 0.8rem system-ui, -apple-system, sans-serif;
+  color: var(--link);
+  background: var(--bg);
+  border: 1px solid var(--edge);
+  border-radius: 0.3rem;
+  padding: 0.2rem 0.7rem;
+  cursor: pointer;
+}
+button.send:hover:not(:disabled) { background: var(--hover); }
+button.send:disabled { color: var(--muted); cursor: default; }
+.try-actions .note { font-size: 0.72rem; color: var(--muted); flex: 1 1 16rem; }
+.with-js { display: none; }
+body.js .with-js { display: inline-block; }
+
+pre.answer, pre.as-curl {
+  font: 0.75rem var(--mono);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.3rem;
+  padding: 0.4rem 0.5rem;
+  margin: 0.3rem 0;
+  overflow-x: auto;
+  max-height: 24rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.as-curl-label { margin: 0.5rem 0 0; font-size: 0.75rem; }
+
+.status { font: 0.8rem var(--mono); }
+.status td { padding: 0.2rem 0.6rem 0.2rem 0; vertical-align: top; }
+.status td.about { font-family: system-ui, -apple-system, sans-serif; font-size: 0.78rem; color: var(--muted); }
+
+section.types { margin-top: 2rem; }
+section.types > h2 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 2px solid var(--edge);
+}
+article.type { margin: 0 0 1.1rem; }
+article.type > h3 { font: 600 0.85rem var(--mono); margin: 0 0 0.1rem; }
+article.type > h3 a.anchor { color: var(--edge); font-weight: 400; }
+.type-note { max-width: 46rem; white-space: pre-wrap; }
+
+.footer {
+  margin-top: 1.8rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--line);
+  font-size: 0.75rem;
+  color: var(--muted);
+}

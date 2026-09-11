@@ -100,6 +100,38 @@ right side without this being rewritten.
 A backend may serve more than one scheme — `Backend::schemes` returns a slice, and
 `http`/`https` are one backend reached two ways.
 
+**A backend's options are its own type, and that type is the only list of them.** Add an
+`XOptions` struct, register its fields in the `Group` impl, add the `Credentials` variant, and
+`accepted_options` picks the names up from `names_of::<XOptions>()`. What this prevents is the
+list and the backend function disagreeing: `gcs_builder` is handed a `&GcsOptions` and cannot
+read `sas_token`, so "the options gcs takes" is one fact rather than a `&[&str]` beside a
+function that reaches wherever it likes. The failure that shape allowed was silent in the worst
+direction — an option accepted at the boundary and never used.
+
+Three things hold it together, and each is a compile error rather than a check:
+
+- **Every option is registered by destructuring.** `Group::named` and `Group::echo_into` both
+  take the struct apart, so a field added and not registered does not build. `StorageOptions`
+  destructures its groups in turn, so a whole group — or a bare field beside `endpoint` — added
+  and not placed does not build either.
+- **`Named::credential` takes a `SecretString` and nothing else**, so a secret cannot be
+  registered as plain, which is what would make `allow_cleartext` wave a request through.
+- **`StorageOptions::resolve` is where the refusal and the narrowing happen together.** It
+  refuses another backend's options and hands back the one `Credentials` variant, so a builder
+  is given a value it could not have obtained without the check having run. Reading the groups
+  directly, beside a separate call to the check, is what that closes.
+
+`endpoint` and `allow_http` belong to no backend and stay bare fields, named by the `ENDPOINT`
+and `ALLOW_HTTP` consts. `endpoint` joins the accepted list only where `has_provider`; a
+single-field group for either would be a type bought for nothing.
+
+**The wire form is flat and stays flat.** The groups are `#[serde(flatten)]`, so a caller sends
+one flat object — which is also why `StorageOptions` cannot use `deny_unknown_fields`: serde
+ignores it on a struct with a `flatten` and drops unmatched keys in silence. A misspelled
+`secret_acces_key` dropped that way is an anonymous request the caller reads as an
+authenticated one, so the leftovers land in `unknown` and `for_scheme` refuses them. Anything
+added here keeps both halves: flat outside, and nothing dropped.
+
 Before committing to a service, check it offers both of these; one that does not cannot
 be served here at all.
 
@@ -822,6 +854,54 @@ seeing the file for the first time. That story goes in the commit message.
 
 Not thinking-out-loud: no reasoning towards the decision, no defending it to a reviewer,
 no restating what the line below already says.
+
+## The API description
+
+`openapi.rs` builds the document and renders the page at `{api.prefix}/docs`; the schemas come
+from the same `serde` types the routes deserialize, so a field added to a request appears in
+both by compiling. Everything below is about keeping that true, and readable.
+
+- **A `///` on a request or response type is the caller's text.** It says what the thing is and
+  how to write it; the reasoning for why it is that way goes in a `//` above, which `utoipa`
+  does not read. There is no second channel — `description` is not a field-level `#[schema]`
+  attribute — so a doc comment written for the next maintainer is published verbatim to
+  whoever is trying to send a request.
+
+  Describe, do not justify, and do not define by negation. "No `WHERE` keyword, just the
+  condition" becomes "the condition that would follow a `WHERE` keyword"; "not what the object
+  is — that is the url" becomes "the url says which object to read; these say how to reach
+  it". A reader wants the thing itself, and a caller cannot act on what something is not.
+
+- **Describe what a caller writes, not what the service does with it.** `select` says how to
+  spell a column and quote it; it does not say which spellings `resolve_identifiers` matches,
+  because that is the service's business and unactionable. Say the constraint that changes what
+  they type — both halves of a pair, exactly one of two radii, which backends take an option.
+
+- **What a route takes is derived, never restated.** `storage::option_schemes` gives each
+  storage option the schemes it applies to, out of the same list that refuses a wrong one, so
+  the document cannot claim an option is for a backend that would reject it. Anything else the
+  page says about applicability should come the same way.
+
+- **The page renders this document, not arbitrary OpenAPI.** It handles the vocabulary
+  `app::describe` emits and no more. Three shapes it has to see through, each of which reads as
+  a fault when it does not: a nullable field is `oneOf[null, T]` and must be reported as `T`; a
+  tagged variant's tag is the heading and is not repeated among its fields; a component that is
+  an `allOf` of others is flattened, since a `#[serde(flatten)]` group is a Rust arrangement and
+  the body has no nesting in it.
+
+- **No CDN, and no bundled renderer either.** The page is rendered here, complete without
+  JavaScript, for the reason every page this service serves is. Weighed and rejected: Swagger
+  UI, RapiDoc, Redoc, Scalar — each loads from a CDN as it ships, so each would have to be
+  vendored, and the smallest sends the browser 863 KB against this page's ~40 KB. Scalar's
+  defaults also route a try-it request through `proxy.scalar.com`, which on this API would send
+  a caller's storage credentials to a third party from a page this service served.
+
+- **`utoipa`'s generics need naming by hand.** `ToSchema::schemas` composes the type argument
+  into the name — `PlanBody_Expr` — while `ToSchema::name` drops it and answers `PlanBody` for
+  every instantiation. Registering a generic under the latter puts both dialects at one key,
+  where the second silently replaces the first and every route ends up describing whichever was
+  built last. `app::named` takes the name for that reason. A recursive type also needs
+  `#[schema(no_recursion)]`, or building the document overflows the stack.
 
 ## Tests
 

@@ -20,7 +20,7 @@ use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, N
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
 use hats_api::query::{Predicate, Projection, QueryResult, Selection};
-use hats_api::storage::{self, StorageOptions};
+use hats_api::storage::{self, S3Options, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use s3s::auth::SimpleAuth;
@@ -139,10 +139,14 @@ impl TestS3 {
     /// because the test server has no certificate.
     pub fn credentialed_options(&self) -> StorageOptions {
         StorageOptions {
-            access_key_id: Some(ACCESS_KEY_ID.to_owned().into()),
-            secret_access_key: Some(SECRET_ACCESS_KEY.to_owned().into()),
+            endpoint: Some(self.endpoint.clone()),
             allow_http: true,
-            ..self.options()
+            s3: S3Options {
+                access_key_id: Some(ACCESS_KEY_ID.to_owned().into()),
+                secret_access_key: Some(SECRET_ACCESS_KEY.to_owned().into()),
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 }
@@ -373,9 +377,12 @@ impl RemoteTarget {
 
         let options = StorageOptions {
             endpoint: var("ENDPOINT").or_else(|| defaults.endpoint.map(ToOwned::to_owned)),
-            region: var("REGION"),
-            access_key_id: var("ACCESS_KEY_ID").map(Into::into),
-            secret_access_key: var("SECRET_ACCESS_KEY").map(Into::into),
+            s3: S3Options {
+                region: var("REGION"),
+                access_key_id: var("ACCESS_KEY_ID").map(Into::into),
+                secret_access_key: var("SECRET_ACCESS_KEY").map(Into::into),
+                ..Default::default()
+            },
             ..Default::default()
         };
 

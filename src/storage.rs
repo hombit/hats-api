@@ -65,57 +65,129 @@ pub fn supported_schemes() -> Vec<&'static str> {
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
 
-/// How to reach the store the object lives in. Not what the object is — that is the
-/// URL, which this service treats as opaque.
+/// How to reach the store. The url says which object to read; these say what is needed to get
+/// at it — a server, a region, credentials.
 ///
-/// One flat set rather than one per scheme: the URL already says which backend it is,
-/// and an option the scheme has no use for is refused rather than ignored. A misspelled
-/// option is a 400 rather than a silently anonymous request.
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The url's scheme decides which of them apply, so a body carries the options of one backend.
+/// An option belonging to another is refused, and so is one no backend has.
+//
+// Flat on the wire, grouped in the type. The groups are what a backend function is handed, so
+// `gcs_builder` cannot reach `sas_token` — which stops "the options s3 takes" from being two
+// facts, the list and whatever the builder happens to read, that nothing keeps in step.
+//
+// `flatten` is why this cannot use `deny_unknown_fields`: serde ignores it on a struct that has
+// one, and drops unmatched keys in silence. A misspelled `secret_acces_key` dropped that way is
+// an anonymous request the caller reads as an authenticated one, so the leftovers are collected
+// and refused by `for_scheme`. Anything added here must keep both halves — flat outside, and
+// nothing dropped.
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
 pub struct StorageOptions {
-    /// Base URL of a server other than the provider's own: MinIO, Ceph, R2, Azurite.
+    /// Base URL of a server other than the provider's own: MinIO, Ceph, R2, Azurite. Taken by
+    /// the backends addressed by bucket, and by no other: a url that is its own address has
+    /// nothing for this to point elsewhere at.
     pub endpoint: Option<String>,
-    /// Permission to send credentials to a cleartext `endpoint`.
+    /// Permission to send credentials to a server reached over cleartext HTTP. Taken by every
+    /// backend: any of them can be handed a credential, and none may send one in the clear
+    /// unless the caller who owns it said so.
     #[serde(default)]
     pub allow_http: bool,
+    #[serde(flatten)]
+    pub s3: S3Options,
+    #[serde(flatten)]
+    pub gcs: GcsOptions,
+    #[serde(flatten)]
+    pub azure: AzureOptions,
+    #[serde(flatten)]
+    pub http: HttpOptions,
+    #[serde(flatten)]
+    pub webdav: WebdavOptions,
+    /// Every key the body carried that no backend has a field for.
+    ///
+    /// Filled by deserialization, and refused when the options are checked against the url's
+    /// scheme. Not something to set: it is where a caller's mistakes are caught, and anything
+    /// put here makes the request a 400. Public only because a struct literal elsewhere in the
+    /// workspace cannot use `..Default::default()` without it.
+    #[serde(flatten)]
+    #[schema(ignore)]
+    pub unknown: BTreeMap<String, serde::de::IgnoredAny>,
+}
 
+/// The two options that belong to no backend in particular. Named here because
+/// `accepted_options` needs them and `StorageOptions::named` registers them, and those are the
+/// two places that must agree.
+const ENDPOINT: &str = "endpoint";
+const ALLOW_HTTP: &str = "allow_http";
+
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct S3Options {
+    /// The bucket's region. Defaults to `us-east-1` when not given.
     pub region: Option<String>,
+    /// Access key id. Give it with `secret_access_key`; without both, the object is read
+    /// anonymously.
+    // A credential is a `SecretString` so that nothing prints it, and that is a type the
+    // document has no way to derive from. Named as a string here, which is what it is on the
+    // wire; the schema is what a caller sends, not how it is held.
+    #[schema(value_type = Option<String>)]
     pub access_key_id: Option<SecretString>,
+    /// Secret access key, alongside `access_key_id`.
+    #[schema(value_type = Option<String>)]
     pub secret_access_key: Option<SecretString>,
+    /// Session token, for temporary credentials. Only with the other two.
+    #[schema(value_type = Option<String>)]
     pub session_token: Option<SecretString>,
+}
 
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct GcsOptions {
     /// A GCS service account key: the JSON Google issues, base64-encoded.
+    #[schema(value_type = Option<String>)]
     pub service_account_key: Option<SecretString>,
-    /// A GCS OAuth2 access token, for a caller who mints short-lived credentials of
-    /// their own rather than handing over a service account key.
+    /// A GCS OAuth2 access token, as an alternative to `service_account_key` for a caller who
+    /// mints short-lived credentials of their own.
+    #[schema(value_type = Option<String>)]
     pub access_token: Option<SecretString>,
+}
 
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct AzureOptions {
     /// The Azure storage account the container is in. Required for `az://`: it is the
     /// host half of the address, which the url only carries the container half of.
     pub account: Option<String>,
     /// An Azure storage account key, base64 as Azure issues it.
+    #[schema(value_type = Option<String>)]
     pub access_key: Option<SecretString>,
+    /// An Azure shared access signature, as an alternative to `access_key`.
+    #[schema(value_type = Option<String>)]
     pub sas_token: Option<SecretString>,
+}
 
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct HttpOptions {
     /// Headers to send with every request to an `http(s)://` server, for a service that
-    /// authenticates with one — a bearer token, an API key. Treated as a credential
-    /// whatever the caller puts in it, since that is what it is for.
+    /// authenticates with one — a bearer token, an API key. Whatever is put here is treated as
+    /// a credential.
     #[serde(default)]
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub headers: Headers,
+}
+
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct WebdavOptions {
     /// The HTTP transport under a `webdav://` URL. HTTPS is the default.
     #[serde(default)]
     pub transport: Option<WebdavTransport>,
-    /// A WebDAV Basic credential, which is the only kind this backend takes. Both halves
-    /// or neither: a username alone would authenticate as nobody, which a server answers
-    /// the same way it answers an anonymous request.
+    /// The WebDAV username. Basic authentication is the only kind this backend takes, and both
+    /// halves are required together: give this with `password`, or give neither.
+    #[schema(value_type = Option<String>)]
     pub username: Option<SecretString>,
+    /// The WebDAV password, alongside `username`.
+    #[schema(value_type = Option<String>)]
     pub password: Option<SecretString>,
 }
 
 /// The transport a WebDAV server speaks. An HTTP transport must be named exactly in
 /// `api.access.webdav.endpoints`; HTTPS is used when this option is absent.
-#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WebdavTransport {
     Http,
@@ -236,23 +308,19 @@ fn refused_header(name: &HeaderName) -> Option<&'static str> {
     None
 }
 
-/// The caller's half of the cleartext decision, which every remote backend has: each of
-/// them can be given a credential, and none may send one over cleartext unless the
-/// caller who owns it said so.
-const CLEARTEXT_OPTION: &[&str] = &["allow_http"];
-/// Naming a server other than the provider's own, which only a backend that has a
-/// provider can do.
-const ENDPOINT_OPTION: &[&str] = &["endpoint"];
-const HTTP_OPTIONS: &[&str] = &["headers"];
-const WEBDAV_OPTIONS: &[&str] = &["transport", "username", "password"];
-const S3_OPTIONS: &[&str] = &[
-    "region",
-    "access_key_id",
-    "secret_access_key",
-    "session_token",
-];
-const GCS_OPTIONS: &[&str] = &["service_account_key", "access_token"];
-const AZURE_OPTIONS: &[&str] = &["account", "access_key", "sas_token"];
+/// The names one group of options answers to.
+///
+/// Read off the group's own [`Group::named`] rather than written beside it, so "which options
+/// are S3's" is one fact. A list written separately is one that can disagree with the fields a
+/// builder actually reads, and the disagreement is silent in the direction that accepts an
+/// option and never uses it.
+fn names_of<G: Group + Default>() -> Vec<&'static str> {
+    G::default()
+        .named()
+        .into_iter()
+        .map(|option| option.name)
+        .collect()
+}
 
 /// Whether an option is proof of identity. What separates the two is not the type — an
 /// Azure `account` is a `String` and a GCS `access_token` is a `SecretString`, and both
@@ -320,7 +388,204 @@ impl Named {
     }
 }
 
+/// The options of the one backend a request is for.
+///
+/// A request names one url, the url's scheme names one backend, and that backend's options are
+/// the only ones that mean anything — so past the point where the scheme is known, this is the
+/// shape, and "s3 options and azure options at once" is not a value that exists.
+///
+/// [`StorageOptions`] stays a struct because it is the wire form, and the wire form is
+/// deserialized before the scheme is known: the url is a sibling field, so serde has nothing to
+/// pick a variant by. This is what that flat form is turned into, by [`StorageOptions::resolve`].
+enum Credentials<'a> {
+    S3(&'a S3Options),
+    Gcs(&'a GcsOptions),
+    Azure(&'a AzureOptions),
+    Http(&'a HttpOptions),
+    Webdav(&'a WebdavOptions),
+}
+
+/// One backend's options, and the two things everything else needs of them.
+///
+/// Implemented by destructuring, which is what makes the guarantees compile-time: a field added
+/// to a group and not registered in `named` does not compile, and a field registered under the
+/// wrong [`Kind`] does not either, because [`Named::credential`] takes a [`SecretString`] and
+/// [`Named::plain`] refuses one.
+trait Group {
+    /// Every option in this group, under the name a request spells it.
+    fn named(&self) -> Vec<Named>;
+
+    /// These options written back out for a plan whose caller asked to have them, credentials
+    /// in the clear. Destructured for the same reason, with the guard running the other way:
+    /// forgetting a field hands back a plan missing something the caller sent.
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>);
+}
+
+fn echo_plain(out: &mut serde_json::Map<String, serde_json::Value>, name: &str, value: &str) {
+    out.insert(name.to_owned(), value.into());
+}
+
+fn echo_secret(
+    out: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    value: &Option<SecretString>,
+) {
+    if let Some(value) = value {
+        echo_plain(out, name, value.expose_secret());
+    }
+}
+
+impl Group for S3Options {
+    fn named(&self) -> Vec<Named> {
+        let Self {
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } = self;
+        vec![
+            Named::plain("region", region),
+            Named::credential("access_key_id", access_key_id),
+            Named::credential("secret_access_key", secret_access_key),
+            Named::credential("session_token", session_token),
+        ]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self {
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } = self;
+        if let Some(region) = region {
+            echo_plain(out, "region", region);
+        }
+        echo_secret(out, "access_key_id", access_key_id);
+        echo_secret(out, "secret_access_key", secret_access_key);
+        echo_secret(out, "session_token", session_token);
+    }
+}
+
+impl Group for GcsOptions {
+    fn named(&self) -> Vec<Named> {
+        let Self {
+            service_account_key,
+            access_token,
+        } = self;
+        vec![
+            Named::credential("service_account_key", service_account_key),
+            Named::credential("access_token", access_token),
+        ]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self {
+            service_account_key,
+            access_token,
+        } = self;
+        echo_secret(out, "service_account_key", service_account_key);
+        echo_secret(out, "access_token", access_token);
+    }
+}
+
+impl Group for AzureOptions {
+    fn named(&self) -> Vec<Named> {
+        let Self {
+            account,
+            access_key,
+            sas_token,
+        } = self;
+        vec![
+            // The storage account, which is the host half of an `az://` address rather
+            // than anything that authenticates. It is signed *over*, not sent as proof.
+            Named::plain("account", account),
+            Named::credential("access_key", access_key),
+            Named::credential("sas_token", sas_token),
+        ]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self {
+            account,
+            access_key,
+            sas_token,
+        } = self;
+        if let Some(account) = account {
+            echo_plain(out, "account", account);
+        }
+        echo_secret(out, "access_key", access_key);
+        echo_secret(out, "sas_token", sas_token);
+    }
+}
+
+impl Group for HttpOptions {
+    fn named(&self) -> Vec<Named> {
+        let Self { headers } = self;
+        vec![Named::credentials("headers", headers)]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self { headers } = self;
+        if !headers.is_empty() {
+            let mut written = serde_json::Map::new();
+            for (name, value) in &headers.0 {
+                echo_plain(&mut written, name, value.expose_secret());
+            }
+            out.insert("headers".to_owned(), written.into());
+        }
+    }
+}
+
+impl Group for WebdavOptions {
+    fn named(&self) -> Vec<Named> {
+        let Self {
+            transport,
+            username,
+            password,
+        } = self;
+        vec![
+            Named::plain("transport", transport),
+            Named::credential("username", username),
+            Named::credential("password", password),
+        ]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self {
+            transport,
+            username,
+            password,
+        } = self;
+        if let Some(transport) = transport {
+            echo_plain(out, "transport", transport.scheme());
+        }
+        echo_secret(out, "username", username);
+        echo_secret(out, "password", password);
+    }
+}
+
 impl StorageOptions {
+    /// Every backend's group, so that anything needing the whole set walks them rather than
+    /// listing the fields again.
+    ///
+    /// Destructured, which is what makes a field added to this struct a compile error until it
+    /// is placed: a new group has to be listed here, and a new bare field beside `endpoint` has
+    /// to be named in the arms of [`Self::named`] and [`Self::echo`] below.
+    fn groups(&self) -> [&dyn Group; 5] {
+        let Self {
+            endpoint: _,
+            allow_http: _,
+            s3,
+            gcs,
+            azure,
+            http,
+            webdav,
+            unknown: _,
+        } = self;
+        [s3, gcs, azure, http, webdav]
+    }
+
     /// Every option, under the name a request spells it, whether it is set, and whether
     /// it is a credential.
     ///
@@ -330,46 +595,17 @@ impl StorageOptions {
     /// is the expensive direction — it makes [`allow_cleartext`] wave through a request
     /// that does carry a secret.
     ///
-    /// Two things keep the list honest, both at compile time: the destructuring means a
-    /// field added to the struct and not listed here does not compile, and the
-    /// constructors mean a field listed under the wrong [`Kind`] does not either.
-    fn named(&self) -> [Named; 15] {
-        let Self {
-            endpoint,
-            allow_http,
-            region,
-            access_key_id,
-            secret_access_key,
-            session_token,
-            service_account_key,
-            access_token,
-            account,
-            access_key,
-            sas_token,
-            headers,
-            transport,
-            username,
-            password,
-        } = self;
-        [
-            Named::plain("endpoint", endpoint),
-            Named::flag("allow_http", *allow_http),
-            Named::plain("region", region),
-            Named::credential("access_key_id", access_key_id),
-            Named::credential("secret_access_key", secret_access_key),
-            Named::credential("session_token", session_token),
-            Named::credential("service_account_key", service_account_key),
-            Named::credential("access_token", access_token),
-            // The storage account, which is the host half of an `az://` address rather
-            // than anything that authenticates. It is signed *over*, not sent as proof.
-            Named::plain("account", account),
-            Named::credential("access_key", access_key),
-            Named::credential("sas_token", sas_token),
-            Named::credentials("headers", headers),
-            Named::plain("transport", transport),
-            Named::credential("username", username),
-            Named::credential("password", password),
-        ]
+    /// The list is honest because each group builds its own by destructuring: a field added to
+    /// a group and not registered does not compile, a field registered under the wrong [`Kind`]
+    /// does not either, and [`Self::groups`] is destructured in turn, so a field added to this
+    /// struct — group or not — does not compile until it is placed.
+    fn named(&self) -> Vec<Named> {
+        let mut all = vec![
+            Named::plain(ENDPOINT, &self.endpoint),
+            Named::flag(ALLOW_HTTP, self.allow_http),
+        ];
+        all.extend(self.groups().iter().flat_map(|group| group.named()));
+        all
     }
 
     /// Nothing set at all, which is what a public object needs.
@@ -380,7 +616,18 @@ impl StorageOptions {
     /// A `file://` url with a `secret_access_key`, or an `s3://` one with a `sas_token`,
     /// is a caller who has the wrong url or the wrong options; either reading is worth
     /// saying rather than guessing at, and one of them misdirects a credential.
+    ///
+    /// This also refuses an option no backend has, which `deny_unknown_fields` used to do and
+    /// cannot any more: serde ignores it on a struct with a flattened field. A misspelled
+    /// `secret_acces_key` silently dropped is an anonymous request the caller reads as an
+    /// authenticated one — the wrong answer rather than an error.
     fn for_scheme(&self, scheme: &str) -> Result<(), ApiError> {
+        if let Some(name) = self.unknown.keys().next() {
+            return Err(ApiError::bad_request(format!(
+                "{name:?} is not a storage option; {}",
+                options_clause_for(scheme)
+            )));
+        }
         let accepted = accepted_options(scheme);
         if accepted.is_empty() {
             return match self.is_empty() {
@@ -404,6 +651,26 @@ impl StorageOptions {
         }
     }
 
+    /// The one backend's options this request is actually for, once the url has said which
+    /// backend that is — and a refusal of everything belonging to another.
+    ///
+    /// The two happen together on purpose. Checking and then reading the groups separately
+    /// leaves a path where the narrowed value is taken without the check having run; here the
+    /// check is how the narrowed value is obtained, so there is no such path to take.
+    /// `None` for a scheme with no backend behind it — `file://`, where there is no store to
+    /// reach. That case is not an error here: the refusal it needs is that it takes no options
+    /// at all, which `for_scheme` has already made.
+    fn resolve(&self, scheme: &str) -> Result<Option<Credentials<'_>>, ApiError> {
+        self.for_scheme(scheme)?;
+        Ok(Backend::from_scheme(scheme).map(|backend| match backend {
+            Backend::S3 => Credentials::S3(&self.s3),
+            Backend::Gcs => Credentials::Gcs(&self.gcs),
+            Backend::Azure => Credentials::Azure(&self.azure),
+            Backend::Http => Credentials::Http(&self.http),
+            Backend::Webdav => Credentials::Webdav(&self.webdav),
+        }))
+    }
+
     /// These options written back out, credentials in the clear, for a plan whose caller
     /// asked to have them.
     ///
@@ -415,71 +682,20 @@ impl StorageOptions {
     /// already do; what it costs is that the plan is then a document with a secret in it,
     /// which is why it is off unless asked for.
     ///
-    /// Destructured like `named`, so a field added to the struct and not written
-    /// here does not compile. The guard runs the other way for this one: forgetting a field
-    /// hands back a plan missing something the caller asked for, rather than one carrying
-    /// what they did not.
+    /// Each group writes its own, by destructuring, so a field added to a group and not
+    /// written here does not compile. The guard runs the other way for this one: forgetting a
+    /// field hands back a plan missing something the caller asked for, rather than one
+    /// carrying what they did not.
     pub fn echo(&self) -> serde_json::Value {
-        fn plain(into: &mut serde_json::Map<String, serde_json::Value>, name: &str, value: &str) {
-            into.insert(name.to_owned(), value.into());
-        }
-        fn secret(
-            into: &mut serde_json::Map<String, serde_json::Value>,
-            name: &str,
-            value: &Option<SecretString>,
-        ) {
-            if let Some(value) = value {
-                plain(into, name, value.expose_secret());
-            }
-        }
-        let Self {
-            endpoint,
-            allow_http,
-            region,
-            access_key_id,
-            secret_access_key,
-            session_token,
-            service_account_key,
-            access_token,
-            account,
-            access_key,
-            sas_token,
-            headers,
-            transport,
-            username,
-            password,
-        } = self;
         let mut out = serde_json::Map::new();
-        for (name, value) in [
-            ("endpoint", endpoint),
-            ("region", region),
-            ("account", account),
-        ] {
-            if let Some(value) = value {
-                plain(&mut out, name, value);
-            }
+        if let Some(endpoint) = &self.endpoint {
+            echo_plain(&mut out, ENDPOINT, endpoint);
         }
-        if *allow_http {
-            out.insert("allow_http".to_owned(), true.into());
+        if self.allow_http {
+            out.insert(ALLOW_HTTP.to_owned(), true.into());
         }
-        if let Some(transport) = transport {
-            plain(&mut out, "transport", transport.scheme());
-        }
-        secret(&mut out, "access_key_id", access_key_id);
-        secret(&mut out, "secret_access_key", secret_access_key);
-        secret(&mut out, "session_token", session_token);
-        secret(&mut out, "service_account_key", service_account_key);
-        secret(&mut out, "access_token", access_token);
-        secret(&mut out, "access_key", access_key);
-        secret(&mut out, "sas_token", sas_token);
-        secret(&mut out, "username", username);
-        secret(&mut out, "password", password);
-        if !headers.is_empty() {
-            let mut written = serde_json::Map::new();
-            for (name, value) in &headers.0 {
-                plain(&mut written, name, value.expose_secret());
-            }
-            out.insert("headers".to_owned(), written.into());
+        for group in self.groups() {
+            group.echo_into(&mut out);
         }
         out.into()
     }
@@ -500,21 +716,38 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
     let Some(backend) = Backend::from_scheme(scheme) else {
         return Vec::new();
     };
-    let specific: &[&str] = match backend {
-        Backend::S3 => S3_OPTIONS,
-        Backend::Gcs => GCS_OPTIONS,
-        Backend::Azure => AZURE_OPTIONS,
-        Backend::Http => HTTP_OPTIONS,
-        Backend::Webdav => WEBDAV_OPTIONS,
+    // The group's own fields, so this list and the fields the backend function reads are the
+    // same fact rather than two that have to be kept in step.
+    let mut accepted = match backend {
+        Backend::S3 => names_of::<S3Options>(),
+        Backend::Gcs => names_of::<GcsOptions>(),
+        Backend::Azure => names_of::<AzureOptions>(),
+        Backend::Http => names_of::<HttpOptions>(),
+        Backend::Webdav => names_of::<WebdavOptions>(),
     };
-    // A url that is its own endpoint has nothing for `endpoint` to point elsewhere at.
-    // `allow_http` is a different question and every backend has it, because every
-    // backend can now be handed a credential the caller would not want in cleartext.
-    let endpoint: &[&str] = match backend.has_provider() {
-        true => ENDPOINT_OPTION,
-        false => &[],
-    };
-    [endpoint, CLEARTEXT_OPTION, specific].concat()
+    // A url that is its own address has nothing for `endpoint` to point elsewhere at, so it
+    // joins the list only for a backend addressed by bucket. `allow_http` is a different
+    // question and every backend has it, because every backend can be handed a credential the
+    // caller would not want in cleartext.
+    if backend.has_provider() {
+        accepted.push(ENDPOINT);
+    }
+    accepted.push(ALLOW_HTTP);
+    accepted
+}
+
+/// Which url schemes each storage option applies to, for the API description.
+///
+/// Derived from the same lists `accepted_options` refuses by, so what the document says an
+/// option is for and what the service accepts it for cannot come apart. A backend added to
+/// `BACKENDS` appears here without anything being written twice.
+pub fn option_schemes(option: &str) -> Vec<&'static str> {
+    BACKENDS
+        .iter()
+        .flat_map(|backend| backend.schemes())
+        .copied()
+        .filter(|scheme| accepted_options(scheme).contains(&option))
+        .collect()
 }
 
 /// The clause naming what this url's scheme takes, for the two messages that have to say
@@ -525,7 +758,10 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
 /// come from checks that run before the scheme is known, and saying "ftp urls take no
 /// storage options" is true and is followed by the refusal that matters.
 fn options_clause(url: &Url) -> String {
-    let scheme = url.scheme();
+    options_clause_for(url.scheme())
+}
+
+fn options_clause_for(scheme: &str) -> String {
     match accepted_options(scheme).as_slice() {
         [] => format!("{scheme} urls take no storage options"),
         options => format!("{scheme} urls take {}", options.join(", ")),
@@ -746,43 +982,46 @@ fn build(
             supported_schemes().join(", ")
         )));
     }
-    options.for_scheme(url.scheme())?;
+    // The refusal of another backend's options and the narrowing to this one's are the same
+    // step, so what the builders below are handed is a value that could not have been obtained
+    // without the check. Before the policy, as the check it replaces was: a `file://` url with
+    // a `secret_access_key` is a caller's mistake whatever the policy would have said.
+    let credentials = options.resolve(url.scheme())?;
     // Before anything is built, and before the filesystem is touched.
     match policy.authorize(url)? {
         Target::Local(path) => local_file(&path),
         Target::Remote(backend) => {
             refuse_port_on_a_bucket(url, backend)?;
+            // `None` is a scheme with no backend, which `authorize` has just said this is not.
+            let credentials = credentials
+                .ok_or_else(|| ApiError::internal("a remote url whose scheme names no backend"))?;
             // Each arm produces a configured builder and nothing more; `remote_store` is
             // the single place a builder becomes something that can make a request.
             // Every backend takes these; only the http one has anything to put in them.
-            let headers = match backend {
-                Backend::Webdav => webdav_headers(options)?,
-                _ => options.headers.to_header_map()?,
+            let headers = match credentials {
+                Credentials::Webdav(webdav) => webdav_headers(webdav)?,
+                Credentials::Http(http) => http.headers.to_header_map()?,
+                _ => HeaderMap::new(),
             };
-            let store: Arc<dyn ObjectStore> = match backend {
-                Backend::S3 => Arc::new(remote_store(
-                    s3_builder(url, options, policy)?,
+            let reach = Reach::of(options, policy);
+            let store: Arc<dyn ObjectStore> = match credentials {
+                Credentials::S3(s3) => {
+                    Arc::new(remote_store(s3_builder(url, s3, reach)?, policy, &headers)?)
+                }
+                Credentials::Gcs(gcs) => Arc::new(remote_store(
+                    gcs_builder(url, gcs, reach)?,
                     policy,
                     &headers,
                 )?),
-                Backend::Gcs => Arc::new(remote_store(
-                    gcs_builder(url, options, policy)?,
-                    policy,
-                    &headers,
-                )?),
-                Backend::Azure => Arc::new(remote_store(
-                    azblob_builder(url, options, policy)?,
+                Credentials::Azure(azure) => Arc::new(remote_store(
+                    azblob_builder(url, azure, reach)?,
                     policy,
                     &headers,
                 )?),
                 // The one backend whose server may refuse to serve byte ranges, since it
                 // is the one whose server the caller chose rather than the operator.
-                Backend::Http => Arc::new(MaterializingStore::new(
-                    Arc::new(remote_store(
-                        http_builder(url, options, policy)?,
-                        policy,
-                        &headers,
-                    )?),
+                Credentials::Http(_) => Arc::new(MaterializingStore::new(
+                    Arc::new(remote_store(http_builder(url, reach)?, policy, &headers)?),
                     origin(url)?,
                     policy.network().client(),
                     // The probe is a request of this service's own, made outside the
@@ -792,13 +1031,13 @@ fn build(
                     headers,
                     Arc::clone(transfers),
                 )),
-                Backend::Webdav => Arc::new(MaterializingStore::new(
+                Credentials::Webdav(webdav) => Arc::new(MaterializingStore::new(
                     Arc::new(remote_store(
-                        webdav_builder(url, options, policy)?,
+                        webdav_builder(url, webdav, reach)?,
                         policy,
                         &headers,
                     )?),
-                    webdav_endpoint(url, options)?,
+                    webdav_endpoint(url, webdav)?,
                     policy.network().client(),
                     headers,
                     Arc::clone(transfers),
@@ -953,19 +1192,41 @@ fn parse_endpoint(endpoint: &str) -> Result<Url, ApiError> {
         .map_err(|error| ApiError::bad_request(format!("invalid endpoint {endpoint:?}: {error}")))
 }
 
+/// What a backend function needs besides its own options: where it may connect, and whether
+/// anything in the request is a credential.
+///
+/// A bundle rather than the whole of [`StorageOptions`], so a backend function is handed its
+/// own group and this, and cannot reach another backend's fields at all. `credentials` spans
+/// every group by design — it is the answer to "is there a secret in this request", which is
+/// what the cleartext rule turns on, and no one group can answer it.
+#[derive(Clone, Copy)]
+struct Reach<'a> {
+    endpoint: Option<&'a str>,
+    allow_http: bool,
+    credentials: bool,
+    policy: &'a AccessPolicy,
+}
+
+impl<'a> Reach<'a> {
+    fn of(options: &'a StorageOptions, policy: &'a AccessPolicy) -> Self {
+        Self {
+            endpoint: options.endpoint.as_deref(),
+            allow_http: options.allow_http,
+            credentials: options.has_credentials(),
+            policy,
+        }
+    }
+}
+
 /// Which server this request would have us talk to, decided before anything is built.
 /// `None` is a request with no `endpoint` option, which means the provider's own
 /// service — and naming no endpoint is a choice the policy gets to refuse too.
-fn resolve_endpoint(
-    backend: Backend,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
-) -> Result<Option<Url>, ApiError> {
-    let Some(raw) = options.endpoint.as_deref() else {
-        policy.authorize_endpoint(backend, None)?;
+fn resolve_endpoint(backend: Backend, reach: Reach<'_>) -> Result<Option<Url>, ApiError> {
+    let Some(raw) = reach.endpoint else {
+        reach.policy.authorize_endpoint(backend, None)?;
         // A provider's own service is https, so there is nothing here for `allow_http`
         // to permit, and a caller who set it has misunderstood what it does.
-        if options.allow_http {
+        if reach.allow_http {
             return Err(ApiError::bad_request(
                 "allow_http only applies together with endpoint",
             ));
@@ -978,13 +1239,8 @@ fn resolve_endpoint(
     // request the policy has anything useful to say about, and saying which host it
     // will not reach would answer a question the caller did not ask.
     let scheme = require_endpoint_scheme(&endpoint)?;
-    policy.authorize_endpoint(backend, Some(&endpoint))?;
-    allow_cleartext(
-        &endpoint,
-        scheme,
-        options.allow_http,
-        options.has_credentials(),
-    )?;
+    reach.policy.authorize_endpoint(backend, Some(&endpoint))?;
+    allow_cleartext(&endpoint, scheme, reach.allow_http, reach.credentials)?;
     Ok(Some(endpoint))
 }
 
@@ -1161,11 +1417,7 @@ fn retries() -> RetryLayer {
         .with_max_delay(std::time::Duration::from_secs(2))
 }
 
-fn s3_builder(
-    url: &Url,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
-) -> Result<services::S3, ApiError> {
+fn s3_builder(url: &Url, options: &S3Options, reach: Reach<'_>) -> Result<services::S3, ApiError> {
     let bucket = host(url)?;
     // Virtual-host addressing puts the region in the hostname, so a region is one of
     // the strings `require_label` exists for.
@@ -1187,7 +1439,7 @@ fn s3_builder(
         .disable_config_load()
         .disable_ec2_metadata();
 
-    builder = match resolve_endpoint(Backend::S3, options, policy)? {
+    builder = match resolve_endpoint(Backend::S3, reach)? {
         // OpendDAL addresses path-style unless told otherwise, which is what an
         // S3-compatible server on a named endpoint wants: MinIO, Ceph and the rest
         // serve `endpoint/bucket/key`, and virtual-host style would need a wildcard
@@ -1228,8 +1480,8 @@ fn s3_builder(
 
 fn gcs_builder(
     url: &Url,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
+    options: &GcsOptions,
+    reach: Reach<'_>,
 ) -> Result<services::Gcs, ApiError> {
     let mut builder = services::Gcs::default()
         .bucket(host(url)?)
@@ -1240,7 +1492,7 @@ fn gcs_builder(
         .disable_config_load()
         .disable_vm_metadata();
 
-    if let Some(endpoint) = resolve_endpoint(Backend::Gcs, options, policy)? {
+    if let Some(endpoint) = resolve_endpoint(Backend::Gcs, reach)? {
         builder = builder.endpoint(endpoint.as_str());
     }
 
@@ -1272,8 +1524,8 @@ fn gcs_builder(
 
 fn azblob_builder(
     url: &Url,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
+    options: &AzureOptions,
+    reach: Reach<'_>,
 ) -> Result<services::Azblob, ApiError> {
     // Azure has no one host to default to: every account is its own. The url carries
     // the container, so the account has to come from the options — and naming it is
@@ -1291,7 +1543,7 @@ fn azblob_builder(
         .container(host(url)?)
         .account_name(account.as_str());
 
-    builder = match resolve_endpoint(Backend::Azure, options, policy)? {
+    builder = match resolve_endpoint(Backend::Azure, reach)? {
         // Azurite and the rest are addressed as they are written; the account is still
         // sent, because it is half of the shared-key signature.
         Some(endpoint) => builder.endpoint(endpoint.as_str()),
@@ -1325,23 +1577,21 @@ fn azblob_builder(
 ///
 /// What it cannot do is list, so a catalog served this way is discoverable only through
 /// the files it names rather than by walking its directories.
-fn http_builder(
-    url: &Url,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
-) -> Result<services::Http, ApiError> {
+fn http_builder(url: &Url, reach: Reach<'_>) -> Result<services::Http, ApiError> {
     let origin = origin(url)?;
     // The url *is* the endpoint here, so this is the same gate the other backends reach
     // through their `endpoint` option — asked about the address the caller wrote.
-    policy.authorize_endpoint(Backend::Http, Some(&origin))?;
+    reach
+        .policy
+        .authorize_endpoint(Backend::Http, Some(&origin))?;
     // The operator has already allowed cleartext by this point, or the line above
     // refused it. This is the other half, and it is the caller's: `headers` may carry a
     // token, and whether that goes out in the clear is not the operator's to decide.
     allow_cleartext(
         &origin,
         require_endpoint_scheme(&origin)?,
-        options.allow_http,
-        options.has_credentials(),
+        reach.allow_http,
+        reach.credentials,
     )?;
     // `Url` prints an empty path as a trailing `/`, and OpenDAL joins the endpoint to a
     // key that already starts with one. Left in, every request would go to `//key`.
@@ -1350,7 +1600,7 @@ fn http_builder(
 
 /// Turn WebDAV's Basic authentication into request headers. The materialization probe
 /// and the WebDAV operator share this map, so they authenticate identically.
-fn webdav_headers(options: &StorageOptions) -> Result<HeaderMap, ApiError> {
+fn webdav_headers(options: &WebdavOptions) -> Result<HeaderMap, ApiError> {
     let mut headers = HeaderMap::new();
     match (&options.username, &options.password) {
         (Some(username), Some(password)) => {
@@ -1393,21 +1643,23 @@ fn webdav_headers(options: &StorageOptions) -> Result<HeaderMap, ApiError> {
 /// would be one credential in two places to keep in step.
 fn webdav_builder(
     url: &Url,
-    options: &StorageOptions,
-    policy: &AccessPolicy,
+    options: &WebdavOptions,
+    reach: Reach<'_>,
 ) -> Result<services::Webdav, ApiError> {
     let endpoint = webdav_endpoint(url, options)?;
     // The url is the endpoint here, as it is for http, so this is the same gate the
     // provider-backed backends reach through their `endpoint` option.
-    policy.authorize_endpoint(Backend::Webdav, Some(&endpoint))?;
+    reach
+        .policy
+        .authorize_endpoint(Backend::Webdav, Some(&endpoint))?;
     // The caller's half of the cleartext decision: a username and password over `http`
     // are Basic authentication in the clear, which is the credential itself and not
     // merely a token derived from it.
     allow_cleartext(
         &endpoint,
         require_endpoint_scheme(&endpoint)?,
-        options.allow_http,
-        options.has_credentials(),
+        reach.allow_http,
+        reach.credentials,
     )?;
     // As in `http_builder`: OpenDAL joins this to a key that already starts with `/`.
     Ok(services::Webdav::default().endpoint(endpoint.as_str().trim_end_matches('/')))
@@ -1421,7 +1673,7 @@ fn webdav_builder(
 /// part of this: it names the object, which is what OpenDAL joins to the endpoint, so a
 /// server rooted under a prefix like `/remote.php/dav` is reached by writing that prefix
 /// into the url.
-fn webdav_endpoint(url: &Url, options: &StorageOptions) -> Result<Url, ApiError> {
+fn webdav_endpoint(url: &Url, options: &WebdavOptions) -> Result<Url, ApiError> {
     Url::parse(&format!(
         "{}://{}",
         options.transport.unwrap_or(WebdavTransport::Https).scheme(),
@@ -1466,6 +1718,9 @@ fn is_base64(value: &str) -> bool {
 /// A url as the caller wrote it — the raw string, before [`parse_url`], so it may not
 /// even be a url. `Debug` prints it cut at the first `?`, which is the most that can be
 /// said about a string nothing has parsed.
+// No `ToSchema`: on the wire this is a string, and a named `SourceUrl` component would put a
+// Rust newtype into the API description for a reader to wonder about. The field that holds one
+// declares `value_type = String` instead.
 #[derive(Clone, serde::Deserialize)]
 #[serde(transparent)]
 pub struct SourceUrl(String);
@@ -1905,15 +2160,26 @@ mod tests {
         }
     }
 
-    /// A misspelled option is a 400 rather than a silently anonymous request. Held by
-    /// `deny_unknown_fields`, and the point is that it holds at all.
+    /// A misspelled option is a 400 rather than a silently anonymous request.
+    ///
+    /// Asserted against opening rather than against deserializing: the groups are flattened
+    /// into [`StorageOptions`], and serde ignores `deny_unknown_fields` on a struct with a
+    /// flattened field, so the leftovers are collected and refused by `for_scheme` instead.
+    /// What must hold is the refusal, not which layer produces it — `secret_acces_key` quietly
+    /// dropped would be an anonymous request the caller reads as an authenticated one.
     #[test]
     fn rejects_unknown_storage_options_instead_of_ignoring_them() {
-        let error =
-            serde_json::from_value::<StorageOptions>(serde_json::json!({"regoin": "us-west-2"}))
-                .unwrap_err();
-        assert!(error.to_string().contains("unknown field"), "{error}");
-        assert!(error.to_string().contains("regoin"), "{error}");
+        let url = parse_url("s3://bucket/key.parquet").unwrap();
+        for (misspelled, value) in [
+            ("regoin", serde_json::json!("us-west-2")),
+            ("secret_acces_key", serde_json::json!(SECRET)),
+        ] {
+            let options = options(serde_json::json!({ misspelled: value }));
+            let error = open(&url, &options).unwrap_err().to_string();
+            assert!(error.contains(misspelled), "{error}");
+            assert!(error.contains("not a storage option"), "{error}");
+            assert!(!error.contains(SECRET), "leaked: {error}");
+        }
     }
 
     /// A local file has no store to reach, so options with it mean the caller has the
@@ -2268,7 +2534,9 @@ mod tests {
         let file = open(&url, &no_options()).unwrap();
         assert_eq!(store_key(&file), "webdav://data.example.com");
         assert_eq!(
-            webdav_endpoint(&url, &no_options()).unwrap().as_str(),
+            webdav_endpoint(&url, &no_options().webdav)
+                .unwrap()
+                .as_str(),
             "https://data.example.com/"
         );
     }
@@ -2296,7 +2564,7 @@ mod tests {
         .unwrap();
         assert!(super::open(&url, &cleartext, &policy, &transfers()).is_ok());
         assert_eq!(
-            webdav_endpoint(&url, &cleartext).unwrap().as_str(),
+            webdav_endpoint(&url, &cleartext.webdav).unwrap().as_str(),
             "http://data.example.com/"
         );
     }
@@ -2319,7 +2587,7 @@ mod tests {
             "username": "reader",
             "password": SECRET,
         }));
-        let headers = webdav_headers(&basic).unwrap();
+        let headers = webdav_headers(&basic.webdav).unwrap();
         assert!(headers.contains_key(http::header::AUTHORIZATION));
         assert!(!format!("{headers:?}").contains(SECRET));
     }

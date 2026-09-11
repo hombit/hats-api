@@ -127,7 +127,7 @@ fn assert_no_other_secret(logs: &str, context: &str) {
 /// runs before anything reaches the wire, and it is the signer that logs.
 #[tokio::test]
 async fn the_other_backends_credentials_never_reach_the_logs() {
-    use hats_api::storage::{self, StorageOptions};
+    use hats_api::storage::{self, AzureOptions, GcsOptions, HttpOptions, StorageOptions};
 
     let captured = logs();
     // One case per signer, since each takes its own path to the wire.
@@ -139,10 +139,13 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
     ] {
         let (port, _receiver) = capture_one_request();
         let endpoint = Some(format!("http://127.0.0.1:{port}"));
-        let azure = || StorageOptions {
+        let azure = |extra: AzureOptions| StorageOptions {
             endpoint: endpoint.clone(),
-            account: Some("hatsdata".to_owned()),
             allow_http: true,
+            azure: AzureOptions {
+                account: Some("hatsdata".to_owned()),
+                ..extra
+            },
             ..Default::default()
         };
         let (raw, options) = match credential {
@@ -150,24 +153,27 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
                 "gs://bucket/key.parquet",
                 StorageOptions {
                     endpoint: endpoint.clone(),
-                    access_token: Some(GCS_TOKEN.to_owned().into()),
                     allow_http: true,
+                    gcs: GcsOptions {
+                        access_token: Some(GCS_TOKEN.to_owned().into()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
             ),
             "azure shared key" => (
                 "az://container/key.parquet",
-                StorageOptions {
+                azure(AzureOptions {
                     access_key: Some(AZURE_KEY.to_owned().into()),
-                    ..azure()
-                },
+                    ..Default::default()
+                }),
             ),
             "azure sas token" => (
                 "az://container/key.parquet",
-                StorageOptions {
+                azure(AzureOptions {
                     sas_token: Some(SAS_TOKEN.to_owned().into()),
-                    ..azure()
-                },
+                    ..Default::default()
+                }),
             ),
             // The http backend, whose credential goes out as a header rather than
             // through a signer. Its url carries the server, so the endpoint the others
@@ -177,11 +183,13 @@ async fn the_other_backends_credentials_never_reach_the_logs() {
                 // is the url, and the port is the capturing server's.
                 Box::leak(format!("http://127.0.0.1:{port}/key.parquet").into_boxed_str()) as &str,
                 StorageOptions {
-                    headers: serde_json::from_value(serde_json::json!({
-                        "Authorization": format!("Bearer {HEADER_TOKEN}"),
-                        HEADER_NAME: "value",
-                    }))
-                    .expect("the headers should deserialize"),
+                    http: HttpOptions {
+                        headers: serde_json::from_value(serde_json::json!({
+                            "Authorization": format!("Bearer {HEADER_TOKEN}"),
+                            HEADER_NAME: "value",
+                        }))
+                        .expect("the headers should deserialize"),
+                    },
                     allow_http: true,
                     ..Default::default()
                 },
@@ -274,9 +282,13 @@ async fn a_session_token_never_reaches_the_logs() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
+    let given = server.credentialed_options();
     let options = StorageOptions {
-        session_token: Some("session-token-value".to_owned().into()),
-        ..server.credentialed_options()
+        s3: hats_api::storage::S3Options {
+            session_token: Some("session-token-value".to_owned().into()),
+            ..given.s3
+        },
+        ..given
     };
     // It will not authenticate — the server knows no such token — which is fine: the
     // question is what got logged on the way.

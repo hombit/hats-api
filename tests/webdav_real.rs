@@ -22,7 +22,7 @@ mod common;
 use common::{expect_error, lookup, parquet_fixture, row_count, skip_or_fail};
 use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, NetworkConfig};
-use hats_api::storage::StorageOptions;
+use hats_api::storage::{StorageOptions, WebdavOptions};
 use opendal::{HttpTransporter, OperationContext, Operator, services};
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
@@ -138,18 +138,24 @@ impl Webdav {
     /// Enough to find this server, and nothing that would authenticate a request.
     fn options(&self) -> StorageOptions {
         StorageOptions {
-            transport: Some(hats_api::storage::WebdavTransport::Http),
+            webdav: WebdavOptions {
+                transport: Some(hats_api::storage::WebdavTransport::Http),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
 
     fn credentialed_options(&self) -> StorageOptions {
         StorageOptions {
-            username: Some(self.username.clone().into()),
-            password: Some(self.password.clone().into()),
+            webdav: WebdavOptions {
+                transport: Some(hats_api::storage::WebdavTransport::Http),
+                username: Some(self.username.clone().into()),
+                password: Some(self.password.clone().into()),
+            },
             // The caller's half of the cleartext decision, which Basic over http needs.
             allow_http: true,
-            ..self.options()
+            ..Default::default()
         }
     }
 }

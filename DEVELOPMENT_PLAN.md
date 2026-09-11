@@ -33,7 +33,8 @@ which.
 | 5.2 | spatial predicate | done | `polygon` is §9; `moc` takes no `url` yet, which §3.3 says why |
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
 | 5.4 | a catalog under a mount | done | a limit or a circle; a plan there is still §5.3's open question |
-| 7.3 | serve the API description | todo | after §5: it describes the API, and §5 is still adding to it |
+| 7.3 | serve the API description | done | `/openapi.json` and a page of this crate's own at `/docs`. The examples in it are placeholders and want revisiting |
+| 7.4 | compress JSON responses, never parquet | todo | independent of the rest of §7 |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
 | 7 | operational surface | todo | |
@@ -777,39 +778,56 @@ request after a cold start times out, and prefetch is the way around it.
 
 ### 7.3 Serve the API description
 
-The service describes itself: `GET {api.prefix}/openapi.json` for the document, and a
-browsable rendering of it at `{api.prefix}/docs`. A deployment is then self-documenting
-for whoever finds it, and a client generator has something to read.
+What is left of this step is the examples. Each route's runner starts from a body that is
+sent as-is, and they currently name one real catalog — ZTF DR24 over `s3://` — which makes
+the page's first impression depend on a bucket, a network and a few seconds of scanning.
+Worth deciding: a fixture the deployment itself serves, or examples that are illustrative
+and not runnable, or keeping the real ones and saying they cost a round trip.
 
-**Generated from the types, never written beside them.** `QueryRequest` already is the
-schema — its fields, its `deny_unknown_fields`, the storage options, the region shapes.
-A description maintained separately is one that disagrees with the service the first
-time a field is added, and a confidently wrong API document is worse than none. This is
-the same reason the endpoint rules are derived from `Backend` rather than listed next
-to it.
+`region` may still gain `moc: {url}` (§3.3) and the combinators beside it, and §7.2's
+streaming would change how a large answer arrives. Both change the document, and clients
+will have generated code from it by then, so each needs the shape decided before it lands.
 
-`utoipa` (5, MIT/Apache-2.0, ~14M recent downloads) is the one to use: derive macros
-over the same `serde` types, with `utoipa-axum` binding the routes so a route added
-without a description is visible rather than quietly absent. `aide` does the same job
-from the router side but is an order of magnitude less used and still pre-1.0.
+IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
+`/availability`, arriving with TAP in §9.6. They are two renderings of one description, not
+two descriptions, and nothing here should make serving both awkward.
 
-- **Bundle the renderer; do not fetch it from a CDN.** `utoipa-swagger-ui` embeds its
-  assets, while the `scalar` and `redoc` variants pull a script from the internet at page
-  load. This service is built for networks where the browser cannot do that, and a
-  documentation page that is blank in exactly the deployment it was written for is not
-  documentation. It costs binary size, which is the trade being made.
-- **It describes API mode only, and must say so.** The file-server mode has no route set
-  to enumerate: every url under a mount is a data path. The listing response and the
-  query parameters are describable, "any path below this prefix" is not, so the README
-  stays the document for that half rather than OpenAPI pretending to cover it.
-- **§5's routes are settled, so what remains is smaller than it was.** `region` may still
-  gain `moc: {url}` (§3.3) and the combinators beside it, and §7.2's streaming would change
-  how a large answer arrives. Describing the API before those land describes a shape that
-  then changes — the reason §4.1 waited, applied to the document that is harder to correct,
-  because clients will have generated code from it.
-- IVOA's VOSI asks the same question in the astronomy vocabulary — `/capabilities` and
-  `/availability`, arriving with TAP in §9.6. Nothing here should make serving both
-  awkward: they are two renderings of one description, not two descriptions.
+### 7.4 Compress the JSON, and nothing else
+
+`tower_http::compression::CompressionLayer` over the router. `tower-http` is already a
+dependency and this is a feature of it — `compression-gzip` at least; `-br` and `-zstd`
+only if measured to earn their code size, since gzip is what every client already sends
+`Accept-Encoding` for.
+
+- **Parquet is excluded, by content type.** A parquet body carries per-column compression
+  of its own, so a second pass over it spends CPU at both ends to save a percent or two —
+  and on the largest answers this service produces. `DefaultPredicate` does not know that:
+  it excludes gRPC, images and `text/event-stream`, and nothing else, so
+  `PARQUET_CONTENT_TYPE` has to be named — `DefaultPredicate::new().and(
+  NotForContentType::const_new(…))`. The predicate reads the response's own content type,
+  which is what makes one rule cover both a parquet file served off a mount and one
+  encoded from a query.
+- **What it is worth is largest where nobody is looking.** A row-heavy JSON answer is
+  repetitive by construction — the same keys on every row — and every directory page
+  inlines `page.css` and `page.js`, 65 KB before a single entry is listed. Measure both
+  before choosing encodings; a JSON answer is the case that decides it, the pages being
+  small in absolute terms however well they compress.
+- **It belongs in the service, not the proxy.** §6.5 puts an nginx cache in front for the
+  deployment that wants one, and a deployment without one is still ordinary. A response
+  compressed here passes through either way.
+- **The `x-hats-*` headers are unaffected**, so `num_rows` and `data_bytes_read` still say
+  what they said. `Content-Length` does go, the body becoming chunked — a client that
+  sized its buffer from the header now cannot.
+- **One JSON response can carry a credential**, and it is the one to think about before
+  turning this on: a plan answered with `return_storage`, which echoes the caller's own
+  storage options. Compressing a body that mixes a secret with attacker-chosen text is
+  the shape BREACH exploits. What makes it not that here is that the secret is the
+  caller's own, in a response to their own `POST`, on a route no third-party page can
+  make the browser send with those options attached — say that, rather than leaving the
+  question to be noticed later.
+- §7.2's streaming and this compose, but the trade moves: a compressor buffers before it
+  emits, so time-to-first-byte gets worse in exchange for fewer bytes. Whichever lands
+  second is where that gets measured.
 
 ## 8. Security requirements
 

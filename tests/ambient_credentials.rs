@@ -23,7 +23,7 @@
 mod common;
 
 use common::{capture_one_request, permissive_policy, transfers};
-use hats_api::storage::{self, StorageOptions};
+use hats_api::storage::{self, AzureOptions, StorageOptions};
 
 /// Values that are syntactically valid, so that anything picking them up would sign
 /// successfully rather than erroring for an unrelated reason.
@@ -143,7 +143,10 @@ async fn a_request_with_no_credentials_ignores_the_environment() {
 
     let head = request_head("az://container/key.parquet", |endpoint| StorageOptions {
         endpoint: Some(endpoint),
-        account: Some("hatsdata".to_owned()),
+        azure: AzureOptions {
+            account: Some("hatsdata".to_owned()),
+            ..Default::default()
+        },
         ..Default::default()
     })
     .await;

@@ -22,7 +22,7 @@ use hats_api::config::{AccessConfig, HttpConfig, LimitsConfig, NetworkConfig};
 use hats_api::error::ApiError;
 use hats_api::materialize::Transfers;
 use hats_api::query::QueryResult;
-use hats_api::storage::{self, StorageOptions};
+use hats_api::storage::{self, HttpOptions, StorageOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -426,10 +426,12 @@ async fn a_caller_header_authenticates_every_request_of_a_read() {
     const TOKEN: &str = "the-caller-s-own-token";
     let server = Server::start_requiring_auth(parquet_fixture().to_vec(), Ranges::Honour, TOKEN);
     let authenticated = |token: &str| StorageOptions {
-        headers: serde_json::from_value(serde_json::json!({
-            "Authorization": format!("Bearer {token}"),
-        }))
-        .expect("the headers should deserialize"),
+        http: HttpOptions {
+            headers: serde_json::from_value(serde_json::json!({
+                "Authorization": format!("Bearer {token}"),
+            }))
+            .expect("the headers should deserialize"),
+        },
         allow_http: true,
         ..Default::default()
     };
@@ -471,10 +473,12 @@ async fn a_caller_header_authenticates_a_materialized_read() {
         &server.url("part0.parquet"),
         &LimitsConfig::default(),
         StorageOptions {
-            headers: serde_json::from_value(serde_json::json!({
-                "Authorization": format!("Bearer {TOKEN}"),
-            }))
-            .expect("the headers should deserialize"),
+            http: HttpOptions {
+                headers: serde_json::from_value(serde_json::json!({
+                    "Authorization": format!("Bearer {TOKEN}"),
+                }))
+                .expect("the headers should deserialize"),
+            },
             allow_http: true,
             ..Default::default()
         },

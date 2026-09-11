@@ -10,7 +10,7 @@ mod common;
 use common::{FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
 use hats_api::error::ApiError;
 use hats_api::query::{Predicate, Projection, Selection};
-use hats_api::storage::StorageOptions;
+use hats_api::storage::{S3Options, StorageOptions};
 
 /// The baseline: a file put in a bucket comes back through the whole path, and the
 /// lookup finds the one row it should.
@@ -230,9 +230,13 @@ async fn the_wrong_credentials_are_refused() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
+    let given = server.credentialed_options();
     let options = StorageOptions {
-        secret_access_key: Some("not-the-right-secret".to_owned().into()),
-        ..server.credentialed_options()
+        s3: S3Options {
+            secret_access_key: Some("not-the-right-secret".to_owned().into()),
+            ..given.s3
+        },
+        ..given
     };
     let error = common::expect_error(
         lookup(
@@ -364,9 +368,10 @@ async fn credentials_over_cleartext_need_allow_http() {
     let server = TestS3::authenticated().await;
     server.put_parquet("private/part0.parquet");
 
+    let given = server.credentialed_options();
     let without_flag = StorageOptions {
         allow_http: false,
-        ..server.credentialed_options()
+        ..given
     };
     let error = common::expect_error(
         lookup(

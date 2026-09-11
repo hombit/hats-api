@@ -68,67 +68,66 @@ const NEAR_ONE: f64 = 1e-6;
 
 /// One shape on the sky.
 ///
-/// It serializes as well as deserializes so that a shape can be written back out in the
-/// spelling the caller used — the radius in the unit they gave it in, rather than one
-/// converted on their behalf.
-///
-/// Not `Copy`: a `moc` carries the caller's serialization.
-#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+/// Which shape it is comes from `type`. Positions are always degrees, and an extent names its
+/// unit in the field itself — `radius_deg`, `radius_arcsec`.
+// Serializes as well as deserializes, so a shape is written back out in the spelling the
+// caller used rather than one converted on their behalf. Not `Copy`: a `moc` carries the
+// caller's serialization.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Region {
-    /// The cone search, under ADQL's name for it: everything within the radius of a point.
+    /// A cone search: everything within a radius of a point. ADQL's name for it.
     ///
-    /// Exactly one of the two radii, which is what keeps the unit unmistakable.
+    /// Give exactly one of `radius_deg` and `radius_arcsec` — naming the unit in the field is
+    /// what stops a bare `radius` being read as the wrong one of the two.
     Circle {
+        /// Right ascension of the centre, in degrees.
         ra: f64,
+        /// Declination of the centre, in degrees.
         dec: f64,
-        /// The radius the caller did not give is left out rather than written as `null`, so
-        /// that what goes out is a body that could have come in.
+        /// The radius in degrees. Give this or `radius_arcsec`, not both.
+        // The one not given is left out rather than written as `null`, so what goes out is a
+        // body that could have come in.
         #[serde(skip_serializing_if = "Option::is_none")]
         radius_deg: Option<f64>,
+        /// The radius in arcseconds. Give this or `radius_deg`, not both.
         #[serde(skip_serializing_if = "Option::is_none")]
         radius_arcsec: Option<f64>,
     },
-    /// A range in each coordinate — `ra: [349.5, 10.5], dec: [-20, -10]` — inclusive at
-    /// both ends.
+    /// A range in each coordinate — `{"ra": [349.5, 10.5], "dec": [-20, -10]}` — in degrees and
+    /// inclusive at both ends.
     ///
-    /// Not a shape bounded by great circles, and not ADQL's `BOX`, which takes a centre
-    /// with a width and a height and is deprecated in ADQL 2.1 besides. This is the
-    /// product of two scalar ranges, which is why it is the cheap shape: it is what
-    /// `ra BETWEEN … AND dec BETWEEN …` already says. `hats` and `lsdb` call it a box and
-    /// take it this way, so the numbers carry across from `box_search` unchanged.
+    /// The same box `hats` and `lsdb` mean by `box_search`, so the numbers carry across
+    /// unchanged. ADQL's `BOX` is a different shape — a centre with a width and a height.
     ///
-    /// **`ra` is directed, not least-to-greatest.** It runs eastward from the first value
-    /// to the second, so `[350, 10]` is twenty degrees across the origin and `[10, 350]`
-    /// is the three hundred and forty the other way. There is no ordering on a circle for
-    /// a `min`/`max` pair to have meant.
+    /// **`ra` is a direction**: it runs eastward from the first value to the second, so
+    /// `[350, 10]` is the twenty degrees across the origin and `[10, 350]` is the three hundred
+    /// and forty the other way round.
     ///
-    /// **`dec` is ordered**, first no greater than second. A reversed one is refused: it
-    /// has no second reading to be confused with, so it is a mistake rather than a shape,
-    /// and answering it with no rows would be indistinguishable from a range that held
-    /// none.
-    Box { ra: [f64; 2], dec: [f64; 2] },
-    /// A Multi-Order Coverage map, in either of IVOA's two text serializations.
+    /// **`dec` is ordered**, first no greater than second. A reversed pair is refused.
+    Box {
+        /// `[from, to]` in degrees, eastward from the first to the second.
+        ra: [f64; 2],
+        /// `[low, high]` in degrees, low first.
+        dec: [f64; 2],
+    },
+    /// A Multi-Order Coverage map, in either of IVOA's two text serializations — whichever
+    /// `mocpy`'s `serialize` gave you. Give exactly one of `ascii` and `json`. FITS is binary,
+    /// and this takes text.
     ///
-    /// Exactly one of `ascii` — `"3/3 10 4/16-18 5/19-20"` — and `json` —
-    /// `{"3": [3, 10], "4": [16, 17, 18]}`. Both are what `mocpy`'s `serialize` writes, under
-    /// `format="str"` and `format="json"`; the JSON one needs no escaping inside a JSON body
-    /// and the ASCII one is shorter. FITS is not accepted: it is binary, so it would arrive
-    /// base64-encoded, which is neither of the two things a caller already has.
+    /// Used at the depth you wrote it at. A MOC already is a set of cells, which makes it the
+    /// one region here matched exactly: every other shape is covered by cells first.
     ///
-    /// **The only shape that is already cells**, so it is the only one whose covering is
-    /// exact: the inner and outer sets are the same set, and no row reaches any geometry. It
-    /// is also the only one with no test on the coordinates at all, which is why it needs a
-    /// HEALPix column and is refused without one — a covering that could be dropped would
-    /// leave the region nothing to say.
-    ///
-    /// Taken at whatever depth the caller wrote it at. Nothing here re-covers it: it is not
-    /// an approximation of a shape, it *is* the shape, so a depth of ours could only move
-    /// the answer.
+    /// It matches on cells alone, so it needs a HEALPix index column. Against a catalog that is
+    /// automatic; against a single file, give `healpix_column` and `healpix_order`.
     Moc {
+        /// The ASCII serialization — `"3/3 10 4/16-18 5/19-20"`. Shorter than the JSON one.
         #[serde(skip_serializing_if = "Option::is_none")]
         ascii: Option<String>,
+        /// The JSON serialization — `{"3": [3, 10], "4": [16, 17, 18]}`. Needs no escaping
+        /// inside a JSON body.
         #[serde(skip_serializing_if = "Option::is_none")]
+        #[schema(value_type = Object)]
         json: Option<serde_json::Value>,
     },
 }

@@ -21,7 +21,7 @@ use common::{
     SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy, transfers,
 };
 use hats_api::logging::CREDENTIAL_UNSAFE_TARGETS;
-use hats_api::storage::{self, StorageOptions};
+use hats_api::storage::{self, AzureOptions, GcsOptions, HttpOptions, StorageOptions};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -84,10 +84,12 @@ async fn http_request_with_headers(token: &str) {
     let raw = format!("http://127.0.0.1:{port}/key.parquet");
     let url = storage::parse_url(&raw).expect("a valid url");
     let options = StorageOptions {
-        headers: serde_json::from_value(serde_json::json!({
-            "Authorization": format!("Bearer {token}"),
-        }))
-        .expect("the headers should deserialize"),
+        http: HttpOptions {
+            headers: serde_json::from_value(serde_json::json!({
+                "Authorization": format!("Bearer {token}"),
+            }))
+            .expect("the headers should deserialize"),
+        },
         allow_http: true,
         ..Default::default()
     };
@@ -130,16 +132,22 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     // server on loopback is enough to make the store actually sign and send.
     signing_request("gs://bucket/key.parquet", |endpoint| StorageOptions {
         endpoint: Some(endpoint),
-        access_token: Some(GCS_TOKEN.to_owned().into()),
         allow_http: true,
+        gcs: GcsOptions {
+            access_token: Some(GCS_TOKEN.to_owned().into()),
+            ..Default::default()
+        },
         ..Default::default()
     })
     .await;
     signing_request("az://container/key.parquet", |endpoint| StorageOptions {
         endpoint: Some(endpoint),
-        account: Some("hatsdata".to_owned()),
-        access_key: Some(AZURE_KEY.to_owned().into()),
         allow_http: true,
+        azure: AzureOptions {
+            account: Some("hatsdata".to_owned()),
+            access_key: Some(AZURE_KEY.to_owned().into()),
+            ..Default::default()
+        },
         ..Default::default()
     })
     .await;

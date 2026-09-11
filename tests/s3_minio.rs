@@ -18,7 +18,7 @@ mod common;
 
 use common::{expect_error, lookup, parquet_fixture, permissive_policy, row_count, skip_or_fail};
 use hats_api::error::ApiError;
-use hats_api::storage::StorageOptions;
+use hats_api::storage::{S3Options, StorageOptions};
 use opendal::{HttpTransporter, OperationContext, Operator, services};
 use std::sync::LazyLock;
 use tokio::sync::Mutex;
@@ -121,10 +121,14 @@ impl Minio {
 
     fn credentialed_options(&self) -> StorageOptions {
         StorageOptions {
-            access_key_id: Some(self.access_key.clone().into()),
-            secret_access_key: Some(self.secret_key.clone().into()),
+            endpoint: Some(self.endpoint.clone()),
             allow_http: true,
-            ..self.options()
+            s3: S3Options {
+                access_key_id: Some(self.access_key.clone().into()),
+                secret_access_key: Some(self.secret_key.clone().into()),
+                ..Default::default()
+            },
+            ..Default::default()
         }
     }
 }
