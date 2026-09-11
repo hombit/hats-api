@@ -597,6 +597,22 @@ Everything below is about reading a catalog, not about judging one.
   one file or a directory, and reading the directory needs a listing. A catalog written
   this way and served over `http(s)://` cannot be read at all, because the names inside a
   partition appear nowhere in the catalog's own metadata.
+- **Listing a directory-partitioned catalog scales with the catalog, so it is done in one of
+  two ways and the cheaper is counted, not guessed.** `hats_npix_suffix=/` is the only shape
+  that needs a listing at all — every other catalog derives a partition's path from the cell
+  and the suffix and asks the store nothing. For one that does, the names inside a partition
+  are what an entry is built from and appear in none of the catalog's metadata. Asking each
+  chosen partition is one request apiece; walking the dataset once is one request per thousand
+  files, a listing being paginated at about that. So `Search::partition_files` compares the two
+  and a plan over a whole catalog walks: for ZTF DR24 that is thirteen requests against 12,485,
+  which was six minutes. Neither walk is more correct than the other and a test holds them to
+  the same answer; what the comparison decides is only the cost.
+
+  **None of this is about sizes.** A directory's bytes are not one file's, so these partitions
+  carry no `estimated_bytes` either way, and `_metadata` — which is where a size comes from
+  when there is one — is not consulted for a catalog whose partition list came from
+  `partition_info.csv`. A listing that looks like it is costing a size check is costing a name.
+
 - **The properties file is Java properties, read by `java-properties` — but as UTF-8.**
   The format specifies ISO-8859-1 and the crate defaults to it; a HATS file is written by
   Python and is UTF-8. The two agree on ASCII and part company after it, so the default

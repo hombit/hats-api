@@ -13,23 +13,48 @@
 //! about order than a request naming one url does. What it does not promise is the order
 //! *within* a partition, which is [`Order`]'s business and unchanged.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
-use futures::StreamExt;
 use futures::stream;
+use futures::{StreamExt, TryStreamExt};
 
 use crate::config::LimitsConfig;
 use crate::data::DataFiles;
 use crate::error::ApiError;
-use crate::hats::{Catalog, HatsPartition, Partitioned};
+use crate::hats::partitions::DATASET_DIR;
+use crate::hats::{Catalog, HatsPartition};
 use crate::healpix::{Cover, Coverage, Detail};
 use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::region::{self, Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{RemoteDir, RemoteFile};
+
+/// How many names one listing request brings back. S3 caps a page of `ListObjectsV2` at a
+/// thousand keys and the other stores are the same order, so this is what a walk of a whole
+/// dataset costs per thousand files — the number [`Search::partition_files`] weighs one
+/// request per chosen partition against.
+const LISTING_PAGE: usize = 1_000;
+
+/// How many partition listings are in flight at once.
+///
+/// Deliberately not [`CatalogLimits::max_concurrent_partitions`], which bounds *reads*: a read
+/// pulls row groups into memory, so a handful at a time is the point of it. A listing is a few
+/// kilobytes of names and costs a round trip, so the two want opposite numbers. The count is
+/// small either way — [`Search::partition_files`] only lists partition by partition when there
+/// are fewer of them than a walk of the whole dataset would cost in pages.
+const LISTING_CONCURRENCY: usize = 16;
+
+/// The last segment of a file's url, which for a partition's listing is the name inside it.
+fn basename(file: &RemoteFile) -> Option<String> {
+    file.url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .map(str::to_owned)
+}
 
 /// What one request against a catalog may spend before it is refused.
 #[derive(Debug, Clone, Copy)]
@@ -388,19 +413,32 @@ impl Search {
     /// that is the catalog's own.
     ///
     /// A partition written as a directory needs a listing to enumerate. That is metadata
-    /// rather than rows, so it is within what this route promises, but it is one request per
-    /// such partition and the ordinary catalog pays none.
+    /// rather than rows, so it is within what this route promises, and
+    /// `partition_files` gathers every one of them before the loop — so what a plan
+    /// costs in requests does not follow the number of partitions it names. The ordinary
+    /// catalog pays nothing at all: its paths come from the cell and the suffix.
     pub async fn entries(&self, data: &DataFiles) -> Result<Vec<Entry>, ApiError> {
         let suffix = self.catalog.properties().npix_suffix();
         // The hop a collection made, which is empty for a catalog named directly. Every path
         // here is joined onto the url the caller wrote, and that url is the collection's.
         let within = self.catalog.within();
+        let listed = match self.catalog.properties().partition_is_a_directory() {
+            true => Some(self.partition_files(data).await?),
+            false => None,
+        };
+        // One list of names per chosen partition and in the same order, so the two walk
+        // together rather than one indexing the other — a catalog that listed short would
+        // otherwise silently take the branch meant for a single-file partition.
+        let per_partition: Box<dyn Iterator<Item = Option<&Vec<String>>>> = match &listed {
+            Some(listed) => Box::new(listed.iter().map(Some)),
+            None => Box::new(std::iter::repeat(None)),
+        };
         let mut entries = Vec::new();
-        for chosen in &self.chosen {
+        for (chosen, names) in self.chosen.iter().zip(per_partition) {
             let partition = &chosen.partition;
             let path = format!("{within}{}", partition.path(suffix));
-            match self.catalog.partition(partition)? {
-                Partitioned::One(_) => entries.push(Entry {
+            let Some(names) = names else {
+                entries.push(Entry {
                     order: partition.order,
                     pixel: partition.pixel,
                     path,
@@ -408,29 +446,115 @@ impl Search {
                     // Only `_metadata` knows it, so only a catalog whose partition list came
                     // from there has an estimate to give.
                     estimated_bytes: partition.bytes,
-                }),
-                Partitioned::Many(_) => {
-                    for file in self.catalog.partition(partition)?.files(data).await? {
-                        let Some(name) = file.url.path_segments().and_then(|mut s| s.next_back())
-                        else {
-                            continue;
-                        };
-                        entries.push(Entry {
-                            order: partition.order,
-                            pixel: partition.pixel,
-                            // The name inside the partition, which is the catalog's own and
-                            // says nothing about where the catalog is.
-                            path: format!("{path}{name}"),
-                            cover: chosen.cover,
-                            // The partition's bytes are the whole directory's, so they are
-                            // not this file's and are not divisible into one.
-                            estimated_bytes: None,
-                        });
-                    }
-                }
+                });
+                continue;
+            };
+            for name in names {
+                entries.push(Entry {
+                    order: partition.order,
+                    pixel: partition.pixel,
+                    // The name inside the partition, which is the catalog's own and says
+                    // nothing about where the catalog is.
+                    path: format!("{path}{name}"),
+                    cover: chosen.cover,
+                    // The partition's bytes are the whole directory's, so they are not this
+                    // file's and are not divisible into one.
+                    estimated_bytes: None,
+                });
             }
         }
         Ok(entries)
+    }
+
+    /// The file names inside each chosen partition, in `self.chosen`'s own order.
+    ///
+    /// Only a directory-partitioned catalog reaches this, and for one it is unavoidable: the
+    /// names inside a partition appear in none of the catalog's metadata, so an entry naming a
+    /// file has to be told them by a listing. Nothing here is about sizes — a directory's
+    /// bytes are not one file's, and the plan carries no estimate for these partitions.
+    ///
+    /// **Two walks, and the cheaper is chosen by counting requests.** Listing each chosen
+    /// partition is one request apiece; listing the whole dataset is one per
+    /// [`LISTING_PAGE`] files however many partitions that spans. So a region that reached a
+    /// handful asks for exactly those, and a plan over a whole catalog reads the lot —
+    /// thirteen requests against 12,485 for ZTF DR24, which is the difference between a plan
+    /// that answers and one nobody waits for. Both produce the same names; this decides only
+    /// what they cost.
+    async fn partition_files(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
+        // One file per partition is the least a dataset can hold, so this is a floor on the
+        // pages a walk would cost. Erring low errs towards asking partition by partition,
+        // which is the walk that reads nothing it was not asked for.
+        let pages = self.catalog.partitions().len().div_ceil(LISTING_PAGE);
+        match self.chosen.len() > pages {
+            true => self.walk_dataset(data).await,
+            false => self.list_each(data).await,
+        }
+    }
+
+    /// Each chosen partition listed on its own, several at a time.
+    ///
+    /// `buffered` yields by position, so the names stay in `self.chosen`'s order whatever
+    /// order the listings land in — the same reason the read path uses it.
+    async fn list_each(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
+        // Materialized before the stream for the same reason [`Search::run`]'s reads are: a
+        // closure handing back a future that borrows its argument owes a higher-ranked bound
+        // the compiler will not infer here. Nothing is listed until the stream is polled.
+        let listings = self
+            .chosen
+            .iter()
+            .map(|chosen| async move {
+                let files = self
+                    .catalog
+                    .partition(&chosen.partition)?
+                    .files(data)
+                    .await?;
+                Ok::<_, ApiError>(files.iter().filter_map(basename).collect())
+            })
+            .collect::<Vec<_>>();
+        stream::iter(listings)
+            .buffered(LISTING_CONCURRENCY)
+            .try_collect()
+            .await
+    }
+
+    /// One recursive listing of the whole dataset, bucketed back onto the chosen partitions.
+    ///
+    /// A listing is recursive and paginated by the store, so this is one walk rather than one
+    /// request: every partition's files arrive in it, and the ones belonging to partitions the
+    /// region did not reach are dropped. That is the trade — it reads names nobody asked for,
+    /// and stops paying a round trip for each partition that was.
+    ///
+    /// Names come back relative to the dataset directory, which is also what a partition's own
+    /// path is once that prefix is off, so the two meet as strings and neither becomes a url.
+    async fn walk_dataset(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
+        let prefix = format!("{DATASET_DIR}/");
+        let mut found: HashMap<&str, Vec<String>> = HashMap::new();
+        let listing = self.catalog.dir().list(DATASET_DIR).await?;
+        for entry in &listing {
+            // The partition is everything above the name, and the name is what `data` judges
+            // — the same split `Partitioned::files` makes, on the same two halves.
+            let Some((directory, name)) = entry.name.rsplit_once('/') else {
+                continue;
+            };
+            if data.matches(name) {
+                found.entry(directory).or_default().push(name.to_owned());
+            }
+        }
+        let suffix = self.catalog.properties().npix_suffix();
+        Ok(self
+            .chosen
+            .iter()
+            .map(|chosen| {
+                let path = chosen.partition.path(suffix);
+                // `path` ends in the suffix, which for these catalogs is the `/` that the
+                // listing's own split took off.
+                let key = path
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&path)
+                    .trim_end_matches('/');
+                found.get(key).cloned().unwrap_or_default()
+            })
+            .collect())
     }
 
     /// The spatial constraint one partition's rows still have to meet.
@@ -680,6 +804,78 @@ pub(crate) mod tests {
             ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    /// A catalog whose partitions are directories rather than files — `hats_npix_suffix=/`,
+    /// which is how ZTF DR24's object catalog is written. Each holds two parquet files and a
+    /// marker that is not one, so a listing has something to pass over.
+    fn directory_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("hats.properties"),
+            format!(
+                "obs_collection=fixture\nhats_col_ra=ra\nhats_col_dec=dec\n\
+                 hats_order={ORDER}\nhats_npix_suffix=/\n"
+            ),
+        )
+        .unwrap();
+        let mut csv = String::from("Norder,Npix\n");
+        for cell in CELLS {
+            csv.push_str(&format!("{ORDER},{cell}\n"));
+        }
+        fs::write(root.join("partition_info.csv"), csv).unwrap();
+        for (cell, rows) in points() {
+            let path = root.join(HatsPartition::new(ORDER, cell).path("/"));
+            fs::create_dir_all(&path).unwrap();
+            let (first, second) = rows.split_at(rows.len() / 2);
+            write_partition(&path.join("part0.parquet"), first, false);
+            write_partition(&path.join("part1.parquet"), second, false);
+            fs::write(path.join("_SUCCESS"), b"").unwrap();
+        }
+        dir
+    }
+
+    /// The two walks answer the same names, which is what lets the cheaper one be chosen by
+    /// counting requests. A difference here would be a plan that depends on how big the
+    /// catalog is — the one thing the choice between them may not change.
+    #[tokio::test]
+    async fn both_listings_find_the_same_files() {
+        let dir = directory_fixture();
+        let data = DataFiles::default();
+        let search = Search::resolve(opened(dir.path()), None, limits())
+            .await
+            .unwrap();
+        assert_eq!(search.chosen().len(), CELLS.len());
+
+        let walked = search.walk_dataset(&data).await.unwrap();
+        let each = search.list_each(&data).await.unwrap();
+        assert_eq!(walked, each);
+
+        // The parts, and not the marker beside them.
+        let parts = vec!["part0.parquet".to_owned(), "part1.parquet".to_owned()];
+        assert_eq!(walked, vec![parts; CELLS.len()]);
+    }
+
+    /// A directory partition becomes one entry per file, and each names a path below the
+    /// catalog rather than a url.
+    #[tokio::test]
+    async fn a_directory_partition_is_one_entry_per_file() {
+        let dir = directory_fixture();
+        let search = Search::resolve(opened(dir.path()), None, limits())
+            .await
+            .unwrap();
+        let entries = search.entries(&DataFiles::default()).await.unwrap();
+        assert_eq!(entries.len(), CELLS.len() * 2);
+        assert_eq!(
+            entries.first().unwrap().path,
+            format!(
+                "dataset/Norder={ORDER}/Dir=0/Npix={}/part0.parquet",
+                CELLS[0]
+            )
+        );
+        // A directory's bytes are not one file's, so no entry claims an estimate.
+        assert!(entries.iter().all(|entry| entry.estimated_bytes.is_none()));
     }
 
     /// The catalog directory, addressed the way a request addresses one: by a mount's path.
