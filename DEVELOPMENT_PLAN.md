@@ -34,7 +34,7 @@ which.
 | 5.3 | two endpoints, rows and plan | done | a `timeout` is §8.4's, and is what a slow origin hits before any of the three bounds |
 | 5.4 | a catalog under a mount | done | a limit or a circle; a plan there is still §5.3's open question |
 | 7.3 | serve the API description | done | `/openapi.json` and a page of this crate's own at `/docs`. The examples in it are placeholders and want revisiting |
-| 7.4 | compress JSON responses, never parquet | todo | independent of the rest of §7 |
+| 7.4 | compress JSON responses, never parquet | done | gzip, br and zstd, the client choosing; §7.2's streaming is where the time-to-first-byte trade gets measured |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
 | 7 | operational surface | todo | |
