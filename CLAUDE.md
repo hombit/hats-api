@@ -750,6 +750,18 @@ request in front of it.
   catalog and the route joins it onto the caller's url; keep that split.
 - **The plan route is not bounded by the limits.** Answering a request too large to run is
   what it is for.
+- **The clock is the one bound that hands back nothing.** `max_request_seconds` is a layer
+  over the whole router rather than a counter in this loop, so it is reached with the work
+  already done and no work list to answer with — a `504` and a sentence. It is also the
+  bound that acts first for anything slow, the byte ceiling being larger than a slow link
+  covers in the time. Do not give it a plan: building one at that point would run a second
+  round of catalog reads for a request that has already been given up on, and the caller
+  who wants a plan has a route that answers without doing any of the work.
+
+  It bounds the response future and not the body, which is what makes a large mounted file
+  stream freely: every query is collected before it answers, so the handler's own future is
+  the work. A bound over the body would cut a download this service is happy to serve and
+  bound nothing a query does.
 
 ## What a caller's file is like
 

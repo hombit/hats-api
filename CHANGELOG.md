@@ -8,7 +8,9 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[limits] max_request_seconds`, 90 by default, bounding how long one request may take to
+  produce an answer. Over it the request is dropped and answered with `504`. `0` is no
+  bound.
 
 ### Changed
 
