@@ -1017,3 +1017,39 @@ it.
 Also `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --document-private-items`, which
 pre-commit does not run. It is where a doc link to a private item turns up, and clippy
 does not see those.
+
+**Every change goes on a branch and through a pull request.** Nothing is committed to
+`main` directly. What that buys is a green run of the whole matrix — the live MinIO and
+WebDAV jobs among them, which nothing local can stand in for — before the branch anyone
+else builds from has the change on it.
+
+## Releasing
+
+Six steps, in this order. The first three are one commit, and the tag is what turns it
+into a release.
+
+1. **`version` in `Cargo.toml`.** This is the number the release is; everything below
+   reads it rather than restating it.
+2. **`cargo update`.** A release is the moment to take the dependency updates that need no
+   code change, so the version that gets a tag is the one built against current crates.
+   `Cargo.lock` is committed, so this is a real change and belongs in the release commit.
+   Anything that will not build is a pull request of its own, not a release problem.
+3. **`CHANGELOG.md`.** A new `## [x.y.z] - YYYY-MM-DD` section, dated in UTC, holding what
+   `[Unreleased]` had accumulated. **One line per entry**, naming the thing that changed —
+   a route, a body field, a config key, an environment variable, an image tag, a status —
+   and nothing about how it works or why. A reader scanning for what breaks their client
+   cannot scan a paragraph, and the whole of the reasoning is in the commit anyway. A
+   dependency bump that changes none of those is not an entry at all. Add the comparison
+   link at the foot beside the others.
+
+   `[Unreleased]` keeps all six headings with `--` under them, which is the menu whoever
+   adds an entry picks from. A release takes the headings that have entries, leaves the
+   placeholders where they are, and the new section carries only the headings it filled.
+4. **Commit it as `vx.y.z`**, the version alone as the subject. That is what makes the
+   release commit findable among the ones that describe changes.
+5. **Tag `vx.y.z`** on that commit and push it. The tag is the trigger: pushing it builds
+   and publishes the release image, and the Docker workflow checks the tag against
+   `Cargo.toml`'s `version`, so a tag that disagrees with step 1 fails rather than
+   publishing a mislabelled image.
+6. **The GitHub release**, whose body is that version's changelog section, copied. Writing
+   a second account of the same release is how the two come to differ.
