@@ -78,16 +78,35 @@ pub(crate) fn post(paths: &mut Paths, path: &str, operation: Operation) {
     paths.add_path_operation(path, vec![HttpMethod::Post], operation);
 }
 
-/// Collapse a component that is an `allOf` of other components into one flat object, and drop
-/// the parts it was made of.
+/// Collapse every component that is an `allOf` of other components into one flat object, and
+/// drop the parts they were made of.
 ///
-/// `StorageOptions` groups its fields per backend in Rust so that a backend function cannot
-/// reach another's, and `#[serde(flatten)]` keeps the wire form flat — but the derived schema
-/// records the grouping as `allOf`, which would show a caller five nested objects for a body
-/// that has none. What a caller sends is one flat set of keys, so that is what is described.
-fn flatten_component(components: &mut Components, name: &str) {
+/// A `#[serde(flatten)]` is a Rust arrangement — `StorageOptions` groups its fields per backend
+/// so that a backend function cannot reach another's, a request body holds its vocabulary that
+/// way, and the plan body holds the whole catalog query that way — and the wire form stays one
+/// flat object. The derived schema records each as `allOf`, which would show a caller nested
+/// objects a body has none of, and show a `$ref` in place of the fields it stands for. What a
+/// caller sends is one flat set of keys, so that is what is described.
+///
+/// A part is dropped only after every component has been flattened, since two of them absorb
+/// the same vocabulary — a request body and a plan entry's body both flatten it — and removing
+/// it for the first would leave the second describing a `$ref` to nothing.
+fn flatten_components(components: &mut Components) {
+    // Names first: flattening rewrites the map.
+    let names = components.schemas.keys().cloned().collect::<Vec<_>>();
+    let absorbed = names
+        .iter()
+        .flat_map(|name| flatten_component(components, name))
+        .collect::<Vec<_>>();
+    for part in absorbed {
+        components.schemas.remove(&part);
+    }
+}
+
+/// One such component, flattened in place, and the parts it absorbed.
+fn flatten_component(components: &mut Components, name: &str) -> Vec<String> {
     let Some(RefOr::T(Schema::AllOf(all_of))) = components.schemas.get(name).cloned() else {
-        return;
+        return Vec::new();
     };
     let mut flat = utoipa::openapi::Object::new();
     let mut absorbed = Vec::new();
@@ -112,9 +131,38 @@ fn flatten_component(components: &mut Components, name: &str) {
     }
     flat.description = all_of.description;
     components.schemas.insert(name.to_owned(), flat.into());
-    for part in absorbed {
-        components.schemas.remove(&part);
-    }
+    absorbed
+}
+
+/// Put one component's fields in the order given, and anything the order does not name after
+/// them, in whatever order it was in.
+///
+/// The order a body is written in is not one this module can work out. A `#[serde(flatten)]`
+/// is an `allOf` in the schema and the flattened part always comes first, so a request's
+/// projection would sit above the `url` it is a projection of — and no rule over "required"
+/// and "not" recovers it either. So the endpoint that owns the fields states the order, and
+/// this applies it.
+///
+/// A field the order does not name still appears: a description that omitted a field would be
+/// wrong in a way a caller acts on, while one that lists it last is only untidy.
+pub(crate) fn order_fields(document: &mut OpenApi, component: &str, order: &[&str]) {
+    let Some(components) = document.components.as_mut() else {
+        return;
+    };
+    let Some(RefOr::T(Schema::Object(object))) = components.schemas.get_mut(component) else {
+        return;
+    };
+    let mut fields = std::mem::take(&mut object.properties)
+        .into_iter()
+        .collect::<Vec<_>>();
+    let rank = |name: &String| {
+        order
+            .iter()
+            .position(|field| field == name)
+            .unwrap_or(order.len())
+    };
+    fields.sort_by_key(|(name, _)| rank(name));
+    object.properties.extend(fields);
 }
 
 /// Say which url schemes each storage option applies to, on the option itself.
@@ -170,7 +218,7 @@ fn note_which_backend(components: &mut Components) {
 
 /// The document around whatever paths and components the routes contributed.
 pub(crate) fn document(paths: Paths, mut components: Components) -> OpenApi {
-    flatten_component(&mut components, "StorageOptions");
+    flatten_components(&mut components);
     note_which_backend(&mut components);
     OpenApiBuilder::new()
         .info(
@@ -183,10 +231,11 @@ pub(crate) fn document(paths: Paths, mut components: Components) -> OpenApi {
                      store needs them, the caller's own credentials — which a query string \
                      would write into every proxy's access log on the way. A body also has \
                      no url-length limit, which a long select list reaches.\n\n\
-                     The first path segment is the vocabulary the body is written in. Both \
-                     say the same thing and lower to the same plan; they differ in what a \
-                     field may hold. A field belonging to the other vocabulary is refused \
-                     and told where it goes, rather than ignored.\n\n\
+                     The first path segment is the vocabulary the body is written in — both \
+                     say the same thing and lower to the same plan, differing in what a field \
+                     may hold — and the rest names what the request is against. Each route \
+                     takes its own body, listed below it, and a key that is not one of its \
+                     fields is refused rather than ignored.\n\n\
                      This describes the API. A deployment may also serve directories of \
                      files, where every url below the mount is a data path and there is no \
                      route set to enumerate; the README covers that half.",
@@ -515,8 +564,9 @@ fn render_operation(method: &str, path: &str, operation: &Operation, document: &
 /// is at least well-formed. Nothing is stored: no history, no last-used values.
 fn render_runner(path: &str, operation: &Operation) -> String {
     // The route's own example, not one assembled from whatever fields carry one. Which fields
-    // a route accepts is the route's to know: a catalog refuses `ra_column`, so a body built
-    // by collecting every example in the schema would start the form off with a 400.
+    // a route accepts is the route's to know, and an example is a body that has to run: one
+    // built by collecting every example in the schema would start the form off with a request
+    // this route cannot answer.
     let body = operation
         .request_body
         .as_ref()

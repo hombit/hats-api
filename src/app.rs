@@ -287,7 +287,42 @@ fn describe(prefix: &str) -> utoipa::openapi::OpenApi {
     let components = utoipa::openapi::ComponentsBuilder::new()
         .schemas_from_iter(schemas)
         .build();
-    openapi::document(paths, components)
+    let mut document = openapi::document(paths, components);
+    // Last, because it is the flattened body that is ordered: the vocabulary's fields are not
+    // in the body's own schema until `document` has folded them in.
+    order_bodies::<Expr>(&mut document);
+    order_bodies::<Simple>(&mut document);
+    document
+}
+
+/// Each request body's fields in the order its own endpoint says a body is written in.
+fn order_bodies<D: Dialect>(document: &mut utoipa::openapi::OpenApi) {
+    openapi::order_fields(
+        document,
+        &component_of::<D>("ParquetQuery"),
+        &ParquetQuery::<D>::fields(),
+    );
+    openapi::order_fields(
+        document,
+        &component_of::<D>("CatalogQuery"),
+        &CatalogQuery::<D>::fields(),
+    );
+    openapi::order_fields(
+        document,
+        &component_of::<D>("CatalogPlanQuery"),
+        &CatalogPlanQuery::<D>::fields(),
+    );
+}
+
+/// What a generic component is called in the document.
+///
+/// Every named schema is registered and referred to by `$ref`, including the generic ones: the
+/// derive composes the argument into the name, so `ParquetQuery<Expr>` and
+/// `ParquetQuery<Simple>` are two components rather than one that is wrong for one route.
+/// Spelled the way utoipa spells a generic it composes itself, so the two kinds of name in the
+/// document read alike.
+fn component_of<D: utoipa::ToSchema>(base: &str) -> String {
+    format!("{base}_{}", <D as utoipa::ToSchema>::name())
 }
 
 /// One vocabulary's three operations, alongside [`with_dialect`]'s three routes.
@@ -300,17 +335,16 @@ fn describe_dialect<D: Dialect>(
     schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>,
     prefix: &str,
 ) {
-    // Every named schema is registered and referred to by `$ref`, including the generic ones:
-    // the derive composes the argument into the name, so `QueryRequest<Expr>` and
-    // `QueryRequest<Simple>` are two components rather than one that is wrong for one route.
-    // Spelled the way utoipa spells a generic it composes itself, so the two kinds of name in
-    // the document read alike.
-    let of = |base: &str| format!("{base}_{}", <D as utoipa::ToSchema>::name());
+    let of = component_of::<D>;
     // The vocabulary itself, which nothing else registers: it reaches the body through a
     // `flatten` on a generic parameter, and walking a type's references does not cross one.
     // Left out, every request body `$ref`s a component that is not in the document.
     named::<D>(schemas, <D as utoipa::ToSchema>::name().to_string());
-    let body = named::<QueryRequest<D>>(schemas, of("QueryRequest"));
+    // One body per endpoint rather than one for all three, which is what makes the description
+    // say of each route exactly what that route takes.
+    let file_body = named::<ParquetQuery<D>>(schemas, of("ParquetQuery"));
+    let catalog_body = named::<CatalogQuery<D>>(schemas, of("CatalogQuery"));
+    let plan_body = named::<CatalogPlanQuery<D>>(schemas, of("CatalogPlanQuery"));
     let plan = named::<PlanResponse<D>>(schemas, of("PlanResponse"));
     let rows = named::<SelectResponse>(
         schemas,
@@ -329,7 +363,7 @@ fn describe_dialect<D: Dialect>(
             D::SEGMENT,
             "Query one parquet file",
             D::SUMMARY,
-            body.clone(),
+            file_body,
             example::<D>(EXAMPLE_PARTITION, PARTITION_SELECT, PARTITION_WHERE, false),
             "The rows, or a parquet file or a VOTable where `format` asked for one",
             rows,
@@ -342,7 +376,7 @@ fn describe_dialect<D: Dialect>(
             D::SEGMENT,
             "Query a HATS catalog",
             D::SUMMARY,
-            body.clone(),
+            catalog_body,
             example::<D>(EXAMPLE_CATALOG, CATALOG_SELECT, CATALOG_WHERE, true),
             "The rows, in the catalog's own order, with the partitions they came from",
             catalog_rows,
@@ -355,7 +389,7 @@ fn describe_dialect<D: Dialect>(
             D::SEGMENT,
             "Resolve a catalog query without running it",
             D::SUMMARY,
-            body,
+            plan_body,
             example::<D>(EXAMPLE_CATALOG, CATALOG_SELECT, CATALOG_WHERE, true),
             "One request per partition, for the client to send itself",
             plan,
@@ -1015,8 +1049,9 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
 ///
 /// A third vocabulary is a third implementation and three more route lines, rather than two
 /// more fields and another pairwise refusal in every body that reads them.
-// `Sync` as well as `Send`: a handler holds `&QueryRequest<Self>` across an await, and a
-// shared reference is only `Send` where what it points at is `Sync`.
+// `Sync` as well as `Send`: a handler holds a reference to a request written in this
+// vocabulary across an await, and a shared reference is only `Send` where what it points at
+// is `Sync`.
 trait Dialect:
     Debug + Clone + Serialize + DeserializeOwned + utoipa::ToSchema + Send + Sync + 'static
 {
@@ -1028,6 +1063,11 @@ trait Dialect:
     /// because they are the two things a route set needs to know about a vocabulary, and a
     /// third one added without either is a route nobody can find or read.
     const SUMMARY: &'static str;
+
+    /// This vocabulary's own two fields, in the order a body is written in. Every endpoint
+    /// splices them into its own field list, so a vocabulary is named in one place and the
+    /// routes that carry it say the same thing about it.
+    const FIELDS: &'static [&'static str];
 
     /// A projection and a predicate written in this vocabulary's own two fields, so that the
     /// description's runner starts from a request that returns rows rather than a 400.
@@ -1091,6 +1131,7 @@ impl Dialect for Expr {
     const SUMMARY: &'static str = "SQL expressions: `select` is a select list, `where` one \
         boolean expression. Neither is a statement — each is parsed on its own and must \
         parse to its end.";
+    const FIELDS: &'static [&'static str] = &["select", "where"];
 
     fn example(projection: &str, predicate: &str) -> serde_json::Value {
         serde_json::json!({ "select": projection, "where": predicate })
@@ -1138,6 +1179,7 @@ impl Dialect for Simple {
     const SUMMARY: &'static str = "Names and the narrower filter form a url query string can \
         carry: `columns` is a comma-separated list of names, `filters` spells `AND` as \
         `&&`. A caller who wants an expression uses the `expr` routes.";
+    const FIELDS: &'static [&'static str] = &["columns", "filters"];
 
     fn example(projection: &str, predicate: &str) -> serde_json::Value {
         serde_json::json!({ "columns": projection, "filters": predicate })
@@ -1158,30 +1200,27 @@ impl Dialect for Simple {
     }
 }
 
-/// Which vocabulary each dialect-specific field belongs to, so that a body sent to the wrong
-/// route is told where the field goes rather than only that it is not here.
-const ELSEWHERE: &[(&str, &str)] = &[
-    ("select", Expr::SEGMENT),
-    ("where", Expr::SEGMENT),
-    ("columns", Simple::SEGMENT),
-    ("filters", Simple::SEGMENT),
-];
-
-/// What to read, and how to read it. The same body on every route.
+/// A query against one parquet file, which the url names outright.
 ///
-/// A catalog names its own coordinate and index columns, so the `hats` routes refuse
-/// `ra_column`, `dec_column`, `healpix_column` and `healpix_order`. A single file given a
-/// `region` requires the first two.
+/// Its own type, not a shared body with the catalog's: a file says nothing about which of its
+/// columns are a position or an index, and a catalog answers both for itself, so the two
+/// endpoints take different fields. Being different types is what makes that structural — the
+/// column names are not fields of a catalog request at all, so there is nothing there to drop
+/// in silence or to honour by a later change, and the description shows each endpoint the
+/// fields it takes rather than every field either takes with a sentence about which.
 ///
-/// Every field is either honoured or refused: a field belonging to the other vocabulary, or one
-/// this service does not know, is a 400 saying so.
+/// What the endpoints share is the code below them, not the body above them: each lowers to
+/// the internal selection its own query layer takes, and both vocabularies lower to one
+/// planned expression the way they always did.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
-struct QueryRequest<D> {
-    /// The file or catalog to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`,
+struct ParquetQuery<D> {
+    /// The parquet file to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`,
     /// `webdav` or `file` — and which of those a deployment answers for is the operator's to
     /// configure.
     // Treated as opaque: whatever query string it has belongs to the origin, not to us.
-    #[schema(value_type = String, example = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats")]
+    // No `example` on the field: every operation's own example carries a url this route
+    // answers, and a second one here is a second thing to keep true.
+    #[schema(value_type = String)]
     url: SourceUrl,
     /// How to reach the store: an endpoint, a region, credentials. Leave it out for a public
     /// object read anonymously, which is the common case. Which options apply is decided by
@@ -1192,10 +1231,10 @@ struct QueryRequest<D> {
     #[serde(flatten)]
     query: D,
     /// One or more shapes on the sky. A row inside any of them qualifies — the array is a
-    /// union — and the whole field is ANDed with the predicate.
+    /// union — and the whole field is ANDed with the predicate. `ra_column` and `dec_column`
+    /// are required alongside it.
     region: Option<Vec<Region>>,
-    /// Which column holds right ascension, in degrees. Required whenever `region` is given,
-    /// and refused for a catalog, which says so itself.
+    /// Which column holds right ascension, in degrees. Required whenever `region` is given.
     // A parquet file carries nothing that says which of its columns are a position, so a guess
     // from conventional names would answer a different question than the one asked.
     #[schema(example = "objra")]
@@ -1219,38 +1258,47 @@ struct QueryRequest<D> {
     /// headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
-    /// At most this many rows. Under the file server they are the file's first; through the
-    /// API the order is not promised, but the same request returns the same rows.
+    /// At most this many rows. The order is not promised, but the same request returns the
+    /// same rows.
     #[schema(example = 100)]
     limit: Option<usize>,
-    /// Write this request's own `storage` — credentials included — into each entry of a plan,
-    /// so the entries can be sent as they stand. Plan routes only. Off by default: it
-    /// discloses nothing, being your own secret handed back to you, but it makes the plan a
-    /// document with a credential in it, and a plan is the sort of thing that gets logged,
-    /// cached and pasted into an issue.
-    // The default writes the stripped url and `requires_credentials`, so a client that would
-    // rather re-attach them itself — which is most of them — never has to think about it.
-    #[serde(default)]
-    return_storage: bool,
-    /// Every key the body carried that this route has no field for.
-    ///
-    /// `deny_unknown_fields` cannot say this: serde does not apply it to a struct that has a
-    /// flattened field, and a `flatten` with nothing to catch the leftovers drops them in
-    /// silence. A `filters` dropped on the expression route would return every row, which
-    /// the caller cannot tell from a predicate that matched them all — the failure this
-    /// service keeps finding in a new place. So the leftovers are collected and refused, and
-    /// having them by name is also what lets the refusal say which route does take one.
-    ///
-    /// Hidden from the description: it is not a field a caller may send, it is where the
-    /// ones they should not have sent are caught. Left in, a generated client would offer
-    /// an `unknown` map that makes every request a 400.
+    /// Every key the body carried that this endpoint has no field for.
     #[serde(flatten)]
     #[schema(ignore)]
     unknown: BTreeMap<String, IgnoredAny>,
 }
 
-impl<D: Dialect> QueryRequest<D> {
-    /// What to read, in this route's vocabulary.
+impl<D: Dialect> ParquetQuery<D> {
+    /// Every field this endpoint takes, in the order a body is written in: what to read, how
+    /// to reach it, where on the sky, what to ask of it, and how the answer comes back.
+    ///
+    /// Stated rather than read off the type, because the order cannot be: a `#[serde(flatten)]`
+    /// is an `allOf` in the schema and its part always lands first, which would put the
+    /// projection above the url it is a projection of. It is what the description orders each
+    /// table by and what a refusal names, and `each_route_describes_its_own_body` holds it to
+    /// the fields the type actually has, in this order.
+    fn fields() -> Vec<&'static str> {
+        let mut fields = vec![
+            "url",
+            "storage",
+            "region",
+            "ra_column",
+            "dec_column",
+            "healpix_column",
+            "healpix_order",
+        ];
+        fields.extend(D::FIELDS);
+        fields.extend(["format", "limit"]);
+        fields
+    }
+
+    /// The same list, as the sentence a refusal ends with.
+    fn takes() -> String {
+        takes(&Self::fields())
+    }
+
+    /// What to read, in this route's vocabulary: the request lowered to what the query layer
+    /// runs, which is the same type the catalog endpoint's own lowering feeds.
     fn selection(&self) -> Result<Selection<'_>, ApiError> {
         Ok(Selection {
             projection: self.query.projection(),
@@ -1258,65 +1306,6 @@ impl<D: Dialect> QueryRequest<D> {
             spatial: self.spatial()?,
             limit: self.limit,
         })
-    }
-
-    /// Refuse a body written in another route's vocabulary, and anything else unrecognised.
-    ///
-    /// Every route calls this before it does anything, since a request this service cannot
-    /// read as written is not one it may answer part of.
-    fn refuse_unknown(&self) -> Result<(), ApiError> {
-        if self.unknown.is_empty() {
-            return Ok(());
-        }
-        let named = self
-            .unknown
-            .keys()
-            .map(|name| {
-                match ELSEWHERE
-                    .iter()
-                    .find(|(field, segment)| field == name && *segment != D::SEGMENT)
-                {
-                    Some((_, segment)) => format!("{name} (the {segment} vocabulary's)"),
-                    None => name.clone(),
-                }
-            })
-            .collect::<Vec<_>>();
-        Err(ApiError::bad_request(format!(
-            "not accepted here: {}; this route takes the {} vocabulary",
-            named.join(", "),
-            D::SEGMENT
-        )))
-    }
-
-    /// The four column names a catalog answers for itself, refused rather than honoured.
-    ///
-    /// `hats_col_ra`, `hats_col_dec` and `hats_col_healpix` are the catalog's statement
-    /// about its own files, and it can see more of them than a caller can. Accepting an
-    /// override would let a request test a pair of columns the catalog does not call a
-    /// position and get an answer that looks like a cone search.
-    ///
-    /// They are refused rather than ignored: a parameter this service acts on is honoured or
-    /// refused, and one silently dropped here returns rows tested against different columns
-    /// than the caller wrote — which they could not tell from the ones they asked for. A
-    /// caller who does want their own pair names the file, where the route takes them.
-    fn refuse_catalog_columns(&self) -> Result<(), ApiError> {
-        let named = [
-            ("ra_column", self.ra_column.is_some()),
-            ("dec_column", self.dec_column.is_some()),
-            ("healpix_column", self.healpix_column.is_some()),
-            ("healpix_order", self.healpix_order.is_some()),
-        ]
-        .into_iter()
-        .filter_map(|(name, given)| given.then_some(name))
-        .collect::<Vec<_>>();
-        match named.is_empty() {
-            true => Ok(()),
-            false => Err(ApiError::bad_request(format!(
-                "{} not accepted against a catalog, which names its own columns; \
-                 to choose them, query one of its files",
-                named.join(", ")
-            ))),
-        }
     }
 
     /// The region and the two columns it is tested against, which travel together or not
@@ -1372,6 +1361,225 @@ impl<D: Dialect> QueryRequest<D> {
             // partition of one. The HATS routes fill this in.
             partition: None,
         }))
+    }
+}
+
+/// A query against a whole HATS catalog: the url names the catalog and the partitions to
+/// read are chosen from the region.
+///
+/// It carries none of [`ParquetQuery`]'s column names. `hats_col_ra`, `hats_col_dec` and
+/// `hats_col_healpix` are the catalog's statement about its own files, and it can see more of
+/// them than a caller can; a caller who wants their own pair names one of the files, where
+/// [`ParquetQuery`] takes them.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct CatalogQuery<D> {
+    /// The HATS catalog to read: the directory holding `hats.properties`, or a collection's,
+    /// which is followed to its primary table. Its scheme picks the backend — `s3`, `gs`,
+    /// `az`, `https`, `webdav` or `file` — and which of those a deployment answers for is the
+    /// operator's to configure.
+    // Treated as opaque: whatever query string it has belongs to the origin, not to us.
+    // No `example` on the field, for the reason [`ParquetQuery::url`] has none.
+    #[schema(value_type = String)]
+    url: SourceUrl,
+    /// How to reach the store: an endpoint, a region, credentials. Leave it out for a public
+    /// catalog read anonymously, which is the common case. Which options apply is decided by
+    /// the url's scheme, and one that does not apply is refused rather than ignored.
+    #[serde(default)]
+    storage: StorageOptions,
+    /// The projection and the predicate, in this route's own vocabulary.
+    #[serde(flatten)]
+    query: D,
+    /// One or more shapes on the sky. A row inside any of them qualifies — the array is a
+    /// union — and the whole field is ANDed with the predicate. It is also what chooses the
+    /// partitions: without one, every partition of the catalog is read.
+    ///
+    /// The columns it is tested against are the catalog's own, from its `properties`.
+    region: Option<Vec<Region>>,
+    /// `json`, the default; `parquet` for the answer as a parquet file laid out like the
+    /// partitions it came from; `votable` for a VOTable, which takes flat columns only and
+    /// refuses a nested one by name. Anything but `json` carries its counts in `x-hats-*`
+    /// response headers, there being no room in the body.
+    #[schema(example = "json")]
+    format: Option<String>,
+    /// At most this many rows, taken from the front of the catalog's own order. The same
+    /// request returns the same rows.
+    #[schema(example = 100)]
+    limit: Option<usize>,
+    /// Every key the body carried that this endpoint has no field for.
+    #[serde(flatten)]
+    #[schema(ignore)]
+    unknown: BTreeMap<String, IgnoredAny>,
+}
+
+impl<D: Dialect> CatalogQuery<D> {
+    /// Every field this endpoint takes, in the order a body is written in.
+    /// [`ParquetQuery::fields`] says why the order is stated rather than read off the type.
+    fn fields() -> Vec<&'static str> {
+        let mut fields = vec!["url", "storage", "region"];
+        fields.extend(D::FIELDS);
+        fields.extend(["format", "limit"]);
+        fields
+    }
+
+    /// The same list, as the sentence a refusal ends with.
+    fn takes() -> String {
+        takes(&Self::fields())
+    }
+
+    /// This request, lowered. No entry of a plan this produces carries a credential: there is
+    /// no field here to have asked with, so the `None` is the type's rather than a check's.
+    fn lowered(&self) -> Lowered<'_, D> {
+        Lowered {
+            url: &self.url,
+            storage: &self.storage,
+            query: &self.query,
+            region: self.region.as_deref(),
+            format: self.format.as_deref(),
+            limit: self.limit,
+            echo: None,
+        }
+    }
+}
+
+/// The same query against the same catalog, answered with the work rather than the rows.
+///
+/// Its own type rather than a flag on [`CatalogQuery`], and written out rather than composed:
+/// what the two endpoints take is the same today and is not the same thing, and a shape shared
+/// until it diverges is one that diverges by growing a field that means nothing on one route.
+/// The one difference today is `return_storage`, which only means something where a plan is
+/// the answer — so a request for rows has no way to spell it.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct CatalogPlanQuery<D> {
+    /// The HATS catalog to resolve the request against: the directory holding
+    /// `hats.properties`, or a collection's, which is followed to its primary table.
+    // No `example` on the field, for the reason [`ParquetQuery::url`] has none.
+    #[schema(value_type = String)]
+    url: SourceUrl,
+    /// How to reach the store: an endpoint, a region, credentials. Only the catalog's own
+    /// files are read here, but they are read the same way the rows would be.
+    #[serde(default)]
+    storage: StorageOptions,
+    /// The projection and the predicate, in this route's own vocabulary. Carried into every
+    /// entry as you wrote it; nothing here is planned against a file.
+    #[serde(flatten)]
+    query: D,
+    /// One or more shapes on the sky, which is what chooses the partitions and so what
+    /// decides how long the work list is. Without one, every partition is an entry.
+    ///
+    /// An entry the region contains whole carries no region: every row of it qualifies.
+    region: Option<Vec<Region>>,
+    /// Written into each entry, so the answers arrive in the encoding you asked for. It is
+    /// not the plan's own: a plan is JSON.
+    #[schema(example = "json")]
+    format: Option<String>,
+    /// Written into each entry as you wrote it. Each answers at most this many rows, and the
+    /// first `limit` of the concatenation is what this service would have returned.
+    #[schema(example = 100)]
+    limit: Option<usize>,
+    /// Write this request's own `storage` — credentials included — into each entry, so the
+    /// entries can be sent as they stand. Off by default: it discloses nothing, being your own
+    /// secret handed back to you, but it makes the plan a document with a credential in it,
+    /// and a plan is the sort of thing that gets logged, cached and pasted into an issue.
+    // The default writes the stripped url and `requires_credentials`, so a client that would
+    // rather re-attach them itself — which is most of them — never has to think about it.
+    #[serde(default)]
+    return_storage: bool,
+    /// Every key the body carried that this endpoint has no field for.
+    #[serde(flatten)]
+    #[schema(ignore)]
+    unknown: BTreeMap<String, IgnoredAny>,
+}
+
+impl<D: Dialect> CatalogPlanQuery<D> {
+    /// Every field this endpoint takes, in the order a body is written in: the catalog
+    /// query's, and last the one field that is this endpoint's own.
+    fn fields() -> Vec<&'static str> {
+        let mut fields = CatalogQuery::<D>::fields();
+        fields.push("return_storage");
+        fields
+    }
+
+    /// The same list, as the sentence a refusal ends with.
+    fn takes() -> String {
+        takes(&Self::fields())
+    }
+
+    /// This request, lowered.
+    fn lowered(&self) -> Lowered<'_, D> {
+        Lowered {
+            url: &self.url,
+            storage: &self.storage,
+            query: &self.query,
+            region: self.region.as_deref(),
+            format: self.format.as_deref(),
+            limit: self.limit,
+            // Both halves, and both are the caller's doing: they asked for it, and they sent
+            // something to hand back. Asked for with nothing to return writes no field rather
+            // than an empty object, which would read as "these are the options" and they are
+            // not.
+            echo: (self.return_storage && !self.storage.is_empty()).then(|| self.storage.echo()),
+        }
+    }
+}
+
+/// A catalog request, lowered: what everything below the routes works in.
+///
+/// The two catalog endpoints are two wire types and one of these, so what they have in common
+/// is code they share rather than a body they share. A third — a catalog read written some
+/// other way — is a wire type and a `lowered`, and nothing below here changes.
+struct Lowered<'a, D> {
+    url: &'a SourceUrl,
+    storage: &'a StorageOptions,
+    query: &'a D,
+    region: Option<&'a [Region]>,
+    format: Option<&'a str>,
+    limit: Option<usize>,
+    /// The caller's own storage options, to be written into every entry of a plan. `Some`
+    /// only from an endpoint that has a `return_storage` to have asked with.
+    echo: Option<serde_json::Value>,
+}
+
+impl<D: Dialect> Lowered<'_, D> {
+    /// What to read, in the vocabulary the request was written in. The catalog supplies the
+    /// columns the region is tested against, so there is nothing here a caller named.
+    fn selection(&self) -> CatalogSelection<'_> {
+        CatalogSelection {
+            projection: self.query.projection(),
+            predicate: self.query.predicate(),
+            regions: self.region,
+            limit: self.limit,
+        }
+    }
+}
+
+/// An endpoint's field list as the sentence a refusal ends with. The url is the one field a
+/// body must carry, and it is first in every list, so the two halves are said apart.
+fn takes(fields: &[&str]) -> String {
+    let [url, optional @ ..] = fields else {
+        return String::new();
+    };
+    format!("{url}, and optionally {}", optional.join(", "))
+}
+
+/// A body carrying a name this endpoint has no field for, refused rather than ignored.
+///
+/// `deny_unknown_fields` cannot say this: serde does not apply it to a struct that has a
+/// flattened field, and every request here flattens its vocabulary. A `flatten` with nothing
+/// to catch the leftovers drops them in silence, and a `filters` dropped on the expression
+/// route would return every row — which the caller cannot tell from a predicate that matched
+/// them all, the failure this service keeps finding in a new place. So each request type
+/// collects them and every route refuses them before it does anything: a request this service
+/// cannot read as written is not one it may answer part of.
+///
+/// The refusal names what the endpoint does take, which is also where a caller who wrote
+/// another route's field reads that it is not this one's.
+fn refuse_unknown(unknown: &BTreeMap<String, IgnoredAny>, takes: &str) -> Result<(), ApiError> {
+    match unknown.is_empty() {
+        true => Ok(()),
+        false => Err(ApiError::bad_request(format!(
+            "not accepted here: {}; this route takes {takes}",
+            unknown.keys().cloned().collect::<Vec<_>>().join(", ")
+        ))),
     }
 }
 
@@ -1436,10 +1644,10 @@ impl Format {
 /// Recognising those two by their wording is the weak part: serde could reword them, and
 /// the only cost would be a caller who stops being told which key they misspelled. It
 /// fails towards the safe message, and the two tests below are what notice.
-fn body_error(rejection: &JsonRejection) -> ApiError {
-    const SHAPE: &str = "expected a JSON object with url, and optionally storage, \
-                         select or columns, where or filters, region with ra_column and \
-                         dec_column, format, limit";
+fn body_error(rejection: &JsonRejection, takes: &str) -> ApiError {
+    // What this endpoint takes, and not what any endpoint takes: the two differ, and a
+    // sentence naming both leaves the caller to work out which half is theirs.
+    let shape = format!("expected a JSON object with {takes}");
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -1455,10 +1663,10 @@ fn body_error(rejection: &JsonRejection) -> ApiError {
                 .any(|prefix| message.contains(prefix));
             match names_a_key {
                 true => ApiError::bad_request(message),
-                false => ApiError::bad_request(format!("the request body does not fit: {SHAPE}")),
+                false => ApiError::bad_request(format!("the request body does not fit: {shape}")),
             }
         }
-        _ => ApiError::bad_request(format!("{}; {SHAPE}", rejection.body_text())),
+        _ => ApiError::bad_request(format!("{}; {shape}", rejection.body_text())),
     }
 }
 
@@ -1537,18 +1745,12 @@ const ELAPSED_MS_HEADER: &str = "x-hats-elapsed-ms";
 
 async fn query_parquet<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest<D>>, JsonRejection>,
+    body: Result<Json<ParquetQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let Json(params) =
+        body.map_err(|rejection| body_error(&rejection, &ParquetQuery::<D>::takes()))?;
     let started = Instant::now();
-    params.refuse_unknown()?;
-    // Refused rather than ignored: this route answers with rows and never with a plan, so
-    // there is nothing here for it to have done.
-    if params.return_storage {
-        return Err(ApiError::bad_request(
-            "return_storage writes credentials into a plan, and this route returns rows",
-        ));
-    }
+    refuse_unknown(&params.unknown, &ParquetQuery::<D>::takes())?;
     // Everything decidable from the request alone, before anything is opened.
     let format = Format::parse(params.format.as_deref(), Format::Json)?;
     let selection = params.selection()?;
@@ -1631,18 +1833,17 @@ struct Opened {
 
 async fn open_catalog<D: Dialect>(
     service: &Service,
-    params: &QueryRequest<D>,
+    params: &Lowered<'_, D>,
 ) -> Result<Opened, ApiError> {
-    let format = Format::parse(params.format.as_deref(), Format::Json)?;
-    params.refuse_catalog_columns()?;
+    let format = Format::parse(params.format, Format::Json)?;
     let url = parse_url(params.url.as_str())?;
     // A directory rather than an object: `open_dir` drops only the refusal of a url naming
     // no object, and every policy check `open` makes still runs. There is no `[data]`
     // question to ask of the url either — the caller names a catalog, and which files inside
     // it are read is the catalog's own answer.
-    let dir = storage::open_dir(&url, &params.storage, &service.policy, &service.transfers)?;
+    let dir = storage::open_dir(&url, params.storage, &service.policy, &service.transfers)?;
     let on_disk = dir.url.to_file_path().ok();
-    let search = Search::resolve(dir, params.region.as_deref(), service.catalog_limits)
+    let search = Search::resolve(dir, params.region, service.catalog_limits)
         .await
         .map_err(|error| match &on_disk {
             Some(path) => error.from_mount(path),
@@ -1658,16 +1859,18 @@ async fn open_catalog<D: Dialect>(
 /// A query against a catalog: the url names a HATS directory, and the partitions to read
 /// are chosen from the region rather than named by the caller.
 ///
-/// The body is the same one [`query_parquet`] takes, and every field means what it means
-/// there. What differs is the four column names, which the catalog answers for itself and
-/// this route therefore refuses.
+/// Its body is [`CatalogQuery`] rather than [`query_parquet`]'s: what a caller may say about
+/// a catalog is not what they may say about one file, so the two are different types on
+/// different routes rather than one body with a sentence about which fields apply where.
 async fn query_hats<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest<D>>, JsonRejection>,
+    body: Result<Json<CatalogQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let Json(body) =
+        body.map_err(|rejection| body_error(&rejection, &CatalogQuery::<D>::takes()))?;
     let started = Instant::now();
-    params.refuse_unknown()?;
+    refuse_unknown(&body.unknown, &CatalogQuery::<D>::takes())?;
+    let params = body.lowered();
     let Opened {
         search,
         url,
@@ -1679,12 +1882,7 @@ async fn query_hats<D: Dialect>(
         None => error,
     };
 
-    let selection = CatalogSelection {
-        projection: params.query.projection(),
-        predicate: params.query.predicate(),
-        regions: params.region.as_deref(),
-        limit: params.limit,
-    };
+    let selection = params.selection();
     let outcome = search
         .run(
             &selection,
@@ -1724,7 +1922,7 @@ async fn query_hats<D: Dialect>(
         filtered = params.query.filtered(),
         // How many shapes, not what they were: logging the numbers would be logging the
         // caller's own coordinates for no purpose the count does not already serve.
-        regions = params.region.as_ref().map_or(0, Vec::len),
+        regions = params.region.map_or(0, <[Region]>::len),
         format = format.name(),
         num_rows,
         data_bytes_read,
@@ -1740,14 +1938,16 @@ async fn query_hats<D: Dialect>(
 /// [`query_hats`] do not apply: the whole point is to answer a request too large to run.
 async fn query_hats_plan<D: Dialect>(
     State(service): State<Service>,
-    body: Result<Json<QueryRequest<D>>, JsonRejection>,
+    body: Result<Json<CatalogPlanQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let Json(params) = body.map_err(|rejection| body_error(&rejection))?;
+    let Json(body) =
+        body.map_err(|rejection| body_error(&rejection, &CatalogPlanQuery::<D>::takes()))?;
     let started = Instant::now();
     // Planned, not run — but a body this route cannot read as written is refused here all
     // the same, or the plan would hand back entries every one of which is a 400 the client
     // discovers one at a time.
-    params.refuse_unknown()?;
+    refuse_unknown(&body.unknown, &CatalogPlanQuery::<D>::takes())?;
+    let params = body.lowered();
     let Opened { search, .. } = open_catalog(&service, &params).await?;
     let plan = plan_of(&service, &search, &params, None).await?;
     tracing::info!(
@@ -1755,7 +1955,7 @@ async fn query_hats_plan<D: Dialect>(
         partitions = search.catalog().partitions().len(),
         chosen = search.chosen().len(),
         requests = plan.requests.len(),
-        regions = params.region.as_ref().map_or(0, Vec::len),
+        regions = params.region.map_or(0, <[Region]>::len),
         elapsed_ms = started.elapsed().as_millis(),
         "catalog plan"
     );
@@ -1850,7 +2050,7 @@ struct PlanBody<D> {
 async fn plan_of<D: Dialect>(
     service: &Service,
     search: &Search,
-    params: &QueryRequest<D>,
+    params: &Lowered<'_, D>,
     reason: Option<Exceeded>,
 ) -> Result<PlanResponse<D>, ApiError> {
     let url = parse_url(params.url.as_str())?;
@@ -1870,12 +2070,6 @@ async fn plan_of<D: Dialect>(
     // catalog route did — so there is nothing to pass on and nothing lost by not passing it.
     let healpix = columns.and_then(|columns| columns.healpix.as_ref());
 
-    // Both halves, and both are the caller's doing: they asked for it, and they sent
-    // something to hand back. Asked for with nothing to return writes no field rather than
-    // an empty object, which would read as "these are the options" and they are not.
-    let storage =
-        (params.return_storage && !params.storage.is_empty()).then(|| params.storage.echo());
-
     let mut estimated_bytes = Some(0);
     let requests = entries
         .iter()
@@ -1887,7 +2081,9 @@ async fn plan_of<D: Dialect>(
             // The region only where the rows still need it, and the columns only where the
             // region is there to be tested.
             let tested = entry.cover != Cover::Inside;
-            let region = tested.then(|| params.region.clone()).flatten();
+            let region = tested
+                .then(|| params.region.map(<[Region]>::to_vec))
+                .flatten();
             let named = region.is_some().then_some(columns).flatten();
             Ok(PlanRequest {
                 order: entry.order,
@@ -1897,15 +2093,15 @@ async fn plan_of<D: Dialect>(
                 estimated_bytes: entry.estimated_bytes,
                 body: PlanBody {
                     url: below(&url, &entry.path)?,
-                    query: params.query.clone(),
+                    query: (*params.query).clone(),
                     region,
                     ra_column: named.map(|columns| columns.ra.clone()),
                     dec_column: named.map(|columns| columns.dec.clone()),
                     healpix_column: named.and(healpix).map(|(column, _)| column.clone()),
                     healpix_order: named.and(healpix).map(|(_, order)| *order),
-                    format: params.format.clone(),
+                    format: params.format.map(str::to_owned),
                     limit: params.limit,
-                    storage: storage.clone(),
+                    storage: params.echo.clone(),
                 },
             })
         })
@@ -2386,7 +2582,7 @@ mod tests {
     /// makes that a choice rather than a rule to remember.
     #[test]
     fn printing_the_request_leaks_nothing() {
-        let params = QueryRequest {
+        let params = ParquetQuery {
             url: "s3://b/k.parquet".to_owned().into(),
             storage: StorageOptions {
                 s3: storage::S3Options {
@@ -2407,7 +2603,6 @@ mod tests {
             healpix_order: None,
             format: None,
             limit: None,
-            return_storage: false,
             unknown: BTreeMap::new(),
         };
         let shown = format!("{params:?}");
@@ -2959,12 +3154,14 @@ mod tests {
         );
     }
 
-    /// The four column names are the catalog's to answer, so a request naming one is refused
-    /// rather than obeyed.
+    /// The four column names are the catalog's to answer, so a catalog request has no field
+    /// for one and a body carrying one is refused.
     ///
     /// Refused and not ignored: silently dropping one would test the rows against different
     /// columns than the caller wrote, which is an answer they cannot tell from the one they
-    /// asked for. The refusal names the field and says where a caller who means it should go.
+    /// asked for. What makes that structural is [`CatalogQuery`] not having the fields; this
+    /// is the catch-all proving the leftovers really are refused rather than dropped, on both
+    /// catalog routes.
     #[tokio::test]
     async fn a_catalog_route_refuses_column_names() {
         let dir = crate::hats_query::tests::fixture(true);
@@ -3472,7 +3669,7 @@ mod tests {
     async fn a_plan_never_carries_the_credentials() {
         let dir = crate::hats_query::tests::fixture(true);
         let service = mounted(dir.path(), &ApiConfig::default());
-        let params = QueryRequest {
+        let params = CatalogQuery {
             url: "file:///".to_owned().into(),
             storage: StorageOptions {
                 s3: storage::S3Options {
@@ -3487,13 +3684,8 @@ mod tests {
                 filters: None,
             },
             region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
-            ra_column: None,
-            dec_column: None,
-            healpix_column: None,
-            healpix_order: None,
             format: None,
             limit: None,
-            return_storage: false,
             unknown: BTreeMap::new(),
         };
         let url = parse_url(params.url.as_str()).unwrap();
@@ -3508,7 +3700,9 @@ mod tests {
             .await
             .unwrap();
 
-        let plan = plan_of(&service, &search, &params, None).await.unwrap();
+        let plan = plan_of(&service, &search, &params.lowered(), None)
+            .await
+            .unwrap();
         let shown = serde_json::to_string(&plan).unwrap();
         assert!(!shown.contains(SECRET), "leaked: {shown}");
         assert!(!shown.contains("us-west-2"), "leaked: {shown}");
@@ -3530,7 +3724,8 @@ mod tests {
         let dir = crate::hats_query::tests::fixture(true);
         let service = mounted(dir.path(), &ApiConfig::default());
         let plan = async |storage: StorageOptions, return_storage: bool| {
-            let params = QueryRequest {
+            // The plan route's own body: it is the one that has a `return_storage` to set.
+            let params = CatalogPlanQuery {
                 url: "file:///".to_owned().into(),
                 storage,
                 query: Simple {
@@ -3538,10 +3733,6 @@ mod tests {
                     filters: None,
                 },
                 region: None,
-                ra_column: None,
-                dec_column: None,
-                healpix_column: None,
-                healpix_order: None,
                 format: None,
                 limit: None,
                 return_storage,
@@ -3558,7 +3749,12 @@ mod tests {
             let search = Search::resolve(opened, None, service.catalog_limits)
                 .await
                 .unwrap();
-            serde_json::to_value(plan_of(&service, &search, &params, None).await.unwrap()).unwrap()
+            serde_json::to_value(
+                plan_of(&service, &search, &params.lowered(), None)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
         };
         let given = || StorageOptions {
             s3: storage::S3Options {
@@ -3596,8 +3792,9 @@ mod tests {
         );
     }
 
-    /// The rows route never produces a plan, so a field about what a plan carries is refused
-    /// there rather than quietly doing nothing.
+    /// The single-file route never produces a plan, so a field about what a plan carries is
+    /// not one of its fields, and a body carrying it is refused rather than quietly doing
+    /// nothing.
     #[tokio::test]
     async fn return_storage_is_refused_where_there_is_no_plan() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -3844,7 +4041,8 @@ mod tests {
         assert!(error.contains("nothing to serve"), "{error}");
     }
 
-    /// A field of the other vocabulary is refused, and the refusal says where it belongs.
+    /// A field of the other vocabulary is refused, and the refusal names the fields this
+    /// route does take, so the caller can see which of the two they wrote.
     ///
     /// This is the whole of what the split buys, and it is the one thing serde cannot say
     /// for us: `deny_unknown_fields` is ignored on a struct with a flattened field, so
@@ -3852,11 +4050,11 @@ mod tests {
     /// which the caller cannot tell from a predicate that matched them all.
     #[tokio::test]
     async fn a_field_of_the_other_vocabulary_is_refused_and_placed() {
-        for (route, field, belongs_to) in [
-            ("/api/v1/expr/parquet", "columns", "simple"),
-            ("/api/v1/expr/parquet", "filters", "simple"),
-            ("/api/v1/simple/parquet", "select", "expr"),
-            ("/api/v1/simple/parquet", "where", "expr"),
+        for (route, field, takes) in [
+            ("/api/v1/expr/parquet", "columns", "select"),
+            ("/api/v1/expr/parquet", "filters", "where"),
+            ("/api/v1/simple/parquet", "select", "columns"),
+            ("/api/v1/simple/parquet", "where", "filters"),
         ] {
             let (status, body) = post_json(
                 api_only(),
@@ -3866,7 +4064,7 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {field}: {body}");
             assert!(body.contains(field), "{route} {field}: {body}");
-            assert!(body.contains(belongs_to), "{route} {field}: {body}");
+            assert!(body.contains(takes), "{route} {field}: {body}");
         }
     }
 
@@ -3880,6 +4078,87 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("wehre"), "{body}");
+    }
+
+    /// Each route's description offers exactly the fields that route takes.
+    ///
+    /// This is what the request types are for: `ra_column` is not a catalog's to refuse
+    /// because it is not a catalog's to send, and the document says so rather than saying
+    /// it in prose beside a field that is there. The lists below are the endpoints' own
+    /// contracts, so a field added to one type and meant for another fails here.
+    #[test]
+    fn each_route_describes_its_own_body() {
+        let document = serde_json::to_value(describe("/api/v1")).unwrap();
+        let fields = |path: &str| {
+            let reference = document["paths"][path]["post"]["requestBody"]["content"]
+                ["application/json"]["schema"]["$ref"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{path} has no request body"))
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned();
+            document["components"]["schemas"][&reference]["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{reference} is not an object"))
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // Compared in order rather than as a set: the order is what a reader meets the fields
+        // in and is stated by hand, so this is what holds it. What to read, how to reach it,
+        // where on the sky, what to ask of it, and last how the answer comes back.
+        for (vocabulary, projection, predicate) in [
+            ("expr", "select", "where"),
+            ("simple", "columns", "filters"),
+        ] {
+            let common = [
+                "url", "storage", "region", projection, predicate, "format", "limit",
+            ];
+            assert_eq!(
+                fields(&format!("/api/v1/{vocabulary}/parquet")),
+                [
+                    &["url", "storage", "region"][..],
+                    &["ra_column", "dec_column", "healpix_column", "healpix_order"],
+                    &[projection, predicate, "format", "limit"],
+                ]
+                .concat(),
+            );
+            assert_eq!(fields(&format!("/api/v1/{vocabulary}/hats")), common);
+            assert_eq!(
+                fields(&format!("/api/v1/{vocabulary}/hats/plan")),
+                [common.as_slice(), &["return_storage"]].concat(),
+            );
+        }
+    }
+
+    /// Every `$ref` in the description names a component the description carries.
+    ///
+    /// The page and any generated client both resolve these, and a dangling one is a
+    /// component that was flattened into its users and removed while something still
+    /// pointed at it — which reads as a body with no fields rather than as an error.
+    #[test]
+    fn the_description_refers_to_nothing_it_does_not_carry() {
+        let document = serde_json::to_value(describe("/api/v1")).unwrap();
+        let carried = document["components"]["schemas"].as_object().unwrap();
+        let mut missing = Vec::new();
+        let mut stack = vec![&document];
+        while let Some(value) = stack.pop() {
+            match value {
+                serde_json::Value::Object(object) => {
+                    if let Some(serde_json::Value::String(reference)) = object.get("$ref") {
+                        let name = reference.rsplit('/').next().unwrap();
+                        if !carried.contains_key(name) {
+                            missing.push(name.to_owned());
+                        }
+                    }
+                    stack.extend(object.values());
+                }
+                serde_json::Value::Array(items) => stack.extend(items),
+                _ => {}
+            }
+        }
+        assert!(missing.is_empty(), "dangling: {missing:?}");
     }
 
     /// A query string on a mounted parquet file is a question about it, and the answer
