@@ -117,12 +117,15 @@ jobs:
   # spelling and which properties they return at all. The in-process server in
   # `tests/webdav.rs` can only prove OpenDAL parses the XML this repository writes.
   #
-  # `rclone serve webdav`, from a pinned image rather than from apt. What the runner's
+  # `rclone serve webdav`, from the current image rather than from apt. What the runner's
   # apt offers is whatever the distribution froze — a 2022 build on ubuntu-24.04 — and it
   # re-rolls whenever `ubuntu-latest` moves, which makes the one job meant to be
-  # representative of a real server the one job whose server nobody chose. The credentials
-  # are made up here and the container is destroyed with the runner, so this runs on
-  # forks too.
+  # representative of a real server the one job whose server nobody chose. `latest` for
+  # the same reason it is not apt's: the question this job asks is whether OpenDAL still
+  # parses what a real server sends today, and a pin would answer it about the server of
+  # whichever year the pin was written. A release that breaks it is the finding. The
+  # credentials are made up here and the container is destroyed with the runner, so this
+  # runs on forks too.
   #
   # `docker run` rather than a service container, as with MinIO above: `serve webdav` and
   # its flags are the image's command, and `jobs.<id>.services` has no way to set one.
@@ -151,7 +154,7 @@ jobs:
           # not docker's.
           docker run -d --name rclone -p 127.0.0.1:8788:8788 \
             -v /tmp/davroot:/data \
-            rclone/rclone:1.75.1 \
+            rclone/rclone:latest \
             serve webdav --addr :8788 \
             --user "$HATS_API_TEST_WEBDAV_USERNAME" \
             --pass "$HATS_API_TEST_WEBDAV_PASSWORD" \
