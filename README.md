@@ -518,6 +518,16 @@ will do at once" is the list of requests that would do it. The same three bind a
 reached by its own URL in file-server mode, where a `413` carries the sentence alone. A
 URL has no way to express a fan-out, which is also what `max_query_radius_arcsec` is about.
 
+### The clock
+
+`max_request_seconds`, 90 by default and `0` for no bound, is how long a request has to
+produce an answer. It is the bound that acts first for anything slow — gigabytes over an
+unhurried link take longer than this — and the one that hands back nothing: the work has
+already been done, so there is no plan to answer with. It is a `504` with a sentence.
+
+The clock covers making the answer and not sending it, so a large file served off a mount
+streams for as long as it takes.
+
 ### Servers that ignore `Range`
 
 A parquet read is tens of ranged requests, and a plain HTTP server may answer one with the
@@ -600,6 +610,7 @@ either. A mount's own `filenames` replaces this for the files under it.
 max_partitions = 16             # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
+max_request_seconds = 90        # how long one request has to answer; 0 is no bound
 max_concurrent_partitions = 4   # a performance setting, not a bound
 max_query_radius_arcsec = 600   # file-server mode only; 0 closes the circle surface
 max_materialize_bytes = "2GiB"  # copying an object off a server that ignores Range

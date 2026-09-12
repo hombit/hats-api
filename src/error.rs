@@ -42,6 +42,12 @@ pub enum ApiError {
     /// smaller region — or against a deployment configured to allow more — is answered.
     #[error("{0}")]
     TooMuchWork(String),
+    /// The request ran past `[limits] max_request_seconds` and was dropped where it
+    /// stood. Distinct from [`Self::TooMuchWork`], which is a bound checked against what
+    /// the request asks for and answers with the plan: this one is reached with work
+    /// already done and nothing to hand back, so the message is all the caller gets.
+    #[error("{0}")]
+    Timeout(String),
     /// Something on this side went wrong. The message is ours, and says nothing about
     /// the machine it happened on.
     #[error("{0}")]
@@ -89,6 +95,10 @@ impl ApiError {
 
     pub fn too_much_work(message: impl Into<String>) -> Self {
         Self::TooMuchWork(message.into())
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout(message.into())
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -146,6 +156,7 @@ impl ApiError {
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_)
             | Self::TooMuchWork(_)
+            | Self::Timeout(_)
             | Self::Internal(_)) => ours,
             // Getting the bytes, or reading them as parquet. These are the failures the
             // one sentence is for, and the ones whose messages name the path.
@@ -178,6 +189,12 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
             Self::TooMuchWork(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            // What every proxy in front of this service answers when the thing behind it
+            // ran long — nginx, HAProxy, Envoy and a load balancer all say `504` — so it
+            // is the status an operator's dashboard already counts as a timeout and a
+            // client's retry policy already knows. `408` is the other standard code and
+            // says the caller was slow to send the request, which is a different event.
+            Self::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ObjectStore(error) => object_store_status(error),
             Self::Storage(error) => storage_status(error),

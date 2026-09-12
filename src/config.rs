@@ -164,6 +164,19 @@ pub struct LimitsConfig {
     /// also what decides how far `max_bytes_fetched` can overshoot, since the reads already
     /// in flight when it trips are not stopped.
     pub max_concurrent_partitions: usize,
+    /// How long one request may take to produce an answer, in seconds. `0` is no bound.
+    ///
+    /// The clock runs while the answer is being made and stops when it is ready to send,
+    /// so a large file served off a mount is not bounded by it — the bytes go out after
+    /// the response exists. What it bounds is work: a read that is waiting on a store
+    /// that has stopped answering, or a query over more data than the other limits
+    /// happen to catch.
+    ///
+    /// It is the bound that acts first for anything slow. `max_bytes_fetched` allows
+    /// gigabytes, which over an unhurried link is longer than this, so a request that
+    /// trips the clock never reaches the counters — and unlike them it has no plan to
+    /// answer with, the work having already been done.
+    pub max_request_seconds: u64,
     /// The widest circle a query string may ask for, in arcseconds.
     ///
     /// The file-server mode's bound and not the API's. A url is something a browser follows
@@ -210,6 +223,10 @@ impl Default for LimitsConfig {
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             max_concurrent_partitions: 4,
+            // Long enough for a wide catalog query against a cold remote store, and short
+            // enough that a caller waiting on one finds out rather than holding a
+            // connection open until something else closes it.
+            max_request_seconds: 90,
             // Ten minutes of arc: a field around a source rather than a single position,
             // which is the size of question a person browsing actually asks — and still
             // small enough against a partition that it lands in a couple of them.

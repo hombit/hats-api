@@ -135,6 +135,10 @@ max_partitions = 16
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 
+# How long one request has to produce an answer; over it, 504 and no plan. "0" is no
+# bound. Making the answer, not sending it: a mounted file streams for as long as it takes.
+max_request_seconds = 90
+
 # How many partitions are read at once. A performance setting rather than a bound: the
 # time goes on network latency, so the reads go out together.
 max_concurrent_partitions = 4

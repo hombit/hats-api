@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     Router,
     extract::{Request, State, rejection::JsonRejection},
     http::{Method, StatusCode, header, request::Parts},
+    middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
@@ -59,6 +60,8 @@ pub struct Service {
     /// The widest circle a query string may ask for. The file-server mode's bound alone: a
     /// url is followed rather than fanned out, so what it asks for has to fit in one answer.
     max_query_radius_arcsec: f64,
+    /// How long a request has to produce an answer; `None` where the operator set no bound.
+    request_timeout: Option<Duration>,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -118,6 +121,8 @@ impl Service {
             sql_limits: limits.into(),
             catalog_limits: limits.into(),
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
+            request_timeout: (limits.max_request_seconds > 0)
+                .then(|| Duration::from_secs(limits.max_request_seconds)),
             show_version: server.show_version,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -149,6 +154,7 @@ impl Service {
 }
 
 pub fn router(service: Service) -> Router {
+    let timeout = service.request_timeout;
     let mut router = Router::new();
     if let Some(prefix) = service.api_prefix.clone() {
         router = router.route(&route(&prefix, "health"), get(health));
@@ -166,15 +172,22 @@ pub fn router(service: Service) -> Router {
         router = with_dialect::<Simple>(router, &prefix);
         router = with_description(router, &prefix);
     }
-    router
+    let mut router = router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
         // at `/api/v1` divide the url space without either being nested in the other.
         .fallback(serve_mounted)
         .with_state(service)
-        .layer(compression())
+        .layer(compression());
+    if let Some(limit) = timeout {
+        router = router.layer(middleware::from_fn_with_state(limit, deadline));
+    }
+    router
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
         // something in.
+        //
+        // Outside the deadline, so a request the clock cut off is logged as the `504` it
+        // answered with rather than as a span that stops mid-request.
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request| {
                 tracing::debug_span!(
@@ -184,6 +197,29 @@ pub fn router(service: Service) -> Router {
                 )
             }),
         )
+}
+
+/// Give up on a request that has run past `[limits] max_request_seconds`.
+///
+/// The clock covers producing the response and not sending it. That is the whole of why
+/// this sits here rather than over the body: every query is collected before it answers,
+/// so a handler's own future is the work, while a mounted file's is already finished when
+/// the first byte goes out. A bound over the body would cut a slow download of a file this
+/// service would happily serve, and bound nothing a query does.
+///
+/// Dropping the future is what stops the work. The reads below it are DataFusion streams
+/// and object-store requests, none of which is polled again once this returns, so a request
+/// nobody is waiting for stops costing the origin as well.
+async fn deadline(State(limit): State<Duration>, request: Request, next: Next) -> Response {
+    match tokio::time::timeout(limit, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => ApiError::timeout(format!(
+            "the request took longer than {} s; narrow the region, the columns or the \
+             limit, or send it to the plan route",
+            limit.as_secs()
+        ))
+        .into_response(),
+    }
 }
 
 /// Compress what is worth compressing, which is everything this service answers with
@@ -4821,5 +4857,66 @@ mod tests {
         let (status, body) = select_with(serde_json::json!({"url": "not-a-url"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("invalid url"), "{body}");
+    }
+
+    /// A handler that never finishes, behind the deadline. Nothing this service answers
+    /// can be made slow to order, so the middleware is exercised over a route of the
+    /// test's own — what is being checked is the layer and the status it produces.
+    fn timed(limit: Duration) -> Router {
+        Router::new()
+            .route("/slow", axum::routing::get(std::future::pending::<&str>))
+            .route("/fast", axum::routing::get(|| async { "answered" }))
+            .layer(middleware::from_fn_with_state(limit, deadline))
+    }
+
+    async fn hit(router: Router, uri: &str) -> (StatusCode, String) {
+        let response = router
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_request_that_runs_past_the_deadline_is_a_gateway_timeout() {
+        let (status, body) = hit(timed(Duration::from_millis(10)), "/slow").await;
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert!(body.contains("took longer than"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_request_that_beats_the_deadline_is_answered_untouched() {
+        let (status, body) = hit(timed(Duration::from_secs(30)), "/fast").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "answered");
+    }
+
+    /// `0` seconds is the operator turning the clock off, which has to be the absence of
+    /// the layer rather than a deadline of no time at all.
+    #[test]
+    fn a_deadline_of_zero_seconds_is_no_deadline() {
+        let with_zero = LimitsConfig {
+            max_request_seconds: 0,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(service_with(&with_zero).request_timeout, None);
+        assert_eq!(
+            service_with(&LimitsConfig::default()).request_timeout,
+            Some(Duration::from_secs(90))
+        );
+    }
+
+    fn service_with(limits: &LimitsConfig) -> Service {
+        Service::new(
+            AccessPolicy::default(),
+            limits,
+            Arc::default(),
+            &ApiConfig::default(),
+            &DataConfig::default(),
+            &ServerConfig::default(),
+        )
+        .unwrap()
     }
 }
