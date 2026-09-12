@@ -65,13 +65,13 @@ jobs:
           test "$tag" = "$crate" \
             || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1; }
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # Built for the daemon first, so the image is run before it is published.
       # Single-platform and native, so `load` is available and costs one export; the
       # push below rebuilds nothing, the builder having every layer already.
       - name: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -94,13 +94,13 @@ jobs:
             || { echo "the service did not answer"; docker logs smoke; exit 1; }
           docker rm -f smoke
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         if: github.event_name != 'pull_request'
         with:
           images: ${{ env.IMAGE }}
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
@@ -114,7 +114,7 @@ jobs:
       - name: push by digest
         id: push
         if: github.event_name != 'pull_request'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -133,7 +133,7 @@ jobs:
           # Without the `sha256:` prefix, which an artifact name may not carry.
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: github.event_name != 'pull_request'
         with:
           # One file per architecture, merged by name in the next job.
@@ -151,15 +151,15 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-*
           merge-multiple: true
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -167,7 +167,7 @@ jobs:
 
       # `latest=auto` moves `latest` for a `v1.2.3` tag and leaves it alone for a
       # prerelease; a manual run publishes `:ci` and moves neither.
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@v6
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -178,9 +178,13 @@ jobs:
 
       - name: assemble and tag
         working-directory: ${{ runner.temp }}/digests
+        env:
+          META: ${{ steps.meta.outputs.json }}
         run: |
+          # One `create` per run, however many tags: each is another name for the one
+          # manifest list, and a second `create` would build a second list.
           docker buildx imagetools create \
-            $(jq -cr '.target["docker-metadata-action"].tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META") \
             $(printf "$IMAGE@sha256:%s " *)
 
       - name: what was published
