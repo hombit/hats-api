@@ -8,9 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `[limits] max_request_seconds`, 90 by default, bounding how long one request may take to
-  produce an answer. Over it the request is dropped and answered with `504`. `0` is no
-  bound.
+--
 
 ### Changed
 
@@ -32,8 +30,18 @@ Release dates are in the UTC time zone.
 
 --
 
-## [0.0.1] - 2026.09.12
+## [0.0.2] - 2026-09-12
+
+### Added
+
+- Request timeout, `[limits] max_request_seconds`, 90 by default.
+
+## [0.0.1] - 2026-09-12
 
 ### Added
 
 Initial release.
+
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/hombit/hats-api/compare/v0.0.1...v0.0.2
+[0.0.1]: https://github.com/hombit/hats-api/releases/tag/v0.0.1

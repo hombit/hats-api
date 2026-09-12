@@ -1,6 +1,6 @@
 [package]
 name = "hats-api"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "MIT"
 authors = ["Konstantin Malanchev"]
