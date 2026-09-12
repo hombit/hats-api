@@ -138,7 +138,7 @@ const CLIENTS = {
      catalog's own files, so it is offered only where there is a catalog to name. */
   lsdb: {pip: 'lsdb', write: viaLsdb, needs: 'catalog'},
   nested_pandas: {pip: 'aiohttp nested-pandas requests', write: viaNestedPandas},
-  astropy: {pip: 'astropy pyarrow requests', write: viaAstropy},
+  astropy: {pip: 'astropy requests', write: viaAstropy},
   pyarrow: {pip: 'pyarrow requests', write: viaPyarrow},
 };
 
@@ -435,14 +435,17 @@ function viaNestedPandas(route, body, got) {
   return 'import nested_pandas as npd\n\nframe = npd.read_parquet(\n    ' + text(got) + '\n)';
 }
 
-/* Through `pyarrow` rather than `Table.read`, which needs `pandas` for a parquet file
-   whatever else is installed. The columns go across as a dict, so nothing here is a
-   second copy of the types. */
+/* A VOTable, which `Table.read` takes on its own — no `pyarrow` and no `pandas` to put a
+   parquet file in front of it. A VOTable declares each column's type, so this is not the
+   JSON answer with the types read back out of the values.
+
+   It takes flat columns only: a request naming a nested one is refused rather than
+   answered, which is the API's refusal and not this snippet's to work around. */
 function viaAstropy(route, body) {
   return (
-    'import io\n\nimport pyarrow.parquet as pq\nimport requests\nfrom astropy.table import Table\n\n' +
-    post(route, {...body, format: 'parquet'}) +
-    'table = Table(pq.read_table(io.BytesIO(answer.content)).to_pydict())'
+    'import io\n\nimport requests\nfrom astropy.table import Table\n\n' +
+    post(route, {...body, format: 'votable'}) +
+    'table = Table.read(io.BytesIO(answer.content), format="votable")'
   );
 }
 
@@ -1052,8 +1055,8 @@ function counts(plan) {
    `nested_pandas` reads from bytes here rather than from a url. On a file's panel it is
    handed the file's own address and fetches it itself; a plan's entries are bodies, and
    nothing that takes a path can send one \u2014 `fsspec` and `UPath` address a resource and have
-   nowhere to put a request body. `astropy` goes through `pyarrow` for the same reason it
-   does above: `Table.read` wants `pandas` for a parquet file whatever else is installed. */
+   nowhere to put a request body. `astropy` asks for a VOTable for the same reason it does
+   above: `Table.read` takes one on its own, with the types declared in the document. */
 function runners(plan, route, body) {
   const base = new URL('/', location.href).href.replace(/\/$/, '');
   const asked = python(JSON.stringify(body, null, 4));
@@ -1143,9 +1146,9 @@ function runners(plan, route, body) {
       name: 'astropy',
       note: 'One Table, stacked in the catalog\u2019s order.',
       code:
-        '# pip install astropy pyarrow requests\n' +
+        '# pip install astropy requests\n' +
         'import io\n\n' +
-        'import pyarrow.parquet as pq\nimport requests\nfrom astropy.table import Table, vstack\n\n' +
+        'import requests\nfrom astropy.table import Table, vstack\n\n' +
         'BASE = ' +
         text(base) +
         '\n\n' +
@@ -1159,10 +1162,10 @@ function runners(plan, route, body) {
         'for request in plan.json()["requests"]:\n' +
         '    answer = requests.post(\n' +
         '        BASE + request["path"],\n' +
-        '        json={**request["body"], "format": "parquet"},\n' +
+        '        json={**request["body"], "format": "votable"},\n' +
         '    )\n' +
         '    answer.raise_for_status()\n' +
-        '    tables.append(Table(pq.read_table(io.BytesIO(answer.content)).to_pydict()))\n\n' +
+        '    tables.append(Table.read(io.BytesIO(answer.content), format="votable"))\n\n' +
         'table = vstack(tables)',
     },
     {
