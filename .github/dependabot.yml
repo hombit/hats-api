@@ -36,6 +36,19 @@ updates:
     # label it could not find.
     labels: [dependencies]
 
+  # The two base images in the Dockerfile, which are pinned so that a tag rebuilds to
+  # the same thing. Pinning is what makes this entry necessary: without it the Rust
+  # toolchain the release image is built with would stay wherever it was pinned.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      docker:
+        patterns:
+          - "*"
+    labels: [dependencies]
+
   # The actions used by the workflows in .github/workflows.
   - package-ecosystem: github-actions
     directory: /

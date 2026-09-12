@@ -501,7 +501,7 @@ fn grouped(count: u64) -> String {
     grouped
 }
 
-/// The same question as a request to the API, which is what a client writes rather than
+/// The same query as a request to the API, which is what a client writes rather than
 /// a browser. Prose, and the address is written out rather than linked: an `<a href>`
 /// below this directory would be scraped as an entry by a client reading the markup for
 /// one.
@@ -513,7 +513,7 @@ fn grouped(count: u64) -> String {
 /// complete on a page whose script did not run.
 fn api_note(prefix: &str) -> String {
     format!(
-        "<p>The same question as an API request: <code>POST {route}</code> with a JSON \
+        "<p>The same query as an API request: <code>POST {route}</code> with a JSON \
          body naming the file as <code>file://\u{2026}</code> — this page's own path. A \
          file's panel writes the request out for <code>curl</code> and for the Python \
          readers, each with the <code>pip install</code> line it needs.</p>\n",

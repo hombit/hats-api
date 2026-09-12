@@ -1,0 +1,191 @@
+name: Docker
+
+# A release is a `v*` tag: each architecture is built on a runner of its own
+# architecture, the two are pushed by digest, and one manifest list is assembled from
+# them and tagged with the version and with `latest`.
+#
+# The same path is exercised without a release by `workflow_dispatch`, which publishes
+# the result as `:ci` instead — the merge step cannot be tested without a registry to
+# merge in, so testing it means really pushing something. Pull requests build both
+# architectures and run the image, but push nothing: a fork's token cannot write
+# packages, and that half needs no registry to prove.
+#
+# Not on every commit. A cold build of this dependency tree is several minutes per
+# architecture, and nothing in the image changes that `cargo build` in CI does not
+# already cover; the paths below are the ones that change how it is packaged.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - .github/workflows/docker.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners rather than QEMU: emulating this build costs hours.
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      # An artifact name cannot hold the `/` a platform is written with.
+      - name: name this platform
+        run: echo "PLATFORM=${PLATFORM//\//-}" >> "$GITHUB_ENV"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+
+      # A tag that says one version and an image that reports another is a fault
+      # nothing downstream can see, so it fails here instead.
+      - name: the tag and Cargo.toml agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          test "$tag" = "$crate" \
+            || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"; exit 1; }
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Built for the daemon first, so the image is run before it is published.
+      # Single-platform and native, so `load` is available and costs one export; the
+      # push below rebuilds nothing, the builder having every layer already.
+      - name: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: hats-api:smoke
+
+      - name: the image runs
+        run: |
+          docker run --rm hats-api:smoke --help
+          # Published on loopback, and to a port that is nobody's default, so a
+          # failure here is this container and not something else on the runner.
+          docker run -d --name smoke -p 127.0.0.1:8099:80 hats-api:smoke
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8099/api/v1/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8099/api/v1/health \
+            || { echo "the service did not answer"; docker logs smoke; exit 1; }
+          docker rm -f smoke
+
+      - uses: docker/metadata-action@v6
+        id: meta
+        if: github.event_name != 'pull_request'
+        with:
+          images: ${{ env.IMAGE }}
+
+      - uses: docker/login-action@v4
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # No tag: each architecture is pushed by digest and only the merge job below
+      # names anything. `provenance` and `sbom` are off because either one makes this
+      # push an index rather than an image, which `imagetools create` would then nest
+      # inside the manifest list as an `unknown/unknown` entry.
+      - name: push by digest
+        id: push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: record the digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          # The name is the digest, so the merge job needs nothing but the filenames.
+          # Without the `sha256:` prefix, which an artifact name may not carry.
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        with:
+          # One file per architecture, merged by name in the next job.
+          name: digest-${{ env.PLATFORM }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: manifest list
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest=auto` moves `latest` for a `v1.2.3` tag and leaves it alone for a
+      # prerelease; a manual run publishes `:ci` and moves neither.
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=auto
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=ci,enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: assemble and tag
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          META: ${{ steps.meta.outputs.json }}
+        run: |
+          # One `create` per run, however many tags: each is another name for the one
+          # manifest list, and a second `create` would build a second list.
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$META") \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      - name: what was published
+        run: docker buildx imagetools inspect "$IMAGE:${{ steps.meta.outputs.version }}"

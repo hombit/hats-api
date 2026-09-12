@@ -49,3 +49,4 @@ pub mod query;
 pub mod region;
 pub mod sql;
 pub mod storage;
+pub mod votable;
