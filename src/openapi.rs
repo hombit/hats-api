@@ -226,7 +226,10 @@ pub(crate) fn document(paths: Paths, mut components: Components) -> OpenApi {
                 .title("hats-api")
                 .version(env!("CARGO_PKG_VERSION"))
                 .description(Some(
-                    "A read-only query service over parquet files and HATS catalogs.\n\n\
+                    "Query HATS catalogs and parquet files over HTTP: a region of the sky, a \
+                     row predicate and the columns you want, answered as JSON, parquet or a \
+                     VOTable — or as a plan, one request per partition, where the work is too \
+                     large for one answer.\n\n\
                      Every query route is a `POST`: the body carries a url and, where the \
                      store needs them, the caller's own credentials — which a query string \
                      would write into every proxy's access log on the way. A body also has \
