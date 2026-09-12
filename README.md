@@ -13,7 +13,6 @@ client to fan out itself.
 
 The catalog can sit on local disk or in S3, GCS, Azure Blob, WebDAV, or behind a plain
 HTTP server. A single parquet file is queryable the same way.
-
 Two interfaces, either or both:
 
 - **[File-server mode](#file-server-mode)** publishes a local directory. Without a query
@@ -21,6 +20,24 @@ Two interfaces, either or both:
   query: `?ra=348&dec=-29&radius_arcsec=30&columns=source_id,mag&filters=mag<18`.
 - **[API mode](#api-mode)** takes the location in the request body, so each request names
   its own catalog instead of one this server publishes.
+
+## Running it
+
+```
+docker run -p 8080:80 ghcr.io/hombit/hats-api
+```
+
+With no configuration that is API mode on
+`http://localhost:8080/api/v1`, reading any S3, GCS, Azure, WebDAV or HTTPS store on the
+public internet. Publishing a local directory, or narrowing what may be reached, is
+[Configuration](#configuration).
+
+From source, with a [Rust toolchain](https://rustup.rs):
+
+```
+cargo build --release
+./target/release/hats-api --config hats-api.toml
+```
 
 ## File-server mode
 
@@ -506,25 +523,6 @@ at once.
 ## Configuration
 
 ```
-cargo build --release
-./target/release/hats-api --config hats-api.toml
-```
-
-Or from the published image, which listens on port 80 and holds the binary and a set of
-CA roots:
-
-```
-docker run -p 8080:80 \
-  -v ./hats-api.toml:/etc/hats-api.toml:ro -e HATS_API_CONFIG=/etc/hats-api.toml \
-  ghcr.io/hombit/hats-api:latest
-```
-
-`latest`, or a version: `ghcr.io/hombit/hats-api:0.0.1`. Both `linux/amd64` and
-`linux/arm64`. A local directory served this way has to be mounted into the container
-as well, at the `source` its `[[mount]]` names. There is no `HEALTHCHECK` in the image,
-the port and the API prefix both being configuration; probe `GET {api.prefix}/health`.
-
-```
 usage: hats-api [--config <path>]
 
   -c, --config <path>  TOML configuration file; defaults to $HATS_API_CONFIG,
@@ -537,9 +535,9 @@ environment:
   RUST_LOG               tracing filter, overriding the config file
 ```
 
-Both modes are off until the config turns them on.
-[`hats-api.example.toml`](hats-api.example.toml) writes out every key; the shortest useful
-file is one mount:
+With no file the API answers on `/api/v1` and the file server publishes nothing, there
+being no mount to publish. [`hats-api.example.toml`](hats-api.example.toml) writes out
+every key; the shortest useful file is one mount:
 
 ```toml
 [server]
@@ -620,6 +618,22 @@ Two independent sets of rules, and both apply:
 
 A name is judged before it is resolved, and every address it resolves to is judged again
 inside the HTTP client's own resolver. Redirects are not followed.
+
+### In a container
+
+The image listens on port 80 and holds the binary and a set of CA roots. A config file
+reaches it as a bind mount, and so does any directory a `[[mount]]` names, at the `source`
+it names:
+
+```
+docker run -p 8080:80 \
+  -v ./hats-api.toml:/etc/hats-api.toml:ro -e HATS_API_CONFIG=/etc/hats-api.toml \
+  -v /mnt/data/gaia:/mnt/data/gaia:ro \
+  ghcr.io/hombit/hats-api
+```
+
+The image carries no `HEALTHCHECK`, the port and the API prefix both being configuration.
+Probe `GET {api.prefix}/health`.
 
 ## Development
 
