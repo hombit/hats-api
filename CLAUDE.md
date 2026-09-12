@@ -240,8 +240,8 @@ everything about what SQL means here is decided there.
   whole file and returns nothing — a slow wrong answer rather than an error.
 
 - **A row's nested column is one value, and a projection into it returns that value.**
-  `columns=lightcurve.mag, lightcurve.mjd` comes back as one `lightcurve` holding those two
-  fields, the way `pyarrow` reads a subset of a struct — never as two columns beside each
+  `columns: ["lightcurve.mag", "lightcurve.mjd"]` comes back as one `lightcurve` holding those
+  two fields, the way `pyarrow` reads a subset of a struct — never as two columns beside each
   other and never flattened. A client that asked for less of a light curve still has a light
   curve; handing back `mag` and `mjd` separately makes the reader above — `nested_pandas`,
   `astropy` — put the row together again, against a schema that no longer matches the file's.
@@ -262,26 +262,54 @@ everything about what SQL means here is decided there.
     a path packs the column into a struct named after the table.
 
 - **Two vocabularies, one meaning, and a route each.** `select`/`where` take expressions and
-  `columns`/`filters` take the narrower forms a query string can carry, but both lower to
-  the same planned expression and meet the same allowlist. A difference in what they mean is
-  a bug, not a feature — so a change to one is a change to `sql.rs`, where they share the
-  code, rather than a second path beside it. `columns` stays narrower: it takes names, and a
-  caller who wants an expression writes `select`.
+  `columns`/`filters` take the narrower pair — a list of names, and one row condition — but
+  both lower to the same planned expression and meet the same allowlist. A difference in what
+  they mean is a bug, not a feature — so a change to one is a change to `sql.rs`, where they
+  share the code, rather than a second path beside it.
+
+  **Only the projection is narrowed.** `columns` takes names, and a caller who wants a
+  computed column or an alias writes `select`. The predicate is the same language under both
+  names: a second, smaller grammar would be a second parser and a second allowlist, and it
+  could not express what `lsdb` pushes down, which is a disjunction.
+
+  **The separators belong to the query string alone.** A body writes a list of names and an
+  `AND`; a url has one `columns=` and one `filters=`, so the comma between names and the
+  `&&`, `,` and `;` between conditions are spellings it needs and nothing else does.
+  `sql::columns` takes the list and `sql::column_text` the comma-separated string, both
+  through the same per-name code; `sql::filters` and `sql::filter_text` are the same
+  expression with and without the separator rewrite. Accepting a separator in a body would
+  leave one meaning with two spellings in the carrier that needs neither.
 
   **Which vocabulary a body is written in is which route it was sent to**, not a pair of
-  fields that may or may not be there: `app::Dialect` is the vocabulary, its `SEGMENT` is
-  the first path segment, and `QueryRequest<D>` is every route's body. That is what keeps
-  "the caller wrote both" from being a case at all, and it is why a third vocabulary is an
-  implementation and three route lines rather than two more fields and another pairwise
-  refusal everywhere the fields are read. A vocabulary answers on every target or the
-  exceptions become something a caller has to remember, so they are registered together.
+  fields that may or may not be there: `app::Dialect` is the vocabulary and its `SEGMENT` is
+  the first path segment. That is what keeps "the caller wrote both" from being a case at
+  all, and it is why a third vocabulary is an implementation and three route lines rather
+  than two more fields and another pairwise refusal everywhere the fields are read. A
+  vocabulary answers on every target or the exceptions become something a caller has to
+  remember, so they are registered together.
+
+  **Each endpoint takes its own request type**, generic over the vocabulary: `ParquetQuery`
+  carries the column names a file cannot supply for itself, `CatalogQuery` carries none of
+  them, `CatalogPlanQuery` adds the one field that only means something where a plan is the
+  answer. A field an endpoint has no use for is not a field of its request, so there is
+  nothing there to drop in silence, nothing to honour by a later change, and the description
+  shows each route what that route takes. Both catalog types lower to `app::Lowered`, which
+  is what everything below the routes works in — so a further catalog endpoint is a wire
+  type and a `lowered()`. The vocabulary stays a type parameter because it is the axis that
+  must *not* diverge; the target is the one that does.
+
+  **The order the fields are described in is the endpoint's to state.** `ParquetQuery::fields`
+  and its siblings list them as a body is written — url, storage, region, then the projection
+  and predicate, then how the answer comes back — and that one list is the order `/docs`
+  renders and the sentence a refusal ends with. It cannot be derived: a `#[serde(flatten)]`
+  is an `allOf` and its part always lands first.
 
   **The body stays flat on the wire.** `{url, select, where, region}`, never a nested query
-  object — which is why `QueryRequest` flattens its dialect. `flatten` is why the struct
-  cannot use `deny_unknown_fields`: serde ignores it there and drops unmatched keys in
-  silence, so the leftovers are collected into `unknown` and refused by `refuse_unknown`,
-  which also names the route a stray `filters` belongs to. Anything added to that struct
-  must keep both halves — flat outside, nothing dropped.
+  object — which is why each request type flattens its dialect. `flatten` is why they cannot
+  use `deny_unknown_fields`: serde ignores it there and drops unmatched keys in silence, so
+  the leftovers are collected into `unknown` and refused by `app::refuse_unknown`, which
+  names what the endpoint does take. Anything added to one of those structs must keep both
+  halves — flat outside, nothing dropped.
 - **A parameter this service acts on is honoured or refused, never dropped.** A `filters`
   that does not parse, or that names a column the file has not got, is a 400. Ignoring it
   returns every row, which the caller cannot tell from a predicate that matched every row
@@ -659,9 +687,10 @@ and decides nothing; `healpix.rs` answers questions about cells and knows nothin
 catalog's contents. Keep it that way — the decisions belong in the one module that has a
 request in front of it.
 
-- **The catalog names its own columns, and the routes refuse a request that names them.**
+- **The catalog names its own columns, and a catalog request has no field for them.**
   `ra_column`, `dec_column`, `healpix_column` and `healpix_order` are `hats_col_*`'s to
-  answer. Refused rather than ignored: a dropped one returns rows tested against columns the
+  answer, so `CatalogQuery` does not carry them and a body that does is refused as a name the
+  route has no field for. Not ignored: a dropped one returns rows tested against columns the
   caller did not write, which they cannot tell from the ones they asked for. They *are*
   written into a plan's entries, since the single-file route those entries go to has no
   catalog to ask.

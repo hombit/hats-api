@@ -183,11 +183,13 @@ The two vocabularies differ in how the projection and the predicate are spelled:
 | vocabulary | projection | predicate                                    |
 |---|---|----------------------------------------------|
 | `expr` | `select`: a SQL select list, so `mag - 0.1 AS mag_corr` works | `where`: single boolean SQL expression       |
-| `simple` | `columns`: comma-separated names | `filters`: one predicate, `&&` or `AND` for combining them |
+| `simple` | `columns`: a list of names | `filters`: one row condition, in the same language as `where` |
 
 Think of an `expr` query as `SELECT {select} FROM {url} WHERE {where}`: you write the two
-fields, and `url` is the table. `simple` is what a URL query string can carry, which is
-why file-server mode reads the same pair out of one.
+fields, and `url` is the table. `simple` narrows the projection to a list of names — nothing
+computed and no aliases — and keeps the same expression language for the condition. It is
+also the pair a URL query string carries, which is why file-server mode reads it out of one;
+there the names are one parameter separated by commas, a url having nowhere to put a list.
 
 The rest of the body is the same in both vocabularies:
 
@@ -265,7 +267,7 @@ A fifteen-degree cone over Gaia DR3, too wide to run in one answer:
 curl -s https://example.com/api/v1/simple/hats/plan -H 'content-type: application/json' -d '
 {
   "url": "s3://stpubdata/gaia/gaia_dr3/public/hats",
-  "columns": "source_id, ra, dec",
+  "columns": ["source_id", "ra", "dec"],
   "filters": "parallax > 1",
   "region": [{ "type": "circle", "ra": 30.0, "dec": 5.0, "radius_deg": 15.0 }],
   "limit": 1000
@@ -284,7 +286,7 @@ curl -s https://example.com/api/v1/simple/hats/plan -H 'content-type: applicatio
       "path": "/api/v1/simple/parquet",
       "body": {
         "url": "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/Norder=2/Dir=0/Npix=0.parquet",
-        "columns": "source_id, ra, dec",
+        "columns": ["source_id", "ra", "dec"],
         "filters": "parallax > 1",
         "region": [{ "type": "circle", "ra": 30.0, "dec": 5.0, "radius_deg": 15.0 }],
         "ra_column": "ra",
@@ -327,7 +329,7 @@ One partition of ZTF DR24, in the `simple` vocabulary, reaching into a nested co
 curl -s https://example.com/api/v1/simple/parquet -H 'content-type: application/json' -d '
 {
   "url": "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats/dataset/Norder=6/Dir=30000/Npix=34623/part0.snappy.parquet",
-  "columns": "objectid, objra, objdec, lightcurve.mag",
+  "columns": ["objectid", "objra", "objdec", "lightcurve.mag"],
   "filters": "nepochs > 10",
   "limit": 2
 }'
@@ -369,12 +371,16 @@ it with a dotted name, `sources.mjd`, and the `sources` column comes back holdin
 fields you named, the way `pyarrow` reads a subset of a struct:
 
 ```
-columns=id, sources.mjd, sources.mag   ->  id, sources{mjd, mag}
-columns=sources                        ->  sources{every field}
-columns=sources, sources.mjd           ->  sources{every field}
-select=sources.mjd AS mjd              ->  mjd          (an alias is your own column)
-select=get_field(sources,'mjd') AS m   ->  m            (an expression, not part of sources)
+columns: ["id", "sources.mjd", "sources.mag"]  ->  id, sources{mjd, mag}
+columns: ["sources"]                           ->  sources{every field}
+columns: ["sources", "sources.mjd"]            ->  sources{every field}
+select:  "sources.mjd AS mjd"                  ->  mjd   (an alias is your own column)
+select:  "get_field(sources,'mjd') AS m"       ->  m     (an expression, not part of sources)
 ```
+
+In a url the same names are one parameter separated by commas —
+`?columns=id,sources.mjd,sources.mag` — which is the only difference between the two
+carriers.
 
 Fields come back in the order you named them, and the column keeps the place where you
 first named it.

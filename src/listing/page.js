@@ -282,14 +282,22 @@ function snippet(panel) {
    shape: a file names itself and a catalog names itself and a shape on the sky, and the
    column names are the catalog's own to answer — which is why they appear in neither.
 
-   Both sit under `simple`, which is the vocabulary the panel's fields are: `columns` takes
-   names and `filters` spells `AND` as `&&`, the same pair a url carries. The `expr` routes
-   take one SQL expression per field instead, and a body written for one is refused by the
-   other rather than half-read. */
+   Both sit under `simple`, which is the vocabulary the panel's fields are — the same pair a
+   url carries. `columns` is a list in a body, since a body can hold one and a url cannot, so
+   the names are split here the way the url form parses them; `filters` is one condition
+   either way and goes across as it is. The `expr` routes take a select list and one SQL
+   expression instead, and a body written for one is refused by the other rather than
+   half-read. */
 function request(panel) {
-  const {ra, dec, radius_arcsec, ...rest} = asked(panel);
+  const {ra, dec, radius_arcsec, columns, ...rest} = asked(panel);
   const catalog = panel.dataset.catalog !== undefined;
-  const body = {url: 'file://' + panel.dataset.url, ...rest};
+  /* Written in the order the API describes a body in — what to read, then what to ask of
+     it — rather than in whichever order the fields were read out of the panel. The snippet
+     is something a reader copies and then edits, so it should look like the documented
+     shape. */
+  const body = {url: 'file://' + panel.dataset.url};
+  if (columns !== undefined) body.columns = listed(columns);
+  Object.assign(body, rest);
   if (catalog) {
     /* Numbers, not the strings the fields hold: the body is JSON, and `"45.6"` is a string
        where a coordinate is expected. An empty field leaves the region out entirely, so a
@@ -382,7 +390,7 @@ function viaLsdb(route, body, got) {
   const circle = body.region === undefined ? undefined : body.region[0];
   const arguments_ = [text(at)];
   if (body.columns !== undefined) {
-    arguments_.push('columns=[' + listed(body.columns).map(bare).join(', ') + ']');
+    arguments_.push('columns=[' + body.columns.map(bare).join(', ') + ']');
   }
   /* The search goes into the open rather than onto the catalog afterwards: it is what
      decides which partitions are read, and a catalog opened without it has already agreed

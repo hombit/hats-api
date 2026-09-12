@@ -597,10 +597,12 @@ async fn serve_mounted(
 /// reader that takes one, which is what the file-server mode is for.
 #[derive(Debug, Default)]
 struct FileQuery {
-    /// The same pair the `simple` route takes, and the reason that vocabulary exists: it is
-    /// what a query string can carry. One type, so a name means the same thing in a url as
-    /// in a body rather than being two fields that happen to agree.
-    simple: Simple,
+    /// The same pair the `simple` route takes, in the text form a url can carry: one
+    /// `columns=` holding names separated by commas, one `filters=` holding conditions
+    /// joined by `&&`, `,` or `;`. A body writes each as a list and needs no separator,
+    /// which is the only difference between the two — both lower to the same expression.
+    columns: Option<String>,
+    filters: Option<String>,
     format: Option<String>,
     limit: Option<String>,
     /// The circle, built and checked at parse time so that everything downstream can borrow
@@ -630,8 +632,8 @@ impl FileQuery {
         let mut asked = false;
         for (name, value) in form_urlencoded::parse(raw.as_bytes()) {
             let field = match name.as_ref() {
-                "columns" => &mut query.simple.columns,
-                "filters" => &mut query.simple.filters,
+                "columns" => &mut query.columns,
+                "filters" => &mut query.filters,
                 "format" => &mut query.format,
                 "limit" => &mut query.limit,
                 "ra_column" => &mut query.ra_column,
@@ -655,8 +657,14 @@ impl FileQuery {
     /// The projection, the predicate and the limit, which every route reads the same way.
     fn common(&self) -> Result<(Projection<'_>, Predicate<'_>, Option<usize>), ApiError> {
         Ok((
-            self.simple.projection(),
-            self.simple.predicate(),
+            match self.columns.as_deref() {
+                Some(list) => Projection::ColumnText(list),
+                None => Projection::All,
+            },
+            match self.filters.as_deref() {
+                Some(text) => Predicate::FilterText(text),
+                None => Predicate::All,
+            },
             match self.limit.as_deref() {
                 // Said as a number rather than left to mean "no limit": a caller who
                 // wrote one and got every row would have no way to notice.
@@ -844,8 +852,8 @@ async fn query_mounted(
         // Both parameters are the caller's own text and can be megabytes of `IN` list,
         // so what is logged is that they were there.
         path = request.uri.path(),
-        projected = query.simple.columns.is_some(),
-        filtered = query.simple.filters.is_some(),
+        projected = query.columns.is_some(),
+        filtered = query.filters.is_some(),
         format = format.name(),
         num_rows,
         // What the pruning was worth, next to the time it took. Free to record and the
@@ -918,8 +926,8 @@ async fn query_catalog_mounted(
         partitions = search.catalog().partitions().len(),
         chosen = search.chosen().len(),
         partitions_read,
-        projected = query.simple.columns.is_some(),
-        filtered = query.simple.filters.is_some(),
+        projected = query.columns.is_some(),
+        filtered = query.filters.is_some(),
         format = format.name(),
         num_rows,
         data_bytes_read,
@@ -1069,6 +1077,12 @@ trait Dialect:
     /// routes that carry it say the same thing about it.
     const FIELDS: &'static [&'static str];
 
+    /// What a caller most often gets wrong about these two, said in the refusal a body that
+    /// would not deserialize meets. Serde's own message names the field and then quotes the
+    /// value, which is why it is not the one shown — so the type has to be said here or not
+    /// at all.
+    const NOTE: &'static str;
+
     /// A projection and a predicate written in this vocabulary's own two fields, so that the
     /// description's runner starts from a request that returns rows rather than a 400.
     ///
@@ -1132,6 +1146,7 @@ impl Dialect for Expr {
         boolean expression. Neither is a statement — each is parsed on its own and must \
         parse to its end.";
     const FIELDS: &'static [&'static str] = &["select", "where"];
+    const NOTE: &'static str = "select and where are each one string";
 
     fn example(projection: &str, predicate: &str) -> serde_json::Value {
         serde_json::json!({ "select": projection, "where": predicate })
@@ -1152,42 +1167,58 @@ impl Dialect for Expr {
     }
 }
 
-/// Names and a narrower filter form — the vocabulary a url query string can carry, which is
-/// why the file-server mode reads the same pair out of one.
+/// A list of column names and one row condition — the narrower pair, and the same one a
+/// url's query string carries.
+///
+/// The projection is a list because a body has arrays and a comma between names is a
+/// separator a caller would otherwise have to quote around. The predicate stays one string:
+/// it is one expression whichever way it is carried, and a list of them would be a second
+/// way to write the `AND` the expression already has.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, utoipa::ToSchema)]
 #[schema(
-    description = "A projection and a predicate in the narrower forms a url query string can \
-                   carry. The same meaning as the expression vocabulary, and the same limits."
+    description = "A projection and a predicate in the narrower forms: a list of column \
+                   names, and one row condition. The same meaning as the expression \
+                   vocabulary, and the same limits."
 )]
 struct Simple {
-    /// Column names, comma-separated: the select list that would follow `SELECT`, restricted to
-    /// plain names. For anything computed, use the expression vocabulary. Write a name as the
-    /// file spells it, in double quotes where the spelling needs them. A dotted name reaches
-    /// inside a struct column, and comes back as that column carrying the fields you named.
+    /// The columns to return, one name per element, and nothing computed — for that, use the
+    /// expression vocabulary. Write a name as the file spells it, in double quotes where the
+    /// spelling needs them. A dotted name reaches inside a struct column, and comes back as
+    /// that column carrying the fields you named. Leave the field out for every column; an
+    /// empty list is refused rather than read as one or the other.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = "objectid, objra, objdec, lightcurve.mag")]
-    columns: Option<String>,
-    /// The row condition, where `&&` may be written for `AND`. Otherwise the same expression
-    /// language as the other vocabulary's `where`.
+    #[schema(example = json!(["objectid", "objra", "objdec", "lightcurve.mag"]))]
+    columns: Option<Vec<String>>,
+    /// The row condition: one boolean expression over this file's columns, which is the same
+    /// language as the other vocabulary's `where`. Leave it out for every row.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[schema(example = "objdec > 60 && nepochs > 100")]
+    #[schema(example = "objdec > 60 AND nepochs > 100")]
     filters: Option<String>,
 }
 
 impl Dialect for Simple {
     const SEGMENT: &'static str = "simple";
-    const SUMMARY: &'static str = "Names and the narrower filter form a url query string can \
-        carry: `columns` is a comma-separated list of names, `filters` spells `AND` as \
-        `&&`. A caller who wants an expression uses the `expr` routes.";
+    const SUMMARY: &'static str = "Names and a condition: `columns` is a list of column \
+        names, `filters` one row condition. A caller who wants a computed column or an \
+        alias uses the `expr` routes.";
     const FIELDS: &'static [&'static str] = &["columns", "filters"];
+    const NOTE: &'static str = "columns is a list of names and filters one condition";
 
     fn example(projection: &str, predicate: &str) -> serde_json::Value {
-        serde_json::json!({ "columns": projection, "filters": predicate })
+        // The projection arrives as the select list the other vocabulary writes, since a
+        // target names the same columns for either, and its commas are this vocabulary's
+        // list. The predicate is one expression in both and goes across as it is.
+        let names = projection
+            .split(',')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        serde_json::json!({ "columns": names, "filters": predicate })
     }
 
     fn projection(&self) -> Projection<'_> {
         match self.columns.as_deref() {
-            Some(list) => Projection::Columns(list),
+            Some(names) => Projection::Columns(names),
             None => Projection::All,
         }
     }
@@ -1644,10 +1675,12 @@ impl Format {
 /// Recognising those two by their wording is the weak part: serde could reword them, and
 /// the only cost would be a caller who stops being told which key they misspelled. It
 /// fails towards the safe message, and the two tests below are what notice.
-fn body_error(rejection: &JsonRejection, takes: &str) -> ApiError {
+fn body_error<D: Dialect>(rejection: &JsonRejection, takes: &str) -> ApiError {
     // What this endpoint takes, and not what any endpoint takes: the two differ, and a
-    // sentence naming both leaves the caller to work out which half is theirs.
-    let shape = format!("expected a JSON object with {takes}");
+    // sentence naming both leaves the caller to work out which half is theirs. The
+    // vocabulary's note is here because this is the message a wrong *type* lands on, and
+    // serde's own — which does say the type — quotes the value beside it.
+    let shape = format!("expected a JSON object with {takes}; {}", D::NOTE);
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -1748,7 +1781,7 @@ async fn query_parquet<D: Dialect>(
     body: Result<Json<ParquetQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(params) =
-        body.map_err(|rejection| body_error(&rejection, &ParquetQuery::<D>::takes()))?;
+        body.map_err(|rejection| body_error::<D>(&rejection, &ParquetQuery::<D>::takes()))?;
     let started = Instant::now();
     refuse_unknown(&params.unknown, &ParquetQuery::<D>::takes())?;
     // Everything decidable from the request alone, before anything is opened.
@@ -1867,7 +1900,7 @@ async fn query_hats<D: Dialect>(
     body: Result<Json<CatalogQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) =
-        body.map_err(|rejection| body_error(&rejection, &CatalogQuery::<D>::takes()))?;
+        body.map_err(|rejection| body_error::<D>(&rejection, &CatalogQuery::<D>::takes()))?;
     let started = Instant::now();
     refuse_unknown(&body.unknown, &CatalogQuery::<D>::takes())?;
     let params = body.lowered();
@@ -1941,7 +1974,7 @@ async fn query_hats_plan<D: Dialect>(
     body: Result<Json<CatalogPlanQuery<D>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(body) =
-        body.map_err(|rejection| body_error(&rejection, &CatalogPlanQuery::<D>::takes()))?;
+        body.map_err(|rejection| body_error::<D>(&rejection, &CatalogPlanQuery::<D>::takes()))?;
     let started = Instant::now();
     // Planned, not run — but a body this route cannot read as written is refused here all
     // the same, or the plan would hand back entries every one of which is a 400 the client
@@ -3579,7 +3612,7 @@ mod tests {
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/simple/hats/plan",
-            serde_json::json!({"url": "file:///", "columns": "id", "region": [region]}),
+            serde_json::json!({"url": "file:///", "columns": ["id"], "region": [region]}),
         )
         .await;
 
@@ -3610,7 +3643,7 @@ mod tests {
                 !plan.to_string().contains(&source),
                 "the plan names the disk"
             );
-            assert_eq!(entry["body"]["columns"], "id");
+            assert_eq!(entry["body"]["columns"], serde_json::json!(["id"]));
             // A region is carried only where the rows still need it, and the columns only
             // where the region is there to test.
             match entry["body"]["region"].is_null() {
@@ -3627,7 +3660,7 @@ mod tests {
         let dir = crate::hats_query::tests::fixture(true);
         let region = crate::hats_query::tests::regions()[1].clone();
         let expected = crate::hats_query::tests::inside(&region);
-        let body = serde_json::json!({"url": "file:///", "columns": "id", "region": [region]});
+        let body = serde_json::json!({"url": "file:///", "columns": ["id"], "region": [region]});
 
         let (_, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
@@ -3680,7 +3713,7 @@ mod tests {
                 ..Default::default()
             },
             query: Simple {
-                columns: Some("id".to_owned()),
+                columns: Some(vec!["id".to_owned()]),
                 filters: None,
             },
             region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
@@ -3729,7 +3762,7 @@ mod tests {
                 url: "file:///".to_owned().into(),
                 storage,
                 query: Simple {
-                    columns: Some("id".to_owned()),
+                    columns: Some(vec!["id".to_owned()]),
                     filters: None,
                 },
                 region: None,
@@ -4066,6 +4099,57 @@ mod tests {
             assert!(body.contains(field), "{route} {field}: {body}");
             assert!(body.contains(takes), "{route} {field}: {body}");
         }
+    }
+
+    /// `columns` is a list in a body, and the refusal says so when it is handed the comma
+    /// separated text a url carries.
+    ///
+    /// A client moving a url's parameters into a body would otherwise be asking for a column
+    /// named `objectid, band` — and the refusal has to name the shape itself, since serde's
+    /// own message says it beside the value it quotes, which is the one thing this service
+    /// does not repeat back.
+    #[tokio::test]
+    async fn the_simple_vocabulary_takes_a_list_of_columns() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let ask = async |body| {
+            post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/simple/parquet",
+                body,
+            )
+            .await
+        };
+
+        let (status, body) = ask(serde_json::json!({
+            "url": "file:///part0.parquet",
+            "columns": ["objectid", "band"],
+            "filters": "objectid < 3 AND band = 'g'",
+        }))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let names = answer["schema"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|column| column["name"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["objectid", "band"], "{body}");
+        // The columns came back in the order they were named, and the condition held.
+        for row in answer["rows"].as_array().unwrap() {
+            assert!(row["objectid"].as_i64().unwrap() < 3, "{row}");
+            assert_eq!(row["band"], "g", "{row}");
+        }
+
+        // The url's spelling of the same request, sent to the body's route.
+        let (status, body) = ask(serde_json::json!({
+            "url": "file:///part0.parquet",
+            "columns": "objectid, band",
+        }))
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("list of names"), "{body}");
     }
 
     /// A field of no vocabulary at all is named too, rather than ignored.

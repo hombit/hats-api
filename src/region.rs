@@ -1018,7 +1018,7 @@ mod tests {
         healpix_column: Option<&str>,
     ) -> Result<Vec<i64>, ApiError> {
         let selection = Selection {
-            projection: Projection::Columns("objectid"),
+            projection: Projection::ColumnText("objectid"),
             predicate: Predicate::All,
             spatial: Some(Spatial {
                 regions,
@@ -1139,7 +1139,7 @@ mod tests {
         let regions = [circle_at(120.0, 20.0, 1.0)];
         let read = async |file: &RemoteFile| {
             let selection = Selection {
-                projection: Projection::Columns("objectid"),
+                projection: Projection::ColumnText("objectid"),
                 predicate: Predicate::All,
                 spatial: Some(Spatial {
                     regions: &regions,

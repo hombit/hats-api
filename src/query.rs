@@ -38,8 +38,12 @@ pub enum Projection<'a> {
     All,
     /// A SQL select list — `objectid, lightcurve.mag AS mag`.
     Select(&'a str),
-    /// Comma-separated column names, and no expressions.
-    Columns(&'a str),
+    /// Column names, one per element, and no expressions.
+    Columns(&'a [String]),
+    /// The same names comma-separated in one string, which is all a url's query string can
+    /// carry. One wire form of [`Self::Columns`] rather than a third vocabulary: the two
+    /// lower through the same code and mean the same thing.
+    ColumnText(&'a str),
 }
 
 /// Which rows come back, and in whose vocabulary the caller asked.
@@ -50,8 +54,11 @@ pub enum Predicate<'a> {
     All,
     /// One boolean SQL expression over this file's columns.
     Where(&'a str),
-    /// The same, with `&&` accepted for `AND`.
+    /// The same language under the other vocabulary's name.
     Filters(&'a str),
+    /// The same again, where `&&`, `,` and `;` stand in for `AND`, `AND` and `OR` — the
+    /// spellings a url's query string needs to join two conditions inside one parameter.
+    FilterText(&'a str),
 }
 
 /// What to read. The two expression fields are each one of two spellings, and the request
@@ -268,6 +275,10 @@ pub(crate) async fn execute(
             let expr = sql::filters(&state, df.schema(), text, limits)?;
             df.filter(expr)?
         }
+        Predicate::FilterText(text) => {
+            let expr = sql::filter_text(&state, df.schema(), text, limits)?;
+            df.filter(expr)?
+        }
     };
     let df = match selection.projection {
         Projection::All => df,
@@ -275,8 +286,12 @@ pub(crate) async fn execute(
             let exprs = sql::projection(&state, df.schema(), sql, limits)?;
             df.select(exprs)?
         }
-        Projection::Columns(list) => {
-            let exprs = sql::columns(&state, df.schema(), list, limits)?;
+        Projection::Columns(names) => {
+            let exprs = sql::columns(&state, df.schema(), names, limits)?;
+            df.select(exprs)?
+        }
+        Projection::ColumnText(list) => {
+            let exprs = sql::column_text(&state, df.schema(), list, limits)?;
             df.select(exprs)?
         }
     };
@@ -804,7 +819,7 @@ pub(crate) mod tests {
                 (
                     "a projection",
                     Selection {
-                        projection: Projection::Columns("objectid, mag"),
+                        projection: Projection::ColumnText("objectid, mag"),
                         predicate: Predicate::All,
                         spatial: None,
                         limit: None,
@@ -822,7 +837,7 @@ pub(crate) mod tests {
                 (
                     "a predicate and a projection",
                     Selection {
-                        projection: Projection::Columns("objectid"),
+                        projection: Projection::ColumnText("objectid"),
                         predicate: Predicate::Where("mag < 0.5"),
                         spatial: None,
                         limit: None,
@@ -863,7 +878,7 @@ pub(crate) mod tests {
         };
         let (_dir, file) = on_disk(&shaped(shape));
         let selection = Selection {
-            projection: Projection::Columns("objectid"),
+            projection: Projection::ColumnText("objectid"),
             predicate: Predicate::Where("mag < 1.0"),
             spatial: None,
             limit: None,
@@ -893,7 +908,7 @@ pub(crate) mod tests {
         for order in [Order::File, Order::Unspecified] {
             for predicate in [Predicate::All, Predicate::Where("mag < 1.0")] {
                 let selection = Selection {
-                    projection: Projection::Columns("objectid"),
+                    projection: Projection::ColumnText("objectid"),
                     predicate,
                     spatial: None,
                     limit: Some(100),
@@ -923,7 +938,7 @@ pub(crate) mod tests {
         };
         let (_dir, file) = on_disk(&shaped(shape));
         let selection = Selection {
-            projection: Projection::Columns("objectid"),
+            projection: Projection::ColumnText("objectid"),
             predicate: Predicate::All,
             spatial: None,
             limit: Some(100),
@@ -971,7 +986,7 @@ pub(crate) mod tests {
         let lookup = run(
             &file,
             &Selection {
-                projection: Projection::Columns("objectid"),
+                projection: Projection::ColumnText("objectid"),
                 predicate: Predicate::Where("objectid = 61234"),
                 spatial: None,
                 limit: None,

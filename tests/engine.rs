@@ -368,8 +368,14 @@ async fn observe_with(
             let expr = hats_api::sql::predicate(&state, df.schema(), sql, LIMITS).expect("where");
             df.filter(expr).expect("filter")
         }
-        Predicate::Filters(text) => {
-            let expr = hats_api::sql::filters(&state, df.schema(), text, LIMITS).expect("filters");
+        Predicate::Filters(conditions) => {
+            let expr =
+                hats_api::sql::filters(&state, df.schema(), conditions, LIMITS).expect("filters");
+            df.filter(expr).expect("filter")
+        }
+        Predicate::FilterText(text) => {
+            let expr =
+                hats_api::sql::filter_text(&state, df.schema(), text, LIMITS).expect("filters");
             df.filter(expr).expect("filter")
         }
     };
@@ -380,8 +386,14 @@ async fn observe_with(
                 hats_api::sql::projection(&state, df.schema(), sql, LIMITS).expect("select");
             df.select(exprs).expect("project")
         }
-        Projection::Columns(list) => {
-            let exprs = hats_api::sql::columns(&state, df.schema(), list, LIMITS).expect("columns");
+        Projection::Columns(names) => {
+            let exprs =
+                hats_api::sql::columns(&state, df.schema(), names, LIMITS).expect("columns");
+            df.select(exprs).expect("project")
+        }
+        Projection::ColumnText(list) => {
+            let exprs =
+                hats_api::sql::column_text(&state, df.schema(), list, LIMITS).expect("columns");
             df.select(exprs).expect("project")
         }
     };
@@ -439,9 +451,10 @@ async fn partition_spans(
         .await
         .expect("read the fixture");
     let df = match selection.projection {
-        Projection::Columns(list) => {
+        Projection::Columns(names) => {
             let state = ctx.state();
-            let exprs = hats_api::sql::columns(&state, df.schema(), list, LIMITS).expect("columns");
+            let exprs =
+                hats_api::sql::columns(&state, df.schema(), names, LIMITS).expect("columns");
             df.select(exprs).expect("project")
         }
         _ => df,
@@ -527,7 +540,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
         (
             "narrow projection",
             Selection {
-                projection: Projection::Columns("objectid, objra, objdec"),
+                projection: Projection::ColumnText("objectid, objra, objdec"),
                 predicate: Predicate::All,
                 spatial: None,
                 limit: None,
@@ -572,7 +585,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
         (
             "narrow projection and a cut",
             Selection {
-                projection: Projection::Columns("objectid, mag"),
+                projection: Projection::ColumnText("objectid, mag"),
                 predicate: Predicate::Where("mag < 0.05"),
                 spatial: None,
                 limit: None,

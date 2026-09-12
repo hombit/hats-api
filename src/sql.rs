@@ -115,8 +115,8 @@ pub fn predicate(
     plan_predicate(state, schema, tokenize(sql, FIELD)?, FIELD, limits)
 }
 
-/// The projection as a list of column names — `columns`, the other of the two ways to
-/// say one.
+/// The projection as column names — `columns`, the other of the two ways to say one, with
+/// one name per element.
 ///
 /// A name, and nothing else. `Gmag` and `lightcurve.mag` are the whole language here;
 /// `mag - 0.1 AS corrected` is [`projection`]'s to accept. Widening this one to
@@ -125,8 +125,39 @@ pub fn predicate(
 ///
 /// A name that is not an ordinary identifier is quoted, the way SQL quotes one:
 /// `"E(BP-RP)"`. Unquoted it parses as a call to a function named `E`, which is a
-/// refusal rather than a wrong column.
+/// refusal rather than a wrong column. An element holding two names is refused as well:
+/// the list is the separator here, so a comma inside one is a name with a comma in it.
 pub fn columns(
+    state: &SessionState,
+    schema: &DFSchema,
+    names: &[String],
+    limits: Limits,
+) -> Result<Vec<Expr>, ApiError> {
+    const FIELD: &str = "columns";
+
+    if names.is_empty() {
+        return Err(ApiError::bad_request(
+            "columns names no column; leave it out to get every column",
+        ));
+    }
+    let parts = names
+        .iter()
+        .map(|name| {
+            let item = parse(tokenize(name, FIELD)?, FIELD, limits, Parser::parse_expr)?;
+            column_part(state, schema, item, limits)
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    regrouped(state, schema, parts, FIELD, limits)
+}
+
+/// The same names comma-separated in one string, which is all a url's query string can
+/// carry.
+///
+/// The comma is the separator a body expresses as an array, so this is one wire form of the
+/// list above rather than a second language: both map each name the same way and meet the
+/// same allowlist. Parsed rather than split on the character, since a quoted name may hold
+/// one — `"E(BP,RP)"` is one column.
+pub fn column_text(
     state: &SessionState,
     schema: &DFSchema,
     list: &str,
@@ -139,42 +170,72 @@ pub fn columns(
     })?;
     let parts = items
         .into_iter()
-        .map(|mut item| {
-            resolve_identifiers(&mut item, schema);
-            // After resolving, so a path is grouped and named by the file's spelling rather
-            // than the caller's.
-            //
-            // A name this file has not got is planned rather than refused here, so that the
-            // message a caller gets is the planner's — which names the closest column it
-            // has — instead of this one saying they wrote an expression when they did not.
-            match projected_path(&item, schema) {
-                Some(path) => Ok(Part::Path(path)),
-                None if column_path(&item).is_some() => plan(
-                    state,
-                    schema,
-                    ExprWithAlias {
-                        expr: item,
-                        alias: None,
-                    },
-                    FIELD,
-                    limits,
-                )
-                .map(Part::Planned),
-                None => Err(ApiError::bad_request(format!(
-                    "{FIELD} takes column names; write select for an expression"
-                ))),
-            }
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
+        .map(|item| column_part(state, schema, item, limits))
+        .collect::<Result<Vec<Part>, ApiError>>()?;
     regrouped(state, schema, parts, FIELD, limits)
 }
 
-/// The row predicate as the file-server vocabulary spells it — [`predicate`]'s language,
-/// with `&&`, `,` and `;` accepted for `AND`, `AND` and `OR`.
+/// One name of a `columns` list, whichever wire form carried it.
+fn column_part(
+    state: &SessionState,
+    schema: &DFSchema,
+    mut item: SqlExpr,
+    limits: Limits,
+) -> Result<Part, ApiError> {
+    const FIELD: &str = "columns";
+
+    resolve_identifiers(&mut item, schema);
+    // After resolving, so a path is grouped and named by the file's spelling rather
+    // than the caller's.
+    //
+    // A name this file has not got is planned rather than refused here, so that the
+    // message a caller gets is the planner's — which names the closest column it
+    // has — instead of this one saying they wrote an expression when they did not.
+    match projected_path(&item, schema) {
+        Some(path) => Ok(Part::Path(path)),
+        None if column_path(&item).is_some() => plan(
+            state,
+            schema,
+            ExprWithAlias {
+                expr: item,
+                alias: None,
+            },
+            FIELD,
+            limits,
+        )
+        .map(Part::Planned),
+        None => Err(ApiError::bad_request(format!(
+            "{FIELD} takes column names; write select for an expression"
+        ))),
+    }
+}
+
+/// The row predicate as the narrower vocabulary spells it: one boolean expression.
 ///
-/// The two fields mean the same thing, so they parse and plan through the same code and
-/// reach the same allowlist. All that differs is the spellings.
+/// [`predicate`]'s language exactly — the two fields mean the same thing, so they parse and
+/// plan through the same code and reach the same allowlist. The separators a query string
+/// needs are not part of it: `&&`, `,` and `;` are [`filter_text`]'s, for a carrier that has
+/// to join two conditions inside one parameter. A body writes `AND`.
 pub fn filters(
+    state: &SessionState,
+    schema: &DFSchema,
+    text: &str,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    const FIELD: &str = "filters";
+
+    plan_predicate(state, schema, tokenize(text, FIELD)?, FIELD, limits)
+}
+
+/// The same predicate as one string, with `&&`, `,` and `;` accepted for `AND`, `AND` and
+/// `OR`.
+///
+/// The file-server mode's alone. A query string carries one `filters=` and no arrays, so the
+/// conjunction has to be written inside the value — and `&` ends a parameter, which is why
+/// `AND` is typable and `&&` must be encoded; `,` and `;` are what `lsdb` sends. The rewrite
+/// itself is on the token stream, where a separator inside a string literal is data — see
+/// `separators_written_as_operators`.
+pub fn filter_text(
     state: &SessionState,
     schema: &DFSchema,
     text: &str,
@@ -827,8 +888,25 @@ mod tests {
         Ok(predicate(&state(), &schema(), sql, limits())?.to_string())
     }
 
-    fn column_names(list: &str) -> Result<Vec<String>, ApiError> {
-        Ok(columns(&state(), &schema(), list, limits())?
+    /// One way of writing a projection, as the test drives it: a string in, the output
+    /// column names out.
+    type Spelling = dyn Fn(&str) -> Result<Vec<String>, ApiError>;
+
+    /// The list form, which is what a body sends.
+    fn column_names(names: &[&str]) -> Result<Vec<String>, ApiError> {
+        let names = names
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+        Ok(columns(&state(), &schema(), &names, limits())?
+            .iter()
+            .map(|expr| expr.schema_name().to_string())
+            .collect())
+    }
+
+    /// The same names comma-separated, which is what a query string sends.
+    fn column_names_of_text(list: &str) -> Result<Vec<String>, ApiError> {
+        Ok(column_text(&state(), &schema(), list, limits())?
             .iter()
             .map(|expr| expr.schema_name().to_string())
             .collect())
@@ -836,6 +914,10 @@ mod tests {
 
     fn filters_of(text: &str) -> Result<String, ApiError> {
         Ok(filters(&state(), &schema(), text, limits())?.to_string())
+    }
+
+    fn filters_of_text(text: &str) -> Result<String, ApiError> {
+        Ok(filter_text(&state(), &schema(), text, limits())?.to_string())
     }
 
     /// The narrower vocabulary: names, in the file's own spelling of them.
@@ -846,11 +928,43 @@ mod tests {
     #[test]
     fn columns_takes_names() {
         assert_eq!(
-            column_names("objectid, lightcurve.mag, gmag").unwrap(),
+            column_names(&["objectid", "lightcurve.mag", "gmag"]).unwrap(),
             ["objectid", "lightcurve", "Gmag"]
         );
         // A name SQL will not take unquoted is written the way SQL writes one.
-        assert_eq!(column_names("\"Gmag\"").unwrap(), ["Gmag"]);
+        assert_eq!(column_names(&["\"Gmag\""]).unwrap(), ["Gmag"]);
+        // Whitespace around a name is nothing: the element is tokenized, and a tokenizer
+        // skips it. A client that built the list by splitting a string keeps its spaces.
+        assert_eq!(column_names(&["  objectid  "]).unwrap(), ["objectid"]);
+        // The list is the separator, so an element holding two names is refused rather than
+        // read as both: that spelling is the query string's, where there is nowhere else to
+        // put the comma.
+        assert!(column_names(&["objectid, objra"]).is_err());
+        assert_eq!(
+            column_names_of_text("objectid, objra").unwrap(),
+            ["objectid", "objra"]
+        );
+    }
+
+    /// Both wire forms of one vocabulary: a body writes the names as a list, a query string
+    /// writes them separated by commas, and what comes back is the same columns.
+    #[test]
+    fn the_list_and_the_comma_separated_text_are_one_vocabulary() {
+        for (list, text) in [
+            (&["objectid", "gmag"][..], "objectid, gmag"),
+            (
+                &["lightcurve.mag", "lightcurve.mjd"],
+                "lightcurve.mag, lightcurve.mjd",
+            ),
+            // Quoted in both, and the comma inside the quotes belongs to the name.
+            (&["\"Gmag\""], "\"Gmag\""),
+        ] {
+            assert_eq!(
+                column_names(list).unwrap(),
+                column_names_of_text(text).unwrap(),
+                "{text}"
+            );
+        }
     }
 
     /// The pieces of a nested column come back as that column, and the two vocabularies
@@ -862,7 +976,14 @@ mod tests {
     /// again, against a schema that no longer matches the file's.
     #[test]
     fn the_pieces_of_a_nested_column_come_back_as_that_column() {
-        for named in [column_names, names] {
+        // The three spellings of one request: a select list, `columns` as a query string
+        // writes it, and `columns` as a body writes it.
+        // Split on the comma alone, so every element but the first arrives with a leading
+        // space: an element is tokenized, and whitespace around a name is nothing to a
+        // tokenizer.
+        let as_a_list = |text: &str| column_names(&text.split(',').collect::<Vec<_>>());
+        let spellings: [&Spelling; 3] = [&names, &column_names_of_text, &as_a_list];
+        for named in spellings {
             // Two fields of one column are one column, and it keeps its place in the list.
             assert_eq!(
                 named("objectid, lightcurve.mag, objra, lightcurve.mjd").unwrap(),
@@ -884,26 +1005,25 @@ mod tests {
     /// name alone would pass for a column that came back whole.
     #[test]
     fn a_packed_column_carries_only_the_fields_that_were_named() {
-        let one = &columns(&state(), &schema(), "lightcurve.mag", limits()).unwrap()[0];
-        let shown = one.to_string();
+        let named = |names: &[&str]| {
+            let names = names
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            columns(&state(), &schema(), &names, limits()).unwrap()
+        };
+        let shown = named(&["lightcurve.mag"])[0].to_string();
         assert!(shown.contains("mag"), "{shown}");
         assert!(!shown.contains("mjd"), "{shown}");
 
         // Both, in the caller's order rather than the file's.
-        let two = &columns(
-            &state(),
-            &schema(),
-            "lightcurve.mjd, lightcurve.mag",
-            limits(),
-        )
-        .unwrap()[0];
-        let shown = two.to_string();
+        let shown = named(&["lightcurve.mjd", "lightcurve.mag"])[0].to_string();
         let mjd = shown.find("mjd").expect(&shown);
         let mag = shown.find("mag").expect(&shown);
         assert!(mjd < mag, "{shown}");
 
         // Whole is the column itself and not a struct rebuilt from its fields.
-        let whole = &columns(&state(), &schema(), "lightcurve", limits()).unwrap()[0];
+        let whole = &named(&["lightcurve"])[0];
         assert!(!whole.to_string().contains("named_struct"), "{whole}");
     }
 
@@ -911,22 +1031,45 @@ mod tests {
     /// refusal says so rather than leaving the caller to guess which half was wrong.
     #[test]
     fn columns_refuses_an_expression() {
-        for list in ["objra - 0.1", "count(objectid)", "1"] {
-            let error = column_names(list).unwrap_err().to_string();
-            assert!(error.contains("column names"), "{list}: {error}");
+        for name in ["objra - 0.1", "count(objectid)", "1"] {
+            let error = column_names(&[name]).unwrap_err().to_string();
+            assert!(error.contains("column names"), "{name}: {error}");
         }
         // An alias is refused by the grammar rather than by the check above: `columns`
-        // parses one expression per item and `AS` is not part of one.
-        assert!(column_names("objra AS ra").is_err());
+        // parses one expression per name and `AS` is not part of one.
+        assert!(column_names(&["objra AS ra"]).is_err());
     }
 
-    /// The one spelling the two predicate fields do not share, and the only difference
-    /// between them.
+    /// The two predicate fields are one language under two names.
     #[test]
-    fn filters_spells_and_with_ampersands() {
+    fn filters_is_the_same_expression_where_is() {
         let expected = filter("objectid > 1 AND objra < 2").unwrap();
-        assert_eq!(filters_of("objectid > 1 && objra < 2").unwrap(), expected);
         assert_eq!(filters_of("objectid > 1 AND objra < 2").unwrap(), expected);
+    }
+
+    /// The separators are the query string's, and only the query string's.
+    ///
+    /// `&&`, `,` and `;` exist because a url has one `filters=` and has to join two
+    /// conditions inside it — `&` ends a parameter, so `AND` is what a caller can type and
+    /// `&&` what a client encodes. A body writes `AND`, and accepting the separators there
+    /// too would leave one meaning with two spellings for nothing.
+    #[test]
+    fn the_separators_are_the_query_strings_alone() {
+        let expected = filter("objectid > 1 AND objra < 2").unwrap();
+        assert_eq!(
+            filters_of_text("objectid > 1 && objra < 2").unwrap(),
+            expected
+        );
+        assert_eq!(
+            filters_of_text("objectid > 1 AND objra < 2").unwrap(),
+            expected
+        );
+        // In a body, `&&` is an operator this service does not run, and it is refused as one
+        // rather than read as `AND`.
+        assert!(filters_of("objectid > 1 && objra < 2").is_err());
+        // A `;` is the end of one statement and the start of another, which is the one thing
+        // this field is parsed so as never to accept.
+        assert!(filters_of("objectid > 1;objra < 2").is_err());
     }
 
     /// The rewrite is on the tokens, so `&&` inside a string is data and stays data.
@@ -935,7 +1078,7 @@ mod tests {
     #[test]
     fn ampersands_inside_a_literal_are_not_an_operator() {
         let text = "cast(objectid AS VARCHAR) = 'a && b'";
-        let planned = filters_of(text).unwrap();
+        let planned = filters_of_text(text).unwrap();
         assert_eq!(planned, filter(text).unwrap());
         assert!(planned.contains("a && b"), "{planned}");
     }
@@ -949,12 +1092,12 @@ mod tests {
     #[test]
     fn filters_spells_and_and_or_the_way_lsdb_sends_them() {
         let expected = filter("objectid >= 1 AND objectid < 2").unwrap();
-        assert_eq!(filters_of("objectid>=1,objectid<2").unwrap(), expected);
+        assert_eq!(filters_of_text("objectid>=1,objectid<2").unwrap(), expected);
 
         let expected =
             filter("objectid >= 1 AND objectid < 2 OR objectid >= 5 AND objectid < 6").unwrap();
         assert_eq!(
-            filters_of("objectid>=1,objectid<2;objectid>=5,objectid<6").unwrap(),
+            filters_of_text("objectid>=1,objectid<2;objectid>=5,objectid<6").unwrap(),
             expected
         );
     }
@@ -969,11 +1112,15 @@ mod tests {
             "objra > 1 AND objectid IN (1, 2, 3)",
             "coalesce(objectid, 0) > 1",
         ] {
-            assert_eq!(filters_of(text).unwrap(), filter(text).unwrap(), "{text}");
+            assert_eq!(
+                filters_of_text(text).unwrap(),
+                filter(text).unwrap(),
+                "{text}"
+            );
         }
         // And the two together: a top-level comma joins, the ones inside the list do not.
         assert_eq!(
-            filters_of("objectid IN (1, 2, 3),objra > 1").unwrap(),
+            filters_of_text("objectid IN (1, 2, 3),objra > 1").unwrap(),
             filter("objectid IN (1, 2, 3) AND objra > 1").unwrap()
         );
     }

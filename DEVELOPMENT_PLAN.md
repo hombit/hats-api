@@ -344,12 +344,15 @@ It is also not a query string. The `GET` shape is a separate question and stays 
 - **The narrower language stays narrower.** `select` takes expressions and aliases;
   `columns` takes names. Accepting `columns` in the API body does not widen it to
   expressions — a caller who wants one writes `select`.
+- **In a body `columns` is a list**, one name per element, and `filters` stays one condition.
+  The separators are the query string's alone — a comma between names, `&&`, `,` and `;`
+  between conditions — because that carrier has one field apiece and nowhere else to put
+  them.
 - **One parser, one allowlist.** `filters` lowers to the expression `sql.rs` already
-  checks, rather than executing down a path of its own. The one difference between the
-  two is `&&`, and it is rewritten on the token stream rather than on the text: `&&`
-  inside a string literal is not an operator, and a substitution over characters that
-  cannot tell the difference is a parser written by accident, which is what §3.5 says not
-  to do.
+  checks, rather than executing down a path of its own. The separator rewrite the url form
+  needs is on the token stream rather than on the text: `&&` inside a string literal is not
+  an operator, and a substitution over characters that cannot tell the difference is a
+  parser written by accident, which is what §3.5 says not to do.
 
 ### 3.5 How much SQL
 
