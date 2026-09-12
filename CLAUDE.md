@@ -1051,5 +1051,22 @@ into a release.
    and publishes the release image, and the Docker workflow checks the tag against
    `Cargo.toml`'s `version`, so a tag that disagrees with step 1 fails rather than
    publishing a mislabelled image.
-6. **The GitHub release**, whose body is that version's changelog section, copied. Writing
-   a second account of the same release is how the two come to differ.
+6. **The GitHub release**, titled `Release vx.y.z`, with GitHub's own generated notes as
+   its body:
+
+   ```sh
+   gh release create vx.y.z --title "Release vx.y.z" --generate-notes
+   ```
+
+   That is every merged pull request with its number and author, the new contributors and
+   the compare link — the whole development history of the release, written by nobody.
+
+   Something may be added above it by hand, and only something critical: a step an
+   operator has to take before upgrading, a change that will break a running deployment.
+   Not a summary of the release, which the list below it already is.
+
+   The changelog is a separate document and neither is copied into the other. It is
+   written by hand, carries only what a caller or an operator does differently, and is
+   read by someone deciding whether to upgrade. The release notes are read by someone
+   asking what went into this tag and who wrote it. Merging them gives each reader the
+   other one's document.
