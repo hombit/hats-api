@@ -11,18 +11,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
-# Dependencies on their own layer: DataFusion is a multi-minute build, and this
-# layer only has to be redone when Cargo.toml or Cargo.lock changes.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src \
-    && echo 'fn main() {}' > src/main.rs \
-    && cargo build --release --locked \
-    && rm -rf src
-
 COPY src ./src
-# The placeholder main.rs was already compiled, so make sure the real one looks
-# newer than the artifact cargo would otherwise reuse.
-RUN touch src/main.rs && cargo build --release --locked
+# One step, dependencies and crate together. Building the dependencies first against a
+# placeholder main.rs, to put them on a layer of their own, buys nothing here: no layer
+# cache survives between builds, and the layer would be keyed on Cargo.toml, which every
+# release changes to say the new version.
+RUN cargo build --release --locked
 
 FROM debian:trixie-slim AS runtime
 
