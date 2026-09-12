@@ -39,6 +39,7 @@ use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::region::{self, Healpix, Region, Spatial};
 use crate::sql;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
+use crate::votable;
 
 /// What every request needs and no request may change: the rules, the shared scratch
 /// budget, and the url space each mode claims. All built once at startup, so a request
@@ -330,7 +331,7 @@ fn describe_dialect<D: Dialect>(
             D::SUMMARY,
             body.clone(),
             example::<D>(EXAMPLE_PARTITION, PARTITION_SELECT, PARTITION_WHERE, false),
-            "The rows, or the file itself where `format` asked for parquet",
+            "The rows, or a parquet file or a VOTable where `format` asked for one",
             rows,
         ),
     );
@@ -1212,8 +1213,10 @@ struct QueryRequest<D> {
     /// returns nothing rather than failing.
     #[schema(example = 29)]
     healpix_order: Option<u8>,
-    /// `json`, the default, or `parquet` for the answer as a parquet file. A parquet answer
-    /// carries its counts in `x-hats-*` response headers, there being no room in the body.
+    /// `json`, the default; `parquet` for the answer as a parquet file laid out like the file
+    /// it came from; `votable` for a VOTable, which takes flat columns only and refuses a
+    /// nested one by name. Anything but `json` carries its counts in `x-hats-*` response
+    /// headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// At most this many rows. Under the file server they are the file's first; through the
@@ -1383,11 +1386,14 @@ const HEALPIX_PAIR: &str = "healpix_column and healpix_order must be given toget
 enum Format {
     Json,
     Parquet,
+    /// The XML table format IVOA tools read. Flat columns only — `votable.rs` says which
+    /// ones are refused and why.
+    Votable,
 }
 
 impl Format {
     /// Every format, in the order a refusal lists them. The default is the first.
-    const ALL: [Self; 2] = [Self::Json, Self::Parquet];
+    const ALL: [Self; 3] = [Self::Json, Self::Parquet, Self::Votable];
 
     /// The one place a format's name is written. [`Self::parse`] and the list in a
     /// refusal are both derived from it, so a format cannot be renamed in one and not
@@ -1396,6 +1402,7 @@ impl Format {
         match self {
             Self::Json => "json",
             Self::Parquet => "parquet",
+            Self::Votable => "votable",
         }
     }
 
@@ -1961,27 +1968,48 @@ async fn hats_answer(
             };
             let body = parquet_out::encode(&result.rows, &layout)?;
             Ok((
-                [
-                    (header::CONTENT_TYPE, PARQUET_CONTENT_TYPE.to_owned()),
-                    (
-                        header::CONTENT_DISPOSITION,
-                        "attachment; filename=\"selection.parquet\"".to_owned(),
-                    ),
-                ],
-                [
-                    (NUM_ROWS_HEADER, num_rows.to_string()),
-                    (NUM_PARTITIONS_HEADER, result.partitions_read.to_string()),
-                    (
-                        DATA_BYTES_READ_HEADER,
-                        result.rows.data_bytes_read.to_string(),
-                    ),
-                    (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
-                ],
+                attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
+                hats_counters(result, num_rows, started),
                 body,
             )
                 .into_response())
         }
+        Format::Votable => Ok((
+            attachment(votable::CONTENT_TYPE, "selection.vot"),
+            hats_counters(result, num_rows, started),
+            votable::encode(&result.rows)?,
+        )
+            .into_response()),
     }
+}
+
+/// What a body that is not JSON is served as, and what to call it once it is saved. The
+/// counts have no room in any of those bodies, so they travel as headers instead.
+fn attachment(content_type: &str, name: &str) -> [(header::HeaderName, String); 2] {
+    [
+        (header::CONTENT_TYPE, content_type.to_owned()),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{name}\""),
+        ),
+    ]
+}
+
+/// What a catalog request reports beside its rows, whichever encoding carries them.
+fn hats_counters(
+    result: &crate::hats_query::CatalogResult,
+    num_rows: usize,
+    started: Instant,
+) -> [(&'static str, String); 4] {
+    [
+        (NUM_ROWS_HEADER, num_rows.to_string()),
+        (NUM_PARTITIONS_HEADER, result.partitions_read.to_string()),
+        (
+            DATA_BYTES_READ_HEADER,
+            result.rows.data_bytes_read.to_string(),
+        ),
+        (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
+    ]
 }
 
 /// The columns of an answer, as the schema describes them.
@@ -2026,7 +2054,26 @@ async fn answer(
     match format {
         Format::Json => json_response(result, started),
         Format::Parquet => parquet_response(result, file, result.num_rows(), started).await,
+        Format::Votable => Ok((
+            attachment(votable::CONTENT_TYPE, &download_name(file, "vot")),
+            counters(result, result.num_rows(), started),
+            votable::encode(result)?,
+        )
+            .into_response()),
     }
+}
+
+/// What a single-file request reports beside its rows, whichever encoding carries them.
+fn counters(
+    result: &QueryResult,
+    num_rows: usize,
+    started: Instant,
+) -> [(&'static str, String); 3] {
+    [
+        (NUM_ROWS_HEADER, num_rows.to_string()),
+        (DATA_BYTES_READ_HEADER, result.data_bytes_read.to_string()),
+        (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
+    ]
 }
 
 fn json_response(result: &QueryResult, started: Instant) -> Result<Response, ApiError> {
@@ -2053,18 +2100,8 @@ async fn parquet_response(
     let layout = parquet_out::read_layout(file).await?;
     let body = parquet_out::encode(result, &layout)?;
     Ok((
-        [
-            (header::CONTENT_TYPE, PARQUET_CONTENT_TYPE.to_owned()),
-            (
-                header::CONTENT_DISPOSITION,
-                format!("attachment; filename=\"{}\"", download_name(file)),
-            ),
-        ],
-        [
-            (NUM_ROWS_HEADER, num_rows.to_string()),
-            (DATA_BYTES_READ_HEADER, result.data_bytes_read.to_string()),
-            (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
-        ],
+        attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
+        counters(result, num_rows, started),
         body,
     )
         .into_response())
@@ -2073,17 +2110,19 @@ async fn parquet_response(
 /// Name the download after the source object, so a directory of these files says which
 /// partition each came from. Falls back to a fixed name for a url that ends in a slash
 /// — `open` already rejected the ones with no object at all.
-fn download_name(file: &RemoteFile) -> String {
+///
+/// The source's own `.parquet` is dropped rather than kept, so that one partition
+/// answered in two encodings is two files with two names rather than one name on a body
+/// that is not parquet at all.
+fn download_name(file: &RemoteFile, extension: &str) -> String {
     let name = file
         .url
         .path_segments()
         .and_then(|mut segments| segments.next_back())
         .filter(|segment| !segment.is_empty() && !segment.contains('"'))
-        .unwrap_or("selection.parquet");
-    match name.ends_with(".parquet") {
-        true => name.to_owned(),
-        false => format!("{name}.parquet"),
-    }
+        .unwrap_or("selection");
+    let stem = name.strip_suffix(".parquet").unwrap_or(name);
+    format!("{stem}.{extension}")
 }
 
 #[cfg(test)]
@@ -2315,25 +2354,32 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unknown format"), "{body}");
-        assert!(body.contains("json, parquet"), "{body}");
+        assert!(body.contains("json, parquet, votable"), "{body}");
     }
 
     #[test]
     fn names_the_download_after_the_source_object() {
         let policy = AccessPolicy::default();
         let transfers = Arc::new(Transfers::new(&LimitsConfig::default()));
-        let name = |raw: &str| {
+        let name = |raw: &str, extension: &str| {
             let url = parse_url(raw).unwrap();
             download_name(
                 &storage::open(&url, &StorageOptions::default(), &policy, &transfers).unwrap(),
+                extension,
             )
         };
         assert_eq!(
-            name("s3://b/dir/part0.snappy.parquet"),
+            name("s3://b/dir/part0.snappy.parquet", "parquet"),
             "part0.snappy.parquet"
         );
         // HATS partition paths, and anything else that is not already a parquet name.
-        assert_eq!(name("s3://b/Norder=5/Npix=12240/part0"), "part0.parquet");
+        assert_eq!(
+            name("s3://b/Norder=5/Npix=12240/part0", "parquet"),
+            "part0.parquet"
+        );
+        // One partition in two encodings is two names, rather than one name on a body
+        // that is not parquet.
+        assert_eq!(name("s3://b/dir/part0.parquet", "vot"), "part0.vot");
     }
 
     /// The request as a struct, printed. Nothing logs it today, but the derive is what
@@ -3974,6 +4020,54 @@ mod tests {
         let projected = asked("/part0.parquet?columns=band&limit=1&format=json").await;
         assert_eq!(projected["schema"].as_array().unwrap().len(), 1);
         assert_eq!(projected["schema"][0]["name"], "band");
+    }
+
+    /// A VOTable comes back as one, with its counts where a body that is not JSON has to
+    /// put them — and a nested column is refused by name rather than dropped from the
+    /// answer, which is the half of this format that is not built yet.
+    #[tokio::test]
+    async fn a_votable_answer_is_a_document_with_its_counts_in_the_headers() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        std::fs::write(
+            dir.path().join("nested.parquet"),
+            query::tests::nested_fixture(),
+        )
+        .unwrap();
+
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/part0.parquet?columns=objectid,band&limit=2&format=votable"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers().clone();
+        assert_eq!(headers[header::CONTENT_TYPE], votable::CONTENT_TYPE);
+        // Named after the partition it came from, and not as the parquet file it is not.
+        assert_eq!(
+            headers[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"part0.vot\""
+        );
+        assert_eq!(headers[NUM_ROWS_HEADER], "2");
+        let body = body_of(response).await;
+        assert!(body.contains("<VOTABLE version=\"1.4\""), "{body}");
+        assert!(
+            body.contains("<FIELD name=\"objectid\" datatype=\"long\"/>"),
+            "{body}"
+        );
+        assert!(body.contains("<TD>0</TD><TD>g</TD>"), "{body}");
+
+        // The whole column, said by name: a caller who cannot tell which column stopped
+        // the request cannot narrow their way past it.
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/nested.parquet?format=votable"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = body_of(response).await;
+        assert!(body.contains("sources"), "{body}");
+        assert!(body.contains("nested"), "{body}");
     }
 
     /// A struct column names its own fields, and the name that is built out of them

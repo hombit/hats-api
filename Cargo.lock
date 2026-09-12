@@ -2134,6 +2134,7 @@ dependencies = [
  "opendal",
  "opendal-http-transport-reqwest",
  "percent-encoding",
+ "quick-xml",
  "reqwest",
  "s3s",
  "s3s-fs",

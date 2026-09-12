@@ -35,6 +35,7 @@ which.
 | 5.4 | a catalog under a mount | done | a limit or a circle; a plan there is still §5.3's open question |
 | 7.3 | serve the API description | done | `/openapi.json` and a page of this crate's own at `/docs` |
 | 7.4 | compress JSON responses, never parquet | done | gzip, br and zstd, the client choosing; §7.2's streaming is where the time-to-first-byte trade gets measured |
+| 7.5 | VOTable output | in progress | flat columns answer; a nested one is refused by name until §7.5's four decisions are made |
 | 6.8 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6.1–6.7 | caching | todo | build in the order §6.8 ranks |
 | 7 | operational surface | todo | |
@@ -792,6 +793,45 @@ two descriptions, and nothing here should make serving both awkward.
 emits, so time-to-first-byte gets worse in exchange for fewer bytes. That is what §7.2 has
 to measure when it lands.
 
+### 7.5 A nested column in a VOTable
+
+`format=votable` answers a flat table and refuses a struct or a list column by name. The
+nested half is what is left, and it is a set of decisions rather than a piece of code: the
+shape it lowers to is not in the standard, and every alternative below puts a value in an
+answer that a reader cannot tell from a different value.
+
+The shape to follow is
+[this notebook](https://github.com/lincc-frameworks/notebooks_lf/blob/main/lsdb/busy_week_2025/VOTable-example-for-hats.ipynb):
+a nested column becomes a `GROUP` carrying the column's name and a `FIELDref` per
+subfield, beside flat `FIELD`s named `diaSource.band`, each holding one row's whole array.
+Four things it does not settle.
+
+- **An array of strings has no spelling.** VOTable's only form is `arraysize="8x*"` — a
+  variable number of *fixed-width* strings, space-padded — so the width has to be measured
+  over the answer first, and a value with real trailing spaces comes back trimmed. The
+  notebook hits this and leaves it, writing `datatype="unicodeChar"` with no `arraysize`
+  and calling the column "actually double-nested" in a comment. A band is the ordinary
+  case, so this one blocks the rest.
+- **A null inside an array.** A float has `NaN` and a boolean has `?`, both native. An
+  integer has only `VALUES`'s `null` attribute, which is a magic value a real measurement
+  can equal — so it needs a pass over the column to find a value nothing uses, and a
+  refusal when there is none. A string has nothing at all.
+- **Both arrow shapes are one VOTable.** `List<Struct<…>>` and `Struct<List<…>, …>` — which
+  is what nested-pandas writes — differ in where the offsets are and produce the same
+  `GROUP` of arrays. Writing them as two cases is how the two come to disagree about a null
+  at the struct level, which belongs to neither field.
+- **Depth is refused, not flattened.** A struct inside a struct, or a list of lists, has no
+  `GROUP` to become. It stays refused by name.
+
+Beside it, and reachable once the above is settled: the same notebook's actual subject is
+the **VOTable-in-Parquet** convention — a whole VOTable header stored in the file's
+key/value metadata under `IVOA.VOTable-Parquet.content`. A catalog carrying one has already
+said what its columns' `unit`, `ucd` and `DESCRIPTION` are, which is metadata no answer here
+can otherwise have; serving those rather than inventing them is what would make the output
+worth reading in an IVOA client. It needs a VOTable *parser*, which nothing here has —
+`votable` on crates.io is the CDS implementation and was weighed once for the writing side
+and turned down, so that reading is where it earns its dependencies.
+
 ## 8. Security requirements
 
 Conditions every phase must keep.
@@ -1012,7 +1052,7 @@ Run `cargo deny` (advisories + licences) in CI.
    `POINT`, `CIRCLE`, `DISTANCE` map onto §5.2's spatial predicates. Plain SQL first: it
    settles the lowering and the rejection messages before the IVOA grammar.
 5. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI endpoints,
-   `VOTable` output, the UWS job model. `/async` is a real job system with state, and is
+   §7.5's VOTable output, the UWS job model. `/async` is a real job system with state, and is
    where §5.3's and §7.2's no-job-queue decision is revisited.
 6. **Filesystem-driven cache invalidation** (§6.7): `SIGHUP` first, then a `notify` watcher
    over local mounts.

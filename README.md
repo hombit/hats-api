@@ -129,7 +129,7 @@ curl -G http://localhost:8080/dataset/Norder=0/Dir=0/Npix=11.parquet \
 | `columns` | comma-separated column names. Absent returns every column. |
 | `filters` | one row predicate; `&&` spells `AND`. Absent returns every row. |
 | `limit` | most rows to return. |
-| `format` | `parquet` (the default here) or `json`. |
+| `format` | `parquet` (the default here), `json`, or `votable`. |
 | `ra`, `dec` | the centre of a cone, in degrees. |
 | `radius_arcsec`, `radius_deg` | its radius; exactly one of the two. |
 | `ra_column`, `dec_column` | which columns hold the position. Required with a cone against a file, refused against a catalog. |
@@ -341,6 +341,15 @@ write to every proxy's access log, and a body has no url-length limit.
 parameter, since a request there selects a region by naming `Norder=k/Npix=p` in the path.
 
 `format` defaults to `json` here and to `parquet` in file-server mode.
+
+`format=votable` gives a VOTable 1.4 document, `TABLEDATA` serialized, with the same
+`x-hats-*` headers a parquet answer carries. It takes flat columns only: a struct or a
+list column is refused, naming the column, because a nested one becomes a `GROUP` of
+dotted `FIELD`s and what goes under one is not settled — an array of variable-length
+strings has no spelling in VOTable, and neither has a null inside an array. `NaN`, `+Inf`
+and `-Inf` are written as themselves. A null is an empty `<TD/>`, which is the only
+spelling the format has: in a `char` column a reader cannot tell that from an empty
+string, so a column where the difference matters wants `json` or `parquet`.
 
 Rows come back in no particular order — unlike file-server mode, which preserves the
 file's. A `limit` is still reproducible: the same request against the same file returns
