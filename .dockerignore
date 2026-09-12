@@ -1,2 +1,7 @@
-.git
-target
+# An allowlist, so the build context is the three things the Dockerfile copies and
+# nothing else. A file the Dockerfile needs and this does not name fails the build
+# rather than silently enlarging the context.
+*
+!Cargo.toml
+!Cargo.lock
+!src

@@ -510,6 +510,20 @@ cargo build --release
 ./target/release/hats-api --config hats-api.toml
 ```
 
+Or from the published image, which listens on port 80 and holds the binary and a set of
+CA roots:
+
+```
+docker run -p 8080:80 \
+  -v ./hats-api.toml:/etc/hats-api.toml:ro -e HATS_API_CONFIG=/etc/hats-api.toml \
+  ghcr.io/hombit/hats-api:latest
+```
+
+`latest`, or a version: `ghcr.io/hombit/hats-api:0.0.1`. Both `linux/amd64` and
+`linux/arm64`. A local directory served this way has to be mounted into the container
+as well, at the `source` its `[[mount]]` names. There is no `HEALTHCHECK` in the image,
+the port and the API prefix both being configuration; probe `GET {api.prefix}/health`.
+
 ```
 usage: hats-api [--config <path>]
 
