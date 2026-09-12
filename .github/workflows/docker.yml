@@ -5,7 +5,7 @@ name: Docker
 # them and tagged with the version and with `latest`.
 #
 # The same path is exercised without a release by `workflow_dispatch`, which publishes
-# the result as `:ci` instead — the merge step cannot be tested without a registry to
+# the result as `:dev` instead — the merge step cannot be tested without a registry to
 # merge in, so testing it means really pushing something. Pull requests build both
 # architectures and run the image, but push nothing: a fork's token cannot write
 # packages, and that half needs no registry to prove.
@@ -166,7 +166,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # `latest=auto` moves `latest` for a `v1.2.3` tag and leaves it alone for a
-      # prerelease; a manual run publishes `:ci` and moves neither.
+      # prerelease; a manual run publishes `:dev` and moves neither.
       - uses: docker/metadata-action@v6
         id: meta
         with:
@@ -174,7 +174,7 @@ jobs:
           flavor: latest=auto
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=ci,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=dev,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: assemble and tag
         working-directory: ${{ runner.temp }}/digests

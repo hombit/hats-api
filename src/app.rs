@@ -4135,6 +4135,62 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// A column's `type` is arrow's own `Display`, which makes an arrow upgrade able to
+    /// change this API without changing a line of this crate. These are the spellings as
+    /// published, so a failure here is that change arriving rather than a mistake in the
+    /// test: decide whether to publish the new spelling or to map to one of our own, and
+    /// say so in the answer, `/docs` and `openapi.json` all at once.
+    #[test]
+    fn the_published_column_types_are_arrows_spelling_and_it_has_not_moved() {
+        use datafusion::arrow::datatypes::{DataType, Field, Fields};
+
+        // `element` is the name arrow's parquet writer gives a list's item field, so it is
+        // the one a caller's file arrives with.
+        let float = || Field::new("element", DataType::Float32, true);
+        let sources = || {
+            Fields::from(vec![
+                Field::new("mjd", DataType::Float64, true),
+                Field::new("band", DataType::Utf8, true),
+            ])
+        };
+        // Every type an astronomy parquet puts in front of a caller: the scalars, a name,
+        // the two shapes a light curve is packed into, and a fixed-width vector.
+        let published = [
+            (DataType::Boolean, "Boolean"),
+            (DataType::Int32, "Int32"),
+            (DataType::Int64, "Int64"),
+            (DataType::UInt64, "UInt64"),
+            (DataType::Float32, "Float32"),
+            (DataType::Float64, "Float64"),
+            (DataType::Utf8, "Utf8"),
+            (
+                DataType::List(Arc::new(float())),
+                "List(Float32, field: 'element')",
+            ),
+            (
+                DataType::FixedSizeList(Arc::new(float()), 3),
+                "FixedSizeList(3 x Float32, field: 'element')",
+            ),
+            (
+                DataType::Struct(sources()),
+                "Struct(\"mjd\": Float64, \"band\": Utf8)",
+            ),
+        ];
+        // Compared as one list rather than one at a time, so a respelling shows every
+        // type it touched instead of stopping at the first.
+        let spelled: Vec<String> = published
+            .iter()
+            .map(|(data_type, _)| {
+                column_of(&Arc::new(Field::new("c", data_type.clone(), true))).r#type
+            })
+            .collect();
+        let expected: Vec<String> = published
+            .iter()
+            .map(|(_, spelling)| (*spelling).to_owned())
+            .collect();
+        assert_eq!(spelled, expected);
+    }
+
     /// The point of taking the parameter names rather than the behaviour: a predicate
     /// that cannot run is refused, never dropped. A caller cannot tell an ignored filter
     /// from one that matched every row.
