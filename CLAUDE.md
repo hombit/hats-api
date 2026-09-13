@@ -552,10 +552,20 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
     the ranges already drive. A merge against a table of ranges would be the asymptotically
     right shape, but `PiecewiseMergeJoinExec` takes a single inequality, is experimental,
     and would mean giving up the one-scan-with-a-filter plan.
-  - **`ScalarUDFImpl::preimage` is the sanctioned way to say this.** A UDF that declares
-    the interval `f(x) = v` inverts to has `f(col) = v` rewritten into `col >= lo AND
-    col < hi`, which prunes. It covers comparisons and not `IN`, so a set of cells lands
-    back on the range expression — by the optimizer's hand rather than ours.
+  - **`ScalarUDFImpl::preimage` says one interval and no more.** A UDF that declares the
+    interval `f(x) = v` inverts to has `f(col) = v` rewritten into `col >= lo AND col <
+    hi`, which prunes. One contiguous interval, for a comparison: a covering is many.
+  - **`ScalarUDFImpl::simplify` says a whole covering**, and is how `geometry::Contains`
+    does it: the call replaces itself during the optimizer's simplify pass with the
+    expression `region::predicate` builds, and that pass runs before the scan's pruning
+    predicate is made. So a region said as a function reads exactly the bytes the `region`
+    field reads, which `naming_the_healpix_column_reads_less_of_the_file` asserts.
+
+- **A region function goes only on a context whose planner also chooses what to scan.**
+  The covering prunes row groups inside a file; a catalog's partitions are chosen before any
+  file is opened, from a `region` field. On a catalog route `contains` would prune within
+  every partition and still open all of them. `geometry::register` is called where a query
+  can say a region as a function, never on `query::session_context`.
 - **Budget the boundary, not the area.** The interior of a shape merges into few ranges
   whatever the depth — the whole sky is one — so the range count follows the boundary's
   length. Sizing by area instead is the same thing up to a constant for a round shape and

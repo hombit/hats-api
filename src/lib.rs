@@ -35,6 +35,7 @@ pub mod app;
 pub mod config;
 pub mod data;
 pub mod error;
+pub mod geometry;
 pub mod hats;
 pub mod hats_query;
 pub mod healpix;
