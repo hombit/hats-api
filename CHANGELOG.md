@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[limits] max_request_body_bytes`, `16MiB` by default.
 
 ### Changed
 

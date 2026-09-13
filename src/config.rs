@@ -191,6 +191,24 @@ pub struct LimitsConfig {
     /// `limit` request, a circle being what a catalog's url narrows rather than what makes
     /// it answerable.
     pub max_query_radius_arcsec: f64,
+    /// How large a request body may be. `0` is no bound.
+    ///
+    /// It bounds the bytes a caller sends, which the expression limits cannot: those are
+    /// counted after the body has been read and parsed, so something far too large to plan
+    /// is refused here rather than after it has been held in memory.
+    ///
+    /// It is also the only bound on `region`, which `max_expression_nodes` never sees: that
+    /// counts a `select` or `where`, and a region is a structured field lowered straight to a
+    /// predicate. Both of the shapes that get large live there — a serialized `moc`, which is
+    /// a coverage map in one string, and a long list of circles, which is how a caller
+    /// cross-matches a catalog of their own against one served here. Those two set this
+    /// default rather than anything about SQL: a circle is about seventy bytes, so this holds
+    /// a couple of hundred thousand of them.
+    ///
+    /// Nothing here streams a body, so this is also how much memory one request may occupy
+    /// before any of its work begins — and, `region` having no count of its own, it is what
+    /// decides how many shapes one request may carry into the covering and the predicate.
+    pub max_request_body_bytes: ByteSize,
     /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -231,6 +249,13 @@ impl Default for LimitsConfig {
             // which is the size of question a person browsing actually asks — and still
             // small enough against a partition that it lands in a couple of them.
             max_query_radius_arcsec: 600.0,
+            // Eight times axum's own default, which is what this replaces. A body here is a
+            // query rather than an upload, so the figure is set by the largest thing a query
+            // legitimately carries: a `region`, either as a serialized MOC or as one circle
+            // per source of a catalog being cross-matched. Two megabytes is some tens of
+            // thousands of circles, which is a small catalog and not a generous bound;
+            // sixteen is still small beside one partition of the answer.
+            max_request_body_bytes: ByteSize::mib(16),
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

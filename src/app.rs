@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Router,
-    extract::{Request, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
     http::{Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
@@ -62,6 +62,8 @@ pub struct Service {
     max_query_radius_arcsec: f64,
     /// How long a request has to produce an answer; `None` where the operator set no bound.
     request_timeout: Option<Duration>,
+    /// How large a request body may be, in bytes; `None` where the operator set no bound.
+    request_body_limit: Option<usize>,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
@@ -125,6 +127,12 @@ impl Service {
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
+            // Saturating rather than refusing: a 32-bit host cannot hold a body that large
+            // anyway, so the cap it lands on is the one that machine could have honoured.
+            request_body_limit: match limits.max_request_body_bytes.as_u64() {
+                0 => None,
+                bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
+            },
             show_version: server.show_version,
             serve_index_html: server.serve_index_html,
             api_prefix: api_prefix.map(Arc::from),
@@ -158,6 +166,7 @@ impl Service {
 
 pub fn router(service: Service) -> Router {
     let timeout = service.request_timeout;
+    let body_limit = service.request_body_limit;
     let mut router = Router::new();
     if let Some(prefix) = service.api_prefix.clone() {
         router = router.route(&route(&prefix, "health"), get(health));
@@ -184,6 +193,13 @@ pub fn router(service: Service) -> Router {
     if let Some(limit) = timeout {
         router = router.layer(middleware::from_fn_with_state(limit, deadline));
     }
+    // Replaces axum's own default rather than adding to it: whichever of the two is set
+    // last is the one an extractor reads, so an operator raising this really does raise it.
+    // Outside the deadline, since refusing an oversized body is not work the clock is about.
+    router = router.layer(match body_limit {
+        Some(bytes) => DefaultBodyLimit::max(bytes),
+        None => DefaultBodyLimit::disable(),
+    });
     router
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
@@ -1730,6 +1746,18 @@ fn body_error<D: Dialect>(rejection: &JsonRejection, takes: &str) -> ApiError {
     // vocabulary's note is here because this is the message a wrong *type* lands on, and
     // serde's own — which does say the type — quotes the value beside it.
     let shape = format!("expected a JSON object with {takes}; {}", D::NOTE);
+
+    // A body past `[limits] max_request_body_bytes` is refused before a byte of it is
+    // parsed, so there is no shape to describe and nothing the caller could respell. Asked
+    // of the rejection's own status rather than by naming a variant: the limit surfaces
+    // through whichever buffering error the extractor wraps, and the status is the part of
+    // that axum promises.
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::too_much_work(
+            "the request body is larger than this service accepts; send fewer terms, or \
+             ask the operator to raise the body limit",
+        );
+    }
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -3926,6 +3954,44 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("return_storage"), "{body}");
+    }
+
+    /// A body past `[limits] max_request_body_bytes` is refused whole, and the bound is the
+    /// operator's to raise: the same body goes through against a larger one.
+    ///
+    /// The refusal is a `413` rather than the `400` every other malformed body gets, since
+    /// nothing was read: there is no field to name and nothing for the caller to respell.
+    #[tokio::test]
+    async fn a_request_body_is_bounded_by_what_the_operator_allows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        // An `IN` list is what a caller's body actually grows by, and this one is some
+        // kilobytes — well past the small bound and well short of the large one.
+        let ids = (0..2000)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": "objectid",
+            "where": format!("objectid IN ({ids})"),
+        });
+        let bounded = |bytes| LimitsConfig {
+            max_request_body_bytes: bytesize::ByteSize::b(bytes),
+            ..LimitsConfig::default()
+        };
+        let service =
+            |limits: &LimitsConfig| with_limits(serving(dir.path()), &ApiConfig::default(), limits);
+
+        let (status, answer) = ask(service(&bounded(1024)), body.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{answer}");
+        assert!(
+            answer.contains("larger than this service accepts"),
+            "{answer}"
+        );
+
+        let (status, answer) = ask(service(&bounded(1 << 20)), body).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
     }
 
     /// A request over more than the server will do comes back as the plan for it, with the
