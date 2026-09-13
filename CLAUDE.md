@@ -231,10 +231,13 @@ everything about what SQL means here is decided there.
   A function that is merely unwanted is left out of the build instead, where it is already
   an error naming it.
 
-  Refusing a name leaves what it meant needing a spelling, which is `query::session_context`'s
-  other job: `lg` is registered as an alias of `log10` rather than as a function of its own,
-  so base ten keeps a short name and the two cannot come apart. Every request builds its
-  context there, so what a caller may call is one list rather than one per call site.
+  Refusing a name is only allowed where what it meant has another spelling already —
+  `log10`, `ln` and `log2` for `log` — and the refusal names them. **Do not add the missing
+  spelling by registering one.** The registry a request plans against is DataFusion's, whole
+  and unedited; a name of this crate's own would be one no other reader of the same SQL has,
+  so an expression that works here would fail everywhere the caller takes it. Every request
+  builds its context in `query::session_context`, which is what keeps that one list rather
+  than one per call site.
 - **A column answers to its own name and to its name in lowercase, and to nothing else.**
   Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
   `objectId` — and a caller reads them off the file, so the file's spelling has to work;
