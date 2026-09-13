@@ -2121,6 +2121,7 @@ dependencies = [
  "csv",
  "datafusion",
  "encoding_rs",
+ "flate2",
  "futures",
  "globset",
  "html-escape",

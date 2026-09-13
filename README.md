@@ -539,6 +539,9 @@ streams for as long as it takes.
 body may be. Over it the request is a `413` before any of it is parsed, so the answer names
 no field — there was nothing read to name.
 
+A body may be sent with `Content-Encoding: gzip`, `br` or `zstd` — anything else is a `415`,
+and the limit is measured on the expanded body.
+
 The default is set by the largest thing a query legitimately carries, which is `region`: a
 serialized `moc`, or one circle per source of a catalog being cross-matched against one
 served here. The expression bounds count a `select` and a `where` and never see either, so

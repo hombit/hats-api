@@ -18,6 +18,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{
     And, DefaultPredicate, NotForContentType, Predicate as _,
 };
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
@@ -201,6 +202,7 @@ pub fn router(service: Service) -> Router {
         None => DefaultBodyLimit::disable(),
     });
     router
+        .layer(decompression())
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
         // something in.
@@ -279,6 +281,28 @@ fn compression() -> CompressionLayer<And<DefaultPredicate, NotForContentType>> {
     CompressionLayer::new().compress_when(
         DefaultPredicate::new().and(NotForContentType::const_new(PARQUET_CONTENT_TYPE)),
     )
+}
+
+/// Read a body the caller compressed, in the same three encodings this service answers in.
+///
+/// The bodies that get large here are `region` — a serialized MOC, or one circle per source
+/// of a cross-match — and both are repetitive text that gzip takes down by an order of
+/// magnitude. There is no negotiating it: `Accept-Encoding` is the server saying what it can
+/// send back, and HTTP has no counterpart for a request, so a caller cannot discover this and
+/// has to be told. That is also why it is not the ordinary case and why nothing here depends
+/// on it — `[limits] max_request_body_bytes` is sized for a body sent as it was written.
+///
+/// **The limit is measured on the expanded bytes, and that is what makes this safe.**
+/// [`DefaultBodyLimit`] is enforced by the extractor, on whatever body the request holds by
+/// then, so a small compressed body that expands without end trips the limit mid-decode and
+/// the decoder stops being polled. The layer also drops `Content-Length` when it decodes, so
+/// nothing downstream reads the compressed size as the body's size.
+///
+/// An encoding this service does not have is a `415` naming the ones it does, which is the
+/// layer's own behaviour and the right one: a caller who guessed wrong learns that from the
+/// status rather than from a complaint about byte 0 not being JSON.
+fn decompression() -> RequestDecompressionLayer {
+    RequestDecompressionLayer::new()
 }
 
 /// One vocabulary's three routes.
@@ -3954,6 +3978,116 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("return_storage"), "{body}");
+    }
+
+    /// `body`, gzipped, as a client that set `Content-Encoding` would send it.
+    fn gzipped(body: &serde_json::Value) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body.to_string().as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn post_bytes(
+        service: Service,
+        body: Vec<u8>,
+        encoding: &str,
+    ) -> (StatusCode, http::HeaderMap, String) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/expr/parquet")
+            .header("content-type", "application/json")
+            .header("content-encoding", encoding)
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let (status, headers) = (response.status(), response.headers().clone());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// A caller may compress a body, and it means exactly what the same body means sent as it
+    /// was written. Worth a test of its own because nothing in the answer would say which way
+    /// it arrived — a decode that silently produced different bytes would read as the
+    /// caller's own mistake.
+    #[tokio::test]
+    async fn a_compressed_body_asks_the_same_question_as_a_plain_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": "objectid",
+            "where": "objectid < 4",
+        });
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let (plain_status, plain) = ask(service(), body.clone()).await;
+        let (status, _, answer) = post_bytes(service(), gzipped(&body), "gzip").await;
+
+        assert_eq!(plain_status, StatusCode::OK, "{plain}");
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        // Everything but how long it took, which is a measurement of this machine rather than
+        // anything the request asked for.
+        let without_timing = |body: &str| {
+            let mut answer: serde_json::Value = serde_json::from_str(body).unwrap();
+            answer.as_object_mut().unwrap().remove("elapsed_ms");
+            answer
+        };
+        assert_eq!(without_timing(&answer), without_timing(&plain));
+    }
+
+    /// An encoding this service has not got is said so, rather than handed to the parser as
+    /// bytes it cannot read. The two are a `415` and a `400` about byte 0, and only the first
+    /// tells a caller what is actually wrong.
+    #[tokio::test]
+    async fn an_encoding_this_service_cannot_read_is_refused_as_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let body = serde_json::json!({"url": "file:///part0.parquet", "select": "objectid"});
+
+        let (status, headers, answer) = post_bytes(
+            mounted(dir.path(), &ApiConfig::default()),
+            gzipped(&body),
+            "snappy",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{answer}");
+        // Which encodings it does have, since the caller has no other way to find out: there
+        // is no negotiation for a request body.
+        let accepted = headers[header::ACCEPT_ENCODING].to_str().unwrap();
+        assert!(accepted.contains("gzip"), "{accepted}");
+    }
+
+    /// The bound is on the body the service ends up holding, never on the bytes that arrived.
+    /// A compressed body that expands past it is refused the same as one sent that size —
+    /// which is what stops a kilobyte from costing the process a gigabyte.
+    #[tokio::test]
+    async fn a_compressed_body_is_measured_after_it_is_expanded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        // Compresses to a few hundred bytes and expands to a megabyte, so the two ends of the
+        // decode fall on opposite sides of the bound.
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": format!("'{}'", "x".repeat(1 << 20)),
+        });
+        let sent = gzipped(&body);
+        assert!(sent.len() < 4096, "the fixture is not compressible enough");
+        let limits = LimitsConfig {
+            max_request_body_bytes: bytesize::ByteSize::kib(64),
+            ..LimitsConfig::default()
+        };
+
+        let (status, _, answer) = post_bytes(
+            with_limits(serving(dir.path()), &ApiConfig::default(), &limits),
+            sent,
+            "gzip",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{answer}");
     }
 
     /// A body past `[limits] max_request_body_bytes` is refused whole, and the bound is the
