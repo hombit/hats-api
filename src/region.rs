@@ -97,15 +97,17 @@ pub enum Region {
     /// A range in each coordinate — `{"ra": [349.5, 10.5], "dec": [-20, -10]}` — in degrees and
     /// inclusive at both ends.
     ///
-    /// The same box `hats` and `lsdb` mean by `box_search`, so the numbers carry across
-    /// unchanged. ADQL's `BOX` is a different shape — a centre with a width and a height.
+    /// The shape `cdshealpix` calls a zone, and the one `hats` and `lsdb` search by with
+    /// `box_search` — the numbers carry across from those unchanged. It is *not* ADQL's
+    /// `BOX`, which is a centre with a width and a height, and whose edges are great
+    /// circles where these run along parallels; the two differ by degrees near a pole.
     ///
     /// **`ra` is a direction**: it runs eastward from the first value to the second, so
     /// `[350, 10]` is the twenty degrees across the origin and `[10, 350]` is the three hundred
     /// and forty the other way round.
     ///
     /// **`dec` is ordered**, first no greater than second. A reversed pair is refused.
-    Box {
+    Zone {
         /// `[from, to]` in degrees, eastward from the first to the second.
         ra: [f64; 2],
         /// `[low, high]` in degrees, low first.
@@ -146,7 +148,7 @@ pub enum Shape {
     Circle { ra: f64, dec: f64, radius: f64 },
     /// The eastward arc from `ra_from` through `ra_span` degrees, `ra_span` in `(0, 360]`,
     /// and the declination range, `dec_from <= dec_to`.
-    Box {
+    Zone {
         ra_from: f64,
         ra_span: f64,
         dec_from: f64,
@@ -346,7 +348,7 @@ impl Region {
                 let radius = radius(radius_deg, radius_arcsec)?;
                 Ok(Shape::Circle { ra, dec, radius })
             }
-            Self::Box {
+            Self::Zone {
                 ra: [ra_from, ra_to],
                 dec: [dec_from, dec_to],
             } => {
@@ -361,7 +363,7 @@ impl Region {
                     )));
                 }
                 let ra_span = eastward_span(ra_from, ra_to)?;
-                Ok(Shape::Box {
+                Ok(Shape::Zone {
                     ra_from,
                     ra_span,
                     dec_from,
@@ -458,12 +460,12 @@ impl Shape {
         match *self {
             Self::Circle { ra, dec, radius } => circle(ra_column, dec_column, ra, dec, radius),
             Self::Moc(_) => unreachable!("a moc has no geometry"),
-            Self::Box {
+            Self::Zone {
                 ra_from,
                 ra_span,
                 dec_from,
                 dec_to,
-            } => sky_box(ra_column, dec_column, ra_from, ra_span, dec_from, dec_to),
+            } => sky_zone(ra_column, dec_column, ra_from, ra_span, dec_from, dec_to),
         }
     }
 }
@@ -496,7 +498,7 @@ fn radius(degrees: Option<f64>, arcseconds: Option<f64>) -> Result<f64, ApiError
 /// How far eastward the arc from `from` to `to` runs, in degrees.
 ///
 /// The two naming the same point is refused rather than read. `hats` reads it as every
-/// right ascension; the other reading is an empty box; the two differ by a whole turn, and
+/// right ascension; the other reading is an empty zone; the two differ by a whole turn, and
 /// nothing in the answer would tell a caller which they got. A caller who meant everything
 /// writes a whole turn — `[0, 360]`.
 fn eastward_span(from: f64, to: f64) -> Result<f64, ApiError> {
@@ -579,7 +581,7 @@ fn ra_reach(dec: f64, radius: f64) -> f64 {
 ///
 /// Both halves are the shape itself rather than a bound around it, so neither is padded:
 /// widening one would return rows the caller did not ask for.
-fn sky_box(
+fn sky_zone(
     ra_column: &Expr,
     dec_column: &Expr,
     ra_from: f64,
@@ -591,7 +593,7 @@ fn sky_box(
         declination_within(dec_column, dec_from, dec_to),
         right_ascension_within(ra_column, ra_from, ra_span),
     ];
-    // A box spanning both coordinates fully is the whole sphere, and has nothing to test.
+    // A zone spanning both coordinates fully is the whole sphere, and has nothing to test.
     bounds
         .into_iter()
         .flatten()
@@ -928,7 +930,7 @@ mod tests {
                         * ((ra - ra0) * HALF_DEGREE).sin().powi(2);
                 hav <= (radius * HALF_DEGREE).sin().powi(2)
             }
-            Region::Box {
+            Region::Zone {
                 ra: [from, to],
                 dec: [low, high],
             } => {
@@ -1187,8 +1189,8 @@ mod tests {
         }
     }
 
-    fn box_over(ra: [f64; 2], dec: [f64; 2]) -> Region {
-        Region::Box { ra, dec }
+    fn zone_over(ra: [f64; 2], dec: [f64; 2]) -> Region {
+        Region::Zone { ra, dec }
     }
 
     /// Every circle worth asking about: away from anything special, across the
@@ -1209,16 +1211,16 @@ mod tests {
         ]
     }
 
-    /// And every box: an ordinary one, an arc across the origin, its long-way-round
+    /// And every zone: an ordinary one, an arc across the origin, its long-way-round
     /// complement, a polar cap, a narrow polar strip, and the whole sky.
-    fn boxes() -> Vec<Region> {
+    fn zones() -> Vec<Region> {
         vec![
-            box_over([315.0, 325.0], [-15.0, -10.0]),
-            box_over([355.0, 5.0], [5.0, 15.0]),
-            box_over([5.0, 355.0], [5.0, 15.0]),
-            box_over([0.0, 360.0], [88.0, 90.0]),
-            box_over([100.0, 150.0], [89.5, 90.0]),
-            box_over([0.0, 360.0], [-90.0, 90.0]),
+            zone_over([315.0, 325.0], [-15.0, -10.0]),
+            zone_over([355.0, 5.0], [5.0, 15.0]),
+            zone_over([5.0, 355.0], [5.0, 15.0]),
+            zone_over([0.0, 360.0], [88.0, 90.0]),
+            zone_over([100.0, 150.0], [89.5, 90.0]),
+            zone_over([0.0, 360.0], [-90.0, 90.0]),
         ]
     }
 
@@ -1243,12 +1245,12 @@ mod tests {
         }
     }
 
-    /// And the box's: a range in each coordinate, with right ascension read eastward from
+    /// And the zone's: a range in each coordinate, with right ascension read eastward from
     /// the first value to the second.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_box_selects_a_range_in_each_coordinate() {
+    async fn a_zone_selects_a_range_in_each_coordinate() {
         for fixture in Fixture::ALL {
-            for region in boxes() {
+            for region in zones() {
                 let regions = [region.clone()];
                 let expected = fixture.reference(&regions);
                 assert!(
@@ -1265,18 +1267,18 @@ mod tests {
     }
 
     /// `ra` is directed rather than least-to-greatest, so the two orderings of one pair are
-    /// two different boxes whose union is the whole band — and neither is empty.
+    /// two different zones whose union is the whole band — and neither is empty.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_two_orderings_of_a_right_ascension_range_are_different_boxes() {
+    async fn the_two_orderings_of_a_right_ascension_range_are_different_zones() {
         let fixture = Fixture {
             convention: Convention::Positive,
             precision: Precision::F64,
             index: HealpixColumn::Present,
         };
         let dec = [5.0, 15.0];
-        let across = fixture.selected(&[box_over([355.0, 5.0], dec)]).await;
-        let round = fixture.selected(&[box_over([5.0, 355.0], dec)]).await;
-        let band = fixture.selected(&[box_over([0.0, 360.0], dec)]).await;
+        let across = fixture.selected(&[zone_over([355.0, 5.0], dec)]).await;
+        let round = fixture.selected(&[zone_over([5.0, 355.0], dec)]).await;
+        let band = fixture.selected(&[zone_over([0.0, 360.0], dec)]).await;
 
         assert!(!across.is_empty() && !round.is_empty());
         assert!(across.len() < round.len(), "the short way round is smaller");
@@ -1299,7 +1301,7 @@ mod tests {
         };
         let regions = [
             circle_at(320.65747, -12.35315, 10.0),
-            box_over([100.0, 150.0], [89.5, 90.0]),
+            zone_over([100.0, 150.0], [89.5, 90.0]),
         ];
         let both = fixture.selected(&regions).await;
         let first = fixture.selected(&regions[..1]).await;
@@ -1625,8 +1627,8 @@ mod tests {
         assert!(refuse(circle_at(0.0, 0.0, 181.0)).contains("radius"));
 
         // A dec range runs first to second, and reversed has no second reading.
-        assert!(refuse(box_over([0.0, 10.0], [20.0, 10.0])).contains("dec"));
-        assert!(refuse(box_over([0.0, 10.0], [-91.0, 10.0])).contains("dec"));
+        assert!(refuse(zone_over([0.0, 10.0], [20.0, 10.0])).contains("dec"));
+        assert!(refuse(zone_over([0.0, 10.0], [-91.0, 10.0])).contains("dec"));
 
         // And an empty array, which would otherwise be a request whose spatial constraint
         // went missing.
@@ -1650,20 +1652,23 @@ mod tests {
     }
 
     /// The two ends of a right-ascension range naming the same point is refused rather than
-    /// read. `hats` reads it as every right ascension; the other reading is an empty box;
+    /// read. `hats` reads it as every right ascension; the other reading is an empty zone;
     /// the two differ by a whole turn and the answer would not say which it was.
     #[test]
     fn a_right_ascension_range_of_no_width_is_refused() {
         // The same point named twice, however it is spelled: `[350, -10]` runs a whole turn
         // back to where it started.
         for range in [[10.0, 10.0], [0.0, 0.0], [350.0, -10.0]] {
-            let error = refuse(box_over(range, [-10.0, 10.0]));
+            let error = refuse(zone_over(range, [-10.0, 10.0]));
             assert!(error.contains("[0, 360]"), "{range:?}: {error}");
         }
         // A whole turn forward is every right ascension, which is what a caller who meant
         // everything writes — from any starting point, not only from zero.
         for range in [[0.0, 360.0], [10.0, 370.0], [-180.0, 180.0]] {
-            assert!(plan(&[box_over(range, [-10.0, 10.0])]).is_ok(), "{range:?}");
+            assert!(
+                plan(&[zone_over(range, [-10.0, 10.0])]).is_ok(),
+                "{range:?}"
+            );
         }
     }
 
@@ -1756,19 +1761,22 @@ mod tests {
         );
         assert_eq!(
             region(serde_json::json!({
-                "type": "box", "ra": [349.5, 10.5], "dec": [-20.0, -10.0],
+                "type": "zone", "ra": [349.5, 10.5], "dec": [-20.0, -10.0],
             }))
             .unwrap(),
-            box_over([349.5, 10.5], [-20.0, -10.0])
+            zone_over([349.5, 10.5], [-20.0, -10.0])
         );
 
         for wrong in [
             // A shape this service does not have.
             serde_json::json!({"type": "polygon", "vertices": []}),
-            // ADQL's BOX, which is a centre with extents and is not what this takes.
+            // ADQL's BOX, which is a centre with extents and is not what a zone takes.
             serde_json::json!({
-                "type": "box", "ra": 10.0, "dec": 20.0, "width": 1.0, "height": 1.0,
+                "type": "zone", "ra": 10.0, "dec": 20.0, "width": 1.0, "height": 1.0,
             }),
+            // `box` is not a shape. It named the zone once, and ADQL spells a different
+            // shape that way, so the name is left unclaimed rather than reused.
+            serde_json::json!({"type": "box", "ra": [349.5, 10.5], "dec": [-20.0, -10.0]}),
             // A field that is not one of the shape's.
             serde_json::json!({
                 "type": "circle", "ra": 1.0, "dec": 2.0, "radius_deg": 3.0, "radus": 4.0,
@@ -1776,8 +1784,8 @@ mod tests {
             // A radius with no unit in its name.
             serde_json::json!({"type": "circle", "ra": 1.0, "dec": 2.0, "radius": 3.0}),
             // A range that is not a pair.
-            serde_json::json!({"type": "box", "ra": [1.0], "dec": [-1.0, 1.0]}),
-            serde_json::json!({"type": "box", "ra": [1.0, 2.0, 3.0], "dec": [-1.0, 1.0]}),
+            serde_json::json!({"type": "zone", "ra": [1.0], "dec": [-1.0, 1.0]}),
+            serde_json::json!({"type": "zone", "ra": [1.0, 2.0, 3.0], "dec": [-1.0, 1.0]}),
             // A frame, which this service has no transformation for: everything is ICRS.
             serde_json::json!({
                 "type": "circle", "ra": 1.0, "dec": 2.0, "radius_deg": 3.0,

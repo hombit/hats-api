@@ -146,7 +146,7 @@ const BASE_CELL_AREA: f64 = (4.0 * PI / 12.0) * (180.0 / PI) * (180.0 / PI);
 /// is cut at the equator so that each half is measured from the pole it is nearer to.
 ///
 /// It is also the widest cone worth having: one reaching a quarter turn already covers half
-/// the sky, so a piece of a box's arc longer than this is cut in two rather than enclosed.
+/// the sky, so a piece of a zone's arc longer than this is cut in two rather than enclosed.
 const QUARTER_TURN: f64 = 90.0;
 
 /// How much finer than the covering depth a cone is evaluated at.
@@ -260,7 +260,7 @@ impl Coverage {
     /// The covering of a union of shapes.
     ///
     /// Each shape is covered at its own depth, since a request may put a cone of an
-    /// arcsecond beside a box of a degree and one depth cannot suit both; the union of the
+    /// arcsecond beside a zone of a degree and one depth cannot suit both; the union of the
     /// two takes the finer of them, which leaves the coarser shape's cells exactly where
     /// they were.
     ///
@@ -695,18 +695,18 @@ impl Shape {
                     far(CellSelection::Inside).complement(),
                 )
             }
-            Self::Box {
+            Self::Zone {
                 ra_from,
                 ra_span,
                 dec_from,
                 dec_to,
             } => {
                 // Two parallels of the arc's own length, and two meridian segments. A
-                // parallel is shorter the further it is from the equator, so the box's
+                // parallel is shorter the further it is from the equator, so the zone's
                 // perimeter follows the one nearer to it.
                 let along = ra_span * dec_from.abs().min(dec_to.abs()).to_radians().cos();
                 let depth = detail.depth(2.0 * (along + dec_to - dec_from));
-                // A box with no declination between its two is a parallel: it has no
+                // A zone with no declination between its two is a parallel: it has no
                 // interior for an inner covering, and no band for the outer one to
                 // intersect. So it gets the sky, which says nothing and costs one comparison
                 // no row can fail, and its rows are decided by the geometry alone.
@@ -716,10 +716,10 @@ impl Shape {
                         RangeMOC::new_full_domain(depth),
                     );
                 }
-                let inner = inside_a_box(ra_from, ra_span, dec_from, dec_to, depth);
-                // The two supersets a box is the intersection of. Each is built from cone
+                let inner = inside_a_zone(ra_from, ra_span, dec_from, dec_to, depth);
+                // The two supersets a zone is the intersection of. Each is built from cone
                 // coverings, which are documented to include cells the shape misses and
-                // never to miss one it covers — so their intersection contains the box.
+                // never to miss one it covers — so their intersection contains the zone.
                 let mut outer = declinations_within(dec_from, dec_to, depth);
                 if ra_span < 360.0 {
                     outer = outer.and(&right_ascensions_within(
@@ -732,14 +732,14 @@ impl Shape {
     }
 }
 
-/// The cells wholly inside a box.
+/// The cells wholly inside a zone.
 ///
-/// From the walk along the box itself, whose "wholly covered" flags are the one thing that
+/// From the walk along the zone itself, whose "wholly covered" flags are the one thing that
 /// walk promises: a cell it flags is genuinely covered, and it is free to flag fewer than it
 /// might. Fewer is the direction an inner covering may be wrong in — a cell left out has its
 /// rows tested by the geometry, which is slower and not different — so what it loses is
 /// affordable here and would not be in [`declinations_within`].
-fn inside_a_box(
+fn inside_a_zone(
     ra_from: f64,
     ra_span: f64,
     dec_from: f64,
@@ -779,10 +779,10 @@ fn inside_a_box(
 /// of the sphere.
 ///
 /// A ring is two cone coverings, and a cone covering is a distance test per cell — no walk
-/// along an edge, and a documented superset. That is why the box's declinations are covered
+/// along an edge, and a documented superset. That is why the zone's declinations are covered
 /// this way rather than taken from the walk that produced its inner covering: the walk drops
 /// wedges of a cell beyond an edge that lies on the seam between two base cells, which for a
-/// superset is a lost row rather than a slower query. The two edges of a box are exactly
+/// superset is a lost row rather than a slower query. The two edges of a zone are exactly
 /// where a caller writes a round number, and every seam is one.
 ///
 /// A band straddling the equator is the union of its two halves, each measured from the pole
@@ -833,9 +833,9 @@ fn cone(
     )
 }
 
-/// A superset of a box's arc of right ascension: the cones enclosing the pieces of it.
+/// A superset of a zone's arc of right ascension: the cones enclosing the pieces of it.
 ///
-/// One cone over the whole box would be as wide as the box is long, and a cone wider than a
+/// One cone over the whole zone would be as wide as the zone is long, and a cone wider than a
 /// quarter turn covers most of the sky, so the arc is cut into pieces short enough for each
 /// cone to be worth having — four at most, since the arc is under a whole turn here.
 ///
@@ -886,7 +886,7 @@ fn separation(ra: f64, dec: f64, other_ra: f64, other_dec: f64) -> f64 {
         .to_degrees()
 }
 
-/// The declination halfway between two, which is the middle of a box in declination —
+/// The declination halfway between two, which is the middle of a zone in declination —
 /// unlike right ascension, where halfway depends on which way round the arc runs.
 fn midpoint(from: f64, to: f64) -> f64 {
     from + 0.5 * (to - from)
@@ -940,7 +940,7 @@ impl Detail {
 /// ordinary thing to ask for. Sized by its area it would be covered at a depth fine enough
 /// to describe the width, and come back as tens of thousands of ranges.
 fn depth_for(perimeter: f64) -> u8 {
-    // A shape with no boundary to follow — a box of no extent, or one whose numbers left a
+    // A shape with no boundary to follow — a zone of no extent, or one whose numbers left a
     // `NaN` behind — is described as finely as anything here ever is, and its rows are
     // decided by the geometry either way.
     if perimeter.is_nan() || perimeter <= 0.0 {
@@ -1310,19 +1310,19 @@ mod tests {
                 dec: 0.0,
                 radius: 179.5,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 350.0,
                 ra_span: 20.0,
                 dec_from: -20.0,
                 dec_to: -10.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 0.0,
                 ra_span: 360.0,
                 dec_from: 80.0,
                 dec_to: 90.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 100.0,
                 ra_span: 1.0,
                 dec_from: 0.0,
@@ -1331,25 +1331,25 @@ mod tests {
             // Edges on the seams where the base cells meet, which is where a walk along an
             // edge loses a wedge of the cell beyond it. Both of the polar caps, since the
             // four cells of one meet at multiples of 90 and the equatorial belt at 45.
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 0.0,
                 ra_span: 90.0,
                 dec_from: 80.0,
                 dec_to: 90.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 90.0,
                 ra_span: 90.0,
                 dec_from: -90.0,
                 dec_to: -60.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 315.0,
                 ra_span: 45.0,
                 dec_from: -50.0,
                 dec_to: 50.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 270.0,
                 ra_span: 90.0,
                 dec_from: 45.0,
@@ -1357,20 +1357,20 @@ mod tests {
             },
             // Declinations either side of the equator, which are covered as two bands
             // measured from the pole each is nearer to.
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 20.0,
                 ra_span: 200.0,
                 dec_from: -70.0,
                 dec_to: 70.0,
             },
-            Shape::Box {
+            Shape::Zone {
                 ra_from: 0.0,
                 ra_span: 360.0,
                 dec_from: -1.0,
                 dec_to: 1.0,
             },
-            // The whole sky, written as a box.
-            Shape::Box {
+            // The whole sky, written as a zone.
+            Shape::Zone {
                 ra_from: 0.0,
                 ra_span: 360.0,
                 dec_from: -90.0,
@@ -1805,7 +1805,7 @@ mod tests {
                 .acos();
                 separation <= radius.to_radians()
             }
-            Shape::Box {
+            Shape::Zone {
                 ra_from,
                 ra_span,
                 dec_from,

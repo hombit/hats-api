@@ -12,7 +12,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- **Breaking** The `box` region is now `zone`, ADQL spelling a different shape `BOX`. [#28](https://github.com/hombit/hats-api/pull/28)
 
 ### Deprecated
 

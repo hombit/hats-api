@@ -341,7 +341,7 @@ deliberately.
 
 ## A circle in a url
 
-`ra`, `dec` and one radius are the one shape a query string carries: a `box` is two ordered
+`ra`, `dec` and one radius are the one shape a query string carries: a `zone` is two ordered
 pairs and a `moc` is a document, and neither is a parameter. It is built into a `Region` and
 checked by `Region::shape`, so a circle means the same thing in a url as in a body rather
 than being validated twice.
@@ -436,10 +436,10 @@ quote and no second parser.
   which of its columns are coordinates, and a guess from conventional names would answer a
   different question than the one asked without saying so. A catalog's `properties` is the
   one thing allowed to supply them.
-- **A shape that reads two ways is refused, not resolved.** A `box`'s `ra` runs eastward
-  from the first value to the second, so `[350, 10]` and `[10, 350]` are different boxes
+- **A shape that reads two ways is refused, not resolved.** A `zone`'s `ra` runs eastward
+  from the first value to the second, so `[350, 10]` and `[10, 350]` are different zones
   and both are legal; the two values naming the *same* point is refused, because it reads
-  equally as an empty box and as the whole sky. `hats` reads that case as the whole sky —
+  equally as an empty zone and as the whole sky. `hats` reads that case as the whole sky —
   a deliberate divergence, since nothing in the answer would say which reading was used.
 - **A `moc` is cells, and that changes three rules rather than adding a shape.** It is used
   at the caller's own depth — `Shape::covering` ignores `Detail` for it, since re-covering
@@ -542,9 +542,9 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   declination band is cut at the equator so each half is measured from its nearer pole.
 - **`zone_coverage` is the inner covering's, never the outer's.** Its walk along an edge
   drops wedges of the cell beyond it when the edge lies on a seam between base cells and
-  the box reaches into a polar cap — and a box's edges are exactly where a caller writes a
+  the zone reaches into a polar cap — and a zone's edges are exactly where a caller writes a
   round number. Dropping cells is what an inner covering is allowed to do. For the outer
-  one a box is the intersection of two supersets built from cones: its declination band,
+  one a zone is the intersection of two supersets built from cones: its declination band,
   and the cones enclosing the pieces of its arc.
 - **`_healpix_29` is discovered; every other index column has to be named.** It is the one
   name that carries its own order, so it is the only one a file can be recognised as having
@@ -1041,6 +1041,13 @@ into a release.
    cannot scan a paragraph, and the whole of the reasoning is in the commit anyway. A
    dependency bump that changes none of those is not an entry at all. Add the comparison
    link at the foot beside the others.
+
+   **An entry that breaks a caller starts with `**Breaking**`**, before anything else on
+   the line — a renamed or removed field, a route that moves, a default that changes an
+   answer, a status a client matched on. The reader deciding whether to upgrade is
+   scanning for exactly these, and a section holding one of them among several ordinary
+   entries gives them nothing to scan for. The heading does not say it: a break can land
+   under `Changed` or `Removed` alike, and `Added` is the one heading it never lands under.
 
    **An entry ends with the pull requests that carried it**, last on the line and after
    the full stop, each written out as a link — `[#123](https://github.com/hombit/hats-api/pull/123)`,
