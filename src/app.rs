@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Router,
-    extract::{Request, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
     http::{Method, StatusCode, header, request::Parts},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
@@ -18,6 +18,7 @@ use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{
     And, DefaultPredicate, NotForContentType, Predicate as _,
 };
+use tower_http::decompression::RequestDecompressionLayer;
 use tower_http::services::ServeFile;
 use tower_http::trace::TraceLayer;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
@@ -62,6 +63,8 @@ pub struct Service {
     max_query_radius_arcsec: f64,
     /// How long a request has to produce an answer; `None` where the operator set no bound.
     request_timeout: Option<Duration>,
+    /// How large a request body may be, in bytes; `None` where the operator set no bound.
+    request_body_limit: Option<usize>,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
@@ -125,6 +128,12 @@ impl Service {
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
+            // Saturating rather than refusing: a 32-bit host cannot hold a body that large
+            // anyway, so the cap it lands on is the one that machine could have honoured.
+            request_body_limit: match limits.max_request_body_bytes.as_u64() {
+                0 => None,
+                bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
+            },
             show_version: server.show_version,
             serve_index_html: server.serve_index_html,
             api_prefix: api_prefix.map(Arc::from),
@@ -158,6 +167,7 @@ impl Service {
 
 pub fn router(service: Service) -> Router {
     let timeout = service.request_timeout;
+    let body_limit = service.request_body_limit;
     let mut router = Router::new();
     if let Some(prefix) = service.api_prefix.clone() {
         router = router.route(&route(&prefix, "health"), get(health));
@@ -184,7 +194,15 @@ pub fn router(service: Service) -> Router {
     if let Some(limit) = timeout {
         router = router.layer(middleware::from_fn_with_state(limit, deadline));
     }
+    // Replaces axum's own default rather than adding to it: whichever of the two is set
+    // last is the one an extractor reads, so an operator raising this really does raise it.
+    // Outside the deadline, since refusing an oversized body is not work the clock is about.
+    router = router.layer(match body_limit {
+        Some(bytes) => DefaultBodyLimit::max(bytes),
+        None => DefaultBodyLimit::disable(),
+    });
     router
+        .layer(decompression())
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
         // something in.
@@ -263,6 +281,28 @@ fn compression() -> CompressionLayer<And<DefaultPredicate, NotForContentType>> {
     CompressionLayer::new().compress_when(
         DefaultPredicate::new().and(NotForContentType::const_new(PARQUET_CONTENT_TYPE)),
     )
+}
+
+/// Read a body the caller compressed, in the same three encodings this service answers in.
+///
+/// The bodies that get large here are `region` — a serialized MOC, or one circle per source
+/// of a cross-match — and both are repetitive text that gzip takes down by an order of
+/// magnitude. There is no negotiating it: `Accept-Encoding` is the server saying what it can
+/// send back, and HTTP has no counterpart for a request, so a caller cannot discover this and
+/// has to be told. That is also why it is not the ordinary case and why nothing here depends
+/// on it — `[limits] max_request_body_bytes` is sized for a body sent as it was written.
+///
+/// **The limit is measured on the expanded bytes, and that is what makes this safe.**
+/// [`DefaultBodyLimit`] is enforced by the extractor, on whatever body the request holds by
+/// then, so a small compressed body that expands without end trips the limit mid-decode and
+/// the decoder stops being polled. The layer also drops `Content-Length` when it decodes, so
+/// nothing downstream reads the compressed size as the body's size.
+///
+/// An encoding this service does not have is a `415` naming the ones it does, which is the
+/// layer's own behaviour and the right one: a caller who guessed wrong learns that from the
+/// status rather than from a complaint about byte 0 not being JSON.
+fn decompression() -> RequestDecompressionLayer {
+    RequestDecompressionLayer::new()
 }
 
 /// One vocabulary's three routes.
@@ -1730,6 +1770,18 @@ fn body_error<D: Dialect>(rejection: &JsonRejection, takes: &str) -> ApiError {
     // vocabulary's note is here because this is the message a wrong *type* lands on, and
     // serde's own — which does say the type — quotes the value beside it.
     let shape = format!("expected a JSON object with {takes}; {}", D::NOTE);
+
+    // A body past `[limits] max_request_body_bytes` is refused before a byte of it is
+    // parsed, so there is no shape to describe and nothing the caller could respell. Asked
+    // of the rejection's own status rather than by naming a variant: the limit surfaces
+    // through whichever buffering error the extractor wraps, and the status is the part of
+    // that axum promises.
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::too_much_work(
+            "the request body is larger than this service accepts; send fewer terms, or \
+             ask the operator to raise the body limit",
+        );
+    }
 
     match rejection {
         // A parse failure quotes the position, not the contents.
@@ -3926,6 +3978,154 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("return_storage"), "{body}");
+    }
+
+    /// `body`, gzipped, as a client that set `Content-Encoding` would send it.
+    fn gzipped(body: &serde_json::Value) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(body.to_string().as_bytes()).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    async fn post_bytes(
+        service: Service,
+        body: Vec<u8>,
+        encoding: &str,
+    ) -> (StatusCode, http::HeaderMap, String) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/expr/parquet")
+            .header("content-type", "application/json")
+            .header("content-encoding", encoding)
+            .body(Body::from(body))
+            .unwrap();
+        let response = router(service).oneshot(request).await.unwrap();
+        let (status, headers) = (response.status(), response.headers().clone());
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    /// A caller may compress a body, and it means exactly what the same body means sent as it
+    /// was written. Worth a test of its own because nothing in the answer would say which way
+    /// it arrived — a decode that silently produced different bytes would read as the
+    /// caller's own mistake.
+    #[tokio::test]
+    async fn a_compressed_body_asks_the_same_question_as_a_plain_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": "objectid",
+            "where": "objectid < 4",
+        });
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let (plain_status, plain) = ask(service(), body.clone()).await;
+        let (status, _, answer) = post_bytes(service(), gzipped(&body), "gzip").await;
+
+        assert_eq!(plain_status, StatusCode::OK, "{plain}");
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        // Everything but how long it took, which is a measurement of this machine rather than
+        // anything the request asked for.
+        let without_timing = |body: &str| {
+            let mut answer: serde_json::Value = serde_json::from_str(body).unwrap();
+            answer.as_object_mut().unwrap().remove("elapsed_ms");
+            answer
+        };
+        assert_eq!(without_timing(&answer), without_timing(&plain));
+    }
+
+    /// An encoding this service has not got is said so, rather than handed to the parser as
+    /// bytes it cannot read. The two are a `415` and a `400` about byte 0, and only the first
+    /// tells a caller what is actually wrong.
+    #[tokio::test]
+    async fn an_encoding_this_service_cannot_read_is_refused_as_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let body = serde_json::json!({"url": "file:///part0.parquet", "select": "objectid"});
+
+        let (status, headers, answer) = post_bytes(
+            mounted(dir.path(), &ApiConfig::default()),
+            gzipped(&body),
+            "snappy",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{answer}");
+        // Which encodings it does have, since the caller has no other way to find out: there
+        // is no negotiation for a request body.
+        let accepted = headers[header::ACCEPT_ENCODING].to_str().unwrap();
+        assert!(accepted.contains("gzip"), "{accepted}");
+    }
+
+    /// The bound is on the body the service ends up holding, never on the bytes that arrived.
+    /// A compressed body that expands past it is refused the same as one sent that size —
+    /// which is what stops a kilobyte from costing the process a gigabyte.
+    #[tokio::test]
+    async fn a_compressed_body_is_measured_after_it_is_expanded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        // Compresses to a few hundred bytes and expands to a megabyte, so the two ends of the
+        // decode fall on opposite sides of the bound.
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": format!("'{}'", "x".repeat(1 << 20)),
+        });
+        let sent = gzipped(&body);
+        assert!(sent.len() < 4096, "the fixture is not compressible enough");
+        let limits = LimitsConfig {
+            max_request_body_bytes: bytesize::ByteSize::kib(64),
+            ..LimitsConfig::default()
+        };
+
+        let (status, _, answer) = post_bytes(
+            with_limits(serving(dir.path()), &ApiConfig::default(), &limits),
+            sent,
+            "gzip",
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{answer}");
+    }
+
+    /// A body past `[limits] max_request_body_bytes` is refused whole, and the bound is the
+    /// operator's to raise: the same body goes through against a larger one.
+    ///
+    /// The refusal is a `413` rather than the `400` every other malformed body gets, since
+    /// nothing was read: there is no field to name and nothing for the caller to respell.
+    #[tokio::test]
+    async fn a_request_body_is_bounded_by_what_the_operator_allows() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        // An `IN` list is what a caller's body actually grows by, and this one is some
+        // kilobytes — well past the small bound and well short of the large one.
+        let ids = (0..2000)
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let body = serde_json::json!({
+            "url": "file:///part0.parquet",
+            "select": "objectid",
+            "where": format!("objectid IN ({ids})"),
+        });
+        let bounded = |bytes| LimitsConfig {
+            max_request_body_bytes: bytesize::ByteSize::b(bytes),
+            ..LimitsConfig::default()
+        };
+        let service =
+            |limits: &LimitsConfig| with_limits(serving(dir.path()), &ApiConfig::default(), limits);
+
+        let (status, answer) = ask(service(&bounded(1024)), body.clone()).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{answer}");
+        assert!(
+            answer.contains("larger than this service accepts"),
+            "{answer}"
+        );
+
+        let (status, answer) = ask(service(&bounded(1 << 20)), body).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
     }
 
     /// A request over more than the server will do comes back as the plan for it, with the

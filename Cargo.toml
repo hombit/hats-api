@@ -53,7 +53,7 @@ serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"
-tower-http = { version = "0.7", features = ["compression-br", "compression-gzip", "compression-zstd", "fs", "trace"] }
+tower-http = { version = "0.7", features = ["compression-br", "compression-gzip", "compression-zstd", "decompression-br", "decompression-gzip", "decompression-zstd", "fs", "trace"] }
 percent-encoding = "2"
 # Escaping, for the VOTable writer.
 quick-xml = "0.42"
@@ -80,6 +80,8 @@ redundant_clone = "warn"
 todo = "warn"
 
 [dev-dependencies]
+# Writes the gzip a client would send.
+flate2 = "1"
 http-body-util = "0.1"
 hyper-util = "0.1"
 s3s = "0.15"
