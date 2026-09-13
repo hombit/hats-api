@@ -3,7 +3,7 @@
 Query HATS catalogs over HTTP.
 
 A query narrows a catalog three ways:
-- A **region** of the sky: a circle, a box, or a MOC.
+- A **region** of the sky: a circle, a zone, or a MOC.
 - A **row predicate** written as a SQL expression.
 - And the **columns** you want.
 
@@ -77,7 +77,7 @@ GET /gaia?ra=348.077&dec=-29.339&radius_arcsec=30&columns=source_id,phot_g_mean_
 | `ra_column`, `dec_column` | which columns hold the position. Refused against a catalog, which names its own; required with a cone against a parquet file. |
 
 A cone is the only shape a URL takes; the API's [`region`](#selecting-a-region-of-the-sky)
-also has a box and a MOC.
+also has a zone and a MOC.
 
 The same from Python:
 
@@ -201,7 +201,7 @@ The rest of the body is the same in both vocabularies:
 | field | means                                                                                                         |
 |---|---------------------------------------------------------------------------------------------------------------|
 | `url` | the resource to query. The only required field                                                                |
-| `region` | [a shape on the sky](#selecting-a-region-of-the-sky): a circle, a box or a MOC                                |
+| `region` | [a shape on the sky](#selecting-a-region-of-the-sky): a circle, a zone or a MOC                                |
 | `ra_column`, `dec_column` | which columns hold the position. Required with a `region` for `/api/v1/*/parquet`, not for HATS, which names its own |
 | `healpix_column`, `healpix_order` | [a HEALPix index column](#the-healpix-column), if the parquet file has one                                    |
 | `limit` | most rows to return                                                                                           |
@@ -429,23 +429,23 @@ in the field name: `radius_deg` or `radius_arcsec`.
 | `type` | fields |
 |---|---|
 | `circle` | `ra`, `dec`, and exactly one of `radius_deg` or `radius_arcsec` |
-| `box` | `ra: [from, to]`, `dec: [from, to]` |
+| `zone` | `ra: [from, to]`, `dec: [from, to]` |
 | `moc` | an IVOA MOC, in exactly one of `ascii` or `json` |
 
 ```json
 "region": [
   { "type": "circle", "ra": 320.65747, "dec": -12.35315, "radius_arcsec": 36 },
-  { "type": "box", "ra": [349.5, 10.5], "dec": [-20, -10] },
+  { "type": "zone", "ra": [349.5, 10.5], "dec": [-20, -10] },
   { "type": "moc", "ascii": "3/3 10 4/16-18 22" }
 ]
 ```
 
-`ra_column` and `dec_column` name the position columns, which a `circle` or a `box` is
+`ra_column` and `dec_column` name the position columns, which a `circle` or a `zone` is
 tested against; a `moc` is tested against the [HEALPix column](#the-healpix-column)
 instead. So the pair is required with a `region`, unless every shape in it is a `moc`.
 Either right ascension convention works, 0 to 360 or -180 to 180.
 
-A `box` is two inclusive ranges. `ra` runs eastward from the first value to the second, so
+A `zone` is two inclusive ranges. `ra` runs eastward from the first value to the second, so
 `[350, 10]` is twenty degrees across the origin and `[10, 350]` is the three hundred and
 forty the other way; `[0, 360]` is every right ascension, and the two values naming the
 same point is refused. `dec` is ordered, so its first value may not be the greater one.
@@ -456,7 +456,7 @@ which are what `mocpy`'s `serialize(format="str")` and `serialize(format="json")
 
 #### The HEALPix column
 
-A `moc` is tested against this column, so it is required there. For a `circle` or a `box`
+A `moc` is tested against this column, so it is required there. For a `circle` or a `zone`
 it is an accelerator: it changes what a query costs and never which rows come back.
 
 `_healpix_29` is used automatically when a file has it. Any other column is named by

@@ -12,7 +12,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- **Breaking** The `box` region is now `zone`, ADQL spelling a different shape `BOX`.
 
 ### Deprecated
 

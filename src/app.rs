@@ -681,7 +681,7 @@ async fn serve_mounted(
 ///
 /// The circle is the API's `region` flattened into a query string — the one shape a url can
 /// carry, since it is four numbers rather than a structure. The rest of the shapes stay with
-/// the API: a `box` is two ordered pairs and a `moc` is a document, and neither reads as a
+/// the API: a `zone` is two ordered pairs and a `moc` is a document, and neither reads as a
 /// parameter. What a url gains in return is that it can be linked to, pasted and handed to a
 /// reader that takes one, which is what the file-server mode is for.
 #[derive(Debug, Default)]
