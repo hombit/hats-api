@@ -41,6 +41,12 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 6.5 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6 | caching | todo | build in the order §6.5 ranks |
 | 7 | operational surface | todo | |
+| 10.2 | `box` renamed `zone` | todo | prerequisite for §10.3; ADQL's `BOX` is a different shape |
+| 10.1 | the ADQL request shape | todo | |
+| 10.3 | ADQL over the query that already runs | todo | not mandatory-complete ADQL, and not to be described as it |
+| 10.4 | the statement planned | todo | needs §8.4's response cap first |
+| 10.5 | one large table and small ones | todo | |
+| 10.6 | two large catalogs | todo | investigation; droppable. Margins computed per request, so complete but slow |
 
 §2–§7 are the phases in order, §8 the conditions every phase must keep, §9 what is
 deferred.
@@ -357,6 +363,212 @@ would make this output worth reading in an IVOA client. It needs a VOTable *pars
 nothing here has; `votable` on crates.io is the CDS implementation, weighed once for the
 writing side and turned down, so the reading is where it earns its dependencies.
 
+## 10. Phase 7 — ADQL
+
+IVOA's query language over the catalogs this service already reads, at one endpoint:
+`POST {api.prefix}/v1/adql`. What it buys is that a TAP client and an `lsdb` user ask the
+same data the same question, in the spelling every other astronomy service takes.
+
+Four stages, and each is worth shipping alone. The first is a front end over the query
+engine that already exists; the ones after it each open something the one before could not
+express, at rising cost. **Stopping after any of them leaves a coherent service** — what
+must not happen is a stage advertising the next one's capability.
+
+References: [ADQL 2.1](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html),
+[TAP 1.1](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.html), the
+[UDF catalogue](https://www.ivoa.net/documents/udf-catalogue/20240807/PEN-udf-catalogue-1.2-20240807.html).
+MOC is in none of them: it is slated for ADQL 2.3, and the only shipping precedent is
+DaCHS, whose spelling §10.7 follows.
+
+### 10.1 The request
+
+```json
+{
+  "query": "SELECT TOP 100 source_id, ra, dec FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+  "tables": {
+    "gaia": {"type": "hats", "url": "s3://bucket/gaia_dr3", "storage": {}, "region": {}}
+  }
+}
+```
+
+- **The caller names the tables, and the request is the only place they come from.** A table
+  entry is what the `parquet` and `hats` bodies already take — `url`, `storage`, `region` —
+  under a `type` that says which of the two it is, so the serde types and their
+  descriptions are reused rather than restated. A url may be `file://` resolving through a
+  mount, or remote, exactly as it may today. That keeps §0.2: nothing is registered between
+  requests.
+- **A table name is an ADQL regular identifier**, and it answers to its own spelling and to
+  its lowercase, the way a column does — not to ADQL's uppercase folding (§10.8).
+  `TAP_UPLOAD` and `TAP_SCHEMA` are refused as names now, before §9.5 needs them.
+- **A table's `region` is a view definition** — "this table is that catalog restricted to
+  this shape" — and it is the only `region` in the request. There is no request-level one:
+  a caller writing ADQL says where they are looking in the `WHERE` clause, and a second
+  spelling beside it would be two ways to say one thing. A table region and a predicate
+  region compose as the intersection, which needs no rule because it is what `AND` means.
+- **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
+  already answered per §7.5 and are what a TAP layer will need anyway.
+
+### 10.2 `zone`, before any of it
+
+**`box` is renamed `zone` and ADQL's `BOX` is left unclaimed.** They are different shapes:
+ours is a coordinate range with edges along parallels, ADQL's is a centre with a width and a
+height and edges along great circles, and at high declination the two differ by degrees. One
+name over both is the failure §5.2 is written against.
+
+`zone` is the word the machinery already uses — `cdshealpix`'s `zone_coverage` is exactly
+this shape, and `CLAUDE.md` names it that in the inner-covering rule — so the request field
+comes to agree with what computes it.
+
+A plain rename: no alias, no deprecation window, `"type": "box"` simply not a shape any
+more. It is a prerequisite rather than part of §10.3, so it lands on its own, as one
+changelog line under `Changed`.
+
+### 10.3 Stage one — ADQL over the query that already runs
+
+Parse the statement; take the select list, the `WHERE`, the `TOP` and the recognised
+geometry; hand them to the `Selection` and the `hats_query::Search` that serve every other
+route. **No second execution path**, which is what makes this stage small: the partition
+fan-out, §5.3's three bounds, plan mode, the ordering guarantee and `first_rows_in_order`
+all carry over unexamined.
+
+- **One statement, and the parser must reach the end of it.** `sql.rs`'s rule, one level up.
+  `GenericDialect` parses `TOP` after `DISTINCT`, which is ADQL's order, so no custom
+  dialect is needed for it.
+- **A geometry predicate is recognised or refused, never ignored.** `1 = CONTAINS(POINT(ra,
+  dec), CIRCLE(…))`, its spellings with the comparison the other way round or against `> 0`,
+  the same with `MOC(…)`, and `DISTANCE(…) < r`, all lower to a `region::Shape` and from
+  there to §5.2's predicate and §5.3's partition choice. Anything else spatial is a 400. A
+  haversine DataFusion merely evaluates is a query that reads every partition — six minutes
+  over ZTF DR24 — which a caller cannot tell from a slow link.
+- **The coordinate columns come from the catalog**, as they do on the `hats` route; a
+  `parquet` table names them in its entry.
+- **Exactly the query shapes the fan-out can answer.** `GROUP BY`, `HAVING`, `ORDER BY`,
+  `DISTINCT`, aggregates, subqueries, set operations and joins each need to combine across
+  partitions and are refused by name, saying that §10.4 is where they arrive. **This stage
+  is not mandatory-complete ADQL and must not be described as it** — the first three of
+  those are in the mandatory core.
+
+### 10.4 Stage two — the statement planned
+
+A `TableProvider` per table and DataFusion plans the query, which is what makes "a large
+table, a small answer" real: an aggregate over a catalog is the best case this service has.
+It is also a second execution path beside §10.3's fan-out, and the convergence of the two is
+deferred rather than pretended away.
+
+- **The provider carries the partition choice.** `supports_filters_pushdown` over the
+  recognised geometry, so the file list a scan is built from is already the partitions
+  §5.3's covering chose. Without it the provider is a list of twelve thousand files.
+- **A memory pool, and no spilling.** §8.4's numbers: `with_memory_limit` installs a
+  `GreedyMemoryPool` so an over-large query fails with `ResourcesExhausted`, and
+  `DiskManagerMode::Disabled` stops a memory bound quietly becoming a disk one.
+- **The response cap is §8.4's**, and this is what forces it: `collect` bounds nothing, and a
+  `GROUP BY` over a high-cardinality column is a small-looking query with a large answer.
+- **`ORDER BY` is bounded by what follows it.** With a `TOP` it is DataFusion's TopK — a heap
+  of *n* — and without one it is bounded only by the response cap. Both are acceptable; the
+  distinction is worth stating because one is a sort of the matched set and the other is not.
+- **`TOP` without `ORDER BY` returns an arbitrary set**, and says so. The fan-out's
+  reproducibility does not survive a plan with an aggregate in it, and ADQL requires nothing
+  here (§10.8).
+
+### 10.5 Stage three — one large table and small ones
+
+Several tables where one is a catalog and the rest fit in memory. **This needs no new
+operator**: DataFusion's hash join with the small side as the build side is a broadcast join
+already, and the two cases originally imagined — small tables only, and one large among
+small ones — are one piece of work, the first being the second with nothing large in it.
+
+What is new is deciding *which* side is small, and refusing rather than discovering. A
+declared size is a fan-out hint and not a cost (§5.3), so the build side is either bounded by
+the memory pool and allowed to fail, or bounded up front by the entry's own kind — a
+`parquet` table is small, a `hats` one is not. Settle that before building it.
+
+### 10.6 Stage four — two large catalogs
+
+A crossmatch, driven partition by partition: both `TableProvider`s carry the HEALPix
+partitioning, so one partition of the left side is joined against the partitions of the
+right side that its cells can reach, and neither whole catalog is ever a build side.
+**Investigation, and droppable** — how much of this the planner will do rather than us is to
+be measured rather than assumed, `EnforceDistribution` having its own ideas about when a
+declared partitioning may be used.
+
+**The answer is complete, and the cost of that is reading boundary partitions more than
+once.** A pair an arcsecond apart either side of a cell edge sits in two different
+partitions, so the right-hand side of each join is not the matching cell but that cell grown
+by the match radius — the covering machinery computes which partitions that reaches, the
+same way §5.3 chooses partitions for a region. That is margins computed per request instead
+of read from a margin catalog: more bytes fetched and more memory than a prepared margin
+would cost, and no rows missing. **Slow is acceptable here and silently incomplete is not**,
+which is the whole reason the grown covering is not an optimisation to be dropped under
+pressure.
+
+Driving from the left means each left row is considered once, so pairs come out unique with
+nothing to deduplicate. A margin catalog, where one exists, is the same query reading less
+— an optimisation over this, not a different design.
+
+It is a recognised query shape rather than general `JOIN` support. Anything outside it is
+refused, naming what it would have cost.
+
+### 10.7 What ADQL asks for, and what is refused
+
+**The geometry functions are an optional feature** — `ivo://ivoa.net/std/tapregext#features-adqlgeo`
+— and TAPRegExt declares them one form at a time, so the service advertises `POINT`,
+`CIRCLE`, `CONTAINS`, `INTERSECTS` and `DISTANCE` without owing the rest. Optional too, for
+whoever goes looking: `LOWER`/`UPPER`/`ILIKE`, common table expressions, set operations,
+`CAST`, `COALESCE`, `OFFSET`, `IN_UNIT`, and every UDF.
+
+Refused, each with a message that says it is refused rather than unsupported: `POLYGON`
+(§9.3), `BOX` (§10.2), `REGION` (an STC-S parser, deprecated in ADQL 2.1), `COORDSYS` and
+`ivo_geom_transform` (frame transforms), `IN_UNIT` (a units library), `AREA` and `CENTROID`
+(they want geometries as values, and no file here has a geometry column).
+
+Added because they are cheap here and expensive elsewhere:
+
+- **`MOC('4/30-33 38 52 7/324-934')`**, DaCHS's spelling, as a region inside `CONTAINS`. It
+  lowers to `Shape::Moc`, which is the one shape matched exactly and the cheapest predicate
+  the service has. DaCHS cannot compare a point to a MOC directly; against a HEALPix-indexed
+  catalog it is what we are fastest at.
+- **`ivo_healpix_index(order, ra, dec)` and `ivo_healpix_center(order, index)`**, a few lines
+  of `cdshealpix` from the UDF catalogue.
+
+**Three function names do not map by spelling**, and each is a silent wrong answer if it
+does: ADQL's `LOG` is the natural logarithm where DataFusion's `log` is base ten — `ln` is
+the one meant — and `CEILING` and `TRUNCATE` are `ceil` and `trunc`. The mapping is written
+out and tested, never a passthrough by name.
+
+**`RAND([seed])` is mandatory and is implemented**, which needs two things said:
+
+- **It is registered `Volatile`.** A zero-argument immutable function is constant-folded —
+  computed once and glued onto every row — so the volatility is what makes it a random
+  column rather than a random constant. `sql.rs`'s volatility rule therefore gains a *named
+  exception* for this one function on this one route, rather than being loosened; `now()`
+  and DataFusion's own `random()` stay refused for the reasons they are refused for.
+- **It is not reproducible**, and the seed actually used is echoed in the response so a run
+  can be replayed. The values depend on the order the generator is consumed in and
+  partitions are read in parallel; a counter-based generator keyed by position would fix it,
+  but DataFusion hands a scalar UDF its batch and `number_rows` and nothing identifying
+  which partition the batch came from. The reproducible alternative — hashing the seed
+  against a stable row key such as `_healpix_29` — is available if the guarantee turns out
+  to be worth more than the standard's reading, and it costs two rows with one key the same
+  number.
+
+### 10.8 Three divergences to write down
+
+Each is a place this service deliberately answers differently from the specification, and
+each belongs in `CLAUDE.md` and in the route's own description once built — found where
+someone will look, not here, since this file is deleted when the work in it is done.
+
+1. **An identifier answers to its own spelling and to its lowercase.** ADQL folds unquoted
+   identifiers to uppercase. Astronomy column names are mixed-case as a matter of course and
+   a caller reads them off the file, so the existing rule wins and applies to table names too.
+2. **A bound reached returns no rows at all.** TAP truncates at `MAXREC` and marks the result
+   `QUERY_STATUS=OVERFLOW`; rows cut off are a value a caller cannot tell from the whole
+   answer, so this service refuses instead. Revisited at §9.5, where `OVERFLOW` is at least
+   an in-band statement that the answer is partial.
+3. **`RAND` and an unordered `TOP` are the first answers here that are not reproducible.**
+   ADQL says nothing about which rows `TOP n` returns without an `ORDER BY`, so an arbitrary
+   set conforms — but every other route promises more than that, and a reader will carry the
+   stronger assumption across unless it is written down.
+
 ## 8. Security requirements
 
 Conditions every phase must keep. What holds them today is in `CLAUDE.md`; what is here is
@@ -460,7 +672,7 @@ Nothing in it bounds what a `collect` returns.
    query string — and the moment anything here could carry a secret it goes back to being a
    `POST`. Left to settle: where it sits in the url space, a url nested in a url needing
    encoding either way.
-3. **A `polygon` region.** `vertices: [[ra, dec], …]`, alongside `circle` and `box`. Every
+3. **A `polygon` region.** `vertices: [[ra, dec], …]`, alongside `circle` and `zone`. Every
    other shape is a formula — one `Expr` that prunes on the coordinate columns — and this
    one is not. Four things to settle before it:
 
@@ -480,17 +692,20 @@ Nothing in it bounds what a `collect` returns.
      can disagree about.
 
    `cdshealpix` supplies the covering; the exact test, the conventions and the refusals are
-   the work.
-4. **SQL, then ADQL, as front ends.** Both parse into the structured query the service
-   already executes rather than opening a second execution path. ADQL's `CONTAINS`,
-   `POINT`, `CIRCLE` and `DISTANCE` map onto §5.2's predicates — and because those
-   spellings are specified, that is also when a spatial constraint can move out of the
-   structured `region` field into the expression, with unrecognised spatial predicates
-   refused rather than silently scanning everything. Plain SQL first: it settles the
-   lowering and the rejection messages before the IVOA grammar.
-5. **TAP protocol.** IVOA TAP over the ADQL layer: `/sync`, `/async`, VOSI, §7.5's VOTable
-   output, the UWS job model. `/async` is a real job system with state, and is where §5.3's
-   and §7.2's no-job-queue decision is revisited.
+   the work. §10 does not wait on it — ADQL's `POLYGON` is part of an optional feature, and
+   the second and third points above are also what `BOX` turns on, which is why §10.7
+   refuses that one rather than mapping it onto a shape with different edges.
+4. **A table registry the operator declares.** §10's tables are the caller's, named in
+   every request, which is all a stateless service needs and all §0.2 allows. A registry is
+   what TAP requires instead: `TAP_SCHEMA` is service-side and has nowhere to put a name
+   that arrives with the query, so a catalog served under TAP has to be named in the config
+   — likely a name on each `[[mount]]`, unique across them and checked at startup the way
+   `path` overlap already is. Not needed before then, and §10 must not assume it.
+5. **TAP protocol.** IVOA TAP over §10's ADQL layer: `/sync`, `/async`, VOSI, §7.5's VOTable
+   output, the UWS job model, and §9.4's registry under it. `/async` is a real job system
+   with state, and is where §5.3's and §7.2's no-job-queue decision is revisited. It is also
+   where §10.8's refusal to truncate is revisited: `QUERY_STATUS=OVERFLOW` is the one
+   sanctioned way to hand back a partial answer that says it is partial.
 6. **Filesystem-driven cache invalidation** (§6.6).
 7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today. The
