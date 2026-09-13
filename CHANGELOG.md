@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[server] serve_index_html`, on by default.
 
 ### Changed
 
