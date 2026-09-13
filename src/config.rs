@@ -256,6 +256,14 @@ pub struct ServerConfig {
     /// much: it hides the number from a reader, not from anyone fingerprinting the
     /// service.
     pub show_version: bool,
+    /// Whether a directory holding an `index.html` is served that file in place of a
+    /// generated listing.
+    ///
+    /// On by default, which is what every other file server does. Off publishes the
+    /// generated page for every directory, and the `index.html` stays an ordinary file
+    /// that answers to its own name — so a tree carrying pages written for some other
+    /// reader is browsable here as data, which is what a HATS catalog under one is.
+    pub serve_index_html: bool,
 }
 
 impl Default for ServerConfig {
@@ -264,6 +272,7 @@ impl Default for ServerConfig {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 80,
             show_version: true,
+            serve_index_html: true,
         }
     }
 }

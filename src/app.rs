@@ -64,6 +64,8 @@ pub struct Service {
     request_timeout: Option<Duration>,
     /// Whether a generated listing says which software and version produced it.
     show_version: bool,
+    /// Whether a directory's own `index.html` is served in place of a generated listing.
+    serve_index_html: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     api_prefix: Option<Arc<str>>,
 }
@@ -124,6 +126,7 @@ impl Service {
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
             show_version: server.show_version,
+            serve_index_html: server.serve_index_html,
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -580,11 +583,21 @@ async fn serve_mounted(
             return query_catalog_mounted(&service, mount, &file, &query, &parts).await;
         }
         // A directory that publishes its own page says what it wants said about itself,
-        // and the generated listing is only the fallback. Through `authorize_mounted`
-        // like any other file, so a link the mount does not follow is not followed here
-        // either.
-        match access::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)) {
-            Ok(index) if index.is_file() => file = index,
+        // and the generated listing is only the fallback — unless the operator turned
+        // that around with `serve_index_html`, which is for a tree whose pages were
+        // written for some other reader and say nothing about the data under them.
+        // Through `authorize_mounted` like any other file, so a link the mount does not
+        // follow is not followed here either.
+        //
+        // The file itself stays served under its own name either way: what the setting
+        // decides is what a request for the *directory* answers with, not whether an
+        // `index.html` exists.
+        let index = match service.serve_index_html {
+            true => access::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)).ok(),
+            false => None,
+        };
+        match index {
+            Some(index) if index.is_file() => file = index,
             _ => return list_directory(&service, mount, &segments, &file, &parts).await,
         }
     }
@@ -2691,19 +2704,21 @@ mod tests {
         api: &ApiConfig,
         limits: &LimitsConfig,
     ) -> Service {
+        with_server(config, api, limits, &ServerConfig::default())
+    }
+
+    /// And the same for the cases that are about what the file server publishes.
+    fn with_server(
+        config: crate::config::MountConfig,
+        api: &ApiConfig,
+        limits: &LimitsConfig,
+        server: &ServerConfig,
+    ) -> Service {
         let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
         let policy =
             AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
                 .unwrap();
-        Service::new(
-            policy,
-            limits,
-            mounts,
-            api,
-            &DataConfig::default(),
-            &ServerConfig::default(),
-        )
-        .unwrap()
+        Service::new(policy, limits, mounts, api, &DataConfig::default(), server).unwrap()
     }
 
     /// A `[[mount]]` publishing `dir` at `/`, which is what most of these want.
@@ -3065,6 +3080,42 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_of(response).await, "<p>the catalog</p>");
+    }
+
+    /// `serve_index_html = false` turns that around: the directory answers with the
+    /// generated listing, and the file is still there under its own name — which is what
+    /// makes this a choice about the directory rather than about hiding a file.
+    #[tokio::test]
+    async fn an_index_is_ignored_where_the_operator_turned_it_off() {
+        let dir = tree();
+        std::fs::write(dir.path().join("index.html"), b"<p>hand-written</p>").unwrap();
+        let service = || {
+            with_server(
+                serving(dir.path()),
+                &ApiConfig::default(),
+                &LimitsConfig::default(),
+                &ServerConfig {
+                    serve_index_html: false,
+                    ..ServerConfig::default()
+                },
+            )
+        };
+
+        let listing = respond(
+            service(),
+            Request::builder()
+                .uri("/")
+                .header(header::ACCEPT, "text/html"),
+        )
+        .await;
+        assert_eq!(listing.status(), StatusCode::OK);
+        let body = body_of(listing).await;
+        assert!(!body.contains("hand-written"), "{body}");
+        assert!(body.contains("href=\"/index.html\""), "{body}");
+
+        let file = respond(service(), Request::builder().uri("/index.html")).await;
+        assert_eq!(file.status(), StatusCode::OK);
+        assert_eq!(body_of(file).await, "<p>hand-written</p>");
     }
 
     /// Nothing here is written, so a verb that would write is refused at the listing

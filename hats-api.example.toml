@@ -11,6 +11,9 @@ port = 80
 # Say which software and version produced a generated directory page, the way apache
 # and nginx sign theirs. Turn it off not to publish which version is running.
 show_version = true
+# Serve a directory's own index.html in place of a generated listing. Off publishes the
+# generated page everywhere, and the file still answers to its own name.
+serve_index_html = true
 
 [api]
 # API mode: the caller names the data in the request, and [api.access] decides what it
