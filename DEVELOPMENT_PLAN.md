@@ -41,7 +41,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 6.5 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
 | 6 | caching | todo | build in the order §6.5 ranks |
 | 7 | operational surface | todo | |
-| 10.2 | `box` renamed `zone` | todo | prerequisite for §10.3; ADQL's `BOX` is a different shape |
+| 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
 | 10.3 | ADQL over the query that already runs | todo | not mandatory-complete ADQL, and not to be described as it |
 | 10.4 | the statement planned | todo | needs §8.4's response cap first |
@@ -408,21 +408,6 @@ DaCHS, whose spelling §10.7 follows.
 - **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
   already answered per §7.5 and are what a TAP layer will need anyway.
 
-### 10.2 `zone`, before any of it
-
-**`box` is renamed `zone` and ADQL's `BOX` is left unclaimed.** They are different shapes:
-ours is a coordinate range with edges along parallels, ADQL's is a centre with a width and a
-height and edges along great circles, and at high declination the two differ by degrees. One
-name over both is the failure §5.2 is written against.
-
-`zone` is the word the machinery already uses — `cdshealpix`'s `zone_coverage` is exactly
-this shape, and `CLAUDE.md` names it that in the inner-covering rule — so the request field
-comes to agree with what computes it.
-
-A plain rename: no alias, no deprecation window, `"type": "box"` simply not a shape any
-more. It is a prerequisite rather than part of §10.3, so it lands on its own, as one
-changelog line under `Changed`.
-
 ### 10.3 Stage one — ADQL over the query that already runs
 
 Parse the statement; take the select list, the `WHERE`, the `TOP` and the recognised
@@ -550,9 +535,10 @@ whoever goes looking: `LOWER`/`UPPER`/`ILIKE`, common table expressions, set ope
 `CAST`, `COALESCE`, `OFFSET`, `IN_UNIT`, and every UDF.
 
 Refused, each with a message that says it is refused rather than unsupported: `POLYGON`
-(§9.3), `BOX` (§10.2), `REGION` (an STC-S parser, deprecated in ADQL 2.1), `COORDSYS` and
-`ivo_geom_transform` (frame transforms), `IN_UNIT` (a units library), `AREA` and `CENTROID`
-(they want geometries as values, and no file here has a geometry column).
+(§9.3), `BOX` (a centre with great-circle edges, which the `zone` region is not), `REGION`
+(an STC-S parser, deprecated in ADQL 2.1), `COORDSYS` and `ivo_geom_transform` (frame
+transforms), `IN_UNIT` (a units library), `AREA` and `CENTROID` (they want geometries as
+values, and no file here has a geometry column).
 
 Added because they are cheap here and expensive elsewhere:
 
@@ -563,10 +549,15 @@ Added because they are cheap here and expensive elsewhere:
 - **`ivo_healpix_index(order, ra, dec)` and `ivo_healpix_center(order, index)`**, a few lines
   of `cdshealpix` from the UDF catalogue.
 
-**Three function names do not map by spelling**, and each is a silent wrong answer if it
-does: ADQL's `LOG` is the natural logarithm where DataFusion's `log` is base ten — `ln` is
-the one meant — and `CEILING` and `TRUNCATE` are `ceil` and `trunc`. The mapping is written
-out and tested, never a passthrough by name.
+**Two function names do not map by spelling**: `CEILING` and `TRUNCATE` are `ceil` and
+`trunc`. The mapping is written out and tested, never a passthrough by name.
+
+`LOG` was a third and is no longer one. ADQL's is the natural logarithm; the trap was that
+DataFusion's `log` is base ten and would have answered a number 2.3 times off. `log` is not
+callable here at all now, so the mapping to `ln` is a name the registry does not otherwise
+answer to rather than one being taken away from a working function — and a passthrough that
+someone writes by accident is an error rather than a wrong answer. The same is true of
+`RAND`: DataFusion's `random()` is refused by volatility, so the name is free.
 
 **`RAND([seed])` is mandatory and is implemented**, which needs two things said:
 
@@ -575,6 +566,11 @@ out and tested, never a passthrough by name.
   column rather than a random constant. `sql.rs`'s volatility rule therefore gains a *named
   exception* for this one function on this one route, rather than being loosened; `now()`
   and DataFusion's own `random()` stay refused for the reasons they are refused for.
+
+  Not `sql::AMBIGUOUS`, which is a list of names that are refused. This is the opposite —
+  one name let through a test it fails — so it is a second exception and not an entry in
+  the first. Two lists with opposite senses under one name is how the wrong one gets
+  extended.
 - **It is not reproducible**, and the seed actually used is echoed in the response so a run
   can be replayed. The values depend on the order the generator is consumed in and
   partitions are read in parallel; a counter-based generator keyed by position would fix it,
