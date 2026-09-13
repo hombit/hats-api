@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- The numeric functions — `sqrt`, `log10`, `power`, `abs`, `degrees`, the trigonometric ones — are callable in `select` and `where`. `lg` is `log10`; `log` is refused as ambiguous.
 
 ### Changed
 
