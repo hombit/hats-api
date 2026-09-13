@@ -122,6 +122,67 @@ pub fn projection(
     let items = parse(tokenize(sql, FIELD)?, FIELD, limits, |parser| {
         parser.parse_comma_separated(Parser::parse_expr_with_alias)
     })?;
+    select_list(state, schema, items, FIELD, limits)
+}
+
+/// A statement's select list and row condition, already parsed.
+///
+/// The other way in. [`projection`] and [`predicate`] above are handed text and parse it;
+/// [`crate::adql`] is handed a statement, and what it has to give back is the pieces it took
+/// out of one. Passing the text back would mean re-rendering an expression through
+/// `sqlparser`'s `Display` and parsing it again — a round trip whose fidelity nothing here
+/// could check, and one that would make every refusal quote this crate's spelling of the
+/// caller's expression rather than the caller's.
+///
+/// So the parsed form comes straight down, and everything below is shared: the same
+/// identifier rule, the same planner, the same allowlist. A divergence between what a
+/// statement means and what the two field vocabularies mean would be a bug, exactly as it
+/// would be between those two.
+///
+/// What arrives is a column reference and nothing else — [`crate::adql`] has already taken
+/// the table's own name off anything written against it, which it can do from the text
+/// alone. So these two entry points take exactly what the text ones take after parsing, and
+/// there is no third reading of an identifier to keep in step with the other two.
+pub fn parsed_projection(
+    state: &SessionState,
+    schema: &DFSchema,
+    items: Vec<ExprWithAlias>,
+    limits: Limits,
+) -> Result<Vec<Expr>, ApiError> {
+    select_list(state, schema, items, STATEMENT, limits)
+}
+
+/// One row condition out of a statement, already parsed.
+pub fn parsed_predicate(
+    state: &SessionState,
+    schema: &DFSchema,
+    expr: SqlExpr,
+    limits: Limits,
+) -> Result<Expr, ApiError> {
+    plan(
+        state,
+        schema,
+        ExprWithAlias { expr, alias: None },
+        STATEMENT,
+        limits,
+    )
+}
+
+/// What a refusal calls the place an expression came from, where it came from a statement.
+///
+/// A statement has no field to name: the caller wrote one string and the select list and the
+/// condition are both inside it, so naming `select` or `where` would point at a field they
+/// did not fill in.
+const STATEMENT: &str = "query";
+
+/// The select list, from its items however they were parsed.
+fn select_list(
+    state: &SessionState,
+    schema: &DFSchema,
+    items: Vec<ExprWithAlias>,
+    field: &str,
+    limits: Limits,
+) -> Result<Vec<Expr>, ApiError> {
     let parts = items
         .into_iter()
         .map(|mut item| {
@@ -135,11 +196,11 @@ pub fn projection(
             // bare path into it is.
             match (&item.alias, projected_path(&item.expr, schema)) {
                 (None, Some(path)) => Ok(Part::Path(path)),
-                _ => plan(state, schema, item, FIELD, limits).map(Part::Planned),
+                _ => plan(state, schema, item, field, limits).map(Part::Planned),
             }
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    regrouped(state, schema, parts, FIELD, limits)
+    regrouped(state, schema, parts, field, limits)
 }
 
 /// The row predicate: one boolean expression, no alias and no second expression after it.
@@ -1455,5 +1516,75 @@ mod tests {
     fn the_nested_field_access_is_allowed() {
         let exprs = projection(&state(), &schema(), "lightcurve.mag", limits()).unwrap();
         assert!(allowed(&exprs[0]).is_ok());
+    }
+
+    /// One statement, taken apart and planned the way the route will plan it.
+    fn statement(adql: &str) -> (Vec<String>, Option<String>) {
+        let parsed = crate::adql::parse(adql, limits()).expect("this query should parse");
+        let names = parsed
+            .select
+            .map(|items| {
+                parsed_projection(&state(), &schema(), items, limits())
+                    .expect("this select list should plan")
+                    .iter()
+                    .map(|expr| expr.schema_name().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let filter = parsed.predicate.map(|expr| {
+            parsed_predicate(&state(), &schema(), expr, limits())
+                .expect("this condition should plan")
+                .to_string()
+        });
+        (names, filter)
+    }
+
+    /// **The whole claim this route rests on**: a statement and the two field vocabularies
+    /// are three spellings of one meaning, not three implementations of a similar one. A
+    /// divergence here would be a bug rather than a feature, exactly as it would be between
+    /// `select` and `columns`.
+    #[test]
+    fn a_statement_plans_to_what_the_fields_plan_to() {
+        for (adql, select, r#where) in [
+            (
+                "SELECT objectid FROM t WHERE objra > 1",
+                "objectid",
+                "objra > 1",
+            ),
+            // The mixed-case column, which the identifier rule reaches and ADQL's own fold
+            // to uppercase would not.
+            ("SELECT Gmag FROM t WHERE gmag < 20", "Gmag", "gmag < 20"),
+            // The nested path, which is this service's reading of a dotted name and has to
+            // survive being carried through a statement.
+            (
+                "SELECT lightcurve.mag FROM t WHERE objectid > 0",
+                "lightcurve.mag",
+                "objectid > 0",
+            ),
+            (
+                "SELECT objra - 0.5 AS shifted FROM t WHERE objra BETWEEN 1 AND 2",
+                "objra - 0.5 AS shifted",
+                "objra BETWEEN 1 AND 2",
+            ),
+        ] {
+            let (adql_names, adql_filter) = statement(adql);
+            assert_eq!(adql_names, names(select).unwrap(), "{adql}");
+            assert_eq!(adql_filter, Some(filter(r#where).unwrap()), "{adql}");
+        }
+    }
+
+    /// The qualifier a statement may carry and a field never can, which reaches here already
+    /// taken off. Asserted against the file rather than only against the text, since the
+    /// point of the rewrite is that what is planned is a column of this schema.
+    #[test]
+    fn a_qualified_column_reference_plans_as_the_column() {
+        for adql in [
+            "SELECT t.objectid FROM t WHERE t.objra > 1",
+            "SELECT g.objectid FROM t AS g WHERE g.objra > 1",
+        ] {
+            let (adql_names, adql_filter) = statement(adql);
+            assert_eq!(adql_names, names("objectid").unwrap(), "{adql}");
+            assert_eq!(adql_filter, Some(filter("objra > 1").unwrap()), "{adql}");
+        }
     }
 }

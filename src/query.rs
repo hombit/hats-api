@@ -23,6 +23,7 @@ use datafusion::physical_plan::{
     execute_stream_partitioned,
 };
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, ExprWithAlias};
 use futures::StreamExt;
 
 use crate::error::ApiError;
@@ -44,6 +45,13 @@ pub enum Projection<'a> {
     /// carry. One wire form of [`Self::Columns`] rather than a third vocabulary: the two
     /// lower through the same code and mean the same thing.
     ColumnText(&'a str),
+    /// A statement's select list, already parsed.
+    ///
+    /// Parsed rather than text because the caller wrote a whole statement and this is the
+    /// part of it that is a projection — handing the piece back as text would mean rendering
+    /// it and parsing it again. It meets the same planner and the same allowlist as every
+    /// other spelling here.
+    Parsed(&'a [ExprWithAlias]),
 }
 
 /// Which rows come back, and in whose vocabulary the caller asked.
@@ -59,6 +67,9 @@ pub enum Predicate<'a> {
     /// The same again, where `&&`, `,` and `;` stand in for `AND`, `AND` and `OR` — the
     /// spellings a url's query string needs to join two conditions inside one parameter.
     FilterText(&'a str),
+    /// What is left of a statement's `WHERE` once the region has been taken out of it,
+    /// already parsed. [`Projection::Parsed`] says why it is not text.
+    Parsed(&'a SqlExpr),
 }
 
 /// What to read. The two expression fields are each one of two spellings, and the request
@@ -289,6 +300,10 @@ pub(crate) async fn execute(
             let expr = sql::filter_text(&state, df.schema(), text, limits)?;
             df.filter(expr)?
         }
+        Predicate::Parsed(expr) => {
+            let expr = sql::parsed_predicate(&state, df.schema(), expr.clone(), limits)?;
+            df.filter(expr)?
+        }
     };
     let df = match selection.projection {
         Projection::All => df,
@@ -302,6 +317,14 @@ pub(crate) async fn execute(
         }
         Projection::ColumnText(list) => {
             let exprs = sql::column_text(&state, df.schema(), list, limits)?;
+            df.select(exprs)?
+        }
+        // Cloned because a partition is read per selection and the parsed items are the
+        // request's, shared across all of them: planning rewrites the identifiers it is
+        // given, and a rewrite done once against one partition's schema would be carried
+        // into the next.
+        Projection::Parsed(items) => {
+            let exprs = sql::parsed_projection(&state, df.schema(), items.to_vec(), limits)?;
             df.select(exprs)?
         }
     };

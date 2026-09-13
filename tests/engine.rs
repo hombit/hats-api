@@ -378,6 +378,11 @@ async fn observe_with(
                 hats_api::sql::filter_text(&state, df.schema(), text, LIMITS).expect("filters");
             df.filter(expr).expect("filter")
         }
+        Predicate::Parsed(expr) => {
+            let expr = hats_api::sql::parsed_predicate(&state, df.schema(), expr.clone(), LIMITS)
+                .expect("where");
+            df.filter(expr).expect("filter")
+        }
     };
     let df = match selection.projection {
         Projection::All => df,
@@ -394,6 +399,12 @@ async fn observe_with(
         Projection::ColumnText(list) => {
             let exprs =
                 hats_api::sql::column_text(&state, df.schema(), list, LIMITS).expect("columns");
+            df.select(exprs).expect("project")
+        }
+        Projection::Parsed(items) => {
+            let exprs =
+                hats_api::sql::parsed_projection(&state, df.schema(), items.to_vec(), LIMITS)
+                    .expect("select");
             df.select(exprs).expect("project")
         }
     };
