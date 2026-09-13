@@ -31,6 +31,7 @@
 )]
 
 pub mod access;
+pub mod adql;
 pub mod app;
 pub mod config;
 pub mod data;
