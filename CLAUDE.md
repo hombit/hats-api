@@ -1042,6 +1042,16 @@ into a release.
    dependency bump that changes none of those is not an entry at all. Add the comparison
    link at the foot beside the others.
 
+   **An entry ends with the pull requests that carried it**, last on the line and after
+   the full stop, each written out as a link — `[#123](https://github.com/hombit/hats-api/pull/123)`,
+   and `[#123](…), [#256](…)` where it took more than one. An issue is the same with
+   `/issues/`. The line says what changed and nothing about how, so the number is the
+   whole of the way from the changelog to the reasoning, and the file is read outside
+   GitHub — in an editor, in a package's docs — where a bare `#123` links to nothing. A
+   number is not always known when the line is written, so a release fills in the ones
+   that went in without one; an entry no pull request produced carries nothing rather
+   than a guess.
+
    `[Unreleased]` keeps all six headings with `--` under them, which is the menu whoever
    adds an entry picks from. A release takes the headings that have entries, leaves the
    placeholders where they are, and the new section carries only the headings it filled.
