@@ -46,7 +46,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.3 | ADQL over the query that already runs | todo | not mandatory-complete ADQL, and not to be described as it |
 | 10.4 | the statement planned | todo | needs §8.4's response cap first |
 | 10.5 | one large table and small ones | todo | |
-| 10.6 | two large catalogs | todo | investigation; droppable. Margins computed per request, so complete but slow |
+| 10.6 | two large catalogs | todo | an equijoin once the left row is expanded to cells; three things to measure first |
 
 §2–§7 are the phases in order, §8 the conditions every phase must keep, §9 what is
 deferred.
@@ -484,26 +484,59 @@ the memory pool and allowed to fail, or bounded up front by the entry's own kind
 
 ### 10.6 Stage four — two large catalogs
 
-A crossmatch, driven partition by partition: both `TableProvider`s carry the HEALPix
-partitioning, so one partition of the left side is joined against the partitions of the
-right side that its cells can reach, and neither whole catalog is ever a build side.
-**Investigation, and droppable** — how much of this the planner will do rather than us is to
-be measured rather than assumed, `EnforceDistribution` having its own ideas about when a
-declared partitioning may be used.
+A crossmatch, as an ordinary equijoin. Each left row is expanded into the order-*k* cells
+its match disk touches, the sides are joined on that cell, and `DISTANCE(…) < r` is the
+residual filter:
 
-**The answer is complete, and the cost of that is reading boundary partitions more than
-once.** A pair an arcsecond apart either side of a cell edge sits in two different
-partitions, so the right-hand side of each join is not the matching cell but that cell grown
-by the match radius — the covering machinery computes which partitions that reaches, the
-same way §5.3 chooses partitions for a region. That is margins computed per request instead
-of read from a margin catalog: more bytes fetched and more memory than a prepared margin
-would cost, and no rows missing. **Slow is acceptable here and silently incomplete is not**,
-which is the whole reason the grown covering is not an optimisation to be dropped under
-pressure.
+```
+left row  →  cells covering the disk of radius r around it   -- one column of lists, unnested
+join on   left.cell = right.cell
+filter    DISTANCE(left.ra, left.dec, right.ra, right.dec) < r
+```
 
-Driving from the left means each left row is considered once, so pairs come out unique with
-nothing to deduplicate. A margin catalog, where one exists, is the same query reading less
-— an optimisation over this, not a different design.
+**Nothing spatial is asked of the planner.** DataFusion has no spatial join and no range
+join: a `BETWEEN` across two tables plans as a `NestedLoopJoinExec`, which is the whole
+build side in memory and a scan of it per probe row, and `PiecewiseMergeJoinExec` — the
+nearest thing — takes a single inequality and is experimental, which `CLAUDE.md` already
+records for the filter case. What the expansion does is remove the need for one. HEALPix is
+nested, so a
+cell at order *k* is a prefix of every cell inside it and **a range at order *k* is an
+equality at order *k***; both sides reduced to that column is a hash join, partitioned, with
+no whole build side and DataFusion's own memory accounting under it. The right side's key is
+one shift of an existing column, `_healpix_29 >> (2 * (29 - k))`.
+
+**Never enumerate below the join order.** One order-5 cell holds 4²⁴ order-29 values, so the
+expansion is of a *cell's neighbourhood at order k* and never of a range at the column's own
+order. That is the one way to write this that does not work, and it looks reasonable.
+
+**Expanding the left is what makes the margin disappear.** A pair either side of a cell edge
+has different cells at every order, which no prefix trick reaches — it is the margin
+problem. Covering the left row's whole disk answers it without touching the right side:
+
+- **No duplicates, structurally.** A right row is in exactly one cell, so a pair can meet in
+  exactly one cell. Nothing to deduplicate, and it is the right side staying unreplicated
+  that guarantees it rather than an argument about join order.
+- **The fan-out is adaptive.** `cone_coverage_approx` at order *k* returns one cell for an
+  interior row and two to four near an edge — paid where the geometry needs it, not as a
+  blanket neighbour cost.
+- **The large catalog is read once and unmodified.** A margin catalog, where one exists, is
+  this query reading less: an optimisation over it, not a different design.
+
+Choose *k* so a cell is larger than *r*; a large radius forces a coarse *k* and therefore
+large partitions, which is the trade-off to state rather than tune.
+
+Three things to measure before building it, none of which affects correctness:
+
+1. **Whether the declared partitioning is used**, or `EnforceDistribution` re-hashes both
+   sides anyway. A shuffle we did not need, if so.
+2. **What a per-row covering costs.** Fine over millions of left rows, not over billions.
+   The fallback is a distance-to-edge test: one cell for an interior row, the covering only
+   near a boundary.
+3. **Whether building the list column needs `nested_expressions`.** It is off, and
+   `make_array` is behind it; a UDF returning a `ListArray` should sidestep that, `Unnest`
+   being a plan node rather than an array function. Worth confirming, because turning the
+   feature on makes every array function callable at once — which is §9.7's decision and
+   not this one's.
 
 It is a recognised query shape rather than general `JOIN` support. Anything outside it is
 refused, naming what it would have cost.
