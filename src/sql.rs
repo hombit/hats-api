@@ -746,16 +746,16 @@ fn resolve_segment(part: &mut Ident, fields: &Fields) -> Option<DataType> {
 /// says. Most readers here arrive from Python, where it is the natural logarithm, which is
 /// not the one this build would have given them.
 ///
-/// `lg`, `log2`, `log10` and `ln` each say which they are and are what the refusal points
-/// at, and another base is `ln(x) / ln(b)`, so nothing is out of reach.
+/// `log10`, `log2` and `ln` each say which they are and are what the refusal points at, and
+/// another base is `ln(x) / ln(b)`, so nothing is out of reach.
 ///
 /// Not a place to put functions that are merely unwanted: those are absent from the build
 /// instead, and an absent one is already an error naming it.
 const AMBIGUOUS: &[(&str, &str)] = &[(
     "log",
     "log means base ten in some SQL and the natural logarithm in others, so it is not \
-     answered here; write lg or log10 for base ten, ln for the natural logarithm, log2 \
-     for base two, and ln(x) / ln(b) for any other base",
+     answered here; write log10 for base ten, ln for the natural logarithm, log2 for base \
+     two, and ln(x) / ln(b) for any other base",
 )];
 
 /// What to say about a function name, where it is one of those.
@@ -1352,33 +1352,22 @@ mod tests {
         }
     }
 
-    /// The volatility rule, which until these functions were registered had nothing in the
-    /// build to test it against.
-    ///
-    /// `random()` is exactly the case it is written for: an ordinary-looking scalar function
-    /// that makes one request's answer differ from the next's for the same query, which is
-    /// wrong to cache and wrong to reproduce from a plan.
     /// One spelling, two answers a factor of 2.3 apart, and both of them numbers: which is
     /// why this one is refused by name where the rest are judged by volatility.
     #[test]
     fn the_ambiguous_logarithm_is_refused_rather_than_picked() {
         for sql in ["log(Gmag) < 1", "log(2, Gmag) < 1"] {
             let error = filter(sql).unwrap_err().to_string();
-            assert!(error.contains("write lg or log10"), "{sql}: {error}");
+            assert!(error.contains("write log10"), "{sql}: {error}");
         }
     }
 
-    /// The short name for the one the refusal above sends a caller to, and an alias rather
-    /// than a function of its own — so it cannot drift from `log10`.
-    #[test]
-    fn lg_is_log10() {
-        // The call planned is `log10`'s own; what the alias keeps is the name the caller
-        // wrote, which is what their output column is then called.
-        let planned = filter("lg(Gmag) < 1").unwrap();
-        assert!(planned.starts_with("log10(Gmag)"), "{planned}");
-        assert!(planned.contains("lg(Gmag)"), "{planned}");
-    }
-
+    /// The volatility rule, which until these functions were registered had nothing in the
+    /// build to test it against.
+    ///
+    /// `random()` is exactly the case it is written for: an ordinary-looking scalar function
+    /// that makes one request's answer differ from the next's for the same query, which is
+    /// wrong to cache and wrong to reproduce from a plan.
     #[test]
     fn a_volatile_function_is_still_refused() {
         let error = filter("random() < 0.5").unwrap_err().to_string();

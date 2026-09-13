@@ -18,8 +18,6 @@ use datafusion::arrow::json::writer::{
     Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder,
 };
 use datafusion::execution::TaskContext;
-use datafusion::functions::math;
-use datafusion::logical_expr::ScalarUDF;
 use datafusion::physical_plan::{
     ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned,
     execute_stream_partitioned,
@@ -205,24 +203,14 @@ pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     config
 }
 
-/// A context with the function registry this service answers for, which is DataFusion's
-/// plus the one name added to it.
+/// The context every request is answered from.
 ///
-/// **`lg` is `log10` under the name that says so.** `log` is refused — it is base ten in
-/// some SQL and the natural logarithm in MySQL, `numpy` and ADQL, and neither reading
-/// announces itself in the answer — which leaves base ten needing a spelling that is not
-/// the ambiguous one. `log10` is that spelling and stays; `lg` is the short form, and an
-/// alias rather than a second function, so the two cannot come apart.
-///
-/// Every request goes through here rather than building its own context, so what a caller
-/// may call is one list and not one per call site.
+/// One function rather than a `SessionContext` built at each call site, so that what a
+/// caller may call is one list: the registry a request plans against is decided here and
+/// the configuration above it, and a second construction somewhere else would be a second
+/// answer to both.
 pub(crate) fn session_context(reproducible: bool) -> SessionContext {
-    let ctx = SessionContext::new_with_config(session_config(reproducible));
-    // Registered under its own name as well as the alias, which is what `register_udf`
-    // does with one — so this replaces `log10` with the same function rather than adding a
-    // second copy beside it.
-    ctx.register_udf(ScalarUDF::clone(&math::log10()).with_aliases(["lg"]));
-    ctx
+    SessionContext::new_with_config(session_config(reproducible))
 }
 
 pub async fn run(

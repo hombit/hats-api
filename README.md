@@ -478,15 +478,15 @@ Functions are judged by volatility: only immutable ones are callable, so
 `now()` and `random()` are refused.
 
 The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`, `sqrt`,
-`cbrt`, `exp`, `ln`, `lg`, `log2`, `log10`, `power`, `signum`, `factorial`, `gcd`, `lcm`,
-`pi`, `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
+`cbrt`, `exp`, `ln`, `log2`, `log10`, `power`, `signum`, `factorial`, `gcd`, `lcm`, `pi`,
+`degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
 
 `log` is refused, which is deliberate: it is base ten in some SQL and the natural logarithm
 in MySQL, `numpy` and ADQL, so the same expression means two things a factor of 2.3 apart
-and both look like ordinary numbers. Every other spelling says which it is — `lg` and
-`log10` for base ten, `ln` for the natural logarithm, `log2` for base two, and
-`ln(x) / ln(b)` for any other base.
+and both look like ordinary numbers. Every other spelling says which it is — `log10` for
+base ten, `ln` for the natural logarithm, `log2` for base two, and `ln(x) / ln(b)` for any
+other base.
 
 ### Storage options
 
