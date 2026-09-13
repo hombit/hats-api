@@ -22,7 +22,8 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 bytesize = { version = "2", features = ["serde"] }
 # A catalog's partition_info.csv is a CSV, not a column of numbers.
 csv = "1"
-datafusion ={ version = "55", default-features = false, features = ["parquet", "compression", "recursive_protection", "sql"] }
+# `math_expressions` is what a caller may call; the rest is what the engine needs.
+datafusion ={ version = "55", default-features = false, features = ["math_expressions", "parquet", "compression", "recursive_protection", "sql"] }
 # The UTF-8 label `java-properties` takes and does not re-export. Same 0.8 as it resolves
 # to, so one copy: an `Encoding` from another would be a different type.
 encoding_rs = "0.8"

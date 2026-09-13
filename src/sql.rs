@@ -731,6 +731,41 @@ fn resolve_segment(part: &mut Ident, fields: &Fields) -> Option<DataType> {
     Some(field.data_type().clone())
 }
 
+/// A function whose name means one thing here and another somewhere the caller has been,
+/// where both answers look ordinary.
+///
+/// **A refusal by name, which is what the volatility rule is written against** — so it is a
+/// named exception rather than a widening of it. Volatility is about whether one request's
+/// answer matches the next's; this is about whether the answer is the one the caller read
+/// their own expression as asking for, which nothing in a signature can say.
+///
+/// The bar for adding a name is both readings being plausible *and* the wrong one coming
+/// back as a number rather than as an error. `log` is that: DataFusion's is base ten, and
+/// MySQL's, `numpy`'s and ADQL's are all the natural logarithm — so the same expression
+/// means two things a factor of 2.3 apart, and a caller reads whichever their background
+/// says. Most readers here arrive from Python, where it is the natural logarithm, which is
+/// not the one this build would have given them.
+///
+/// `lg`, `log2`, `log10` and `ln` each say which they are and are what the refusal points
+/// at, and another base is `ln(x) / ln(b)`, so nothing is out of reach.
+///
+/// Not a place to put functions that are merely unwanted: those are absent from the build
+/// instead, and an absent one is already an error naming it.
+const AMBIGUOUS: &[(&str, &str)] = &[(
+    "log",
+    "log means base ten in some SQL and the natural logarithm in others, so it is not \
+     answered here; write lg or log10 for base ten, ln for the natural logarithm, log2 \
+     for base two, and ln(x) / ln(b) for any other base",
+)];
+
+/// What to say about a function name, where it is one of those.
+fn ambiguous(name: &str) -> Option<&'static str> {
+    AMBIGUOUS
+        .iter()
+        .find(|(ambiguous, _)| *ambiguous == name)
+        .map(|(_, reason)| *reason)
+}
+
 /// Walk the planned expression and refuse everything this service will not run.
 fn check(expr: &Expr, field: &str, limits: Limits) -> Result<(), ApiError> {
     let mut nodes = 0usize;
@@ -795,12 +830,18 @@ fn allowed(expr: &Expr) -> Result<(), String> {
         // is `Volatile` and `now()` is `Stable`, and both make one request's answer
         // differ from the next's for the same query — which is a wrong answer to cache
         // and a wrong answer to reproduce from a plan.
-        Expr::ScalarFunction(call) => match call.func.signature().volatility {
-            Volatility::Immutable => Ok(()),
-            Volatility::Stable | Volatility::Volatile => Err(format!(
-                "{}() does not answer the same way twice, so it cannot be used here",
-                call.func.name()
-            )),
+        //
+        // `AMBIGUOUS` is checked first and is the one list of names here, for the one thing
+        // volatility cannot see.
+        Expr::ScalarFunction(call) => match ambiguous(call.func.name()) {
+            Some(reason) => Err(reason.to_owned()),
+            None => match call.func.signature().volatility {
+                Volatility::Immutable => Ok(()),
+                Volatility::Stable | Volatility::Volatile => Err(format!(
+                    "{}() does not answer the same way twice, so it cannot be used here",
+                    call.func.name()
+                )),
+            },
         },
 
         Expr::AggregateFunction(_) | Expr::WindowFunction(_) | Expr::GroupingSet(_) => Err(
@@ -841,7 +882,6 @@ mod tests {
 
     use axum::http::StatusCode;
     use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
-    use datafusion::prelude::SessionContext;
 
     use super::*;
 
@@ -869,7 +909,7 @@ mod tests {
     fn state() -> SessionState {
         // Reproducibility decides how the scan is read back, and nothing about how an
         // identifier is parsed, so either value gives the same answer here.
-        SessionContext::new_with_config(crate::query::session_config(false)).state()
+        crate::query::session_context(false).state()
     }
 
     /// The limits an operator who set none would get.
@@ -1290,6 +1330,59 @@ mod tests {
             let error = filter(sql).unwrap_err().to_string();
             assert!(error.contains("one row"), "{sql}: {error}");
         }
+    }
+
+    /// The arithmetic a caller needs to turn a column into a quantity: a magnitude into a
+    /// flux, a parallax into a distance, degrees into radians.
+    #[test]
+    fn the_numeric_functions_are_callable() {
+        for sql in [
+            "sqrt(objra) > 1",
+            "log10(Gmag) < 1",
+            "log2(Gmag) < 1",
+            "ln(Gmag) < 1",
+            "power(10, -0.4 * Gmag) > 1e-6",
+            "abs(objra - 180) < 1",
+            "degrees(radians(objra)) > 1",
+            "atan2(objra, Gmag) > 0",
+            "round(Gmag) = 20",
+            "isnan(Gmag)",
+        ] {
+            assert!(filter(sql).is_ok(), "{sql}: {:?}", filter(sql).err());
+        }
+    }
+
+    /// The volatility rule, which until these functions were registered had nothing in the
+    /// build to test it against.
+    ///
+    /// `random()` is exactly the case it is written for: an ordinary-looking scalar function
+    /// that makes one request's answer differ from the next's for the same query, which is
+    /// wrong to cache and wrong to reproduce from a plan.
+    /// One spelling, two answers a factor of 2.3 apart, and both of them numbers: which is
+    /// why this one is refused by name where the rest are judged by volatility.
+    #[test]
+    fn the_ambiguous_logarithm_is_refused_rather_than_picked() {
+        for sql in ["log(Gmag) < 1", "log(2, Gmag) < 1"] {
+            let error = filter(sql).unwrap_err().to_string();
+            assert!(error.contains("write lg or log10"), "{sql}: {error}");
+        }
+    }
+
+    /// The short name for the one the refusal above sends a caller to, and an alias rather
+    /// than a function of its own — so it cannot drift from `log10`.
+    #[test]
+    fn lg_is_log10() {
+        // The call planned is `log10`'s own; what the alias keeps is the name the caller
+        // wrote, which is what their output column is then called.
+        let planned = filter("lg(Gmag) < 1").unwrap();
+        assert!(planned.starts_with("log10(Gmag)"), "{planned}");
+        assert!(planned.contains("lg(Gmag)"), "{planned}");
+    }
+
+    #[test]
+    fn a_volatile_function_is_still_refused() {
+        let error = filter("random() < 0.5").unwrap_err().to_string();
+        assert!(error.contains("the same way twice"), "{error}");
     }
 
     /// The node cap counts terms, not rows and not depth: this list is two levels deep

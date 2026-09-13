@@ -222,6 +222,19 @@ everything about what SQL means here is decided there.
   from the next's for the same query, which is wrong to cache and wrong to reproduce from
   a plan. The rule holds for functions this crate has never compiled in, which is why it
   is not a list of names.
+
+  `sql::AMBIGUOUS` is the one exception, and it is a named one rather than a widening.
+  Volatility asks whether an answer matches the next one; it cannot ask whether the answer
+  is the one the caller read their own expression as asking for. A name belongs there only
+  when both readings are plausible *and* the wrong one comes back as a number rather than
+  as an error — `log`, base ten here and the natural logarithm in MySQL, `numpy` and ADQL.
+  A function that is merely unwanted is left out of the build instead, where it is already
+  an error naming it.
+
+  Refusing a name leaves what it meant needing a spelling, which is `query::session_context`'s
+  other job: `lg` is registered as an alias of `log10` rather than as a function of its own,
+  so base ten keeps a short name and the two cannot come apart. Every request builds its
+  context there, so what a caller may call is one list rather than one per call site.
 - **A column answers to its own name and to its name in lowercase, and to nothing else.**
   Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
   `objectId` — and a caller reads them off the file, so the file's spelling has to work;
@@ -338,6 +351,14 @@ everything about what SQL means here is decided there.
 Adding a scalar function feature to the `datafusion` dependency adds everything it
 registers to what a caller may call. That is the decision being made; make it
 deliberately.
+
+`math_expressions` is the one that is on, because arithmetic over a column is what a
+catalog query is for and every function in it is `Immutable` but one — `random()`, which
+the volatility rule already refuses and which `sql::tests` holds to that. The rest stay
+off, and a request naming one of their functions is an error naming it. Turning another on
+means reading its list: `string_expressions` and `regex_expressions` in particular carry
+functions whose cost is in the data rather than in the expression, which is a different
+question from whether they are immutable.
 
 ## A circle in a url
 

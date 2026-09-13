@@ -18,6 +18,8 @@ use datafusion::arrow::json::writer::{
     Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder,
 };
 use datafusion::execution::TaskContext;
+use datafusion::functions::math;
+use datafusion::logical_expr::ScalarUDF;
 use datafusion::physical_plan::{
     ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned,
     execute_stream_partitioned,
@@ -203,6 +205,26 @@ pub(crate) fn session_config(reproducible: bool) -> SessionConfig {
     config
 }
 
+/// A context with the function registry this service answers for, which is DataFusion's
+/// plus the one name added to it.
+///
+/// **`lg` is `log10` under the name that says so.** `log` is refused — it is base ten in
+/// some SQL and the natural logarithm in MySQL, `numpy` and ADQL, and neither reading
+/// announces itself in the answer — which leaves base ten needing a spelling that is not
+/// the ambiguous one. `log10` is that spelling and stays; `lg` is the short form, and an
+/// alias rather than a second function, so the two cannot come apart.
+///
+/// Every request goes through here rather than building its own context, so what a caller
+/// may call is one list and not one per call site.
+pub(crate) fn session_context(reproducible: bool) -> SessionContext {
+    let ctx = SessionContext::new_with_config(session_config(reproducible));
+    // Registered under its own name as well as the alias, which is what `register_udf`
+    // does with one — so this replaces `log10` with the same function rather than adding a
+    // second copy beside it.
+    ctx.register_udf(ScalarUDF::clone(&math::log10()).with_aliases(["lg"]));
+    ctx
+}
+
 pub async fn run(
     file: &RemoteFile,
     selection: &Selection<'_>,
@@ -226,7 +248,7 @@ pub(crate) async fn execute(
     order: Order,
 ) -> Result<(QueryResult, usize), ApiError> {
     let reproducible = reproducible(selection, order);
-    let ctx = SessionContext::new_with_config(session_config(reproducible));
+    let ctx = session_context(reproducible);
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
 
     // The url names one object, and it has already been decided that this is a parquet
