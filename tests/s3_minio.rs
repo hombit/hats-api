@@ -16,7 +16,10 @@
 
 mod common;
 
-use common::{expect_error, lookup, parquet_fixture, permissive_policy, row_count, skip_or_fail};
+use common::{
+    expect_error, fixture_retries, lookup, parquet_fixture, permissive_policy, row_count,
+    skip_or_fail,
+};
 use hats_api::error::ApiError;
 use hats_api::storage::{S3Options, StorageOptions};
 use opendal::{HttpTransporter, OperationContext, Operator, services};
@@ -90,6 +93,7 @@ impl Minio {
                     opendal_http_transport_reqwest::ReqwestTransport::default(),
                 )),
             )
+            .layer(fixture_retries())
     }
 
     /// Put the fixture at `key` and return the url a caller would send to read it.

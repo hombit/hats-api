@@ -23,6 +23,7 @@ use hats_api::query::{Predicate, Projection, QueryResult, Selection};
 use hats_api::storage::{self, S3Options, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
+use opendal::layers::RetryLayer;
 use s3s::auth::SimpleAuth;
 use s3s::service::S3ServiceBuilder;
 use s3s_fs::FileSystem;
@@ -181,6 +182,26 @@ pub fn parquet_fixture() -> Vec<u8> {
     writer.write(&batch).expect("write batch");
     writer.close().expect("close");
     buffer
+}
+
+/// Retries for the fixture writes the real-server tests make before they read anything
+/// back, matching what `storage::open` puts on the read path.
+///
+/// Those operators take their transport from `ReqwestTransport::default()`, which hands
+/// out clones of one process-wide `reqwest::Client`, so a write is given a pooled
+/// connection that the server may already have closed. `hyper` replays a request off a
+/// dead pooled connection only while its body is replayable, and a 1.4 MB fixture is
+/// past that point: the failure arrives as `error sending request` with the whole body
+/// counted as written, rather than as a status any accepted-status list could reach.
+/// OpenDAL marks it temporary, and `RetryLayer` replays it from the buffer the writer
+/// still holds. Serializing the writes does not cover this — that is about two writers
+/// at once, and this happens to a write that has the server to itself.
+pub fn fixture_retries() -> RetryLayer {
+    RetryLayer::new()
+        .with_jitter()
+        .with_max_times(3)
+        .with_min_delay(std::time::Duration::from_millis(100))
+        .with_max_delay(std::time::Duration::from_secs(2))
 }
 
 /// Network rules that reach the loopback interface, which is where every test server

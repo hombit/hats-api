@@ -7,9 +7,10 @@
 //! namespace prefixes, their `href` spelling and which properties they return at all. A
 //! hand-written `207` proves that OpenDAL parses *our* XML.
 //!
-//! CI runs `rclone serve webdav` from a pinned image, so what these tests are held
-//! against is a server someone chose rather than whatever the runner's distribution
-//! packaged. Any other server can be pointed at instead through the same variables.
+//! CI runs `rclone serve webdav` from the project's own image rather than from the
+//! runner's apt, so what these tests are held against is a server someone chose rather
+//! than whatever the distribution froze. Any other server can be pointed at instead
+//! through the same variables.
 //!
 //! The fixture is written here rather than uploaded by CI, through OpenDAL, so the file
 //! read back is the same one `tests/common` defines and there is no upload step to
@@ -19,7 +20,7 @@
 
 mod common;
 
-use common::{expect_error, lookup, parquet_fixture, row_count, skip_or_fail};
+use common::{expect_error, fixture_retries, lookup, parquet_fixture, row_count, skip_or_fail};
 use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, NetworkConfig};
 use hats_api::storage::{StorageOptions, WebdavOptions};
@@ -89,6 +90,7 @@ impl Webdav {
                     opendal_http_transport_reqwest::ReqwestTransport::default(),
                 )),
             )
+            .layer(fixture_retries())
     }
 
     /// Put the fixture at `key` and return the url a caller would send to read it.
