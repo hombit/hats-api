@@ -43,7 +43,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 7 | operational surface | todo | |
 | 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
-| 10.3 | the statement planned, over parquet tables | in progress | region functions and the translation are open as the bottom of the stack; the route is not written. Needs §8.4's response cap |
+| 10.3 | the statement planned, over parquet tables | done | every function ADQL makes mandatory is answered; the geometry it leaves optional is §10.7's |
 | 10.4 | HATS catalogs as tables | todo | two decisions first |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | an equijoin once the left row is expanded to cells; three things to measure first |
@@ -425,48 +425,6 @@ DaCHS, whose spelling §10.7 follows.
 - **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
   already answered per §7.5 and are what a TAP layer will need anyway.
 
-### 10.3 Stage one — the statement planned, over parquet tables
-
-`POST /v1/adql` with `parquet` tables only. Each entry is opened through `storage::open`, so
-the access policy decides it as it decides every other url, and registered under the
-caller's name; a `hats` entry is refused by name until §10.4. This is already most of ADQL's
-mandatory core, because the planner supplies it.
-
-**The translation** — `TOP n` to a `LIMIT`; `1 = CONTAINS(p, r)` and its mirrored, `> 0` and
-`INTERSECTS` spellings to `contains(p, r)`, compared with 0 to its negation; `DISTANCE(p, c)
-< r` to the circle it is, so it prunes; `CEILING`, `TRUNCATE`, `LOG` and `MOD` to `ceil`,
-`trunc`, `ln` and `%`. One statement, which the parser must reach the end of, and only a
-`SELECT`. The geometry in §10.7's refused list is refused by name rather than left to fail as
-an unknown function.
-
-**What the route has to add around the planner:**
-
-- **Every table the statement reads is declared by the request**, less the names its own
-  `WITH` defines. A table function in `FROM` is refused — `generate_series(1, 1e12)` is a row
-  source nobody declared and nothing bounds — and so is a qualified name. `enable_url_table`
-  stays off, or `FROM 's3://…'` is a url the access policy never saw.
-- **The allowlist runs over the logical plan**, not per expression. The volatility rule and
-  `sql::AMBIGUOUS` apply to every expression in it; the one-row rule does not, aggregates being
-  the point of this route. A walk of the plan is also where a statement's node count is
-  bounded — only its depth is, at the parser.
-- **A memory pool, and no spilling.** `with_memory_limit` installs a `GreedyMemoryPool` so an
-  over-large `GROUP BY` fails with `ResourcesExhausted`, and `DiskManagerMode::Disabled` stops
-  a memory bound quietly becoming a disk one.
-- **A response cap**, which is §8.4's and which this forces: `collect` bounds nothing, and a
-  `GROUP BY` over a high-cardinality column is a small-looking query with a large answer.
-- **A refusal raised while optimizing is a 400.** `contains` refuses a region built from a
-  column during simplify, and DataFusion hands that back as its own error; left alone it
-  would read as the service failing.
-- **Identifiers follow §10.8.1.** The expression routes get their casing rule from
-  `sql::resolve_identifiers` over one schema; a statement has several tables and the planner
-  resolves names itself, with normalization off, so today a name matches its exact spelling
-  only. How the rule is applied here is to be decided — a rewrite against the registered
-  schemas before planning is the obvious one, and it must not become a second resolver
-  beside DataFusion's.
-- **What it does not carry.** No plan mode, no work list, no ordering promise: `TOP` without
-  `ORDER BY` is an arbitrary set and says so (§10.8). `ORDER BY` with a `TOP` is TopK, a heap
-  of *n*; without one it is bounded by the response cap.
-
 ### 10.4 Stage two — HATS catalogs as tables
 
 A catalog `TableProvider`, which is what makes "a large table, a small answer" real: an
@@ -600,39 +558,17 @@ Added because they are cheap here and expensive elsewhere:
 passthrough by name. Every other ADQL name needs nothing, DataFusion lowercasing an unquoted
 function name itself. `LOG` is the one that matters: ADQL's is natural and DataFusion's `log`
 base ten, and since `log` is refused as ambiguous, a passthrough written by accident is an
-error rather than a number 2.3 times off. `RAND`'s name is free the same way, DataFusion's
-`random()` being refused by volatility.
+error rather than a number 2.3 times off.
 
 **Still to add, each small and none blocking a stage:**
 
-- **`DISTANCE` as a value**, for a select list or an `ORDER BY`. §10.3 answers it only bounded
+- **`DISTANCE` as a value**, for a select list or an `ORDER BY`. It is answered only bounded
   above, as the region test it then is; anywhere else it needs a distance function and is
   refused until there is one.
 - **`INTERSECTS` between two shapes.** Against a point it is `CONTAINS`; between a circle and
   a MOC it is a covering intersection nothing builds yet (§5.2).
 - **`LOWER`, `UPPER`, `ILIKE`.** `string_expressions` is off, and turning it on is `CLAUDE.md`'s
   deliberate decision about everything in that feature, not only these three.
-
-**`RAND([seed])` is mandatory and is implemented**, which needs two things said:
-
-- **It is registered `Volatile`.** A zero-argument immutable function is constant-folded —
-  computed once and glued onto every row — so the volatility is what makes it a random
-  column rather than a random constant. `sql.rs`'s volatility rule therefore gains a *named
-  exception* for this one function on this one route, rather than being loosened; `now()`
-  and DataFusion's own `random()` stay refused for the reasons they are refused for.
-
-  Not `sql::AMBIGUOUS`, which is a list of names that are refused. This is the opposite —
-  one name let through a test it fails — so it is a second exception and not an entry in
-  the first. Two lists with opposite senses under one name is how the wrong one gets
-  extended.
-- **It is not reproducible**, and the seed actually used is echoed in the response so a run
-  can be replayed. The values depend on the order the generator is consumed in and
-  partitions are read in parallel; a counter-based generator keyed by position would fix it,
-  but DataFusion hands a scalar UDF its batch and `number_rows` and nothing identifying
-  which partition the batch came from. The reproducible alternative — hashing the seed
-  against a stable row key such as `_healpix_29` — is available if the guarantee turns out
-  to be worth more than the standard's reading, and it costs two rows with one key the same
-  number.
 
 ### 10.8 Three divergences to write down
 
