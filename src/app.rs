@@ -513,10 +513,12 @@ fn describe_adql(
             body,
             serde_json::json!({
                 "query": format!(
-                    "SELECT TOP 100 {PARTITION_SELECT_FLAT} FROM ztf WHERE {PARTITION_WHERE}"
+                    "SELECT TOP 10 {CATALOG_SELECT} FROM gaia \
+                     WHERE 1 = CONTAINS(POINT(ra, dec), \
+                     CIRCLE({ADQL_EXAMPLE_RA}, {ADQL_EXAMPLE_DEC}, {ADQL_EXAMPLE_RADIUS}))"
                 ),
                 "tables": {
-                    "ztf": {"type": "parquet", "url": EXAMPLE_PARTITION},
+                    "gaia": {"type": "parquet", "url": ADQL_EXAMPLE_PARTITION},
                 },
                 "format": "json",
             }),
@@ -552,12 +554,25 @@ const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
 const PARTITION_SELECT: &str = "objectid, objra, objdec, lightcurve.mag";
 const PARTITION_WHERE: &str = "nepochs > 10";
 
-/// The same columns without the nested one, for the ADQL example.
+/// One partition of Gaia DR3, for the ADQL example.
 ///
-/// ADQL has no way to say a projection into a struct: a dotted name there is a table beside
-/// its column, which is the reading its own grammar gives it. So the example that shows the
-/// nested column stays on the single-file route, and this one shows what a statement is for.
-const PARTITION_SELECT_FLAT: &str = "objectid, objra, objdec";
+/// A file rather than the catalog above, since a statement reads parquet tables and a whole
+/// catalog is not answered yet. It is the partition the plan route resolves the circle below
+/// to, which is how a reader would find it: send the circle to `hats/plan` and take the url
+/// out of the one entry that comes back.
+///
+/// 230 MB, of which the query reads 7: the region test is a covering over `_healpix_29`
+/// before it is trigonometry, so what a small circle costs is the row groups it reaches.
+/// About a second.
+const ADQL_EXAMPLE_PARTITION: &str = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/\
+    dataset/Norder=3/Dir=0/Npix=148.parquet";
+
+/// A position inside that partition with a bright source an arcsecond away, so the example
+/// returns a row rather than an empty answer a reader would read as a fault. In degrees,
+/// which is what ADQL's `CIRCLE` takes; the radius is one arcsecond.
+const ADQL_EXAMPLE_RA: f64 = 254.45754;
+const ADQL_EXAMPLE_DEC: f64 = 35.34235;
+const ADQL_EXAMPLE_RADIUS: f64 = 0.000278;
 
 /// A body the route it is shown on will actually answer, in about a second: the url, this
 /// vocabulary's own two fields, a limit, and for a catalog a circle.
@@ -4312,6 +4327,35 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(answer["rows"][0]["n"], 10);
+    }
+
+    /// Two tables, which is what `tables` being a map is for: each is opened and registered
+    /// under its own name, and the join is the planner's.
+    #[tokio::test]
+    async fn an_adql_statement_reads_more_than_one_table() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.parquet"), query::tests::fixture()).unwrap();
+        std::fs::write(dir.path().join("b.parquet"), query::tests::sky_fixture()).unwrap();
+
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT a.band, b.ra FROM a JOIN b ON a.objectid = b.objectid \
+                          WHERE b.ra > 44.5 ORDER BY b.ra",
+                "tables": {
+                    "a": {"type": "parquet", "url": "file:///a.parquet"},
+                    "b": {"type": "parquet", "url": "file:///b.parquet"},
+                },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The sky fixture runs 40..50 in right ascension against ids 0..10, so five rows are
+        // past 44.5 and each carries the band its id has in the other file.
+        assert_eq!(answer["num_rows"], 5, "{body}");
+        assert_eq!(answer["rows"][0]["ra"], 45.0);
     }
 
     /// A column answers to its own spelling and to its lowercase, and to nothing else — the

@@ -485,58 +485,52 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 
 ### ADQL
 
-`POST /api/v1/adql` takes a whole query instead of a target and two fields. The tables it
-may read are declared beside it, each under the name the query calls it:
+`POST /api/v1/adql` takes an
+[ADQL](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html) query instead of a
+target and two fields. Every table the query reads is declared beside it, under the name the
+query uses. This one runs as written:
 
 ```json
 {
-  "query": "SELECT TOP 100 objectid, ra, dec FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+  "query": "SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.000278))",
   "tables": {
-    "gaia": { "type": "parquet", "url": "s3://bucket/part0.parquet" }
-  },
-  "format": "json"
+    "gaia": {
+      "type": "parquet",
+      "url": "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/Norder=3/Dir=0/Npix=148.parquet"
+    }
+  }
 }
 ```
 
-A table the query reads and `tables` does not declare is an error, and so is a `FROM` that
-names anything but one of those — there is no way to reach a file from inside the query.
-`type` is `parquet` today; `hats` is the shape a whole catalog will take and is refused for
-now, so query a catalog through the `hats` routes or name one of its partition files here.
+Declare two tables to join them. A `FROM` naming a table `tables` does not declare is an
+error: a query cannot reach a file the request did not name.
 
-**DataFusion plans the query**, so `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins,
-subqueries and set operations are all answered. What this service does is translate the
-places ADQL and SQL disagree:
+`type` is `parquet`, one file. A whole catalog is not supported yet, so query one through
+the `hats` routes, or use [`hats/plan`](#a-plan-instead-of-the-rows) to find the partition
+files a region covers and name those here.
+
+`GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
+answered. Where ADQL spells something differently from SQL, the query is translated:
 
 | ADQL | means |
 |---|---|
 | `TOP n` | `LIMIT n` |
 | `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
 | `1 = INTERSECTS(point, shape)` | the same test, either argument first |
-| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r`, so it prunes like one |
+| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r` |
 | `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
 | `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%` |
 
-A region test is what decides which row groups are read, exactly as the `region` field does
-on the other routes — it is not a filter run over everything.
+These ADQL functions are not supported: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
+`COORDSYS`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
 
-The geometry this service does not test is refused by name rather than left to fail as an
-unknown function: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`, `COORDSYS`,
-`IVO_GEOM_TRANSFORM`, `POLYGON` and `REGION`.
+`RAND()` works here, and is refused on the other routes, which answer the same way twice.
+Two runs of the same query give different numbers. The standard's optional argument is
+accepted but changes nothing, because the standard leaves its meaning undefined and advises
+omitting it.
 
-`RAND()` is answered here and nowhere else — the other routes refuse a function whose
-answer differs between two identical requests, and ADQL makes this one mandatory. Its
-optional argument is accepted and ignored, which is what the standard says it means: it
-"has undefined semantics", and query writers are advised to omit it. Two runs of the same
-query do not agree.
-
-Two things differ from the standard on purpose. **A column or table name is written as the
-file spells it, or in lowercase** — ADQL folds an unquoted name to uppercase, which would
-put every mixed-case astronomy column out of reach. And **an answer over the row cap is
-refused rather than truncated**: rows cut off are a value you cannot tell from the whole
-answer.
-
-`ORDER BY` is what promises an order. Without one, `TOP n` returns some *n* rows rather
-than a defined *n*.
+An answer over the row cap is refused rather than truncated: rows cut off are a value you
+cannot tell from the whole answer.
 
 ### Storage options
 
