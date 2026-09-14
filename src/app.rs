@@ -4365,6 +4365,23 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("the same way twice"), "{body}");
 
+        // `RAND` is the one function let through that rule, ADQL making it mandatory — and
+        // `random()` above is what shows the exception is the name and not the volatility.
+        let (status, body) = ask_adql(dir.path(), "SELECT RAND() AS r FROM t").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let drawn = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["r"].as_f64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(drawn.len(), 10);
+        assert!(
+            drawn.windows(2).any(|pair| pair[0] != pair[1]),
+            "a constant rather than a column: {drawn:?}"
+        );
+
         let (status, body) = ask_adql(dir.path(), "SELECT LOG(objectid) AS l FROM t").await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let answer: serde_json::Value = serde_json::from_str(&body).unwrap();

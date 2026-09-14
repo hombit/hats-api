@@ -75,10 +75,6 @@ const REFUSED: &[(&str, &str)] = &[
         "REGION",
         "it takes an STC-S string, which ADQL 2.1 deprecated",
     ),
-    (
-        "RAND",
-        "an answer that differs every time it is asked is not one this service returns yet",
-    ),
 ];
 
 /// ADQL's names for functions DataFusion registers under another name.
@@ -628,12 +624,9 @@ mod tests {
         );
     }
 
-    /// **Every mathematical function ADQL 2.1 makes mandatory**, planned rather than merely
-    /// translated: they are §2.3 of the specification and carry no optional-feature URI, so a
-    /// name that does not resolve is a hole in what this route claims to answer.
-    ///
-    /// `RAND` is the one that is missing and is refused by name, which is why this route is
-    /// not described as mandatory-complete ADQL.
+    /// **Every mathematical function ADQL 2.1 makes mandatory**, planned and run rather than
+    /// merely translated: they are §2.3 of the specification and carry no optional-feature
+    /// URI, so a name that does not resolve is a hole in what this route claims to answer.
     #[tokio::test]
     async fn the_mandatory_mathematical_functions_resolve() {
         use std::sync::Arc;
@@ -642,6 +635,7 @@ mod tests {
         use datafusion::sql::parser::Statement as DfStatement;
 
         let ctx = crate::query::session_context(false);
+        crate::adql_functions::register(&ctx);
         let rows = RecordBatch::try_from_iter([(
             "x",
             Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
@@ -661,6 +655,9 @@ mod tests {
             "PI()",
             "POWER(x, 2)",
             "RADIANS(x)",
+            "RAND()",
+            // The argument ADQL defines and leaves undefined, which has to parse and run.
+            "RAND(42)",
             "ROUND(x)",
             "SQRT(x)",
             "TRUNCATE(x)",
@@ -737,7 +734,6 @@ mod tests {
                 "SELECT ra FROM t WHERE 1 = CONTAINS(POINT(ra, dec), POLYGON(1, 2, 3, 4, 5, 6))",
             ),
             ("AREA", "SELECT AREA(CIRCLE(1, 2, 3)) FROM t"),
-            ("RAND", "SELECT RAND() FROM t"),
         ] {
             let refusal = refusal(adql);
             assert!(

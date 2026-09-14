@@ -521,7 +521,13 @@ on the other routes — it is not a filter run over everything.
 
 The geometry this service does not test is refused by name rather than left to fail as an
 unknown function: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`, `COORDSYS`,
-`IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`, and `RAND`.
+`IVO_GEOM_TRANSFORM`, `POLYGON` and `REGION`.
+
+`RAND()` is answered here and nowhere else — the other routes refuse a function whose
+answer differs between two identical requests, and ADQL makes this one mandatory. Its
+optional argument is accepted and ignored, which is what the standard says it means: it
+"has undefined semantics", and query writers are advised to omit it. Two runs of the same
+query do not agree.
 
 Two things differ from the standard on purpose. **A column or table name is written as the
 file spells it, or in lowercase** — ADQL folds an unquoted name to uppercase, which would

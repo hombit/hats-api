@@ -29,6 +29,7 @@ use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, Ident, Statement, visit_e
 use futures::StreamExt;
 
 use crate::adql::Translated;
+use crate::adql_functions;
 use crate::error::ApiError;
 use crate::geometry;
 use crate::query::{QueryResult, data_bytes_read, session_config};
@@ -77,6 +78,9 @@ pub async fn run(
     // before a file is opened, so there it would prune within every partition and open them
     // all. Here the planner is what decides what to scan.
     geometry::register(&ctx);
+    // ADQL's own, which is `rand` — mandatory, and the one function let through the
+    // volatility rule, on this route and nowhere else.
+    adql_functions::register(&ctx);
 
     // Registered under the name the *statement* used rather than the one the request
     // declared, so that a table answers to its own spelling and to its lowercase the way a

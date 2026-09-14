@@ -9,7 +9,7 @@ Release dates are in the UTC time zone.
 ### Added
 
 - The numeric functions — `sqrt`, `log10`, `power`, `abs`, `degrees`, the trigonometric ones — are callable in `select` and `where`. `log` is refused as ambiguous.
-- `POST {api.prefix}/adql`, taking an ADQL statement over parquet tables the request declares.
+- `POST {api.prefix}/adql`, taking an ADQL statement over parquet tables the request declares. `RAND()` is answered there and refused everywhere else.
 - `[limits] max_query_memory_bytes`, `1GiB` by default.
 
 ### Changed
