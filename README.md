@@ -509,7 +509,7 @@ error: a query cannot reach a file the request did not name.
 
 ```json
 {
-  "query": "SELECT COUNT(*) AS n, AVG(phot_g_mean_mag) AS mean_g FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.01))",
+  "query": "SELECT COUNT(*) AS n, MIN(phot_g_mean_mag) AS brightest FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.01))",
   "tables": {
     "gaia": { "type": "hats", "url": "s3://stpubdata/gaia/gaia_dr3/public/hats" }
   }
