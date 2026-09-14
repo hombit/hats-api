@@ -149,7 +149,7 @@ max_concurrent_partitions = 4
 # How large a request body may be; over it, 413. "0" is no bound. What makes a body large
 # is "region" — a serialized MOC, or one circle per source of a cross-match — and no other
 # limit bounds it.
-max_request_body_bytes = "16MiB"
+max_request_body_bytes = "2MiB"
 
 # How much SQL one request may carry, in "select" and "where". Both bound the text the
 # caller wrote, not how many rows come back.

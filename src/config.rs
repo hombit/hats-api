@@ -249,13 +249,14 @@ impl Default for LimitsConfig {
             // which is the size of question a person browsing actually asks — and still
             // small enough against a partition that it lands in a couple of them.
             max_query_radius_arcsec: 600.0,
-            // Eight times axum's own default, which is what this replaces. A body here is a
-            // query rather than an upload, so the figure is set by the largest thing a query
-            // legitimately carries: a `region`, either as a serialized MOC or as one circle
-            // per source of a catalog being cross-matched. Two megabytes is some tens of
-            // thousands of circles, which is a small catalog and not a generous bound;
-            // sixteen is still small beside one partition of the answer.
-            max_request_body_bytes: ByteSize::mib(16),
+            // Axum's own default, which is what this replaces rather than widens. A body
+            // here is a query and not an upload, so the figure is set by the largest thing a
+            // query legitimately carries: a `region`, either as a serialized MOC or as one
+            // circle per source of a catalog being cross-matched. At about seventy bytes a
+            // circle this is some tens of thousands of them, which is already more than one
+            // request can run: the cost of a `region` is linear in its shapes, so a few
+            // thousand circles reach `max_request_seconds` before they reach this.
+            max_request_body_bytes: ByteSize::mib(2),
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

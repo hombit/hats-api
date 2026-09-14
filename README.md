@@ -546,7 +546,7 @@ streams for as long as it takes.
 
 ### The body
 
-`max_request_body_bytes`, `16MiB` by default and `0` for no bound, is how large a request
+`max_request_body_bytes`, `2MiB` by default and `0` for no bound, is how large a request
 body may be. Over it the request is a `413` before any of it is parsed, so the answer names
 no field — there was nothing read to name.
 
@@ -556,9 +556,8 @@ and the limit is measured on the expanded body.
 The default is set by the largest thing a query legitimately carries, which is `region`: a
 serialized `moc`, or one circle per source of a catalog being cross-matched against one
 served here. The expression bounds count a `select` and a `where` and never see either, so
-this is the only bound on both — at about seventy bytes a circle, `16MiB` is a couple of
-hundred thousand of them. Bodies are read into memory whole, so it is also what one request
-may occupy before its work starts.
+this is the only bound on both — at about seventy bytes a circle, `2MiB` is some tens of
+thousands of them.
 
 ### Servers that ignore `Range`
 
@@ -643,7 +642,7 @@ max_partitions = 16             # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 max_request_seconds = 90        # how long one request has to answer; 0 is no bound
-max_request_body_bytes = "16MiB" # how large a body may be; 0 is no bound
+max_request_body_bytes = "2MiB" # how large a body may be; 0 is no bound
 max_concurrent_partitions = 4   # a performance setting, not a bound
 max_query_radius_arcsec = 600   # file-server mode only; 0 closes the circle surface
 max_materialize_bytes = "2GiB"  # copying an object off a server that ignores Range
