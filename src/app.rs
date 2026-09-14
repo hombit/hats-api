@@ -506,10 +506,10 @@ fn describe_adql(
         openapi::operation(
             "adql",
             "Query with ADQL",
-            "IVOA's query language over tables this request declares. Grouping, ordering, \
-             joins and subqueries are answered; a region is `1 = CONTAINS(POINT(ra, dec), \
-             CIRCLE(…))`, which chooses what is read rather than being tested over \
-             everything.",
+            "IVOA's query language over tables this request declares, each one a parquet file \
+             or a whole HATS catalog. Grouping, ordering, joins and subqueries are answered; a \
+             region is `1 = CONTAINS(POINT(ra, dec), CIRCLE(…))`, which chooses the partitions \
+             read rather than being tested over everything.",
             body,
             serde_json::json!({
                 "query": format!(
@@ -1781,8 +1781,7 @@ struct AdqlQuery {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AdqlTable {
-    /// `parquet`, one file the url names outright. `hats` is the shape a whole catalog will
-    /// take and is not answered here yet.
+    /// `parquet` for one file the url names outright, `hats` for a whole catalog.
     r#type: TableKind,
     /// The object to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`, `webdav`
     /// or `file` — and which of those a deployment answers for is the operator's to configure.
@@ -1800,10 +1799,10 @@ struct AdqlTable {
 enum TableKind {
     /// One parquet file.
     Parquet,
-    /// A whole HATS catalog. **Not answered yet** — a statement over a catalog needs its
-    /// partitions chosen from the query's own region before any file is opened, which is work
-    /// of its own. Query a catalog through the `hats` routes, or name one of its partition
-    /// files here.
+    /// A whole HATS catalog: the directory holding `hats.properties`, or a collection's, which
+    /// is followed to its primary table. Only the partitions the query's region reaches are
+    /// read, and a query reaching more than the server's partition limit is refused rather
+    /// than started.
     Hats,
 }
 
@@ -2126,32 +2125,52 @@ async fn query_adql(
     }
 
     let mut tables = Vec::new();
+    let mut data_files = None;
     for (name, table) in &params.tables {
-        if table.r#type == TableKind::Hats {
-            return Err(ApiError::bad_request(format!(
-                "tables: {name} is a hats catalog, which this route does not answer yet; query \
-                 a catalog through the hats routes, or name one of its partition files here"
-            )));
-        }
         let url = parse_url(table.url.as_str())?;
-        // The same question the single-file route asks: a url naming something this service
-        // does not read as data names nothing it serves, and answering it here costs no
-        // connection.
-        let data_files = service.data_files_for(&url);
-        if !data_files.matches_url(&url) {
-            return Err(ApiError::not_found(format!(
-                "tables: {name} does not name a data file; url must end in a name matching {}",
-                data_files.describe()
-            )));
-        }
-        let file = storage::open(&url, &table.storage, &service.policy, &service.transfers)?;
+        let source = match table.r#type {
+            TableKind::Parquet => {
+                // The same question the single-file route asks: a url naming something this
+                // service does not read as data names nothing it serves, and answering it here
+                // costs no connection.
+                let files = service.data_files_for(&url);
+                if !files.matches_url(&url) {
+                    return Err(ApiError::not_found(format!(
+                        "tables: {name} does not name a data file; url must end in a name \
+                         matching {}",
+                        files.describe()
+                    )));
+                }
+                adql_query::Source::File(storage::open(
+                    &url,
+                    &table.storage,
+                    &service.policy,
+                    &service.transfers,
+                )?)
+            }
+            // A directory rather than an object, and no name to match: a catalog's own files
+            // are what its metadata names, and which of those are rows is the question
+            // `data_files` answers below rather than one about this url.
+            TableKind::Hats => {
+                data_files = Some(service.data_files_for(&url).clone());
+                adql_query::Source::Catalog(storage::open_dir(
+                    &url,
+                    &table.storage,
+                    &service.policy,
+                    &service.transfers,
+                )?)
+            }
+        };
         tables.push(adql_query::Table {
             name: name.clone(),
-            file,
+            source,
         });
     }
 
-    let result = adql_query::run(&translated, &tables, service.adql_limits).await?;
+    // Whichever mount governs a catalog this request named, else the service's own list. A
+    // request with no catalog never asks.
+    let data_files = data_files.unwrap_or_else(|| service.data_files.as_ref().clone());
+    let result = adql_query::run(&translated, &tables, &data_files, service.adql_limits).await?;
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     let response = adql_answer(&result, format, started)?;
@@ -4506,22 +4525,162 @@ mod tests {
         assert!(body.contains("declares no table"), "{body}");
     }
 
-    /// A catalog is the shape this route will take and does not answer yet, so it says that
-    /// rather than failing as a file it could not read.
+    /// A whole catalog as a table, which is the point of the route: the statement names the
+    /// catalog and the planner reads the partitions a region reaches.
     #[tokio::test]
-    async fn an_adql_hats_table_is_refused_by_name() {
-        let dir = adql_fixture();
+    async fn the_adql_route_answers_a_catalog() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[0].clone();
+        let expected = crate::hats_query::tests::inside(&region);
+        assert!(!expected.is_empty(), "the cone selects nothing");
+        let (ra, dec, radius) = match &region {
+            Region::Circle {
+                ra,
+                dec,
+                radius_deg,
+                ..
+            } => (*ra, *dec, radius_deg.unwrap()),
+            other => panic!("the fixture's first region is a circle: {other:?}"),
+        };
+
         let (status, body) = post_json(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/adql",
             serde_json::json!({
-                "query": "SELECT objectid FROM t",
-                "tables": {"t": {"type": "hats", "url": "file:///"}},
+                "query": format!(
+                    "SELECT id FROM c WHERE 1 = CONTAINS(POINT(ra, dec), \
+                     CIRCLE({ra}, {dec}, {radius})) ORDER BY id"
+                ),
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The same rows the fan-out returns for the same circle, which is the claim: two
+        // routes over one catalog are two ways of asking, not two answers.
+        assert_eq!(
+            answer["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{body}"
+        );
+    }
+
+    /// An aggregate over a whole catalog, which is what a statement is for and what no other
+    /// route can answer: the partition fan-out cannot combine rows across partitions.
+    #[tokio::test]
+    async fn the_adql_route_aggregates_a_catalog() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT COUNT(*) AS n, MIN(id) AS lowest FROM c",
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        // Against what the fan-out returns for the same catalog, which is the only number
+        // worth comparing to: an aggregate nobody can check is an aggregate of anything.
+        let (status, counted) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///", "select": "id"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{counted}");
+        let counted: serde_json::Value = serde_json::from_str(&counted).unwrap();
+        assert_eq!(answer["rows"][0]["n"], counted["num_rows"], "{body}");
+        assert!(answer["rows"][0]["n"].as_i64().unwrap() > 0);
+    }
+
+    /// **The bound that acts before any work.** The memory pool bounds memory and the clock
+    /// bounds time; neither refuses a scan of every partition before it starts, and a
+    /// statement has no plan route to be answered with instead.
+    #[tokio::test]
+    async fn a_catalog_scan_wider_than_the_partition_bound_is_refused() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 2,
+            ..LimitsConfig::default()
+        };
+        let mut service = mounted(dir.path(), &ApiConfig::default());
+        service.adql_limits = (&limits).into();
+        let (status, body) = post_json(
+            service,
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT COUNT(*) AS n FROM c",
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
             }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert!(body.contains("does not answer yet"), "{body}");
+        assert!(body.contains("partitions"), "{body}");
+    }
+
+    /// **That the pruning has teeth**, which the tests above cannot show: they would pass
+    /// whether or not a partition was skipped, since skipping one changes what a query costs
+    /// and not what it answers.
+    ///
+    /// The bound is what makes the difference visible. With fewer partitions allowed than the
+    /// catalog has, a query carrying a region still answers — which it can only do if the
+    /// region removed partitions before the bound was checked — while the same query without
+    /// one is refused for reaching them all.
+    #[tokio::test]
+    async fn a_region_prunes_the_partitions_a_statement_reads() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let region = crate::hats_query::tests::regions()[0].clone();
+        let (ra, dec, radius) = match &region {
+            Region::Circle {
+                ra,
+                dec,
+                radius_deg,
+                ..
+            } => (*ra, *dec, radius_deg.unwrap()),
+            other => panic!("the fixture's first region is a circle: {other:?}"),
+        };
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let service = || {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            service
+        };
+
+        let (status, body) = post_json(
+            service(),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": format!(
+                    "SELECT COUNT(*) AS n FROM c WHERE 1 = CONTAINS(POINT(ra, dec), \
+                     CIRCLE({ra}, {dec}, {radius}))"
+                ),
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the region did not prune: {body}");
+
+        let (status, body) = post_json(
+            service(),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT COUNT(*) AS n FROM c",
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
     /// Reserved now, before a TAP layer needs them, so that no caller writes a statement

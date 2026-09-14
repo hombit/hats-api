@@ -41,6 +41,7 @@ pub mod error;
 pub mod geometry;
 pub mod hats;
 pub mod hats_query;
+pub mod hats_table;
 pub mod healpix;
 pub mod listing;
 pub mod logging;

@@ -505,21 +505,32 @@ query uses. This one runs as written:
 Declare two tables to join them. A `FROM` naming a table `tables` does not declare is an
 error: a query cannot reach a file the request did not name.
 
-`type` is `parquet`, one file. A whole catalog is not supported yet, so query one through
-the `hats` routes, or use [`hats/plan`](#a-plan-instead-of-the-rows) to find the partition
-files a region covers and name those here.
+`type` is `parquet` for one file, or `hats` for a whole catalog:
+
+```json
+{
+  "query": "SELECT COUNT(*) AS n, AVG(phot_g_mean_mag) AS mean_g FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.01))",
+  "tables": {
+    "gaia": { "type": "hats", "url": "s3://stpubdata/gaia/gaia_dr3/public/hats" }
+  }
+}
+```
+
+A catalog reads only the partitions the query's region reaches, the same ones the
+[`hats` routes](#the-routes) would choose. Without a region it reads every partition, and a
+query reaching more than `max_partitions` is refused rather than started.
 
 `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
 answered. Where ADQL spells something differently from SQL, the query is translated:
 
-| ADQL | means |
-|---|---|
-| `TOP n` | `LIMIT n` |
+| ADQL | SQL                                    |
+|---|----------------------------------------|
+| `TOP n` | `LIMIT n`                              |
 | `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
-| `1 = INTERSECTS(point, shape)` | the same test, either argument first |
-| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r` |
+| `1 = INTERSECTS(point, shape)` | the same test, either argument first   |
+| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r`               |
 | `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
-| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%` |
+| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%`             |
 
 These ADQL functions are not supported: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
 `COORDSYS`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.

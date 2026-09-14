@@ -44,7 +44,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
 | 10.3 | the statement planned, over parquet tables | done | every function ADQL makes mandatory is answered; the geometry it leaves optional is §10.7's |
-| 10.4 | HATS catalogs as tables | todo | two decisions first |
+| 10.4 | HATS catalogs as tables | done | partitions pruned by `PruningPredicate` over each cell's span, not by recognising a region |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | an equijoin once the left row is expanded to cells; three things to measure first |
 
@@ -425,55 +425,8 @@ DaCHS, whose spelling §10.7 follows.
 - **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
   already answered per §7.5 and are what a TAP layer will need anyway.
 
-### 10.4 Stage two — HATS catalogs as tables
-
-A catalog `TableProvider`, which is what makes "a large table, a small answer" real: an
-aggregate over a catalog is the best case this service has. It reuses `hats/` for everything
-about reading a catalog — all three discovery sources, directory partitions, a collection
-followed to its primary table, the materializing store for http — and replaces none of it.
-
-**The region is gone by the time the provider is asked, and that settles the design.**
-`contains` rewrites itself during the optimizer's simplify pass, which runs before a filter
-reaches a scan — so what arrives is the covering and the haversine, and no `CONTAINS` call
-survives to read a region out of. Checked by printing the optimized plan of a statement over
-a registered parquet table: the `TableScan`'s `partial_filters` are the coordinate bounds and
-the trigonometry, exactly as `region::predicate` builds them.
-
-So the provider prunes the way every other DataFusion container does, by statistics:
-
-- **`schema()` from `dataset/_common_metadata`.** One more small `GET` per catalog per
-  request, which §5.1 already weighs for the expression routes.
-- **`supports_filters_pushdown` answers `Inexact` for everything.** Inexact because the filter
-  must still run over the rows — pruning a partition is not testing one — and for everything
-  because which filters help is the pruning predicate's to decide rather than a pattern this
-  code recognises.
-- **`scan()` prunes partitions with a `PruningPredicate`.** `datafusion::physical_optimizer::pruning`
-  is reachable without a new dependency, and the trait it wants is statistics per container.
-  A HATS partition *is* one HEALPix cell, so `HatsPartition::span` gives its `_healpix_29`
-  range exactly, without reading anything — better statistics than a parquet footer's, and
-  free. What survives is scanned as one source with a file group per partition.
-
-  This is better than matching a `CONTAINS` would have been even if one survived: it prunes on
-  any predicate over the index column, whoever wrote it, and a caller who writes
-  `_healpix_29 BETWEEN …` by hand gets the same partition choice as one who writes a circle.
-
-One decision before building it:
-
-1. **What stops a regionless scan early.** The memory pool bounds memory and the clock bounds
-   time; neither refuses `SELECT COUNT(*) FROM ztf` over 12,485 partitions before it starts.
-   §5.3's `max_partitions` checked in `scan()` against the surviving list is the natural bound,
-   and it is a refusal rather than a work list, the route having none.
-
-**A partition the region contains whole is not treated specially.** The fan-out gives such a
-partition no spatial test at all; a planned scan applies one filter to every file, and
-DataFusion offers no per-file predicate. Dropped rather than deferred: what it would save is
-the trigonometry over rows that were always going to pass.
-
-Whether the `hats` expression routes later move onto the provider is deferred, not assumed.
-
-**`contains` is registered only on a context whose planner chooses what to scan.** On the
-shared context it would reach the catalog routes, which choose partitions from the `region`
-field before any file is opened and would therefore open all of them.
+Whether the `hats` expression routes later move onto `hats_table`'s provider is deferred, not
+assumed: they promise an order and answer with a work list, and it does neither.
 
 ### 10.5 Stage three — one large table and small ones
 

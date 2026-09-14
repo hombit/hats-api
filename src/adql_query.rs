@@ -18,6 +18,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::catalog::TableProvider;
 use datafusion::common::TableReference;
 use datafusion::error::DataFusionError;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
@@ -27,14 +28,17 @@ use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion::sql::parser::Statement as PlannerStatement;
 use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, Ident, Statement, visit_expressions_mut};
 use futures::StreamExt;
+use url::Url;
 
 use crate::adql::Translated;
 use crate::adql_functions;
+use crate::data::DataFiles;
 use crate::error::ApiError;
 use crate::geometry;
+use crate::hats_table;
 use crate::query::{QueryResult, data_bytes_read, session_config};
 use crate::sql;
-use crate::storage::RemoteFile;
+use crate::storage::{RemoteDir, RemoteFile};
 
 /// What one statement may spend.
 #[derive(Debug, Clone, Copy)]
@@ -46,6 +50,8 @@ pub struct Limits {
     pub max_rows: usize,
     /// How much SQL the statement may contain.
     pub sql: sql::Limits,
+    /// What a catalog table may spend, and how much of its metadata may be read.
+    pub catalog: hats_table::Limits,
 }
 
 impl From<&crate::config::LimitsConfig> for Limits {
@@ -54,22 +60,43 @@ impl From<&crate::config::LimitsConfig> for Limits {
             max_memory_bytes: config.max_query_memory_bytes.as_u64(),
             max_rows: config.max_rows,
             sql: config.into(),
+            catalog: hats_table::Limits {
+                max_partitions: config.max_partitions,
+                max_metadata_bytes: config.max_catalog_metadata_bytes.as_u64(),
+            },
         }
     }
 }
 
-/// One table of a request: the name the caller gave it, and the file it is.
+/// One table of a request: the name the caller gave it, and what it is.
 #[derive(Debug)]
 pub struct Table {
     /// As the request declared it, which is what a statement's `FROM` is matched against.
     pub name: String,
-    pub file: RemoteFile,
+    pub source: Source,
+}
+
+/// What a table's url turned out to name.
+///
+/// Opened by the route before either reaches here, since both go through the access policy
+/// and a catalog's own metadata is read to open one at all.
+#[derive(Debug)]
+pub enum Source {
+    /// One parquet file.
+    File(RemoteFile),
+    /// A whole catalog, which chooses the partitions a scan reads.
+    Catalog(RemoteDir),
 }
 
 /// Run a translated statement over these tables.
+///
+/// `data` is which names inside a catalog are read as rows, which a catalog whose partitions
+/// are directories needs in order to list one. It is not a bound and so not one of `limits`:
+/// it is the operator's answer to which files a query is about at all.
 pub async fn run(
     translated: &Translated,
     tables: &[Table],
+    data: &DataFiles,
     limits: Limits,
 ) -> Result<QueryResult, ApiError> {
     let ctx = context(limits)?;
@@ -89,26 +116,35 @@ pub async fn run(
     let mut schemas = Vec::new();
     for spelling in &translated.tables {
         let table = declared(spelling, tables)?;
-        ctx.register_object_store(&table.file.base, Arc::clone(&table.file.store));
-        // The url names one object and it has already been decided to be parquet, so the
-        // extension filter that would hide a HATS `_metadata` is turned off, as it is for
-        // every other route here.
-        let options = ParquetReadOptions {
-            file_extension: "",
-            ..ParquetReadOptions::default()
+        let reference = TableReference::bare(spelling.clone());
+        let schema = match &table.source {
+            Source::File(file) => {
+                ctx.register_object_store(&file.base, Arc::clone(&file.store));
+                // The url names one object and it has already been decided to be parquet, so
+                // the extension filter that would hide a HATS `_metadata` is turned off, as it
+                // is for every other route here.
+                let options = ParquetReadOptions {
+                    file_extension: "",
+                    ..ParquetReadOptions::default()
+                };
+                ctx.register_parquet(reference.clone(), file.url.as_str(), options)
+                    .await
+                    .map_err(|error| opening(&file.url, &error))?;
+                ctx.table_provider(reference)
+                    .await
+                    .map_err(|error| opening(&file.url, &error))?
+                    .schema()
+            }
+            Source::Catalog(dir) => {
+                let url = dir.url.clone();
+                let table = hats_table::HatsTable::open(&ctx, dir, data, limits.catalog).await?;
+                let schema = TableProvider::schema(&table);
+                ctx.register_table(reference, Arc::new(table))
+                    .map_err(|error| opening(&url, &error))?;
+                schema
+            }
         };
-        ctx.register_parquet(
-            TableReference::bare(spelling.clone()),
-            table.file.url.as_str(),
-            options,
-        )
-        .await
-        .map_err(|error| opening(&table.file, &error))?;
-        let provider = ctx
-            .table_provider(TableReference::bare(spelling.clone()))
-            .await
-            .map_err(|error| opening(&table.file, &error))?;
-        schemas.push(provider.schema());
+        schemas.push(schema);
     }
 
     let mut statement = translated.statement.clone();
@@ -284,14 +320,13 @@ fn refusal(error: &DataFusionError) -> ApiError {
 
 /// Opening one of the request's tables, which is a statement about that file rather than
 /// about the query.
-fn opening(file: &RemoteFile, error: &DataFusionError) -> ApiError {
+fn opening(url: &Url, error: &DataFusionError) -> ApiError {
     let refusal = ApiError::bad_request(format!(
-        "tables: {} could not be read as parquet: {}",
-        file.url,
+        "tables: {url} could not be read as parquet: {}",
         first_line(&error.to_string())
     ));
     // A local url resolved to a place on disk the caller did not write and must not be shown.
-    match file.url.to_file_path().ok() {
+    match url.to_file_path().ok() {
         Some(path) => refusal.from_mount(&path),
         None => refusal,
     }
