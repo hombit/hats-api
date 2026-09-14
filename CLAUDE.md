@@ -476,6 +476,20 @@ quote and no second parser.
   which of its columns are coordinates, and a guess from conventional names would answer a
   different question than the one asked without saying so. A catalog's `properties` is the
   one thing allowed to supply them.
+
+  **Where a catalog supplies them they are also the only pair allowed**, and a region over
+  any other of its columns is refused. A catalog's partitions are chosen by a HEALPix index,
+  and that index says where `hats_col_ra` and `hats_col_dec` put a row and nothing about any
+  other column — so a region over a different pair is pruned by statistics that do not
+  describe it, and the partitions dropped can be exactly the ones holding the positions asked
+  for. Fewer rows than the shape contains, with nothing in the answer to say why. A file
+  declares nothing and so constrains nothing: naming the two columns is the caller's only
+  claim there, and there is nothing for it to contradict.
+
+  How the claim reaches the check is a mark on the schema — `geometry::COORDINATE` on the two
+  fields, written by `hats_table::marked` and read by `geometry::declared_position`. It rides
+  on the field, so an alias, a join or a subquery between the table and the region test
+  changes nothing; a registry keyed by table name would have to resolve all three.
 - **A shape that reads two ways is refused, not resolved.** A `zone`'s `ra` runs eastward
   from the first value to the second, so `[350, 10]` and `[10, 350]` are different zones
   and both are legal; the two values naming the *same* point is refused, because it reads

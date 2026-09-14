@@ -27,7 +27,7 @@
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields};
-use datafusion::common::{DFSchema, ScalarValue};
+use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion::logical_expr::{
@@ -36,6 +36,15 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use crate::region::{self, Region, Spatial};
+
+/// The metadata key a table marks its own coordinate columns with, and the two values it takes.
+///
+/// A file says nothing about which of its columns are a position, so the caller naming them is
+/// the only claim there is; a catalog does say, and [`crate::hats_table`] writes what it says
+/// into the schema the planner sees. `declared_position` below is what reads it back.
+pub const COORDINATE: &str = "hats.coordinate";
+pub const RA: &str = "ra";
+pub const DEC: &str = "dec";
 
 /// What a position is, as a type: two fields and no values.
 ///
@@ -235,11 +244,13 @@ impl ScalarUDFImpl for Contains {
             return Err(shape_of_a_region_test());
         };
         let (ra_column, dec_column) = coordinates(point)?;
+        let schema: &DFSchema = info.schema();
+        declared_position(schema, &ra_column, &dec_column)?;
         let regions = [region_of(shape)?];
         let spatial = Spatial {
             regions: &regions,
-            ra_column: Some(&ra_column),
-            dec_column: Some(&dec_column),
+            ra_column: Some(&ra_column.name),
+            dec_column: Some(&dec_column.name),
             // Discovered from the file's own schema, which is the rule everywhere else: a
             // column named `_healpix_29` carries its order in its name, and any other index
             // column has to be named — which a function call has no way to do.
@@ -248,7 +259,6 @@ impl ScalarUDFImpl for Contains {
             // no partition to put a floor under its depth or to be cut to.
             partition: None,
         };
-        let schema: &DFSchema = info.schema();
         region::predicate(schema, &spatial)
             .map(ExprSimplifyResult::Simplified)
             .map_err(|error| DataFusionError::Plan(error.to_string()))
@@ -268,7 +278,7 @@ impl ScalarUDFImpl for Contains {
 /// before this runs, and the arithmetic below widens to `f64` anyway — so the cast says
 /// nothing this needs, while the column underneath is the whole point: the covering has to
 /// be a test on a column for row-group statistics to prune on it.
-fn coordinates(point: &Expr) -> DfResult<(String, String)> {
+fn coordinates(point: &Expr) -> DfResult<(Column, Column)> {
     let Expr::ScalarFunction(call) = point else {
         return Err(shape_of_a_region_test());
     };
@@ -289,14 +299,57 @@ fn coordinates(point: &Expr) -> DfResult<(String, String)> {
 }
 
 /// The column an expression is, under whatever the planner wrapped it in.
-fn column(expr: &Expr) -> Option<String> {
+fn column(expr: &Expr) -> Option<Column> {
     match expr {
-        Expr::Column(column) => Some(column.name.clone()),
+        Expr::Column(column) => Some(column.clone()),
         Expr::Cast(cast) => column(&cast.expr),
         Expr::TryCast(cast) => column(&cast.expr),
         Expr::Alias(alias) => column(&alias.expr),
         _ => None,
     }
+}
+
+/// Refuse a region over a table's columns other than the ones it says hold a position.
+///
+/// **A catalog's partitions are chosen by its HEALPix index, and that index describes one pair
+/// of columns.** The covering this rewrite produces is a test on that index, so a cone written
+/// over some other pair would be answered from partitions chosen by a column that says nothing
+/// about it — and the partitions dropped could be exactly the ones holding the positions asked
+/// for. Fewer rows than the shape contains, with nothing in the answer to say so.
+///
+/// Swapping the two is the way it actually happens: `point(dec, ra)` is a cone somewhere else
+/// entirely, and over a small catalog it comes back empty rather than wrong.
+///
+/// A table that marks nothing constrains nothing. That is every parquet file, where which
+/// columns hold a position is the caller's to say and this is the saying of it.
+fn declared_position(schema: &DFSchema, ra: &Column, dec: &Column) -> DfResult<()> {
+    // A column the planner left unqualified is looked up by name, so that a statement over one
+    // table — where there is no qualifier to write — is checked like any other.
+    let table = match &ra.relation {
+        Some(relation) => Some(relation.clone()),
+        None => schema
+            .iter()
+            .find(|(_, field)| field.name() == &ra.name)
+            .and_then(|(relation, _)| relation.cloned()),
+    };
+    let role = |want: &str| {
+        schema.iter().find_map(|(relation, field)| {
+            (relation == table.as_ref()
+                && field.metadata().get(COORDINATE).map(String::as_str) == Some(want))
+            .then(|| field.name().clone())
+        })
+    };
+    let (Some(its_ra), Some(its_dec)) = (role(RA), role(DEC)) else {
+        return Ok(());
+    };
+    if ra.name == its_ra && dec.name == its_dec {
+        return Ok(());
+    }
+    Err(DataFusionError::Plan(format!(
+        "this catalog's positions are in {its_ra} and {its_dec}, and its partitions are chosen \
+         by an index over those two; a region over ({}, {}) cannot be answered from them",
+        ra.name, dec.name
+    )))
 }
 
 /// The shape an expression is, where it is a constant one.

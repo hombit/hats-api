@@ -494,23 +494,6 @@ query uses. This one runs as written:
 {
   "query": "SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.000278))",
   "tables": {
-    "gaia": {
-      "type": "parquet",
-      "url": "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/Norder=3/Dir=0/Npix=148.parquet"
-    }
-  }
-}
-```
-
-Declare two tables to join them. A `FROM` naming a table `tables` does not declare is an
-error: a query cannot reach a file the request did not name.
-
-`type` is `parquet` for one file, or `hats` for a whole catalog:
-
-```json
-{
-  "query": "SELECT COUNT(*) AS n, MIN(phot_g_mean_mag) AS brightest FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.01))",
-  "tables": {
     "gaia": { "type": "hats", "url": "s3://stpubdata/gaia/gaia_dr3/public/hats" }
   }
 }
@@ -519,6 +502,28 @@ error: a query cannot reach a file the request did not name.
 A catalog reads only the partitions the query's region reaches, the same ones the
 [`hats` routes](#the-routes) would choose. Without a region it reads every partition, and a
 query reaching more than `max_partitions` is refused rather than started.
+
+The `POINT` of a region over a catalog names the catalog's own position columns, the ones
+its `hats_col_ra` and `hats_col_dec` declare. Any other pair is refused: the partitions are
+chosen by an index over those two, so a region over other columns would be answered from
+partitions that say nothing about it. A parquet file declares nothing, so there the two
+columns are the query's to name.
+
+`type` is `hats` for a whole catalog, or `parquet` for one file:
+
+```json
+{
+  "query": "SELECT COUNT(*) AS n, MIN(phot_g_mean_mag) AS brightest FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.01))",
+  "tables": {
+    "gaia": {
+      "type": "parquet",
+      "url": "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/Norder=3/Dir=0/Npix=148.parquet"
+    }
+  }
+}
+```
+
+Declare two tables to run cross-table queries.
 
 `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
 answered. Where ADQL spells something differently from SQL, the query is translated:

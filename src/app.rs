@@ -518,7 +518,7 @@ fn describe_adql(
                      CIRCLE({ADQL_EXAMPLE_RA}, {ADQL_EXAMPLE_DEC}, {ADQL_EXAMPLE_RADIUS}))"
                 ),
                 "tables": {
-                    "gaia": {"type": "parquet", "url": ADQL_EXAMPLE_PARTITION},
+                    "gaia": {"type": "hats", "url": EXAMPLE_CATALOG},
                 },
                 "format": "json",
             }),
@@ -554,22 +554,14 @@ const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
 const PARTITION_SELECT: &str = "objectid, objra, objdec, lightcurve.mag";
 const PARTITION_WHERE: &str = "nepochs > 10";
 
-/// One partition of Gaia DR3, for the ADQL example.
+/// A position with a bright source an arcsecond away, so the ADQL example returns a row rather
+/// than an empty answer a reader would read as a fault. In degrees, which is what ADQL's
+/// `CIRCLE` takes; the radius is one arcsecond.
 ///
-/// A file rather than the catalog above, since a statement reads parquet tables and a whole
-/// catalog is not answered yet. It is the partition the plan route resolves the circle below
-/// to, which is how a reader would find it: send the circle to `hats/plan` and take the url
-/// out of the one entry that comes back.
-///
-/// 230 MB, of which the query reads 7: the region test is a covering over `_healpix_29`
-/// before it is trigonometry, so what a small circle costs is the row groups it reaches.
-/// About a second.
-const ADQL_EXAMPLE_PARTITION: &str = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/\
-    dataset/Norder=3/Dir=0/Npix=148.parquet";
-
-/// A position inside that partition with a bright source an arcsecond away, so the example
-/// returns a row rather than an empty answer a reader would read as a fault. In degrees,
-/// which is what ADQL's `CIRCLE` takes; the radius is one arcsecond.
+/// The circle is what makes the example cheap against the whole catalog: it reaches one
+/// partition of 230 MB, of which the query reads 7 — the region test is a covering over
+/// `_healpix_29` before it is trigonometry, so what a small circle costs is the row groups it
+/// reaches. About a second.
 const ADQL_EXAMPLE_RA: f64 = 254.45754;
 const ADQL_EXAMPLE_DEC: f64 = 35.34235;
 const ADQL_EXAMPLE_RADIUS: f64 = 0.000278;
@@ -4681,6 +4673,49 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A catalog's positions are where the catalog says they are, and a region over any other
+    /// pair of its columns is refused rather than answered from the wrong partitions.
+    ///
+    /// Swapped is the case worth testing because it is the one that happens, and because it
+    /// fails silently without the check: the partitions are chosen by an index over `ra` and
+    /// `dec`, so a cone at the transposed position finds none of them and the answer is
+    /// empty — fewer rows than the shape holds, with nothing saying why.
+    #[tokio::test]
+    async fn a_region_over_a_catalogs_other_columns_is_refused() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT id FROM c WHERE 1 = CONTAINS(POINT(dec, ra), \
+                          CIRCLE(10.0, 10.0, 0.5))",
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("ra") && body.contains("dec"), "{body}");
+    }
+
+    /// The same statement against one file, which answers it. A file says nothing about which
+    /// of its columns hold a position, so the caller naming them is the only claim there is
+    /// and there is nothing for this to contradict.
+    #[tokio::test]
+    async fn a_region_over_a_files_columns_is_the_callers_to_choose() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("part0.parquet"),
+            query::tests::sky_fixture(),
+        )
+        .unwrap();
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT objectid FROM t WHERE 1 = CONTAINS(POINT(dec, ra), CIRCLE(42.0, -20.0, 0.1))",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// Reserved now, before a TAP layer needs them, so that no caller writes a statement

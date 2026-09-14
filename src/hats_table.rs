@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, UInt64Array};
 use datafusion::arrow::compute::cast;
-use datafusion::arrow::datatypes::{DataType, SchemaRef};
+use datafusion::arrow::datatypes::{DataType, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Column, DFSchema, DataFusionError, Result as DfResult, ScalarValue};
 use datafusion::datasource::listing::{
@@ -35,6 +35,7 @@ use datafusion::prelude::SessionContext;
 
 use crate::data::DataFiles;
 use crate::error::ApiError;
+use crate::geometry;
 use crate::hats::partitions::COMMON_METADATA;
 use crate::hats::{Catalog, HatsPartition};
 use crate::storage::RemoteDir;
@@ -90,15 +91,19 @@ impl HatsTable {
         let catalog = Catalog::open(dir.clone(), limits.max_metadata_bytes).await?;
         let data = data.clone();
         let schema = schema_of(ctx, &catalog, &data).await?;
+        let columns = catalog.columns().ok();
         // The catalog's own name for it, else the one name a file can be recognised by. Both
         // are checked against the schema, so a catalog naming a column its files have not got
         // prunes nothing rather than failing a scan.
-        let index = catalog
-            .columns()
-            .ok()
+        let index = columns
+            .as_ref()
             .map(|columns| columns.healpix.0.to_owned())
             .or_else(|| Some(crate::healpix::DEFAULT_HEALPIX_COLUMN_NAME.to_owned()))
             .filter(|name| schema.field_with_name(name).is_ok());
+        let schema = match &columns {
+            Some(columns) => marked(&schema, columns.ra, columns.dec),
+            None => schema,
+        };
         Ok(Self {
             catalog,
             data,
@@ -335,6 +340,30 @@ impl PruningStatistics for Spans<'_> {
 /// Every filter as one expression, or `None` where there are none.
 fn conjunction(filters: &[Expr]) -> Option<Expr> {
     filters.iter().cloned().reduce(Expr::and)
+}
+
+/// The two columns `hats_col_ra` and `hats_col_dec` name, marked in the schema the planner sees.
+///
+/// What reads the mark is [`crate::geometry`], which refuses a region over any other pair: the
+/// partitions here are chosen by an index over these two columns and describe no others. The
+/// catalog is the only thing that can say which they are, and the schema is the only thing that
+/// reaches the expression where the question is asked.
+fn marked(schema: &SchemaRef, ra: &str, dec: &str) -> SchemaRef {
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let role = match field.name().as_str() {
+                name if name == ra => geometry::RA,
+                name if name == dec => geometry::DEC,
+                _ => return Arc::clone(field),
+            };
+            let mut metadata = field.metadata().clone();
+            metadata.insert(geometry::COORDINATE.to_owned(), role.to_owned());
+            Arc::new(field.as_ref().clone().with_metadata(metadata))
+        })
+        .collect::<Fields>();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 /// The catalog's schema, which a statement is checked against before anything is read.

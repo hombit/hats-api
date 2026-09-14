@@ -11,8 +11,8 @@
 //! refuses a query whose working set is too large, with spilling to disk off so the bound
 //! cannot quietly become a disk one. A row cap refuses an answer too large to send, which the
 //! pool does not see — a `GROUP BY` streams its output. And the clock over the whole router
-//! refuses one that is merely slow. None of them is the partition count the catalog routes
-//! use: that is §5.3's, and a statement has no partition list to check it against.
+//! refuses one that is merely slow. The partition count is not one of them: a statement has no
+//! partition list of its own, so that bound belongs to each catalog table it names.
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -315,7 +315,14 @@ fn resolve(ident: &mut Ident, schemas: &[SchemaRef]) {
 /// while the optimizer runs. Left alone it would read as this service failing rather than as
 /// the request being wrong.
 fn refusal(error: &DataFusionError) -> ApiError {
-    ApiError::bad_request(format!("query: {}", first_line(&error.to_string())))
+    // The root and not the outermost. An optimizer rule wraps whatever it raised in "Optimizer
+    // rule 'simplify_expressions' failed", which is where the failure happened and says nothing
+    // about what the caller wrote — and `geometry::Contains` raises every one of its refusals
+    // from inside that rule.
+    ApiError::bad_request(format!(
+        "query: {}",
+        first_line(&error.find_root().to_string())
+    ))
 }
 
 /// Opening one of the request's tables, which is a statement about that file rather than
