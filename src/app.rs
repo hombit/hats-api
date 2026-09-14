@@ -26,6 +26,8 @@ use tower_http::trace::TraceLayer;
 use url::{Url, form_urlencoded};
 
 use crate::access::{self, AccessPolicy};
+use crate::adql;
+use crate::adql_query;
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
 use crate::error::ApiError;
@@ -58,6 +60,8 @@ pub struct Service {
     pub sql_limits: sql::Limits,
     /// What a request against a whole catalog may spend.
     pub catalog_limits: CatalogLimits,
+    /// What one ADQL statement may spend.
+    pub adql_limits: adql_query::Limits,
     /// The widest circle a query string may ask for. The file-server mode's bound alone: a
     /// url is followed rather than fanned out, so what it asks for has to fit in one answer.
     max_query_radius_arcsec: f64,
@@ -125,6 +129,7 @@ impl Service {
             data_files: Arc::new(data_files),
             sql_limits: limits.into(),
             catalog_limits: limits.into(),
+            adql_limits: limits.into(),
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
@@ -183,6 +188,10 @@ pub fn router(service: Service) -> Router {
         // wider body and another pairwise refusal everywhere the fields are read.
         router = with_dialect::<Expr>(router, &prefix);
         router = with_dialect::<Simple>(router, &prefix);
+        // Not a fourth vocabulary and so not a `with_dialect`: a statement carries its own
+        // targets and its own projection, which is the pair the other three routes take from
+        // the url and the body separately.
+        router = router.route(&route(&prefix, "adql"), post(query_adql));
         router = with_description(router, &prefix);
     }
     let mut router = router
@@ -363,6 +372,7 @@ fn describe(prefix: &str) -> utoipa::openapi::OpenApi {
     openapi::health(&mut paths, &route(prefix, "health"));
     describe_dialect::<Expr>(&mut paths, &mut schemas, prefix);
     describe_dialect::<Simple>(&mut paths, &mut schemas, prefix);
+    describe_adql(&mut paths, &mut schemas, prefix);
     let components = utoipa::openapi::ComponentsBuilder::new()
         .schemas_from_iter(schemas)
         .build();
@@ -476,6 +486,46 @@ fn describe_dialect<D: Dialect>(
     );
 }
 
+/// The one ADQL operation.
+///
+/// Not a [`describe_dialect`]: there is one route rather than a set, and its body is not
+/// generic over anything, a statement carrying the pair the vocabularies vary.
+fn describe_adql(
+    paths: &mut utoipa::openapi::Paths,
+    schemas: &mut Vec<(String, utoipa::openapi::RefOr<utoipa::openapi::Schema>)>,
+    prefix: &str,
+) {
+    let body = named::<AdqlQuery>(schemas, <AdqlQuery as utoipa::ToSchema>::name().to_string());
+    let rows = named::<SelectResponse>(
+        schemas,
+        <SelectResponse as utoipa::ToSchema>::name().to_string(),
+    );
+    openapi::post(
+        paths,
+        &route(prefix, "adql"),
+        openapi::operation(
+            "adql",
+            "Query with ADQL",
+            "IVOA's query language over tables this request declares. Grouping, ordering, \
+             joins and subqueries are answered; a region is `1 = CONTAINS(POINT(ra, dec), \
+             CIRCLE(…))`, which chooses what is read rather than being tested over \
+             everything.",
+            body,
+            serde_json::json!({
+                "query": format!(
+                    "SELECT TOP 100 {PARTITION_SELECT_FLAT} FROM ztf WHERE {PARTITION_WHERE}"
+                ),
+                "tables": {
+                    "ztf": {"type": "parquet", "url": EXAMPLE_PARTITION},
+                },
+                "format": "json",
+            }),
+            "The rows, or a parquet file or a VOTable where `format` asked for one",
+            rows,
+        ),
+    );
+}
+
 /// Gaia DR3, which a reader can send the catalog examples at as written: a real collection,
 /// published anonymously, all-sky, and with partitions even enough that a reader who moves the
 /// circle gets the same answer in the same time.
@@ -501,6 +551,13 @@ const EXAMPLE_PARTITION: &str = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/\
     ztf_dr24_lc-hats/dataset/Norder=6/Dir=30000/Npix=34623/part0.snappy.parquet";
 const PARTITION_SELECT: &str = "objectid, objra, objdec, lightcurve.mag";
 const PARTITION_WHERE: &str = "nepochs > 10";
+
+/// The same columns without the nested one, for the ADQL example.
+///
+/// ADQL has no way to say a projection into a struct: a dotted name there is a table beside
+/// its column, which is the reading its own grammar gives it. So the example that shows the
+/// nested column stays on the single-file route, and this one shows what a statement is for.
+const PARTITION_SELECT_FLAT: &str = "objectid, objra, objdec";
 
 /// A body the route it is shown on will actually answer, in about a second: the url, this
 /// vocabulary's own two fields, a limit, and for a catalog a circle.
@@ -1672,6 +1729,88 @@ impl<D: Dialect> Lowered<'_, D> {
     }
 }
 
+/// A query written in IVOA's ADQL, over tables this request declares.
+///
+/// Its own body rather than a fourth vocabulary: `select`/`where` and `columns`/`filters` are
+/// two spellings of one projection and one predicate against a target the url names, and a
+/// statement carries its own targets, its own joins and its own ordering. There is nothing for
+/// a vocabulary parameter to vary.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+struct AdqlQuery {
+    /// The ADQL statement. One `SELECT`, over the tables `tables` declares — `SELECT TOP 100
+    /// source_id, ra, dec FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0,
+    /// 0.1))`. Grouping, ordering, joins and subqueries are answered; the geometry this
+    /// service does not test is refused by name.
+    #[schema(example = "SELECT TOP 100 objectid, objra, objdec FROM ztf WHERE nepochs > 10")]
+    query: String,
+    /// The tables the statement may read, each under the name it is written as in the query.
+    /// A name the statement reads and this does not declare is an error.
+    tables: BTreeMap<String, AdqlTable>,
+    /// `json`, the default; `parquet` for the answer as a parquet file; `votable` for a
+    /// VOTable, which takes flat columns only and refuses a nested one by name. Anything but
+    /// `json` carries its counts in `x-hats-*` response headers, there being no room in the
+    /// body.
+    #[schema(example = "json")]
+    format: Option<String>,
+    /// Every key the body carried that this endpoint has no field for.
+    #[serde(flatten)]
+    #[schema(ignore)]
+    unknown: BTreeMap<String, IgnoredAny>,
+}
+
+/// One table of an ADQL request: what kind of thing it is, and where.
+///
+/// The three fields are the same whichever kind it is — a catalog is a url and storage
+/// options exactly as a file is — so `type` is a field rather than a tag over two variants
+/// that would hold the same pair.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+struct AdqlTable {
+    /// `parquet`, one file the url names outright. `hats` is the shape a whole catalog will
+    /// take and is not answered here yet.
+    r#type: TableKind,
+    /// The object to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`, `webdav`
+    /// or `file` — and which of those a deployment answers for is the operator's to configure.
+    #[schema(value_type = String)]
+    url: SourceUrl,
+    /// How to reach the store: an endpoint, a region, credentials. Leave it out for a public
+    /// object read anonymously.
+    #[serde(default)]
+    storage: StorageOptions,
+}
+
+/// What a table's url names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+enum TableKind {
+    /// One parquet file.
+    Parquet,
+    /// A whole HATS catalog. **Not answered yet** — a statement over a catalog needs its
+    /// partitions chosen from the query's own region before any file is opened, which is work
+    /// of its own. Query a catalog through the `hats` routes, or name one of its partition
+    /// files here.
+    Hats,
+}
+
+impl AdqlQuery {
+    /// Every field this endpoint takes, in the order a body is written in.
+    fn fields() -> Vec<&'static str> {
+        vec!["query", "tables", "format"]
+    }
+
+    /// The same list, as the sentence a refusal ends with.
+    fn takes() -> String {
+        takes(&Self::fields())
+    }
+}
+
+/// Names a table may not be given, because a TAP layer over this will need them for itself.
+///
+/// Reserved now rather than when that layer arrives: a caller who has already written
+/// `FROM TAP_SCHEMA` against this service would find it meaning something else the day it
+/// does, which is worse than not being able to use the name today.
+const RESERVED_TABLES: [&str; 2] = ["TAP_SCHEMA", "TAP_UPLOAD"];
+
 /// An endpoint's field list as the sentence a refusal ends with. The url is the one field a
 /// body must carry, and it is first in every list, so the two halves are said apart.
 fn takes(fields: &[&str]) -> String {
@@ -1945,6 +2084,127 @@ async fn query_parquet<D: Dialect>(
         "query"
     );
     Ok(response)
+}
+
+/// One ADQL statement, planned and run over the tables the request declared.
+async fn query_adql(
+    State(service): State<Service>,
+    body: Result<Json<AdqlQuery>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(params) = body.map_err(|rejection| adql_body_error(&rejection))?;
+    let started = Instant::now();
+    refuse_unknown(&params.unknown, &AdqlQuery::takes())?;
+    let format = Format::parse(params.format.as_deref(), Format::Json)?;
+    // Everything decidable from the request alone, before a store is built. The statement is
+    // read first because it says which of the declared tables are even needed, and because a
+    // statement this service will not answer costs nothing to refuse.
+    let translated = adql::translate(&params.query, service.sql_limits)?;
+    for name in params.tables.keys() {
+        if RESERVED_TABLES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+        {
+            return Err(ApiError::bad_request(format!(
+                "tables: {name} is reserved for a future TAP layer and cannot name a table here"
+            )));
+        }
+    }
+
+    let mut tables = Vec::new();
+    for (name, table) in &params.tables {
+        if table.r#type == TableKind::Hats {
+            return Err(ApiError::bad_request(format!(
+                "tables: {name} is a hats catalog, which this route does not answer yet; query \
+                 a catalog through the hats routes, or name one of its partition files here"
+            )));
+        }
+        let url = parse_url(table.url.as_str())?;
+        // The same question the single-file route asks: a url naming something this service
+        // does not read as data names nothing it serves, and answering it here costs no
+        // connection.
+        let data_files = service.data_files_for(&url);
+        if !data_files.matches_url(&url) {
+            return Err(ApiError::not_found(format!(
+                "tables: {name} does not name a data file; url must end in a name matching {}",
+                data_files.describe()
+            )));
+        }
+        let file = storage::open(&url, &table.storage, &service.policy, &service.transfers)?;
+        tables.push(adql_query::Table {
+            name: name.clone(),
+            file,
+        });
+    }
+
+    let result = adql_query::run(&translated, &tables, service.adql_limits).await?;
+    let num_rows = result.num_rows();
+    let data_bytes_read = result.data_bytes_read;
+    let response = adql_answer(&result, format, started)?;
+    tracing::info!(
+        // The names and not the urls: a url may carry credentials, and which tables a
+        // statement read is what a log is for. The statement itself is the caller's own text
+        // and can be large, so what is recorded is its size.
+        tables = %translated.tables.iter().cloned().collect::<Vec<_>>().join(","),
+        query_bytes = params.query.len(),
+        format = format.name(),
+        num_rows,
+        data_bytes_read,
+        elapsed_ms = started.elapsed().as_millis(),
+        "adql"
+    );
+    Ok(response)
+}
+
+/// The answer to a statement, in the encoding the request asked for.
+///
+/// Its own function because the parquet case differs: a single-file answer is laid out like
+/// the file it came from, and a statement may have read several files or none whose layout
+/// means anything for a set of groups. So the writer's own defaults, which is what
+/// [`parquet_out::SourceLayout::default`] is.
+fn adql_answer(
+    result: &QueryResult,
+    format: Format,
+    started: Instant,
+) -> Result<Response, ApiError> {
+    match format {
+        Format::Json => json_response(result, started),
+        Format::Parquet => Ok((
+            attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
+            counters(result, result.num_rows(), started),
+            parquet_out::encode(result, &parquet_out::SourceLayout::default())?,
+        )
+            .into_response()),
+        Format::Votable => Ok((
+            attachment(votable::CONTENT_TYPE, "query.vot"),
+            counters(result, result.num_rows(), started),
+            votable::encode(result)?,
+        )
+            .into_response()),
+    }
+}
+
+/// A body this route could not read, said without quoting it back.
+///
+/// [`body_error`] is written for the three routes a vocabulary has and names that vocabulary's
+/// own two fields; this one has neither, so the note it ends with is about the shape a table
+/// entry takes — which is what a caller writing this body for the first time gets wrong.
+fn adql_body_error(rejection: &JsonRejection) -> ApiError {
+    let takes = AdqlQuery::takes();
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError::too_much_work(
+            "the request body is larger than this service accepts; send a shorter query, or \
+             ask the operator to raise the body limit",
+        );
+    }
+    match rejection {
+        JsonRejection::JsonSyntaxError(error) => {
+            ApiError::bad_request(format!("the request body is not valid JSON: {error}"))
+        }
+        _ => ApiError::bad_request(format!(
+            "expected a JSON object with {takes}; query is one ADQL statement and tables maps \
+             each name it reads to {{\"type\": \"parquet\", \"url\": …}}"
+        )),
+    }
 }
 
 /// How many partitions of the catalog the answer was read from, which is the number that
@@ -3978,6 +4238,271 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("return_storage"), "{body}");
+    }
+
+    /// One ADQL statement over a mounted parquet file, under the name `t`.
+    async fn ask_adql(dir: &Path, query: &str) -> (StatusCode, String) {
+        post_json(
+            mounted(dir, &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": query,
+                "tables": {"t": {"type": "parquet", "url": "file:///part0.parquet"}},
+            }),
+        )
+        .await
+    }
+
+    /// A directory holding the ten-row fixture, which every ADQL case below reads.
+    fn adql_fixture() -> tempfile::TempDir {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        dir
+    }
+
+    /// The route end to end, and the point of it: what a statement asks for is the planner's
+    /// to answer, so the cases here are the ones the other routes refuse — a grouped
+    /// aggregate, an ordering, a join of a table with itself.
+    #[tokio::test]
+    async fn the_adql_route_answers_what_the_planner_plans() {
+        let dir = adql_fixture();
+
+        let (status, body) = ask_adql(dir.path(), "SELECT TOP 3 objectid FROM t").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 3);
+
+        // `TOP` became a `LIMIT` and the ordering is the statement's own, so the last three
+        // ids come back rather than whichever rows the scan reached first.
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT TOP 3 objectid FROM t ORDER BY objectid DESC",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            answer["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["objectid"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [9, 8, 7]
+        );
+
+        // An aggregate over a group, which every other route refuses as an expression over
+        // more than one row.
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT band, COUNT(*) AS n FROM t GROUP BY band ORDER BY band",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 2);
+        assert_eq!(answer["rows"][0]["n"], 5);
+
+        // A join, which needs both sides at once.
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT COUNT(*) AS n FROM t AS a JOIN t AS b ON a.objectid = b.objectid",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["rows"][0]["n"], 10);
+    }
+
+    /// A column answers to its own spelling and to its lowercase, and to nothing else — the
+    /// rule the expression routes follow, which a statement does not get from the planner:
+    /// identifier normalization is off, so `gmag` would otherwise be a column no file has.
+    ///
+    /// **`GMAG` is refused, and that is the divergence from ADQL**, which folds an unquoted
+    /// name to uppercase. Resolving it would make the names a column answers to depend on
+    /// what else is in the file.
+    #[tokio::test]
+    async fn an_adql_column_answers_to_its_own_spelling_and_its_lowercase() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("part0.parquet"),
+            query::tests::mixed_case_fixture(),
+        )
+        .unwrap();
+
+        for query in [
+            "SELECT Gmag FROM t",
+            "SELECT gmag FROM t",
+            // Qualified by the table, and by an alias, since the column is the last segment
+            // either way.
+            "SELECT t.gmag FROM t",
+            "SELECT a.gmag FROM t AS a",
+        ] {
+            let (status, body) = ask_adql(dir.path(), query).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["num_rows"], 10, "{query}");
+        }
+
+        let (status, body) = ask_adql(dir.path(), "SELECT GMAG FROM t").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        // The table's name by the same rule: as the request declared it, or in lowercase.
+        let (status, body) = ask_adql(dir.path(), "SELECT objectid FROM T").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// The volatility rule holds inside a statement. It is the one thing `sql.rs` checks that
+    /// a planner will not: `random()` is an ordinary scalar function to DataFusion.
+    ///
+    /// `LOG` is the case that shows the translation is what decides. `sql::AMBIGUOUS` refuses
+    /// `log` where the caller wrote SQL, because base ten and the natural logarithm are both
+    /// plausible readings; ADQL says which its own is, so here it becomes `ln` and is answered.
+    #[tokio::test]
+    async fn an_adql_statement_meets_the_function_rules() {
+        let dir = adql_fixture();
+        let (status, body) = ask_adql(dir.path(), "SELECT random() FROM t").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("the same way twice"), "{body}");
+
+        let (status, body) = ask_adql(dir.path(), "SELECT LOG(objectid) AS l FROM t").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The natural logarithm of 2, which base ten would answer 0.301 for. The row before
+        // it is `log(1)`, which both bases answer 0 for and which would prove nothing.
+        assert_eq!(answer["rows"][2]["l"], std::f64::consts::LN_2);
+    }
+
+    /// A region test through the route, which is the whole path nothing else runs end to end:
+    /// the statement is translated, the table registered, `CONTAINS` becomes the function
+    /// `geometry` registers, and that rewrites itself into the predicate `region.rs` builds.
+    ///
+    /// Every spelling ADQL gives a region test, against rows a degree apart, so a test that
+    /// read one the wrong way round returns a different row rather than the same count.
+    #[tokio::test]
+    async fn the_adql_route_answers_a_region() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("part0.parquet"),
+            query::tests::sky_fixture(),
+        )
+        .unwrap();
+
+        for predicate in [
+            "1 = CONTAINS(POINT(ra, dec), CIRCLE(42.0, -20.0, 0.1))",
+            "CONTAINS(POINT(ra, dec), CIRCLE(42.0, -20.0, 0.1)) = 1",
+            "1 = INTERSECTS(POINT(ra, dec), CIRCLE(42.0, -20.0, 0.1))",
+            "DISTANCE(POINT(ra, dec), POINT(42.0, -20.0)) < 0.1",
+            "DISTANCE(ra, dec, 42.0, -20.0) < 0.1",
+        ] {
+            let (status, body) = ask_adql(
+                dir.path(),
+                &format!("SELECT objectid FROM t WHERE {predicate}"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{predicate}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["num_rows"], 1, "{predicate}: {body}");
+            // The row two degrees along from the first, which is the one the circle is on.
+            assert_eq!(answer["rows"][0]["objectid"], 2, "{predicate}");
+        }
+
+        // Compared with 0, which is the same test negated rather than a different one.
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT objectid FROM t WHERE 0 = CONTAINS(POINT(ra, dec), CIRCLE(42.0, -20.0, 0.1))",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 9);
+    }
+
+    /// A shape this service does not test, refused by name rather than as an unknown function
+    /// — which is what a caller would otherwise be told about `BOX`.
+    #[tokio::test]
+    async fn an_adql_geometry_this_service_refuses_says_so() {
+        let dir = adql_fixture();
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT objectid FROM t WHERE 1 = CONTAINS(POINT(ra, dec), BOX(1, 2, 3, 4))",
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("BOX") && body.contains("not answered"),
+            "{body}"
+        );
+    }
+
+    /// A table the statement reads and the request did not declare, which is the one thing
+    /// standing between `FROM` and a file nobody named.
+    #[tokio::test]
+    async fn an_adql_statement_reads_only_the_tables_the_request_declared() {
+        let dir = adql_fixture();
+        let (status, body) = ask_adql(dir.path(), "SELECT objectid FROM somewhere_else").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("declares no table"), "{body}");
+    }
+
+    /// A catalog is the shape this route will take and does not answer yet, so it says that
+    /// rather than failing as a file it could not read.
+    #[tokio::test]
+    async fn an_adql_hats_table_is_refused_by_name() {
+        let dir = adql_fixture();
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT objectid FROM t",
+                "tables": {"t": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("does not answer yet"), "{body}");
+    }
+
+    /// Reserved now, before a TAP layer needs them, so that no caller writes a statement
+    /// against this service that would mean something else the day it arrives.
+    #[tokio::test]
+    async fn an_adql_table_may_not_take_a_reserved_name() {
+        let dir = adql_fixture();
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT objectid FROM TAP_SCHEMA",
+                "tables": {"TAP_SCHEMA": {"type": "parquet", "url": "file:///part0.parquet"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("reserved"), "{body}");
+    }
+
+    /// The operator's ceiling on an answer, which a statement can reach without asking for
+    /// many rows: a cross join of ten rows with themselves is a hundred.
+    #[tokio::test]
+    async fn an_adql_answer_larger_than_the_cap_is_refused() {
+        let dir = adql_fixture();
+        let limits = LimitsConfig {
+            max_rows: 50,
+            ..LimitsConfig::default()
+        };
+        let mut service = mounted(dir.path(), &ApiConfig::default());
+        service.adql_limits = (&limits).into();
+        let (status, body) = post_json(
+            service,
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT a.objectid FROM t AS a, t AS b",
+                "tables": {"t": {"type": "parquet", "url": "file:///part0.parquet"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(body.contains("more than 50 rows"), "{body}");
     }
 
     /// `body`, gzipped, as a client that set `Content-Encoding` would send it.

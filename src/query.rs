@@ -626,6 +626,55 @@ pub(crate) mod tests {
         buffer
     }
 
+    /// The same ten rows with a mixed-case column beside them, which is what an astronomy
+    /// catalog's columns actually look like — `Gmag`, `objectId`, read off the file.
+    ///
+    /// Which spellings reach such a column is a rule rather than an accident, so a test of it
+    /// needs a file whose own spelling is neither what SQL would fold to nor what a caller
+    /// would type.
+    pub(crate) fn mixed_case_fixture() -> Vec<u8> {
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+        let gmag: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..10).map(|i| 15.0 + f64::from(i)),
+        ));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("Gmag", gmag, true),
+        ])
+        .expect("the fixture batch");
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
+
+    /// Ten rows spread along a line of declination, with an id to select.
+    ///
+    /// Positions rather than values, for the tests that ask a region something: they are far
+    /// enough apart that a small circle holds exactly one of them, so a test can say which row
+    /// and not merely how many.
+    pub(crate) fn sky_fixture() -> Vec<u8> {
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..10));
+        let ra: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..10).map(|i| 40.0 + f64::from(i)),
+        ));
+        let dec: ArrayRef = Arc::new(Float64Array::from_iter_values((0..10).map(|_| -20.0)));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("ra", ra, true),
+            ("dec", dec, true),
+        ])
+        .expect("the fixture batch");
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
+
     /// A file with a struct column, which is how a HATS catalog carries a light curve: one
     /// row per object, and the measurements packed into a field per column.
     ///

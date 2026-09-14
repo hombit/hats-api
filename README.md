@@ -178,7 +178,8 @@ body is written in. Both go in the path, under `[api] prefix`, `/api/v1` by defa
 | a whole catalog | `POST /api/v1/expr/hats` | `POST /api/v1/simple/hats` |
 | a catalog query, resolved but not run | `POST /api/v1/expr/hats/plan` | `POST /api/v1/simple/hats/plan` |
 
-Plus `GET /api/v1/health`.
+Plus `POST /api/v1/adql`, which takes a whole query rather than a target and two fields,
+and `GET /api/v1/health`.
 
 The `hats` routes pick the partitions the query touches; `hats/plan` takes the same body
 and returns the requests that query would take.
@@ -482,6 +483,55 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
 
+### ADQL
+
+`POST /api/v1/adql` takes a whole query instead of a target and two fields. The tables it
+may read are declared beside it, each under the name the query calls it:
+
+```json
+{
+  "query": "SELECT TOP 100 objectid, ra, dec FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+  "tables": {
+    "gaia": { "type": "parquet", "url": "s3://bucket/part0.parquet" }
+  },
+  "format": "json"
+}
+```
+
+A table the query reads and `tables` does not declare is an error, and so is a `FROM` that
+names anything but one of those — there is no way to reach a file from inside the query.
+`type` is `parquet` today; `hats` is the shape a whole catalog will take and is refused for
+now, so query a catalog through the `hats` routes or name one of its partition files here.
+
+**DataFusion plans the query**, so `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins,
+subqueries and set operations are all answered. What this service does is translate the
+places ADQL and SQL disagree:
+
+| ADQL | means |
+|---|---|
+| `TOP n` | `LIMIT n` |
+| `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
+| `1 = INTERSECTS(point, shape)` | the same test, either argument first |
+| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r`, so it prunes like one |
+| `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
+| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%` |
+
+A region test is what decides which row groups are read, exactly as the `region` field does
+on the other routes — it is not a filter run over everything.
+
+The geometry this service does not test is refused by name rather than left to fail as an
+unknown function: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`, `COORDSYS`,
+`IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`, and `RAND`.
+
+Two things differ from the standard on purpose. **A column or table name is written as the
+file spells it, or in lowercase** — ADQL folds an unquoted name to uppercase, which would
+put every mixed-case astronomy column out of reach. And **an answer over the row cap is
+refused rather than truncated**: rows cut off are a value you cannot tell from the whole
+answer.
+
+`ORDER BY` is what promises an order. Without one, `TOP n` returns some *n* rows rather
+than a defined *n*.
+
 ### Storage options
 
 `storage` says how to reach the store; the URL says which object. Leave it out for a
@@ -636,6 +686,7 @@ either. A mount's own `filenames` replaces this for the files under it.
 max_partitions = 16             # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
+max_query_memory_bytes = "1GiB" # what one ADQL statement's joins and groups may hold
 max_request_seconds = 90        # how long one request has to answer; 0 is no bound
 max_request_body_bytes = "16MiB" # how large a body may be; 0 is no bound
 max_concurrent_partitions = 4   # a performance setting, not a bound
