@@ -471,8 +471,8 @@ order returns no rows.
 `source_id = 1383212200036217` is an `Int64` compared against row-group statistics, the
 page index and a bloom filter.
 
-A column answers to its own name, `Gmag`, `objectId`, whatever the file spells it, and to
-that name in lowercase, which is what unquoted SQL means by a name.
+Write a column name as the file spells it — `Gmag`, `objectId` — or in lowercase, `gmag`,
+`objectid`.
 
 Functions are judged by volatility: only immutable ones are callable, so
 `now()` and `random()` are refused.
