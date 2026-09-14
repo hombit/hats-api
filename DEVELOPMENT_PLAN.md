@@ -600,8 +600,9 @@ Added because they are cheap here and expensive elsewhere:
 passthrough by name. Every other ADQL name needs nothing, DataFusion lowercasing an unquoted
 function name itself. `LOG` is the one that matters: ADQL's is natural and DataFusion's `log`
 base ten, and since `log` is refused as ambiguous, a passthrough written by accident is an
-error rather than a number 2.3 times off. `RAND`'s name is free the same way, DataFusion's
-`random()` being refused by volatility.
+error rather than a number 2.3 times off. `RAND` needs no mapping either: DataFusion ships it
+as an alias of `random`, and `adql_functions` registers its own under that name — which is
+what keeps the volatility exception to `rand` alone and leaves `random()` refused.
 
 **Still to add, each small and none blocking a stage:**
 
@@ -613,26 +614,13 @@ error rather than a number 2.3 times off. `RAND`'s name is free the same way, Da
 - **`LOWER`, `UPPER`, `ILIKE`.** `string_expressions` is off, and turning it on is `CLAUDE.md`'s
   deliberate decision about everything in that feature, not only these three.
 
-**`RAND([seed])` is mandatory and is implemented**, which needs two things said:
-
-- **It is registered `Volatile`.** A zero-argument immutable function is constant-folded —
-  computed once and glued onto every row — so the volatility is what makes it a random
-  column rather than a random constant. `sql.rs`'s volatility rule therefore gains a *named
-  exception* for this one function on this one route, rather than being loosened; `now()`
-  and DataFusion's own `random()` stay refused for the reasons they are refused for.
-
-  Not `sql::AMBIGUOUS`, which is a list of names that are refused. This is the opposite —
-  one name let through a test it fails — so it is a second exception and not an entry in
-  the first. Two lists with opposite senses under one name is how the wrong one gets
-  extended.
-- **It is not reproducible**, and the seed actually used is echoed in the response so a run
-  can be replayed. The values depend on the order the generator is consumed in and
-  partitions are read in parallel; a counter-based generator keyed by position would fix it,
-  but DataFusion hands a scalar UDF its batch and `number_rows` and nothing identifying
-  which partition the batch came from. The reproducible alternative — hashing the seed
-  against a stable row key such as `_healpix_29` — is available if the guarantee turns out
-  to be worth more than the standard's reading, and it costs two rows with one key the same
-  number.
+**`RAND([seed])` is mandatory and is done**, and the standard asked for less than this
+section once assumed. Its whole definition is "Returns a random value between 0.0 and 1.0.
+The optional argument, *x*, originally intended to provide a random seed, has undefined
+semantics. Query writers are advised to omit this argument." So determinism is not required
+and the seed means nothing: the argument is accepted and dropped, and no reproducibility
+machinery is owed — not the echo of a seed, not a counter-based generator keyed by position,
+not a hash against a stable row key. Those were answers to a guarantee nobody asked for.
 
 ### 10.8 Three divergences to write down
 
