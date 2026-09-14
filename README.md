@@ -482,12 +482,6 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
 
-`log` is refused, which is deliberate: it is base ten in some SQL and the natural logarithm
-in MySQL, `numpy` and ADQL, so the same expression means two things a factor of 2.3 apart
-and both look like ordinary numbers. Every other spelling says which it is — `log10` for
-base ten, `ln` for the natural logarithm, `log2` for base two, and `ln(x) / ln(b)` for any
-other base.
-
 ### Storage options
 
 `storage` says how to reach the store; the URL says which object. Leave it out for a
