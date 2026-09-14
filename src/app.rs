@@ -3636,6 +3636,41 @@ mod tests {
         );
     }
 
+    /// A `zone` against a pole is answered rather than dropping the connection.
+    ///
+    /// The covering turns a declination band into a ring about the pole, and a band this
+    /// close to one makes a ring smaller than a cell — which `cdshealpix` panics on. A panic
+    /// is the one failure that reaches no caller: it unwinds past the handler, and what
+    /// arrives is a reset connection rather than a status. So what is asserted is only that
+    /// there is a response at all; which rows it holds is
+    /// `healpix::tests::a_covering_brackets_its_shape`'s question.
+    ///
+    /// See <https://github.com/cds-astro/cds-healpix-rust/issues/27>.
+    #[tokio::test]
+    async fn a_zone_at_a_pole_is_answered() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let zones = [
+            // A polar cap, reaching the pole from either side.
+            serde_json::json!({"type": "zone", "ra": [0.0, 360.0], "dec": [89.9, 90.0]}),
+            serde_json::json!({"type": "zone", "ra": [0.0, 360.0], "dec": [-90.0, -89.9]}),
+            // A band near a pole that does not reach it: the ring's size is what matters,
+            // not whether the pole is in the zone.
+            serde_json::json!({"type": "zone", "ra": [0.0, 359.999], "dec": [89.999, 89.9999]}),
+            // And one narrow in right ascension as well, which takes the other arm of the
+            // zone covering.
+            serde_json::json!({"type": "zone", "ra": [0.0, 10.0], "dec": [89.999, 90.0]}),
+        ];
+
+        for zone in zones {
+            let (status, body) = ask_hats(
+                mounted(dir.path(), &ApiConfig::default()),
+                serde_json::json!({"url": "file:///", "select": "id", "region": [zone.clone()]}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{zone}: {body}");
+        }
+    }
+
     /// A catalog that says nothing about its position columns cannot be region-searched, and
     /// says so rather than answering without a spatial test.
     #[tokio::test]
