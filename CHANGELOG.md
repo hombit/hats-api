@@ -24,7 +24,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- A `region` of a few hundred shapes, or a `moc` of a few hundred ranges, aborted the process with a stack overflow instead of answering.
 
 ### Security
 
