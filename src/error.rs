@@ -42,6 +42,16 @@ pub enum ApiError {
     /// smaller region — or against a deployment configured to allow more — is answered.
     #[error("{0}")]
     TooMuchWork(String),
+    /// The bytes the caller sent are past `[limits] max_request_body_bytes`.
+    ///
+    /// Distinct from [`Self::TooMuchWork`], and the distinction is the whole point of the
+    /// variant: that one is about what the request asks this service to *read*, which a
+    /// body of a few hundred bytes can ask for, while this one is about the size of the
+    /// request itself. Answering both with one status leaves a caller holding a `413` that
+    /// says "payload too large" about a payload that is nothing of the sort — and the
+    /// obvious next move, raising a proxy's `client_max_body_size`, changes nothing.
+    #[error("{0}")]
+    BodyTooLarge(String),
     /// The request ran past `[limits] max_request_seconds` and was dropped where it
     /// stood. Distinct from [`Self::TooMuchWork`], which is a bound checked against what
     /// the request asks for and answers with the plan: this one is reached with work
@@ -95,6 +105,10 @@ impl ApiError {
 
     pub fn too_much_work(message: impl Into<String>) -> Self {
         Self::TooMuchWork(message.into())
+    }
+
+    pub fn body_too_large(message: impl Into<String>) -> Self {
+        Self::BodyTooLarge(message.into())
     }
 
     pub fn timeout(message: impl Into<String>) -> Self {
@@ -156,6 +170,7 @@ impl ApiError {
             | Self::NotFound(_)
             | Self::MethodNotAllowed(_)
             | Self::TooMuchWork(_)
+            | Self::BodyTooLarge(_)
             | Self::Timeout(_)
             | Self::Internal(_)) => ours,
             // Getting the bytes, or reading them as parquet. These are the failures the
@@ -188,7 +203,12 @@ impl ApiError {
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::MethodNotAllowed(_) => StatusCode::METHOD_NOT_ALLOWED,
-            Self::TooMuchWork(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            // Not `413`: the request content is the caller's query, and it is well formed
+            // and ordinarily small. What is too large is the read it asks for, which is
+            // `422`'s case — a body understood, and a set of instructions this service will
+            // not carry out. `413` is `Self::BodyTooLarge`'s alone.
+            Self::TooMuchWork(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::BodyTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             // What every proxy in front of this service answers when the thing behind it
             // ran long — nginx, HAProxy, Envoy and a load balancer all say `504` — so it
             // is the status an operator's dashboard already counts as a timeout and a

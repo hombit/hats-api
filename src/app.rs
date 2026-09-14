@@ -1926,7 +1926,7 @@ fn body_error<D: Dialect>(rejection: &JsonRejection, takes: &str) -> ApiError {
     // through whichever buffering error the extractor wraps, and the status is the part of
     // that axum promises.
     if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        return ApiError::too_much_work(
+        return ApiError::body_too_large(
             "the request body is larger than this service accepts; send fewer terms, or \
              ask the operator to raise the body limit",
         );
@@ -2324,7 +2324,7 @@ async fn query_hats<D: Dialect>(
         // something smaller and guess what.
         Outcome::TooMuchWork(why) => {
             let plan = plan_of(&service, &search, &params, Some(why)).await?;
-            return Ok((StatusCode::PAYLOAD_TOO_LARGE, Json(plan)).into_response());
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(plan)).into_response());
         }
     };
 
@@ -3894,7 +3894,7 @@ mod tests {
         let response = respond(service(), Request::builder().uri("/?format=json")).await;
         let status = response.status();
         let body = body_of(response).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert!(body.contains("partitions"), "{body}");
     }
 
@@ -5082,7 +5082,7 @@ mod tests {
         let status = response.status();
         let plan: serde_json::Value = serde_json::from_str(&body_of(response).await).unwrap();
 
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{plan}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{plan}");
         assert!(
             plan["reason"].as_str().unwrap().contains("at most 2"),
             "{plan}"
@@ -5131,8 +5131,63 @@ mod tests {
         .unwrap();
 
         let (status, body) = ask_hats(service, serde_json::json!({"url": "file:///"})).await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert!(body.contains("at most 2"), "{body}");
+    }
+
+    /// The two bounds a caller is most likely to meet answer with different statuses, and
+    /// telling them apart is the whole of what the distinction buys.
+    ///
+    /// A query-cost bound is reached by a body of a couple of hundred bytes — a handful of
+    /// one-arcsecond circles scattered across a catalog touch a partition apiece — so a
+    /// caller answered `413` for it reads "payload too large" about a payload that is
+    /// nothing of the sort. The move that follows from that reading is raising a proxy's
+    /// `client_max_body_size`, which changes nothing, and the bound that actually stopped
+    /// them is never looked at. Hence `422` here and `413` only for the bytes.
+    #[tokio::test]
+    async fn a_costly_query_and_an_oversized_body_are_told_apart() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let tiny = LimitsConfig {
+            max_partitions: 1,
+            max_request_body_bytes: bytesize::ByteSize::b(256),
+            ..LimitsConfig::default()
+        };
+        let service = || {
+            let mounts =
+                Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
+            let policy =
+                AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
+                    .unwrap();
+            Service::new(
+                policy,
+                &tiny,
+                mounts,
+                &ApiConfig::default(),
+                &DataConfig::default(),
+                &ServerConfig::default(),
+            )
+            .unwrap()
+        };
+
+        // Well inside the body bound, and over the partition bound.
+        let small = serde_json::json!({"url": "file:///"});
+        assert!(serde_json::to_vec(&small).unwrap().len() < 256);
+        let (status, body) = ask_hats(service(), small).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a query-cost bound answered as a payload-size one: {body}"
+        );
+
+        // Over the body bound, and never planned at all.
+        let large = serde_json::json!({
+            "url": "file:///",
+            "select": format!("'{}'", "x".repeat(512)),
+        });
+        assert!(serde_json::to_vec(&large).unwrap().len() > 256);
+        let (status, body) = ask_hats(service(), large).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert!(body.contains("larger than this service accepts"), "{body}");
     }
 
     /// `serve` is what the file server needs and the API does not, and `path` is the
