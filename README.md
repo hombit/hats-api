@@ -471,8 +471,8 @@ order returns no rows.
 `source_id = 1383212200036217` is an `Int64` compared against row-group statistics, the
 page index and a bloom filter.
 
-A column answers to its own name, `Gmag`, `objectId`, whatever the file spells it, and to
-that name in lowercase, which is what unquoted SQL means by a name.
+Write a column name as the file spells it — `Gmag`, `objectId` — or in lowercase, `gmag`,
+`objectid`.
 
 Functions are judged by volatility: only immutable ones are callable, so
 `now()` and `random()` are refused.
@@ -481,12 +481,6 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 `cbrt`, `exp`, `ln`, `log2`, `log10`, `power`, `signum`, `factorial`, `gcd`, `lcm`, `pi`,
 `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
-
-`log` is refused, which is deliberate: it is base ten in some SQL and the natural logarithm
-in MySQL, `numpy` and ADQL, so the same expression means two things a factor of 2.3 apart
-and both look like ordinary numbers. Every other spelling says which it is — `log10` for
-base ten, `ln` for the natural logarithm, `log2` for base two, and `ln(x) / ln(b)` for any
-other base.
 
 ### Storage options
 
