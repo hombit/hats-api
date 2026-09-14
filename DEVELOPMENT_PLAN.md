@@ -43,8 +43,8 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 7 | operational surface | todo | |
 | 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
-| 10.3 | ADQL over the query that already runs | todo | not mandatory-complete ADQL, and not to be described as it |
-| 10.4 | the statement planned | todo | needs §8.4's response cap first |
+| 10.3 | the statement planned, over parquet tables | in progress | region functions and the translation are open as the bottom of the stack; the route is not written. Needs §8.4's response cap |
+| 10.4 | HATS catalogs as tables | todo | two decisions first |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | an equijoin once the left row is expanded to cells; three things to measure first |
 
@@ -369,10 +369,27 @@ IVOA's query language over the catalogs this service already reads, at one endpo
 `POST {api.prefix}/v1/adql`. What it buys is that a TAP client and an `lsdb` user ask the
 same data the same question, in the spelling every other astronomy service takes.
 
-Four stages, and each is worth shipping alone. The first is a front end over the query
-engine that already exists; the ones after it each open something the one before could not
-express, at rising cost. **Stopping after any of them leaves a coherent service** — what
-must not happen is a stage advertising the next one's capability.
+**DataFusion plans the statement; this service translates it.** ADQL is SQL with a handful
+of spelling differences, so the route rewrites the parsed statement where the two disagree,
+refuses what neither would answer correctly, and hands DataFusion a syntax tree over tables
+registered by the caller's names. Grouping, ordering, joins, subqueries and set operations
+are the planner's, and nothing here re-decides what they mean. It is a different execution
+path from the `expr` and `simple` routes on purpose: those fan a selection out over
+partitions and make promises about order and work lists that a planned statement does not.
+Where the two share code it is because the code is the same thing — the region covering, the
+storage layer, the answer writers — not to keep one path.
+
+The region test is DataFusion's too. `point`, `circle`, `moc` and `contains` are scalar
+functions, and `contains` replaces its own call during the optimizer's simplify pass with the
+expression `region::predicate` already builds, so a region said in a statement prunes row
+groups exactly as the `region` field does. `simplify`, not `preimage`: the latter answers
+with one contiguous interval and a covering is many.
+
+Three stages after the first, each opening something the one before could not express.
+**The work lands as one stack of pull requests that merges together**; a piece that nothing
+calls — the functions with no route registering them — is not merged on its own. **Stopping
+after any stage leaves a coherent service**, and no stage advertises the next one's
+capability.
 
 References: [ADQL 2.1](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html),
 [TAP 1.1](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.html), the
@@ -408,52 +425,81 @@ DaCHS, whose spelling §10.7 follows.
 - **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
   already answered per §7.5 and are what a TAP layer will need anyway.
 
-### 10.3 Stage one — ADQL over the query that already runs
+### 10.3 Stage one — the statement planned, over parquet tables
 
-Parse the statement; take the select list, the `WHERE`, the `TOP` and the recognised
-geometry; hand them to the `Selection` and the `hats_query::Search` that serve every other
-route. **No second execution path**, which is what makes this stage small: the partition
-fan-out, §5.3's three bounds, plan mode, the ordering guarantee and `first_rows_in_order`
-all carry over unexamined.
+`POST /v1/adql` with `parquet` tables only. Each entry is opened through `storage::open`, so
+the access policy decides it as it decides every other url, and registered under the
+caller's name; a `hats` entry is refused by name until §10.4. This is already most of ADQL's
+mandatory core, because the planner supplies it.
 
-- **One statement, and the parser must reach the end of it.** `sql.rs`'s rule, one level up.
-  `GenericDialect` parses `TOP` after `DISTINCT`, which is ADQL's order, so no custom
-  dialect is needed for it.
-- **A geometry predicate is recognised or refused, never ignored.** `1 = CONTAINS(POINT(ra,
-  dec), CIRCLE(…))`, its spellings with the comparison the other way round or against `> 0`,
-  the same with `MOC(…)`, and `DISTANCE(…) < r`, all lower to a `region::Shape` and from
-  there to §5.2's predicate and §5.3's partition choice. Anything else spatial is a 400. A
-  haversine DataFusion merely evaluates is a query that reads every partition — six minutes
-  over ZTF DR24 — which a caller cannot tell from a slow link.
-- **The coordinate columns come from the catalog**, as they do on the `hats` route; a
-  `parquet` table names them in its entry.
-- **Exactly the query shapes the fan-out can answer.** `GROUP BY`, `HAVING`, `ORDER BY`,
-  `DISTINCT`, aggregates, subqueries, set operations and joins each need to combine across
-  partitions and are refused by name, saying that §10.4 is where they arrive. **This stage
-  is not mandatory-complete ADQL and must not be described as it** — the first three of
-  those are in the mandatory core.
+**The translation** — `TOP n` to a `LIMIT`; `1 = CONTAINS(p, r)` and its mirrored, `> 0` and
+`INTERSECTS` spellings to `contains(p, r)`, compared with 0 to its negation; `DISTANCE(p, c)
+< r` to the circle it is, so it prunes; `CEILING`, `TRUNCATE`, `LOG` and `MOD` to `ceil`,
+`trunc`, `ln` and `%`. One statement, which the parser must reach the end of, and only a
+`SELECT`. The geometry in §10.7's refused list is refused by name rather than left to fail as
+an unknown function.
 
-### 10.4 Stage two — the statement planned
+**What the route has to add around the planner:**
 
-A `TableProvider` per table and DataFusion plans the query, which is what makes "a large
-table, a small answer" real: an aggregate over a catalog is the best case this service has.
-It is also a second execution path beside §10.3's fan-out, and the convergence of the two is
-deferred rather than pretended away.
-
-- **The provider carries the partition choice.** `supports_filters_pushdown` over the
-  recognised geometry, so the file list a scan is built from is already the partitions
-  §5.3's covering chose. Without it the provider is a list of twelve thousand files.
-- **A memory pool, and no spilling.** §8.4's numbers: `with_memory_limit` installs a
-  `GreedyMemoryPool` so an over-large query fails with `ResourcesExhausted`, and
-  `DiskManagerMode::Disabled` stops a memory bound quietly becoming a disk one.
-- **The response cap is §8.4's**, and this is what forces it: `collect` bounds nothing, and a
+- **Every table the statement reads is declared by the request**, less the names its own
+  `WITH` defines. A table function in `FROM` is refused — `generate_series(1, 1e12)` is a row
+  source nobody declared and nothing bounds — and so is a qualified name. `enable_url_table`
+  stays off, or `FROM 's3://…'` is a url the access policy never saw.
+- **The allowlist runs over the logical plan**, not per expression. The volatility rule and
+  `sql::AMBIGUOUS` apply to every expression in it; the one-row rule does not, aggregates being
+  the point of this route. A walk of the plan is also where a statement's node count is
+  bounded — only its depth is, at the parser.
+- **A memory pool, and no spilling.** `with_memory_limit` installs a `GreedyMemoryPool` so an
+  over-large `GROUP BY` fails with `ResourcesExhausted`, and `DiskManagerMode::Disabled` stops
+  a memory bound quietly becoming a disk one.
+- **A response cap**, which is §8.4's and which this forces: `collect` bounds nothing, and a
   `GROUP BY` over a high-cardinality column is a small-looking query with a large answer.
-- **`ORDER BY` is bounded by what follows it.** With a `TOP` it is DataFusion's TopK — a heap
-  of *n* — and without one it is bounded only by the response cap. Both are acceptable; the
-  distinction is worth stating because one is a sort of the matched set and the other is not.
-- **`TOP` without `ORDER BY` returns an arbitrary set**, and says so. The fan-out's
-  reproducibility does not survive a plan with an aggregate in it, and ADQL requires nothing
-  here (§10.8).
+- **A refusal raised while optimizing is a 400.** `contains` refuses a region built from a
+  column during simplify, and DataFusion hands that back as its own error; left alone it
+  would read as the service failing.
+- **Identifiers follow §10.8.1.** The expression routes get their casing rule from
+  `sql::resolve_identifiers` over one schema; a statement has several tables and the planner
+  resolves names itself, with normalization off, so today a name matches its exact spelling
+  only. How the rule is applied here is to be decided — a rewrite against the registered
+  schemas before planning is the obvious one, and it must not become a second resolver
+  beside DataFusion's.
+- **What it does not carry.** No plan mode, no work list, no ordering promise: `TOP` without
+  `ORDER BY` is an arbitrary set and says so (§10.8). `ORDER BY` with a `TOP` is TopK, a heap
+  of *n*; without one it is bounded by the response cap.
+
+### 10.4 Stage two — HATS catalogs as tables
+
+A catalog `TableProvider`, which is what makes "a large table, a small answer" real: an
+aggregate over a catalog is the best case this service has. It reuses `hats/` for everything
+about reading a catalog — all three discovery sources, directory partitions, a collection
+followed to its primary table, the materializing store for http — and replaces none of it.
+
+- **`schema()` from `dataset/_common_metadata`.** One more small `GET` per catalog per
+  request, which §5.1 already weighs for the expression routes.
+- **`supports_filters_pushdown` chooses the partitions.** It is handed the planned `contains`
+  call, reads the region out of it, and `Coverage::reaches` picks the partitions exactly as
+  §5.3 does for the `region` field. `Inexact`: the filter still runs over the files, which is
+  where the covering prunes row groups. Without this the provider is a list of twelve thousand
+  files.
+- **`scan()` over the chosen files only**, as one parquet source with a file group per
+  partition.
+
+Two decisions before building it:
+
+1. **What stops a regionless scan early.** The memory pool bounds memory and the clock bounds
+   time; neither refuses `SELECT COUNT(*) FROM ztf` over 12,485 partitions before it starts.
+   §5.3's `max_partitions` checked in `scan()` against the chosen list is the natural bound, and
+   it is a refusal rather than a work list, the route having none.
+2. **Whether a partition the region contains skips the geometry.** The fan-out gives such a
+   partition no spatial test at all. A planned scan applies one filter to every file, so this
+   would need a per-file predicate, which DataFusion does not offer as such. Probably dropped:
+   the cost is the trigonometry over rows that were always going to pass.
+
+Whether the `hats` expression routes later move onto the provider is deferred, not assumed.
+
+**`contains` is registered only on a context whose planner chooses what to scan.** On the
+shared context it would reach the catalog routes, which choose partitions from the `region`
+field before any file is opened and would therefore open all of them.
 
 ### 10.5 Stage three — one large table and small ones
 
@@ -543,21 +589,29 @@ values, and no file here has a geometry column).
 Added because they are cheap here and expensive elsewhere:
 
 - **`MOC('4/30-33 38 52 7/324-934')`**, DaCHS's spelling, as a region inside `CONTAINS`. It
-  lowers to `Shape::Moc`, which is the one shape matched exactly and the cheapest predicate
-  the service has. DaCHS cannot compare a point to a MOC directly; against a HEALPix-indexed
-  catalog it is what we are fastest at.
+  is `Shape::Moc` once `contains` rewrites itself, the one shape matched exactly and the
+  cheapest predicate the service has. DaCHS cannot compare a point to a MOC directly; against
+  a HEALPix-indexed catalog it is what we are fastest at.
 - **`ivo_healpix_index(order, ra, dec)` and `ivo_healpix_center(order, index)`**, a few lines
   of `cdshealpix` from the UDF catalogue.
 
-**Two function names do not map by spelling**: `CEILING` and `TRUNCATE` are `ceil` and
-`trunc`. The mapping is written out and tested, never a passthrough by name.
+**Four function names do not map by spelling**: `CEILING`, `TRUNCATE` and `LOG` are `ceil`,
+`trunc` and `ln`, and `MOD(x, y)` is `x % y`. The mapping is written out and tested, never a
+passthrough by name. Every other ADQL name needs nothing, DataFusion lowercasing an unquoted
+function name itself. `LOG` is the one that matters: ADQL's is natural and DataFusion's `log`
+base ten, and since `log` is refused as ambiguous, a passthrough written by accident is an
+error rather than a number 2.3 times off. `RAND`'s name is free the same way, DataFusion's
+`random()` being refused by volatility.
 
-`LOG` was a third and is no longer one. ADQL's is the natural logarithm; the trap was that
-DataFusion's `log` is base ten and would have answered a number 2.3 times off. `log` is not
-callable here at all now, so the mapping to `ln` is a name the registry does not otherwise
-answer to rather than one being taken away from a working function — and a passthrough that
-someone writes by accident is an error rather than a wrong answer. The same is true of
-`RAND`: DataFusion's `random()` is refused by volatility, so the name is free.
+**Still to add, each small and none blocking a stage:**
+
+- **`DISTANCE` as a value**, for a select list or an `ORDER BY`. §10.3 answers it only bounded
+  above, as the region test it then is; anywhere else it needs a distance function and is
+  refused until there is one.
+- **`INTERSECTS` between two shapes.** Against a point it is `CONTAINS`; between a circle and
+  a MOC it is a covering intersection nothing builds yet (§5.2).
+- **`LOWER`, `UPPER`, `ILIKE`.** `string_expressions` is off, and turning it on is `CLAUDE.md`'s
+  deliberate decision about everything in that feature, not only these three.
 
 **`RAND([seed])` is mandatory and is implemented**, which needs two things said:
 
