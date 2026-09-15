@@ -1178,6 +1178,50 @@ mod tests {
             "the indexed file read {pruned} bytes against {whole} for the plain one, which \
              is no pruning worth the name"
         );
+
+        // The same circle written as a function in the predicate, with no region field at
+        // all. `contains` rewrites itself into the expression the field produces, during the
+        // optimizer's simplify pass — and that pass runs before the scan's pruning predicate is
+        // built, which is the thing only a read can show. So it has to read exactly what the
+        // field read, not merely return the same rows: returning them while reading the whole
+        // file is the failure this is here to catch.
+        //
+        // Planned on a context of its own, since the functions are registered only where a
+        // query can say a region as one, and read back the way `query::run` reads a file.
+        use datafusion::physical_plan::collect_partitioned;
+        use datafusion::prelude::ParquetReadOptions;
+
+        let indexed = written(true);
+        let ctx = query::session_context(true);
+        crate::geometry::register(&ctx);
+        ctx.register_object_store(&indexed.base, Arc::clone(&indexed.store));
+        let options = ParquetReadOptions {
+            file_extension: "",
+            ..ParquetReadOptions::default()
+        };
+        let df = ctx
+            .read_parquet(indexed.url.as_str(), options)
+            .await
+            .unwrap();
+        let predicate = sql::predicate(
+            &ctx.state(),
+            df.schema(),
+            "contains(point(objRA, objDec), circle(120.0, 20.0, 1.0))",
+            limits(),
+        )
+        .unwrap();
+        let df = df.filter(predicate).unwrap();
+        let plan = df.create_physical_plan().await.unwrap();
+        let batches = collect_partitioned(Arc::clone(&plan), ctx.task_ctx())
+            .await
+            .unwrap();
+        let function_rows: usize = batches.iter().flatten().map(RecordBatch::num_rows).sum();
+        let function_read = query::data_bytes_read(plan.as_ref());
+        assert_eq!(function_rows, rows, "the function changed the answer");
+        assert_eq!(
+            function_read, pruned,
+            "the function read {function_read} bytes where the field read {pruned}"
+        );
     }
 
     fn circle_at(ra: f64, dec: f64, radius_deg: f64) -> Region {

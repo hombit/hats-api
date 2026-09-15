@@ -353,7 +353,7 @@ pub(crate) async fn execute(
 /// DataFusion fetches those from the store directly rather than through the reader that
 /// holds the counter, so no counter sits on them. Counting them too would mean wrapping
 /// the store in one of our own.
-fn data_bytes_read(plan: &dyn ExecutionPlan) -> u64 {
+pub(crate) fn data_bytes_read(plan: &dyn ExecutionPlan) -> u64 {
     let own = plan
         .metrics()
         // DataFusion's own name for it.
