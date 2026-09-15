@@ -47,9 +47,16 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.4 | HATS catalogs as tables | done | partitions pruned by `PruningPredicate` over each cell's span, not by recognising a region |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
+| 11.1 | the tables the service publishes | todo | a name and a url, no storage options; temporary until §9.5, and §0.2 holds only while the list is config |
+| 11.2 | `/sync` and the parameters | todo | form-encoded is a carrier no route takes today |
+| 11.3 | formats, `MAXREC`, `OVERFLOW`, errors | todo | csv and tsv are new writers; `votable::encode` needs a trailer |
+| 11.4 | `TAP_SCHEMA` | todo | names are strict here, the published spelling being what a client copies; a nested column is declared by its leaves and answered only by `json` and `parquet` |
+| 11.5 | VOSI capabilities, availability, tables | todo | |
+| 11.6 | `/examples` | todo | |
+| 11.7 | what a caller gets told | todo | its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 
-§2–§7 are the phases in order, §8 the conditions every phase must keep, §9 what is
-deferred.
+§2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
+what is deferred.
 
 ## 0. Invariants
 
@@ -295,7 +302,7 @@ underneath either way.
 
 ### 7.2 Long requests
 
-**No async job interface in this plan.** TAP's `/async` (§9.5) is what forces one and UWS
+**No async job interface in this plan.** TAP's `/async` (§9.4) is what forces one and UWS
 specifies its shape, so it gets built once rather than invented and then reconciled. A job
 system would also break §0's statelessness and add job ids as an authorization surface.
 
@@ -327,7 +334,7 @@ seconds, shorter than this service's own default. Two things to build instead:
 `region` may still gain `moc: {url}` and the combinators (§5.2), and §7.2's streaming would
 change how a large answer arrives. Both change the document, and clients will have
 generated code from it by then, so each needs its shape decided before it lands. IVOA's
-VOSI asks the same question in the astronomy vocabulary and arrives with TAP in §9.5 — two
+VOSI asks the same question in the astronomy vocabulary and arrives with TAP in §11.5 — two
 renderings of one description, not two descriptions.
 
 ### 7.5 A nested column in a VOTable
@@ -416,7 +423,7 @@ DaCHS, whose spelling §10.7 follows.
   requests.
 - **A table name is an ADQL regular identifier**, and it answers to its own spelling and to
   its lowercase, the way a column does — not to ADQL's uppercase folding (§10.8).
-  `TAP_UPLOAD` and `TAP_SCHEMA` are refused as names now, before §9.5 needs them.
+  `TAP_UPLOAD` and `TAP_SCHEMA` are refused as names now, before §11.4 needs them.
 - **A table's `region` is a view definition** — "this table is that catalog restricted to
   this shape" — and it is the only `region` in the request. There is no request-level one:
   a caller writing ADQL says where they are looking in the `WHERE` clause, and a second
@@ -553,12 +560,248 @@ someone will look, not here, since this file is deleted when the work in it is d
    a caller reads them off the file, so the existing rule wins and applies to table names too.
 2. **A bound reached returns no rows at all.** TAP truncates at `MAXREC` and marks the result
    `QUERY_STATUS=OVERFLOW`; rows cut off are a value a caller cannot tell from the whole
-   answer, so this service refuses instead. Revisited at §9.5, where `OVERFLOW` is at least
+   answer, so this service refuses instead. Revisited at §11.3, where `OVERFLOW` is at least
    an in-band statement that the answer is partial.
 3. **`RAND` and an unordered `TOP` are the first answers here that are not reproducible.**
    ADQL says nothing about which rows `TOP n` returns without an `ORDER BY`, so an arbitrary
    set conforms — but every other route promises more than that, and a reader will carry the
    stronger assumption across unless it is written down.
+
+## 11. Phase 8 — TAP
+
+IVOA's Table Access Protocol over §10's ADQL layer, so that TOPCAT, `pyvo` and `astroquery`
+reach these catalogs with no client written for this service. The resources are siblings
+under one base url, `{api.prefix}/tap`, which is what the specification requires of every
+resource but `/availability` and what a client builds its urls from by appending fixed names.
+
+References: [TAP 1.1](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.html),
+[DALI 1.1](https://www.ivoa.net/documents/DALI/20170517/REC-DALI-1.1.html),
+[VOSI 1.1](https://www.ivoa.net/documents/VOSI/20170524/REC-VOSI-1.1.html),
+[TAPRegExt 1.0](https://www.ivoa.net/documents/TAPRegExt/20120827/REC-TAPRegExt-1.0.html).
+
+**This phase is deliberately not a conforming TAP service, in exactly one place.** `/async`
+is a MUST (TAP §2.2) and is §9.4. Everything else a conforming service needs is here. What
+that costs is a real thing and belongs in the README rather than being discovered from a
+validator: a query too slow for `max_request_seconds` has nowhere to go, because the resource
+a client would be sent to does not exist. `taplint` will say so, and the answer is that the
+query has to be made smaller until §9.4 lands.
+
+Two things follow from being sync-only, and both are refusals rather than silence:
+`/capabilities` advertises no async interface, and `{api.prefix}/tap/async` answers `404`.
+Advertising one and failing the job submission is worse than not offering it — a client
+chooses the interface off the capabilities document and has no way back.
+
+### 11.1 The tables the service publishes
+
+A TAP query names a table the service already knows: `TAP_SCHEMA` is service-side and has
+nowhere to put a name that arrived with the query, so the per-request `tables` of §10.1 has
+no equivalent here. **The list is config, and that is the temporary half of this phase** —
+§9.5 is where the tables come from somewhere else, and nothing built here may assume the
+list is written by hand.
+
+A table is a name and a url, local or remote, and nothing else:
+
+```toml
+[[tap.table]]
+name = "gaia_dr3.gaia_source"
+url = "file:///hats/gaia_dr3"
+
+[[tap.table]]
+name = "ztf.dr24_object"
+url = "s3://irsa-fornax-testdata/ZTF/dr24/object"
+```
+
+**§0.2 survives this and must keep surviving it.** A list read from the config at startup is
+config, not a registry accumulated across requests; nothing here caches a catalog between
+two requests. The moment tables are discovered rather than declared — §9.5 — that stops
+being true and §0.2 is what has to be reopened.
+
+Four things this shape settles:
+
+- **A name is the operator's, not the mount's.** Deriving `schema.table` from a mount's
+  `path` would make a mount rename break every query a client has saved, and would leave a
+  remote catalog — which has no mount — unnameable. The cost is that a catalog is not
+  published until someone writes it down, which is the right default for a surface that
+  serves whatever it lists to anyone who can reach it.
+- **No storage options, so a published table is one that reads anonymously.** A url is the
+  whole of what a table is: `[[tap.table]]` has no `storage`, and a catalog needing a
+  credential is not publishable over TAP until §9.5 decides where one would come from. What
+  that buys is that the question §8.1 would otherwise have to answer here — an operator's
+  secret in a config file, on a surface whose answers are public — does not arise. Adding the
+  field later is adding that question, not a convenience.
+- **The columns come from `dataset/_common_metadata`**, which `hats_table.rs` already reads
+  first as one small `GET` — every partition's columns and no rows. So a table's metadata
+  costs one request rather than a partition read, which is what makes §11.4 and §11.5
+  answerable at all.
+- **A url is checked against the access policy like any other.** A table's url goes through
+  `storage::open_dir`, so an operator naming an endpoint the policy refuses finds out at
+  startup rather than on a caller's query.
+
+### 11.2 `/sync`, and the parameters
+
+`GET` and `POST` both, the latter `application/x-www-form-urlencoded` — a new carrier, every
+route today taking JSON or a typed query struct. TAP §2.1 notes a `GET` may be answered from
+a cache and that a client needing current data must `POST`; nothing here caches, so the two
+differ only in where the parameters are read from.
+
+Parameter names are case-insensitive (DALI §3.1) and values are not, except where a
+parameter's own definition says so. What is taken:
+
+| parameter | |
+|---|---|
+| `QUERY` | the ADQL statement, to `adql::translate` unchanged |
+| `LANG` | `ADQL` only; anything else is refused naming what is taken |
+| `RESPONSEFORMAT` / `FORMAT` | §11.3. TAP §2.7.3 requires `FORMAT` be accepted as the equivalent |
+| `MAXREC` | §11.3 |
+| `RUNID` | at most 64 characters, written to the log and nowhere else (DALI §3.4.6) |
+| `REQUEST` | `doQuery` accepted, any other value refused |
+
+**`REQUEST` is accepted although TAP 1.1 removed it** (Appendix A.3). A 1.0-era client sends
+it, the value carries no meaning this service acts on, and refusing the request over it would
+400 a query that would otherwise run. Accepting the one value rather than ignoring the
+parameter is what keeps `REQUEST=doSomethingElse` from being read as a `doQuery`.
+
+**Everything else is refused, and DALI does not say otherwise** — §3.1 settles the case of
+parameter names and is silent on unrecognised ones, so the house rule stands: a parameter
+this service acts on is honoured or refused, never dropped. A repeated single-valued
+parameter is refused too (DALI §3.2).
+
+### 11.3 What comes back
+
+**Formats.** `votable` is mandatory and the default. `csv` and `tsv` are a SHOULD (TAP
+§2.7.3) and are new writers over the same `QueryResult`; `parquet` and `json` are this
+service's own and are advertised in `/capabilities` as what they are. Each name and its
+media type come from one list, the way `Format` already holds the three it has.
+
+**`MAXREC` is not `limit`.** Three of its rules are its own:
+
+- It **overrides `TOP`** (TAP §2.7.4), so `SELECT TOP 100 … ` with `MAXREC=10` returns ten.
+- **`MAXREC=0` returns the columns and no rows**, needs no overflow marker, and the service
+  may skip execution entirely. TOPCAT uses it to inspect a table.
+- **Truncation is marked, not silent.** `<INFO name="QUERY_STATUS" value="OVERFLOW"/>` goes
+  *after* the `TABLE` (DALI §4.4), where the `OK` this encoder already writes goes before it.
+  So `votable::encode` grows a trailer; it cannot be said in the prologue, which is written
+  before the row count is known.
+
+**Reading `MAXREC` rows cannot tell a full answer from a truncated one**, so the read asks
+for `MAXREC + 1` and reports the overflow if it arrives. Exactly `MAXREC` rows is otherwise
+two different answers with one spelling, which is the failure this service keeps finding.
+
+**`OVERFLOW` is where §10.8.2 is revisited, and only for the row bound.** `max_rows` becomes
+a truncation that says it is a truncation, because the marker is precisely the in-band
+statement whose absence made refusing the right answer everywhere else. `max_partitions` and
+`max_bytes_fetched` have no such marker and no plan to answer with, so they stay refusals.
+Two bounds with two answer shapes on one route is the deliberate part.
+
+**An error is a VOTable**, `<INFO name="QUERY_STATUS" value="ERROR">message</INFO>` before
+the table (DALI §4.4), with a 4xx or 5xx status. `ApiError` renders JSON, so these routes
+need a rendering of their own; what may be named in the message is unchanged — the caller's
+own url and the names inside a catalog they asked for, never a local path.
+
+**The answer's columns are the `SELECT` clause's, in number, order and name** — TAP §3.2, and
+a `FIELD` takes the alias where one was written. `sql::packed` answers `lightcurve.mag,
+lightcurve.mjd` as one `lightcurve` column holding both subfields, which would disagree with
+that — and does not arise, because **a nested column in a VOTable is refused**. §3.2 is met
+by there being no such answer. That refusal is this phase's behaviour and not a gap waiting
+on something: whatever form a nested column eventually takes here has to satisfy §3.2 as one
+of its conditions, which is a constraint on that decision rather than a reason to make it
+now. `json` and `parquet` nest what they are given, so the packing does show there — a
+divergence those two formats carry.
+
+### 11.4 `TAP_SCHEMA`
+
+The four tables of TAP §4 — `schemas`, `tables`, `columns`, and the empty `keys` and
+`key_columns` — registered as in-memory tables so a client learns the column list by querying
+them, which is how `pyvo` and TOPCAT ask. `TAP_SCHEMA` describes itself as well, since that
+is the first thing a client queries.
+
+`votable::spelling` already returns the `(datatype, arraysize)` pair `columns` needs, so the
+mapping is not written twice. `indexed`, `principal` and `std` are not-null and are this
+service's to answer: the spatial index column and the two coordinate columns are the
+`indexed` ones, being what a region prunes on.
+
+**A name answers to its own spelling and to nothing else, and `TAP_SCHEMA` is what says what
+that spelling is.** This interface is stricter than every other route here, and the standard
+is what affords it: TAP §4.2 and §4.3 say the published `table_name` and `column_name` are
+"the string that is recommended for use in querying", and that a name needing quotes is
+published *with the quotes*. So a mixed-case column goes into `TAP_SCHEMA.columns` as
+`"Gmag"`, a client that builds its query from `TAP_SCHEMA` writes a delimited identifier, and
+ADQL matches a delimited identifier case-sensitively. Strictness costs a caller nothing
+because the thing they copy is already correct — which is not true on any other route, where
+there is no `TAP_SCHEMA` to copy from and §10.8.1's lowercase fallback is what stands in for
+one.
+
+So: no folding, no lowercase fallback, and a name that does not match is refused naming the
+column. ADQL says an unquoted identifier is case-insensitive but does not say whether it
+folds up or down, and places no requirement on the service's matching at all — it names the
+resulting interoperability problem and leaves it open. Being strict is therefore a choice the
+language permits rather than a divergence from it, which is the opposite of §10.8.1's
+standing.
+
+**`TAP_SCHEMA`'s own name is the one exception, and it has to be.** A client queries
+`TAP_SCHEMA.columns` to find out what this service calls things, so it cannot have learned
+that name from the answer it has not received yet — it hardcodes a spelling, and which one is
+the client's business. The five fixed names of TAP §4 therefore resolve case-insensitively;
+every name this service publishes does not. The exception is exactly the bootstrap and does
+not extend to a table an operator declared, whose spelling a client reads before it writes.
+
+**A nested column is declared by its leaves, dotted, and the struct itself is not a row.**
+`TAP_SCHEMA.columns` gets `lightcurve.mag` and `lightcurve.mjd`, each with its leaf's own
+datatype and `arraysize="*"`, and no row named `lightcurve`. Three things behind that:
+
+- **A leaf has a type and the struct has none.** A leaf holds one row's whole array, which
+  VOTable spells as the element's datatype with `arraysize="*"`. A row for the struct could
+  carry only an invented type, which is what this section's strictness is against.
+- **It is what a caller writes.** `sql.rs` reads `lightcurve.mag` as a path into a struct
+  where the head is one of the file's own fields, so the published name is the name that
+  selects the value — which is what TAP §4.3 asks the published name to be.
+- **Depth is not declared.** A struct in a struct has no leaf with a spelling either, so it
+  is absent for the same reason the struct is, rather than by a second rule.
+
+**Declaring a column is not promising every format can return it, and three of the five
+cannot.** `json` and `parquet` answer these; `votable`, `csv` and `tsv` refuse. That split is
+this phase's behaviour rather than a temporary state — `votable.rs` refuses a nested column
+by name today and keeps doing so until there is a right way to write one, which is a decision
+this phase does not make and must not anticipate. For `csv` and `tsv` there is no decision to
+make at all: CSV has no notion of structure, DALI §3.4.3 names the media type and says
+nothing about nesting, and `arrow-csv`'s writer rejects any `is_nested()` type outright — so
+the refusal is the writer's and nothing here implements it.
+
+What the declaration buys is that a caller can see the column exists and reach it in a format
+that carries it. Omitting it would make a catalog look narrower than it is, and would make
+`SELECT *` fail over columns the client was never told about.
+
+**The dot is structure and must not be quoted.** TAP §4.3 says to publish a name *with*
+quotes where it must be quoted; this is the case it does not anticipate, a name that must
+*not* be. `"lightcurve.mag"` is one delimited identifier naming no field, so a client that
+quotes defensively breaks on it. Worth stating on §11.7's page, there being nowhere in
+`TAP_SCHEMA` to say it.
+
+### 11.5 VOSI
+
+- **`/availability`** — `<vosi:availability><vosi:available>true</vosi:available></vosi:availability>`,
+  and nothing this service can currently say is false.
+- **`/capabilities`** — the TAP capability at `ivo://ivoa.net/std/TAP`, the two VOSI ones at
+  `ivo://ivoa.net/std/VOSI#capabilities` and `#availability`, and `#tables-1.1` for the third
+  below. The TAPRegExt detail — `language`, `outputFormat`, `outputLimit` — is a SHOULD that
+  clients do read, and every value in it is already a config key or the format list, so it is
+  derived rather than written out beside them.
+- **`/tables`** — the same metadata as §11.4 in VOSI's own XML, with `?detail=min` returning
+  table names without columns and `/tables/{name}` returning one table in full.
+
+### 11.6 `/examples`
+
+A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. The
+rules `openapi.rs` already follows apply unchanged — an example is a query that runs and is
+judged on what it costs, so each names a few columns and a catalog example carries a circle.
+It is a page this service serves, so: no CDN, complete without JavaScript.
+
+### 11.7 What a caller gets told
+
+`/docs` describes JSON bodies and TAP takes form parameters, so the TAP surface is described
+in its own page rather than bent into the OpenAPI document. What it has to say, once, and in
+the README as well: the base url to paste into TOPCAT, the table names, that `/async` is not
+there and what to do instead, and which formats carry a nested column.
 
 ## 8. Security requirements
 
@@ -686,17 +929,20 @@ Nothing in it bounds what a `collect` returns.
    the work. §10 does not wait on it — ADQL's `POLYGON` is part of an optional feature, and
    the second and third points above are also what `BOX` turns on, which is why §10.7
    refuses that one rather than mapping it onto a shape with different edges.
-4. **A table registry the operator declares.** §10's tables are the caller's, named in
-   every request, which is all a stateless service needs and all §0.2 allows. A registry is
-   what TAP requires instead: `TAP_SCHEMA` is service-side and has nowhere to put a name
-   that arrives with the query, so a catalog served under TAP has to be named in the config
-   — likely a name on each `[[mount]]`, unique across them and checked at startup the way
-   `path` overlap already is. Not needed before then, and §10 must not assume it.
-5. **TAP protocol.** IVOA TAP over §10's ADQL layer: `/sync`, `/async`, VOSI, §7.5's VOTable
-   output, the UWS job model, and §9.4's registry under it. `/async` is a real job system
-   with state, and is where §5.3's and §7.2's no-job-queue decision is revisited. It is also
-   where §10.8's refusal to truncate is revisited: `QUERY_STATUS=OVERFLOW` is the one
-   sanctioned way to hand back a partial answer that says it is partial.
+4. **TAP `/async` and UWS.** The one MUST §11 does not answer, and the reason it is not a
+   step of that phase: a job model is state — creation, phases, polling, results that
+   outlive the request that asked for them, destruction times and their collection — against
+   a service whose every answer today is collected inside one request future. It is where
+   §5.3's and §7.2's no-job-queue decision is revisited, and where a job id becomes an
+   authorization surface. UWS specifies the shape, so it gets built once rather than
+   invented and then reconciled.
+5. **Tables discovered rather than declared.** §11.1's list is written out per table and is
+   temporary; the HATS registry is where it comes from instead. It reopens two things at
+   once. §0.2, because a set of tables fetched from elsewhere is a registry across requests,
+   with a refresh, a staleness window and two requests that may disagree about what exists.
+   And §11.1's url-only table, because a catalog the registry names may need a credential to
+   read — which is §8.1's question on a surface whose answers are public, and the reason
+   §11.1 declines to answer it early.
 6. **Filesystem-driven cache invalidation** (§6.6).
 7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today. The
