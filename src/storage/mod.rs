@@ -1064,7 +1064,7 @@ fn build(
 /// This does not go through [`open`], and there is nothing here for it to decide. `open`
 /// exists to judge a url a caller wrote — the scheme, the options, the endpoint, the
 /// address behind it — and in file-server mode the caller wrote none of that: they named
-/// a path under a mount, and [`crate::access::authorize_mounted`] has already answered
+/// a path under a mount, and [`crate::access::local::authorize_mounted`] has already answered
 /// the only question there was, against the mount, returning the canonical path taken
 /// here. Routing it back through a `file://` url would ask the API mode's local-access
 /// rules about a file the API mode is not serving.

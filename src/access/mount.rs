@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 
 use percent_encoding::percent_decode_str;
 
-use crate::access::canonical_root;
 use crate::access::data::DataFiles;
+use crate::access::local::canonical_root;
 use crate::config::{ConfigError, DataConfig, MountConfig};
 use crate::error::ApiError;
 
