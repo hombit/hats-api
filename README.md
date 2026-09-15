@@ -611,9 +611,9 @@ enough rows are in, so the limit bounds the request and `max_partitions` joins t
 counters, watched as the reads land. That is what makes `?limit=10` against a
 thousand-partition catalog cost one partition.
 
-**Over a limit is `413`, and the body is the plan.** So the answer to "that is more than I
+**Over a limit is `422`, and the body is the plan.** So the answer to "that is more than I
 will do at once" is the list of requests that would do it. The same three bind a catalog
-reached by its own URL in file-server mode, where a `413` carries the sentence alone. A
+reached by its own URL in file-server mode, where a `422` carries the sentence alone. A
 URL has no way to express a fan-out, which is also what `max_query_radius_arcsec` is about.
 
 ### The clock

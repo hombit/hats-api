@@ -129,7 +129,7 @@ max_concurrent_materializations = 4
 max_catalog_metadata_bytes = "256MiB"
 
 # What one request to "/api/v1/hats" may spend. Whichever is reached first refuses it
-# with 413, and the body is the plan: the same work as separate requests to fan out over.
+# with 422, and the body is the plan: the same work as separate requests to fan out over.
 #
 # Only the partition count is checked before anything is read, so it is the one that
 # actually bounds the work; the other two are counters watched as partitions land, and a
