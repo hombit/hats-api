@@ -103,7 +103,7 @@ impl Properties {
     ///
     /// Both halves default independently, so what this answers is a candidate rather than
     /// a fact about the catalog. It costs nothing when it is wrong about a catalog that
-    /// has no such column: [`crate::healpix::SpatialIndex::resolve`] asks the file's
+    /// has no such column: [`crate::sky::healpix::SpatialIndex::resolve`] asks the file's
     /// schema, and a column that is not there means the query runs on the geometry alone.
     /// A request naming its own column and order overrides this.
     /// Whether the catalog names a HEALPix column of its own, as against
@@ -119,9 +119,9 @@ impl Properties {
     pub fn healpix_column(&self) -> Result<(&str, u8), ApiError> {
         Ok((
             self.get("hats_col_healpix")
-                .unwrap_or(crate::healpix::DEFAULT_HEALPIX_COLUMN_NAME),
+                .unwrap_or(crate::sky::healpix::DEFAULT_HEALPIX_COLUMN_NAME),
             self.number("hats_col_healpix_order")?
-                .unwrap_or(crate::healpix::MAX_ORDER),
+                .unwrap_or(crate::sky::healpix::MAX_ORDER),
         ))
     }
 

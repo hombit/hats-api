@@ -22,9 +22,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use common::{parquet_fixture, row_count};
 use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, LimitsConfig, NetworkConfig};
+use hats_api::engine::query::QueryResult;
 use hats_api::error::ApiError;
-use hats_api::materialize::Transfers;
-use hats_api::query::QueryResult;
+use hats_api::storage::materialize::Transfers;
 use hats_api::storage::{self, StorageOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -312,14 +312,14 @@ async fn read_one_row(
 ) -> Result<QueryResult, ApiError> {
     let parsed = storage::parse_url(url)?;
     let file = storage::open(&parsed, &options, policy, &Arc::new(Transfers::new(limits)))?;
-    hats_api::query::run(
+    hats_api::engine::query::run(
         &file,
-        &hats_api::query::Selection {
-            predicate: hats_api::query::Predicate::Filters("objectid = 42"),
+        &hats_api::engine::query::Selection {
+            predicate: hats_api::engine::query::Predicate::Filters("objectid = 42"),
             ..Default::default()
         },
         limits.into(),
-        hats_api::query::Order::Unspecified,
+        hats_api::engine::query::Order::Unspecified,
     )
     .await
 }

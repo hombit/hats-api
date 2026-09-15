@@ -3,10 +3,10 @@ use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use hats_api::access::AccessPolicy;
+use hats_api::access::mount::Mounts;
 use hats_api::app;
 use hats_api::config::{self, CONFIG_ENV_VAR, Config, LogConfig, LogFormat};
 use hats_api::logging;
-use hats_api::mount::Mounts;
 
 const USAGE: &str = "\
 usage: hats-api [--config <path>]

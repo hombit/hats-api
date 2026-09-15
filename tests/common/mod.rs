@@ -17,9 +17,9 @@ use datafusion::parquet::arrow::ArrowWriter;
 use datafusion::parquet::file::properties::WriterProperties;
 use hats_api::access::AccessPolicy;
 use hats_api::config::{AccessConfig, EndpointConfig, HttpConfig, LimitsConfig, NetworkConfig};
+use hats_api::engine::query::{Predicate, Projection, QueryResult, Selection};
 use hats_api::error::ApiError;
-use hats_api::materialize::Transfers;
-use hats_api::query::{Predicate, Projection, QueryResult, Selection};
+use hats_api::storage::materialize::Transfers;
 use hats_api::storage::{self, S3Options, StorageOptions};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
@@ -300,11 +300,11 @@ pub async fn query(
     let url = storage::parse_url(raw_url)?;
     let file = storage::open(&url, options, policy, &transfers())?;
     // These read through a url the way the API does, so they take the API's order.
-    hats_api::query::run(
+    hats_api::engine::query::run(
         &file,
         selection,
         (&LimitsConfig::default()).into(),
-        hats_api::query::Order::Unspecified,
+        hats_api::engine::query::Order::Unspecified,
     )
     .await
 }

@@ -25,9 +25,9 @@ use datafusion::physical_plan::{
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use futures::StreamExt;
 
+use crate::engine::sql;
 use crate::error::ApiError;
-use crate::region::{self, Spatial};
-use crate::sql;
+use crate::sky::region::{self, Spatial};
 use crate::storage::RemoteFile;
 
 /// Which columns come back.

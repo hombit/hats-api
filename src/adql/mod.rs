@@ -11,7 +11,7 @@
 //!
 //! - **`TOP n`** is ADQL's row limit, and becomes `LIMIT n`.
 //! - **A region test compares with 1**, ADQL having no boolean: `1 = CONTAINS(p, r)` is the
-//!   `contains(p, r)` that [`crate::geometry`] registers, and `0 = CONTAINS(p, r)` its
+//!   `contains(p, r)` that [`crate::sky::geometry`] registers, and `0 = CONTAINS(p, r)` its
 //!   negation. `INTERSECTS` against a point is the same test. `DISTANCE(p, c) < r` around a
 //!   position written out is the circle of radius `r` around `c`, said as a region test so
 //!   that it prunes like one; between two rows' positions it is a crossmatch and stays a
@@ -22,6 +22,9 @@
 //! Everything ADQL has that this service does not answer is refused by name, so a caller is
 //! told what was not understood rather than handed an unknown-function error about it.
 
+pub mod functions;
+pub mod query;
+
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
@@ -31,8 +34,8 @@ use datafusion::sql::sqlparser::ast::{
     TopQuantity, UnaryOperator, Value, VisitMut, VisitorMut,
 };
 
+use crate::engine::sql;
 use crate::error::ApiError;
-use crate::sql;
 
 /// The field a statement arrives in, and what every refusal here names first.
 const FIELD: &str = "query";
@@ -639,8 +642,8 @@ mod tests {
         use datafusion::arrow::array::{ArrayRef, Float64Array, RecordBatch};
         use datafusion::sql::parser::Statement as DfStatement;
 
-        let ctx = crate::query::session_context(false);
-        crate::adql_functions::register(&ctx);
+        let ctx = crate::engine::query::session_context(false);
+        functions::register(&ctx);
         let rows = RecordBatch::try_from_iter([(
             "x",
             Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
@@ -832,8 +835,8 @@ mod tests {
         use datafusion::arrow::datatypes::Int64Type;
         use datafusion::sql::parser::Statement as DfStatement;
 
-        let ctx = crate::query::session_context(false);
-        crate::geometry::register(&ctx);
+        let ctx = crate::engine::query::session_context(false);
+        crate::sky::geometry::register(&ctx);
         let rows = RecordBatch::try_from_iter([
             ("id", Arc::new(Int64Array::from(vec![1, 2])) as ArrayRef),
             (

@@ -10,7 +10,7 @@
 //! them is a union: a row inside any shape qualifies. The expression is built so that the
 //! parts of it that *can* prune are plain comparisons against a column, which row-group
 //! statistics and the page index both understand — the coordinate bounds around the exact
-//! test here, and the HEALPix ranges [`crate::healpix`] puts in front of it where the file
+//! test here, and the HEALPix ranges [`crate::sky::healpix`] puts in front of it where the file
 //! has an index column to compare.
 //!
 //! Degrees for every position, and ICRS throughout. Only an extent carries its unit in its
@@ -36,8 +36,9 @@ use moc::moc::{
 use moc::qty::Hpx;
 use serde::{Deserialize, Serialize};
 
+use crate::engine::sql;
 use crate::error::ApiError;
-use crate::{healpix, sql};
+use crate::sky::healpix;
 
 /// The field these refusals name, which is what the caller wrote in their body.
 const FIELD: &str = "region";
@@ -139,7 +140,7 @@ pub enum Region {
 /// [`Region`] is what a caller writes and carries their spellings: two ways to give a
 /// radius, a declination range that might be the wrong way round, a right ascension pair
 /// that has to be read as a direction rather than as a range. This is what that means once,
-/// so the predicate and the HEALPix covering ([`crate::healpix`]) are two readings of the
+/// so the predicate and the HEALPix covering ([`crate::sky::healpix`]) are two readings of the
 /// same numbers rather than two validations that can drift apart.
 /// Not `Copy`: a MOC is a set of ranges on the heap. Everything else here is a few floats.
 #[derive(Debug, Clone, PartialEq)]
@@ -229,7 +230,7 @@ pub struct Healpix<'a> {
 /// too: a caller coming from `filters` reads a list as something joined by `AND`.
 ///
 /// The geometric test is the answer; a named HEALPix column only puts cheaper tests in
-/// front of it, and [`crate::healpix`] is where that happens.
+/// front of it, and [`crate::sky::healpix`] is where that happens.
 pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiError> {
     let shapes = shapes(spatial.regions)?;
     // Resolved only where some shape reads a position out of a row, since a `moc` does not.
@@ -709,8 +710,8 @@ mod tests {
     use datafusion::parquet::arrow::ArrowWriter;
 
     use super::*;
-    use crate::healpix::DEFAULT_HEALPIX_COLUMN_NAME;
-    use crate::query::{self, Order, Predicate, Projection, Selection};
+    use crate::engine::query::{self, Order, Predicate, Projection, Selection};
+    use crate::sky::healpix::DEFAULT_HEALPIX_COLUMN_NAME;
     use crate::storage::RemoteFile;
 
     /// How a file writes right ascension.
@@ -1228,7 +1229,7 @@ mod tests {
 
         let indexed = written(true);
         let ctx = query::session_context(true);
-        crate::geometry::register(&ctx);
+        crate::sky::geometry::register(&ctx);
         ctx.register_object_store(&indexed.base, Arc::clone(&indexed.store));
         let options = ParquetReadOptions {
             file_extension: "",

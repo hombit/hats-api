@@ -379,7 +379,7 @@ impl reqwest::dns::Resolve for PolicyResolver {
 
 /// The one HTTP client this process makes requests with. Every store is built on it
 /// through [`NetworkPolicy::transport`], and the requests this crate makes directly —
-/// the range probe in [`crate::materialize`] — go through [`NetworkPolicy::client`], so
+/// the range probe in [`crate::storage::materialize`] — go through [`NetworkPolicy::client`], so
 /// there is one resolver and one redirect policy rather than one per caller.
 fn build_client(rules: Arc<Rules>) -> Result<reqwest::Client, ConfigError> {
     #[expect(

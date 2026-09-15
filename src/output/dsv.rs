@@ -52,8 +52,8 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::csv::WriterBuilder;
 use datafusion::arrow::datatypes::Schema;
 
+use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::query::QueryResult;
 
 /// Which of the two, which is a delimiter and the names that go with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

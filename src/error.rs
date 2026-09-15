@@ -9,7 +9,7 @@ use datafusion::error::DataFusionError;
 use datafusion::parquet::errors::ParquetError;
 use serde::Serialize;
 
-use crate::materialize::{Refused, TooLarge};
+use crate::storage::materialize::{Refused, TooLarge};
 
 /// Whether a message says where on disk the file is. A mount publishes a directory, not
 /// the machine it is on, so a message that names one is not repeatable to a caller

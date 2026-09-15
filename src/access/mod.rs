@@ -18,7 +18,7 @@
 //!
 //! Which *address* a request ends up reaching is a second question, and one the endpoint
 //! rules cannot answer: a name allowed here may still resolve onto the network this
-//! process happens to sit on. That is [`crate::network`]'s, under `[access.network]`.
+//! process happens to sit on. That is [`network`]'s, under `[access.network]`.
 //!
 //! ```toml
 //! [access.network]
@@ -52,15 +52,19 @@
 //! nor a symlink inside the mount can lead out of it; and unless the mount's
 //! `follow_symlinks` is on, a path that goes through a symlink at all is refused.
 
+pub mod data;
+pub mod mount;
+pub mod network;
+
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use url::{Host, Url};
 
+use crate::access::mount::{Mount, Mounts};
+use crate::access::network::NetworkPolicy;
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
-use crate::mount::{self, Mount, Mounts};
-use crate::network::NetworkPolicy;
 
 /// What a URL turned out to be, once it was allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]

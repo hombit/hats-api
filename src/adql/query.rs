@@ -1,6 +1,6 @@
 //! A statement against the tables a request declared.
 //!
-//! `query.rs` runs a selection against one file and `hats_query.rs` fans one out over a
+//! `engine::query` runs a selection against one file and `hats::query` fans one out over a
 //! catalog's partitions; this is the third shape a request can have — a whole statement, over
 //! tables the caller named, planned and executed by DataFusion. What it shares with the other
 //! two is the storage layer, the region covering and the answer writers. What it does not
@@ -30,14 +30,13 @@ use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, Ident, Statement, visit_e
 use futures::StreamExt;
 use url::Url;
 
-use crate::adql::Translated;
-use crate::adql_functions;
-use crate::data::DataFiles;
+use crate::access::data::DataFiles;
+use crate::adql::{Translated, functions};
+use crate::engine::query::{QueryResult, data_bytes_read, session_config};
+use crate::engine::sql;
 use crate::error::ApiError;
-use crate::geometry;
-use crate::hats_table;
-use crate::query::{QueryResult, data_bytes_read, session_config};
-use crate::sql;
+use crate::hats;
+use crate::sky::geometry;
 use crate::storage::{RemoteDir, RemoteFile};
 
 /// What one statement may spend.
@@ -51,7 +50,7 @@ pub struct Limits {
     /// How much SQL the statement may contain.
     pub sql: sql::Limits,
     /// What a catalog table may spend, and how much of its metadata may be read.
-    pub catalog: hats_table::Limits,
+    pub catalog: hats::table::Limits,
 }
 
 impl From<&crate::config::LimitsConfig> for Limits {
@@ -60,7 +59,7 @@ impl From<&crate::config::LimitsConfig> for Limits {
             max_memory_bytes: config.max_query_memory_bytes.as_u64(),
             max_rows: config.max_rows,
             sql: config.into(),
-            catalog: hats_table::Limits {
+            catalog: hats::table::Limits {
                 max_partitions: config.max_partitions,
                 max_metadata_bytes: config.max_catalog_metadata_bytes.as_u64(),
             },
@@ -107,7 +106,7 @@ pub async fn run(
     geometry::register(&ctx);
     // ADQL's own, which is `rand` — mandatory, and the one function let through the
     // volatility rule, on this route and nowhere else.
-    adql_functions::register(&ctx);
+    functions::register(&ctx);
 
     // Registered under the name the *statement* used rather than the one the request
     // declared, so that a table answers to its own spelling and to its lowercase the way a
@@ -137,7 +136,7 @@ pub async fn run(
             }
             Source::Catalog(dir) => {
                 let url = dir.url.clone();
-                let table = hats_table::HatsTable::open(&ctx, dir, data, limits.catalog).await?;
+                let table = hats::table::HatsTable::open(&ctx, dir, data, limits.catalog).await?;
                 let schema = TableProvider::schema(&table);
                 ctx.register_table(reference, Arc::new(table))
                     .map_err(|error| opening(&url, &error))?;

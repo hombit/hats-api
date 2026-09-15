@@ -39,8 +39,8 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
+use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::query::QueryResult;
 use crate::storage::RemoteFile;
 
 /// How the source file writes each of its leaf columns, keyed by the dotted parquet

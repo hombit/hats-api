@@ -1,7 +1,7 @@
 name: CodeQL
 
 # Two languages, because the service is written in one and serves the other: the
-# directory page's script is `src/listing/page.js`, a file of its own rather than a string
+# directory page's script is `src/app/listing/page.js`, a file of its own rather than a string
 # inside a Rust literal, so the JavaScript extractor finds it the way it finds any script.
 # Writing it inline would have put it out of reach of this workflow entirely.
 #

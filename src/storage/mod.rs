@@ -21,6 +21,8 @@
 //! Which URLs may be opened at all is not decided here: [`open`] asks the
 //! [`AccessPolicy`] first, and every path into a store goes through that one call.
 
+pub mod materialize;
+
 use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 use std::sync::Arc;
@@ -41,7 +43,7 @@ use crate::access::{
     describe_endpoint_schemes,
 };
 use crate::error::ApiError;
-use crate::materialize::{MaterializingStore, Transfers};
+use crate::storage::materialize::{MaterializingStore, Transfers};
 
 /// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
 /// list written out by hand, so a backend cannot be added and then refused here by a
@@ -1333,7 +1335,7 @@ fn allow_cleartext(
 /// What gets attached: the policy's own HTTP transport, whose resolver decides which
 /// addresses may be connected to, and the retries. OpenDAL would otherwise reach for the
 /// process-wide default transport — a plain `reqwest::Client` that resolves and connects
-/// to whatever it is given, which is the whole of what [`crate::network`] exists to stop.
+/// to whatever it is given, which is the whole of what [`crate::access::network`] exists to stop.
 #[expect(
     clippy::disallowed_methods,
     reason = "the one permitted call; the lint exists to send every other one here"
@@ -2404,7 +2406,7 @@ mod tests {
     /// the network policy. A store on OpenDAL's process-wide default client would
     /// resolve and connect to whatever it was handed, so this checks that a name a store
     /// is pointed at goes through a resolver that works — the refusing half is
-    /// [`crate::network`]'s own test.
+    /// [`crate::access::network`]'s own test.
     #[tokio::test]
     async fn a_store_reaches_a_named_host_through_the_policys_own_resolver() {
         let (port, receiver) = capture_one_request();

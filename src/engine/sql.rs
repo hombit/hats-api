@@ -35,7 +35,7 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
-use crate::adql_functions;
+use crate::adql;
 use crate::config::LimitsConfig;
 use crate::error::ApiError;
 
@@ -255,7 +255,7 @@ pub fn coordinate_column(
 /// term per shape and nothing counts them — `max_expression_nodes` is about `columns` and
 /// `filters`, and never sees a structured field — so a cross-match sending one circle per
 /// source is as many terms as the body holds. A `moc` is one term per range and skips
-/// [`crate::healpix`]'s range budget entirely, the ranges being the whole answer there
+/// [`crate::sky::healpix`]'s range budget entirely, the ranges being the whole answer there
 /// rather than a saving. Pairing terms until one is left makes both `⌈log₂ n⌉` deep instead:
 /// thirty thousand circles is fifteen frames rather than thirty thousand.
 ///
@@ -290,7 +290,7 @@ fn balanced(mut terms: Vec<Expr>, combine: fn(Expr, Expr) -> Expr) -> Option<Exp
 /// a literal of another integer type is not a comparison DataFusion keeps as one: it widens
 /// both sides to something no row-group statistic, page index or bloom filter is held in,
 /// which turns the cheapest test in the plan into a scan. Which types those are is
-/// [`crate::healpix`]'s to decide, since what fits depends on the order the caller says the
+/// [`crate::sky::healpix`]'s to decide, since what fits depends on the order the caller says the
 /// column is at.
 pub fn integer_column(
     schema: &DFSchema,
@@ -810,7 +810,7 @@ fn check(expr: &Expr, field: &str, limits: Limits) -> Result<(), ApiError> {
 /// **`rand` is the one exception, and it is this shape's alone.** ADQL makes it mandatory, so
 /// a route answering ADQL has to have it; every other route is refused it, which is what
 /// scoping the exception to a statement means. It is the first answer this service gives that
-/// differs between two identical requests — see [`crate::adql_functions`].
+/// differs between two identical requests — see [`crate::adql::functions`].
 ///
 /// The node budget is the whole plan's rather than one expression's. A statement has many
 /// expressions and no single one of them is the size worth bounding.
@@ -924,7 +924,9 @@ fn allowed(expr: &Expr, shape: Shape) -> Result<(), String> {
             // The one name let *through* a rule it fails, where `AMBIGUOUS` is a list of names
             // refused by one they pass. Opposite senses, so they are two lists: under one
             // name, whoever comes next extends the wrong one.
-            None if shape == Shape::Statement && call.func.name() == adql_functions::RAND => Ok(()),
+            None if shape == Shape::Statement && call.func.name() == adql::functions::RAND => {
+                Ok(())
+            }
             None => match call.func.signature().volatility {
                 Volatility::Immutable => Ok(()),
                 Volatility::Stable | Volatility::Volatile => Err(format!(
@@ -1013,7 +1015,7 @@ mod tests {
     fn state() -> SessionState {
         // Reproducibility decides how the scan is read back, and nothing about how an
         // identifier is parsed, so either value gives the same answer here.
-        crate::query::session_context(false).state()
+        crate::engine::query::session_context(false).state()
     }
 
     /// The limits an operator who set none would get.

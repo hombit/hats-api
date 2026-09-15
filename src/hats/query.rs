@@ -1,8 +1,8 @@
 //! A request against a whole HATS catalog rather than against one file of it.
 //!
 //! Three modules meet here and none of them could do this alone. `hats/` reads a catalog's
-//! own files and decides nothing about a request; `healpix.rs` answers questions about cells
-//! and knows nothing about a catalog's contents; `query.rs` runs a selection against one
+//! own files and decides nothing about a request; `sky::healpix` answers questions about cells
+//! and knows nothing about a catalog's contents; `engine::query` runs a selection against one
 //! file and knows nothing about either. This opens the catalog, settles which columns hold a
 //! position, chooses the partitions the region reaches, and reads them.
 //!
@@ -22,15 +22,15 @@ use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use futures::stream;
 use futures::{StreamExt, TryStreamExt};
 
+use crate::access::data::DataFiles;
 use crate::config::LimitsConfig;
-use crate::data::DataFiles;
+use crate::engine::query::{self, Order, Predicate, Projection, QueryResult, Selection};
+use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats::partitions::DATASET_DIR;
 use crate::hats::{Catalog, HatsPartition};
-use crate::healpix::{Cover, Coverage, Detail};
-use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{self, Healpix, Region, Spatial};
-use crate::sql;
+use crate::sky::healpix::{Cover, Coverage, Detail};
+use crate::sky::region::{self, Healpix, Region, Spatial};
 use crate::storage::{RemoteDir, RemoteFile};
 
 /// How many names one listing request brings back. S3 caps a page of `ListObjectsV2` at a
@@ -693,11 +693,11 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::access::AccessPolicy;
+    use crate::access::mount::Mounts;
     use crate::config::{AccessConfig, DataConfig, LimitsConfig, MountConfig};
-    use crate::materialize::Transfers;
-    use crate::mount::Mounts;
-    use crate::region::Region;
+    use crate::sky::region::Region;
     use crate::storage::StorageOptions;
+    use crate::storage::materialize::Transfers;
 
     /// The order the fixture is partitioned at.
     const ORDER: u8 = 3;
