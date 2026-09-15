@@ -49,7 +49,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
 | 11.1 | the tables the service publishes | todo | a name and a url, no storage options; temporary until §9.5, and §0.2 holds only while the list is config |
 | 11.2 | `/sync` and the parameters | todo | form-encoded is a carrier no route takes today |
-| 11.3 | formats, `MAXREC`, `OVERFLOW`, errors | todo | csv and tsv are new writers; `votable::encode` needs a trailer |
+| 11.3 | formats, `MAXREC`, `OVERFLOW`, errors | todo | csv and tsv are new writers; `output::votable::encode` needs a trailer |
 | 11.4 | `TAP_SCHEMA` | todo | names are strict here, the published spelling being what a client copies; a nested column is declared by its leaves and answered only by `json` and `parquet` |
 | 11.5 | VOSI capabilities, availability, tables | todo | |
 | 11.6 | `/examples` | todo | |
@@ -82,7 +82,7 @@ whatever else is decided.
 
 - **`xet`, the default.** The object comes over `hf-xet`'s own session — its own `reqwest`
   client, thread pool and disk cache — so the resolver would not see the addresses the
-  bytes come from and `materialize::Transfers` would not see the bytes. The session is
+  bytes come from and `storage::materialize::Transfers` would not see the bytes. The session is
   built unconditionally, so choosing the other mode avoids using it but not building it.
   Reads are said to be several times faster this way: revisit if the session ever takes an
   `HttpTransport`. The `xet-*` crates also read `HF_TOKEN` and `HF_ENDPOINT` themselves,
@@ -167,7 +167,7 @@ No job queue, job ids or polling: a plan is a list of stateless requests. See §
 ### 5.4 A catalog under a mount
 
 Three things a url deliberately does not do, each waiting for someone to want it: a `box`
-(four numbers would fit), an offset (`query::Order` promises nothing within a partition, so
+(four numbers would fit), an offset (`engine::query::Order` promises nothing within a partition, so
 it would have to say what it is an offset into), and a `catalog` field in the JSON listing
 so a client need not recognise a catalog from the names the way this service does. A
 collection has no `dataset/_common_metadata`, so the page falls back to the schema on the
@@ -218,7 +218,7 @@ costs `ttl`-bounded staleness rather than a permanently wrong answer.
 **The first two are the ones worth building, and the reason is measured.** A
 `format=parquet` request reads the source footer three times, two of them this crate's own:
 DataFusion fetches it while inferring the schema and serves the scan from its own
-`FileMetadataCache`, while `parquet_out::read_layout` goes to the store and pays two
+`FileMetadataCache`, while `output::parquet::read_layout` goes to the store and pays two
 requests — the reader's default prefetch is 8 bytes, enough for the footer tail and never
 for the footer. Every shape measured came to `+2` requests for the layout.
 
@@ -388,7 +388,7 @@ storage layer, the answer writers — not to keep one path.
 
 The region test is DataFusion's too. `point`, `circle`, `moc` and `contains` are scalar
 functions, and `contains` replaces its own call during the optimizer's simplify pass with the
-expression `region::predicate` already builds, so a region said in a statement prunes row
+expression `sky::region::predicate` already builds, so a region said in a statement prunes row
 groups exactly as the `region` field does. `simplify`, not `preimage`: the latter answers
 with one contiguous interval and a covering is many.
 
@@ -629,7 +629,7 @@ Four things this shape settles:
   that buys is that the question §8.1 would otherwise have to answer here — an operator's
   secret in a config file, on a surface whose answers are public — does not arise. Adding the
   field later is adding that question, not a convenience.
-- **The columns come from `dataset/_common_metadata`**, which `hats_table.rs` already reads
+- **The columns come from `dataset/_common_metadata`**, which `hats/table.rs` already reads
   first as one small `GET` — every partition's columns and no rows. So a table's metadata
   costs one request rather than a partition read, which is what makes §11.4 and §11.5
   answerable at all.
@@ -680,7 +680,7 @@ media type come from one list, the way `Format` already holds the three it has.
   may skip execution entirely. TOPCAT uses it to inspect a table.
 - **Truncation is marked, not silent.** `<INFO name="QUERY_STATUS" value="OVERFLOW"/>` goes
   *after* the `TABLE` (DALI §4.4), where the `OK` this encoder already writes goes before it.
-  So `votable::encode` grows a trailer; it cannot be said in the prologue, which is written
+  So `output::votable::encode` grows a trailer; it cannot be said in the prologue, which is written
   before the row count is known.
 
 **Reading `MAXREC` rows cannot tell a full answer from a truncated one**, so the read asks
@@ -699,7 +699,7 @@ need a rendering of their own; what may be named in the message is unchanged —
 own url and the names inside a catalog they asked for, never a local path.
 
 **The answer's columns are the `SELECT` clause's, in number, order and name** — TAP §3.2, and
-a `FIELD` takes the alias where one was written. `sql::packed` answers `lightcurve.mag,
+a `FIELD` takes the alias where one was written. `engine::sql::packed` answers `lightcurve.mag,
 lightcurve.mjd` as one `lightcurve` column holding both subfields, which would disagree with
 that — and does not arise, because **a nested column in a VOTable is refused**. §3.2 is met
 by there being no such answer. That refusal is this phase's behaviour and not a gap waiting
@@ -715,7 +715,7 @@ The four tables of TAP §4 — `schemas`, `tables`, `columns`, and the empty `ke
 them, which is how `pyvo` and TOPCAT ask. `TAP_SCHEMA` describes itself as well, since that
 is the first thing a client queries.
 
-`votable::spelling` already returns the `(datatype, arraysize)` pair `columns` needs, so the
+`output::votable::spelling` already returns the `(datatype, arraysize)` pair `columns` needs, so the
 mapping is not written twice. `indexed`, `principal` and `std` are not-null and are this
 service's to answer: the spatial index column and the two coordinate columns are the
 `indexed` ones, being what a region prunes on.
@@ -752,7 +752,7 @@ datatype and `arraysize="*"`, and no row named `lightcurve`. Three things behind
 - **A leaf has a type and the struct has none.** A leaf holds one row's whole array, which
   VOTable spells as the element's datatype with `arraysize="*"`. A row for the struct could
   carry only an invented type, which is what this section's strictness is against.
-- **It is what a caller writes.** `sql.rs` reads `lightcurve.mag` as a path into a struct
+- **It is what a caller writes.** `engine/sql.rs` reads `lightcurve.mag` as a path into a struct
   where the head is one of the file's own fields, so the published name is the name that
   selects the value — which is what TAP §4.3 asks the published name to be.
 - **Depth is not declared.** A struct in a struct has no leaf with a spelling either, so it
@@ -760,7 +760,7 @@ datatype and `arraysize="*"`, and no row named `lightcurve`. Three things behind
 
 **Declaring a column is not promising every format can return it, and three of the five
 cannot.** `json` and `parquet` answer these; `votable`, `csv` and `tsv` refuse. That split is
-this phase's behaviour rather than a temporary state — `votable.rs` refuses a nested column
+this phase's behaviour rather than a temporary state — `output/votable.rs` refuses a nested column
 by name today and keeps doing so until there is a right way to write one, which is a decision
 this phase does not make and must not anticipate. For `csv` and `tsv` there is no decision to
 make at all: CSV has no notion of structure, DALI §3.4.3 names the media type and says
@@ -792,7 +792,7 @@ quotes defensively breaks on it. Worth stating on §11.7's page, there being now
 ### 11.6 `/examples`
 
 A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. The
-rules `openapi.rs` already follows apply unchanged — an example is a query that runs and is
+rules `app/openapi/` already follows apply unchanged — an example is a query that runs and is
 judged on what it costs, so each names a few columns and a catalog example carries a circle.
 It is a page this service serves, so: no CDN, complete without JavaScript.
 
@@ -920,7 +920,7 @@ Nothing in it bounds what a `collect` returns.
      caller writing a "rectangle" means the second; `cdshealpix` means the first.
    - **The per-row test is a loop, not an expression** — a crossing count over `N` edges
      with `N` the caller's to choose, the one shape whose cost per row the request sets.
-     That wants a UDF, and a UDF is a thing `sql.rs`'s volatility rule and §5.2's pruning
+     That wants a UDF, and a UDF is a thing `engine/sql.rs`'s volatility rule and §5.2's pruning
      both have to be taught about.
    - **Self-intersecting and degenerate input**, each of which the covering and the row test
      can disagree about.

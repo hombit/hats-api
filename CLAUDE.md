@@ -27,6 +27,43 @@ reason; if that makes the comment longer, it was leaning on the plan to finish i
 sentence. The `no-plan-references` pre-commit hook greps for both spellings; this file
 is exempt because it is where the rule is written down.
 
+## Where the code lives
+
+Modules are grouped by what they are about, and a directory's name is the subject rather
+than the layer:
+
+```
+access/   what a request may reach: the endpoint rules (policy), the addresses behind them
+          (network), the readable directories (mount), a path under one (local), and which
+          files are data (data)
+storage/  a url opened into a store: the url itself (store), each backend's options
+          (options), each builder (backends), and a server that will not serve ranges
+          (materialize)
+engine/   the caller's SQL (sql) and running a selection against one parquet file (query)
+sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
+          (healpix), and saying one inside a query (geometry)
+hats/     a catalog: its own files (catalog, partitions, properties, local), a request
+          fanned out over it (query), and it as a table a statement names (table)
+adql/     the statement rewrite (translate), running one (query), the functions the
+          language requires (functions)
+output/   an answer written out: json, dsv, votable, parquet
+app/      the HTTP surface: the service and router (service), the file-server mode (files),
+          what every body shares (request), what every answer carries (answer), one module
+          per route under routes/, the directory page (listing) and the API description
+          (openapi/)
+```
+
+`config`, `error` and `logging` stay at the top, being everyone's.
+
+**A `mod.rs` holds declarations and nothing else** — the module doc, its `mod` lines and
+the `pub use` the rest of the crate reads it through. The code goes in a file named for
+what it is, beside it. A `mod.rs` that grows a type is one where the directory's contents
+can only be read by scrolling past it.
+
+Moving a type out of a `mod.rs` changes what its siblings can see: a field the parent kept
+private is no longer visible to the other children, so it needs `pub(super)`, and a test
+helper two siblings share needs `pub(in crate::<module>)`.
+
 ## Dependencies
 
 Look for a public crate before writing one. Especially for anything security- or
@@ -173,7 +210,7 @@ Then follow the shape the existing ones set:
   named may not, and OpenDAL accepts a `200` to a ranged read without complaint, so the
   reader gets the head of the file where it asked for the tail — a wrong answer, not an
   error. Any backend whose host comes from the request goes behind
-  `materialize::MaterializingStore`, which decides per object and copies to scratch when
+  `storage::materialize::MaterializingStore`, which decides per object and copies to scratch when
   it has to. Reading the code cannot tell the two servers apart; `tests/http_ranges.rs`
   serves both and checks the rows.
 
@@ -204,8 +241,8 @@ Then follow the shape the existing ones set:
 
 ## The caller's SQL
 
-`sql.rs` is the only way a caller's expression becomes something this service runs, and
-everything about what SQL means here is decided there.
+`engine/sql.rs` is the only way a caller's expression becomes something this service runs,
+and everything about what SQL means here is decided there.
 
 - **Expressions, never statements.** Each field is parsed on its own with `sqlparser`,
   and the parser must reach the end of the string. That is what makes it an expression
@@ -223,7 +260,7 @@ everything about what SQL means here is decided there.
   a plan. The rule holds for functions this crate has never compiled in, which is why it
   is not a list of names.
 
-  `sql::AMBIGUOUS` is the one exception, and it is a named one rather than a widening.
+  `engine::sql::AMBIGUOUS` is the one exception, and it is a named one rather than a widening.
   Volatility asks whether an answer matches the next one; it cannot ask whether the answer
   is the one the caller read their own expression as asking for. A name belongs there only
   when both readings are plausible *and* the wrong one comes back as a number rather than
@@ -233,7 +270,7 @@ everything about what SQL means here is decided there.
 
   **`rand` is the one name let *through* the rule, and only inside a statement.** ADQL makes
   it mandatory, so the route that answers ADQL has to have it; every other route refuses it,
-  which is what scoping the exception to `sql::Shape::Statement` means. Keep it out of
+  which is what scoping the exception to `engine::sql::Shape::Statement` means. Keep it out of
   `AMBIGUOUS`: that is a list of names refused by a rule they pass, this is a name passed by
   one it fails, and two lists with opposite senses under one name is how the wrong one gets
   extended. It is the only answer this service gives that differs between two identical
@@ -244,11 +281,11 @@ everything about what SQL means here is decided there.
   spelling by registering one.** The registry a request plans against is DataFusion's, whole
   and unedited; a name of this crate's own would be one no other reader of the same SQL has,
   so an expression that works here would fail everywhere the caller takes it. Every request
-  builds its context in `query::session_context`, which is what keeps that one list rather
+  builds its context in `engine::query::session_context`, which is what keeps that one list rather
   than one per call site.
 
   **What a *language* requires is the other case, and it is not an exception to that.**
-  `geometry::register` and `adql_functions::register` put `contains`, `point`, `circle`,
+  `sky::geometry::register` and `adql::functions::register` put `contains`, `point`, `circle`,
   `moc` and `rand` on the ADQL route's context, and the test is the same one: a name every
   other reader of that language also has. `CONTAINS` and `RAND` are ADQL's, written down in
   a standard, so a statement that works here works against any ADQL service — which is what
@@ -263,7 +300,7 @@ everything about what SQL means here is decided there.
   reachable by writing them out, and the form they share names neither.
 
   This is `resolve_identifiers`, and it needs `enable_ident_normalization` to stay off in
-  `query::session_config` — with it on, DataFusion lowercases what the pass did not
+  `engine::query::session_config` — with it on, DataFusion lowercases what the pass did not
   rewrite, and `OBJECTID` starts finding `objectid` again. Neither half works alone: a
   session config that turns normalization back on quietly widens the rule.
 - **The schema is what types a literal.** Plan against the file's `DFSchema` so that
@@ -278,7 +315,8 @@ everything about what SQL means here is decided there.
   curve; handing back `mag` and `mjd` separately makes the reader above — `nested_pandas`,
   `astropy` — put the row together again, against a schema that no longer matches the file's.
 
-  `sql::regrouped` and `sql::packed` are where that happens, which is why it is in `sql.rs`
+  `engine::sql::regrouped` and `engine::sql::packed` are where that happens, which is why it
+  is in `engine/sql.rs`
   with the rest of what a projection means rather than in the route that took the parameter:
   a body's list and a query string's comma-separated text both reach it, and a path means the
   same in either. Two rules go with it, and each is a case someone will otherwise write the
@@ -303,21 +341,23 @@ everything about what SQL means here is decided there.
   **The separators belong to the query string alone.** A body writes a list of names and an
   `AND`; a url has one `columns=` and one `filters=`, so the comma between names and the
   `&&`, `,` and `;` between conditions are spellings it needs and nothing else does.
-  `sql::columns` takes the list and `sql::column_text` the comma-separated string, both
-  through the same per-name code; `sql::filters` and `sql::filter_text` are the same
+  `engine::sql::columns` takes the list and `engine::sql::column_text` the comma-separated string, both
+  through the same per-name code; `engine::sql::filters` and `engine::sql::filter_text` are the same
   expression with and without the separator rewrite. Accepting a separator in a body would
   leave one meaning with two spellings in the carrier that needs neither.
 
-  **The three query routes answer on every target together.** `app::with_queries` registers
-  them as one set and `app::describe_queries` describes the same set, since a request that
-  answered on only some targets would be exceptions a caller has to remember.
+  **The three query routes answer on every target together.** `app::service::with_queries`
+  registers them as one set and `app::openapi::description::describe_queries` describes the
+  same set, since a request that answered on only some targets would be exceptions a caller has
+  to remember.
 
-  **Each endpoint takes its own request type**: `ParquetQuery` carries the column names a file
-  cannot supply for itself, `CatalogQuery` carries none of them, `CatalogPlanQuery` adds the
+  **Each endpoint takes its own request type**, in the route module that answers it:
+  `routes::parquet::ParquetQuery` carries the column names a file cannot supply for itself,
+  `routes::hats::CatalogQuery` carries none of them, `routes::hats::CatalogPlanQuery` adds the
   one field that only means something where a plan is the answer. A field an endpoint has no
   use for is not a field of its request, so there is nothing there to drop in silence, nothing
   to honour by a later change, and the description shows each route what that route takes.
-  Both catalog types lower to `app::Lowered`, which is what everything below the routes works
+  Both catalog types lower to one `Lowered`, which is what everything below those routes works
   in — so a further catalog endpoint is a wire type and a `lowered()`.
 
   **A request type declares its fields in the order a body is written** — url, storage,
@@ -329,7 +369,7 @@ everything about what SQL means here is decided there.
 
   **The body stays flat on the wire.** `{url, columns, filters, region}`, never a nested query
   object. Keys a route has no field for are collected into a flattened `unknown` and refused by
-  `app::refuse_unknown`, which names what the endpoint does take — which `deny_unknown_fields`
+  `app::request::refuse_unknown`, which names what the endpoint does take — which `deny_unknown_fields`
   would not, and which the `flatten` on `unknown` rules out anyway. Anything added to one of
   those structs must keep both halves: flat outside, nothing dropped.
 - **A parameter this service acts on is honoured or refused, never dropped.** A `filters`
@@ -340,7 +380,7 @@ everything about what SQL means here is decided there.
   why the names were taken and the behaviour was not.
 
   A parameter on a path that has no query surface is a different thing and is ignored, the
-  way any HTTP server ignores what it has no use for. `data::DataFiles` is what draws that
+  way any HTTP server ignores what it has no use for. `access::data::DataFiles` is what draws that
   line — a list of filename globs — so whether a request is a query at all is decided
   before any parameter is read, rather than by each parameter deciding for itself.
 
@@ -363,7 +403,7 @@ deliberately.
 
 `math_expressions` is the one that is on, because arithmetic over a column is what a
 catalog query is for and every function in it is `Immutable` but one — `random()`, which
-the volatility rule already refuses and which `sql::tests` holds to that. The rest stay
+the volatility rule already refuses and which `engine::sql::tests` holds to that. The rest stay
 off, and a request naming one of their functions is an error naming it. Turning another on
 means reading its list: `string_expressions` and `regex_expressions` in particular carry
 functions whose cost is in the data rather than in the expression, which is a different
@@ -398,8 +438,8 @@ than being validated twice.
 ## The order of the rows
 
 **The file-server mode returns rows in the source file's order. The API mode promises
-nothing about order. Both answer a `limit` reproducibly.** `query::Order` is how a request
-says which it is, and `query::reproducible` turns that plus the presence of a `limit` into
+nothing about order. Both answer a `limit` reproducibly.** `engine::query::Order` is how a request
+says which it is, and `engine::query::reproducible` turns that plus the presence of a `limit` into
 the one decision the rest of the code reads.
 
 A `limit` is the part that is easy to get wrong. Under an unstable order it stops being
@@ -420,25 +460,25 @@ Three mechanisms, and all three are load-bearing:
   working, so this is not a serial read — do not reach for `target_partitions = 1`.
 - **A `limit` is applied while reading, never by the plan.** `DataFrame::limit` also
   inserts a `CoalescePartitionsExec`, so a plan-level limit chooses arbitrary rows by
-  construction. `query::first_rows_in_order` walks the partitions in index order and
+  construction. `engine::query::first_rows_in_order` walks the partitions in index order and
   stops, which is both correct and cheap: a stream that is never polled never reads its
   byte range.
 
-`query::tests` crosses these against row counts, row-group sizes, and files written with
+`engine::query::tests` crosses these against row counts, row-group sizes, and files written with
 page statistics, chunk statistics and none — because the guarantee cannot depend on how a
 file was written, and which importer wrote a caller's file is not something this service
 gets to assume. Two things such a test needs to stay honest:
 
 - **Assert the scan was actually split.** DataFusion does not split a file below
   `repartition_file_min_size`, which is 1 MiB, so a small fixture reads in one partition
-  and every ordering assertion passes while checking nothing. `query::execute` returns the
+  and every ordering assertion passes while checking nothing. `engine::query::execute` returns the
   partition count for exactly this.
 - **Defeat compression.** An ascending column ZSTDs down to nothing, so a fixture needs a
   scattered one to reach that 1 MiB at all.
 
 ## The region on the sky
 
-`region.rs` is the only place a shape becomes a predicate. It is a structured field rather
+`sky/region.rs` is the only place a shape becomes a predicate. It is a structured field rather
 than an expression because the constraint has to be *recognised* to be planned on, and it
 lowers to a `datafusion` `Expr` directly rather than to SQL text — there is nothing to
 quote and no second parser.
@@ -476,8 +516,8 @@ quote and no second parser.
   declares nothing and so constrains nothing: naming the two columns is the caller's only
   claim there, and there is nothing for it to contradict.
 
-  How the claim reaches the check is a mark on the schema — `geometry::COORDINATE` on the two
-  fields, written by `hats_table::marked` and read by `geometry::declared_position`. It rides
+  How the claim reaches the check is a mark on the schema — `sky::geometry::COORDINATE` on the two
+  fields, written by `hats::table::marked` and read by `sky::geometry::declared_position`. It rides
   on the field, so an alias, a join or a subquery between the table and the region test
   changes nothing; a registry keyed by table name would have to resolve all three.
 - **A shape that reads two ways is refused, not resolved.** A `zone`'s `ra` runs eastward
@@ -489,7 +529,7 @@ quote and no second parser.
   at the caller's own depth — `Shape::covering` ignores `Detail` for it, since re-covering
   the shape *is* moving it — so its inner and outer sets are the same set and it is the one
   exact shape. It has no coordinate test, so it needs no `ra_column`; and it has nothing
-  behind its covering, so the covering may not be dropped. `healpix::Cells` carries that
+  behind its covering, so the covering may not be dropped. `sky::healpix::Cells` carries that
   last one: `Required` turns off `ROW_RANGE_BUDGET`, which for every other shape trades a
   long covering for the geometry and here would trade it for nothing. A dropped covering
   there returns no rows, which reads exactly like a MOC that holds none — and a file with no
@@ -500,14 +540,14 @@ quote and no second parser.
   region selecting nothing is the failure worth catching, whatever produced it.
 - Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
   widened before the arithmetic rather than the trigonometry running at single precision.
-  `region::tests` crosses both column types against both right-ascension conventions.
-- A caller's shape is validated once, into a `region::Shape`, and everything downstream
+  `sky::region::tests` crosses both column types against both right-ascension conventions.
+- A caller's shape is validated once, into a `sky::region::Shape`, and everything downstream
   reads that. Two readings of one field — the predicate's and the covering's — is how the
   two come to disagree about what `dec: [10, 10]` meant.
 
 ## The HEALPix covering
 
-`healpix.rs` turns a shape into cells: which partitions of a catalog it can touch, and
+`sky/healpix.rs` turns a shape into cells: which partitions of a catalog it can touch, and
 which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds them.
 
 - **Two sets, and each may only be wrong one way.** The outer set contains the shape, so a
@@ -575,39 +615,39 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   - **`ScalarUDFImpl::preimage` says one interval and no more.** A UDF that declares the
     interval `f(x) = v` inverts to has `f(col) = v` rewritten into `col >= lo AND col <
     hi`, which prunes. One contiguous interval, for a comparison: a covering is many.
-  - **`ScalarUDFImpl::simplify` says a whole covering**, and is how `geometry::Contains`
+  - **`ScalarUDFImpl::simplify` says a whole covering**, and is how `sky::geometry::Contains`
     does it: the call replaces itself during the optimizer's simplify pass with the
-    expression `region::predicate` builds, and that pass runs before the scan's pruning
+    expression `sky::region::predicate` builds, and that pass runs before the scan's pruning
     predicate is made. So a region said as a function reads exactly the bytes the `region`
     field reads, which `naming_the_healpix_column_reads_less_of_the_file` asserts.
 
 - **A shape built out of columns is a crossmatch, and it carries no covering.**
   `contains(point(b.ra, b.dec), circle(a.ra, a.dec, r))` is ADQL's own spelling of one, and
   the circle is a different circle for every row of `a` — so there is no one covering, no
-  pruning, and what it becomes is `region::within`, the separation and the bound. That it
+  pruning, and what it becomes is `sky::region::within`, the separation and the bound. That it
   prunes nothing is not a gap to be closed by recognising the pattern harder: a scan is
   pruned by one predicate, and this is a predicate over two rows. What bounds such a query
   is each side's *own* region, which does prune, and `max_partitions` refusing a side that
   has none.
 
-  `region::separation` is the one haversine, and both forms go through it: a cone, a
+  `sky::region::separation` is the one haversine, and both forms go through it: a cone, a
   crossmatch, and `distance(...)` as a value. A second copy of that formula is how two ways
   of asking the same question come to disagree about which pairs are a degree apart.
 
-- **A region test in a statement has to say which table it is about.** `region::Spatial`
-  carries a `relation` for that, and `geometry::Contains` fills it in from the caller's own
+- **A region test in a statement has to say which table it is about.** `sky::region::Spatial`
+  carries a `relation` for that, and `sky::geometry::Contains` fills it in from the caller's own
   `point(...)`. With two catalogs joined, a bare `ra` is a column of each and the predicate
   will not plan — and `_healpix_29` is a column of each too, which is worse: `SpatialIndex`
   finds two, reports that neither names an index, and the covering is silently dropped. Both
-  halves are needed, and `sql::fields_of` is what narrows the search to one table's fields.
+  halves are needed, and `engine::sql::fields_of` is what narrows the search to one table's fields.
   `the_adql_route_crossmatches_two_catalogs` runs with one partition allowed, so a lost
   covering is a refusal rather than a slow pass.
 
 - **A region function goes only on a context whose planner also chooses what to scan.**
   The covering prunes row groups inside a file; a catalog's partitions are chosen before any
   file is opened, from a `region` field. On a catalog route `contains` would prune within
-  every partition and still open all of them. `geometry::register` is called where a query
-  can say a region as a function, never on `query::session_context`.
+  every partition and still open all of them. `sky::geometry::register` is called where a query
+  can say a region as a function, never on `engine::query::session_context`.
 - **Budget the boundary, not the area.** The interior of a shape merges into few ranges
   whatever the depth — the whole sky is one — so the range count follows the boundary's
   length. Sizing by area instead is the same thing up to a constant for a round shape and
@@ -626,7 +666,7 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   name that carries its own order, so it is the only one a file can be recognised as having
   — `SpatialIndex::discover` takes it where the schema holds exactly one column of that
   name, of a type wide enough for an order-29 cell. Two of them names neither, the way
-  `sql::resolve_identifiers` has it for any shared name. Everything it rejects is `None`
+  `engine::sql::resolve_identifiers` has it for any shared name. Everything it rejects is `None`
   rather than an error: nobody claimed the column was there, so its absence is a file with
   no index rather than a fault. That is what makes a HATS partition queried directly as fast
   as the same partition reached through its catalog.
@@ -638,7 +678,7 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
   failing. `SpatialIndex::resolve` refuses a type too narrow for the order it was given.
 - **The column is an accelerator, and that is a claim about every answer.** Naming it
   changes what a query costs and never which rows come back, which is why
-  `region::tests` runs every case both ways over one fixture and asserts they agree —
+  `sky::region::tests` runs every case both ways over one fixture and asserts they agree —
   and why one test measures `data_bytes_read` to show the prefilter ran at all. A file
   sorted by the column skips row groups; one that is not gets the same rows, having only
   saved the trigonometry. Nothing checks for the sorting, because nothing depends on it.
@@ -663,7 +703,7 @@ Two things follow, and both have been got wrong here before:
   seen.
 - **A library's invariants are the library's.** `moc`'s ranges are disjoint and normalized
   because that is what a `RangeMOC` is; `cdshealpix`'s coverings are supersets because that
-  is what the function returns. Nothing here re-checks any of it. Where `healpix::tests`
+  is what the function returns. Nothing here re-checks any of it. Where `sky::healpix::tests`
   cross a covering against its shape, that is testing *this crate's* use of the library —
   the depth it chose, the complement it took — not auditing the library.
 
@@ -743,7 +783,7 @@ Everything below is about reading a catalog, not about judging one.
   no rows rather than an error. What makes the fallback safe is that it is a candidate and
   not a claim: `SpatialIndex::resolve` asks the file's schema, and a file with no such
   column is queried on the geometry alone. A request naming its own pair overrides it.
-- **The partition list is sorted by each cell's `healpix::span` start and searched into.**
+- **The partition list is sorted by each cell's `sky::healpix::span` start and searched into.**
   That is what makes `Partitions::overlapping` two binary searches rather than a pass over
   the catalog, and it is the order partitions, rows and plan entries come back in. Sorting
   by name instead puts `Npix=1000` before `Npix=2`, which is neither spatial nor numeric.
@@ -757,9 +797,10 @@ Everything below is about reading a catalog, not about judging one.
 
 ## A request against a catalog
 
-`hats_query.rs` is where a request meets a catalog: it opens one, settles which columns
-hold a position, chooses the partitions, and reads them. `hats/` reads the catalog's files
-and decides nothing; `healpix.rs` answers questions about cells and knows nothing about a
+`hats/query.rs` is where a request meets a catalog: it opens one, settles which columns
+hold a position, chooses the partitions, and reads them. The rest of `hats/` reads the
+catalog's files
+and decides nothing; `sky/healpix.rs` answers questions about cells and knows nothing about a
 catalog's contents. Keep it that way — the decisions belong in the one module that has a
 request in front of it.
 
@@ -786,7 +827,7 @@ request in front of it.
   promise the catalog routes make and the single-file route does not. A cell's number is
   where it is on the sky, so the order costs nothing — the partitions are enumerated anyway
   — and it makes a `limit` a coherent piece of sky rather than an arbitrary sample. Order
-  *within* a partition is `query::Order`'s and is unchanged.
+  *within* a partition is `engine::query::Order`'s and is unchanged.
 - **Partitions are read several at a time, and the answer is still the catalog's order.**
   `buffered` yields by position, so the parallelism costs nothing in reproducibility — which
   is the whole of what a `limit` here depends on. Each partition is read with the whole limit
@@ -851,7 +892,7 @@ That applies to code and to conclusions equally. A setting kept because "today's
 have no page index" is a setting that breaks quietly the week an importer starts writing
 one — and one dropped for the same reason is worse, because nothing in the answer would
 say the query got slower. A measurement over one file shape is a measurement of that
-shape: `query::tests` and `tests/engine.rs` both cross their cases over how the file was
+shape: `engine::query::tests` and `tests/engine.rs` both cross their cases over how the file was
 written for this reason, and a finding that holds on one shape and not another is a
 finding about the shape.
 
@@ -866,7 +907,7 @@ nothing downstream reports it.
 
 - **JSON has no number for `NaN` or either infinity, and arrow's writer spells all three
   `null`.** Three values a file holds, reported as a fourth it does not — and in a
-  photometric column all three are ordinary. `query::to_json` installs an `EncoderFactory`
+  photometric column all three are ordinary. `output::json::to_json` installs an `EncoderFactory`
   that writes them as the strings `"NaN"`, `"Infinity"` and `"-Infinity"`, which `float()`
   and `Number()` both read back. It takes over only a column that actually holds one, so
   ordinary data keeps the writer's own faster formatting; the cost of the check is a pass
@@ -884,7 +925,7 @@ A body is compressed on the way out where the client asked for it, which is one 
 the whole router and two rules to keep:
 
 - **A body that is already compressed is excluded by its content type**, not by its route.
-  Parquet is the one today — `app::compression` names `PARQUET_CONTENT_TYPE` beside what
+  Parquet is the one today — `app::service::compression` names `PARQUET_CONTENT_TYPE` beside what
   `DefaultPredicate` excludes — and that one line covers a file served off a mount and a
   query encoded into one. A new response type carrying its own compression is another name
   in that predicate; a route-shaped rule would already have missed one of parquet's two
@@ -905,7 +946,7 @@ has one, otherwise every entry, ordered by name. No paging, no cap, no sort para
 - **A name is the filesystem's, and it is encoded twice.** Into a url — where `/`, `%`
   and the delimiters must not survive literally, and `=` must, because HATS directories
   are called `Norder=5` — and into HTML, where a name is markup until it is escaped.
-  Both encodings live in `listing.rs`; nothing outside it builds a url out of a name.
+  Both encodings live in `app/listing.rs`; nothing outside it builds a url out of a name.
 - **The page is scraped, so every link on it is a claim about the directory.** `fsspec`'s
   HTTP filesystem — and the `lsdb` clients above it — reads a directory by pulling every
   `href` out of the markup and keeping the ones below the url it asked for. So each entry
@@ -1003,9 +1044,11 @@ no restating what the line below already says.
 
 ## The API description
 
-`openapi.rs` builds the document and renders the page at `{api.prefix}/docs`; the schemas come
-from the same `serde` types the routes deserialize, so a field added to a request appears in
-both by compiling. Everything below is about keeping that true, and readable.
+`app/openapi/` builds the document and renders the page at `{api.prefix}/docs`: `description`
+is what this service's own routes say, `document` builds the document around them, and `page`
+renders it. The schemas come from the same `serde` types the routes deserialize, so a field
+added to a request appears in both by compiling. Everything below is about keeping that true,
+and readable.
 
 - **A `///` on a request or response type is the caller's text.** It says what the thing is and
   how to write it; the reasoning for why it is that way goes in a `//` above, which `utoipa`
@@ -1029,7 +1072,7 @@ both by compiling. Everything below is about keeping that true, and readable.
   page says about applicability should come the same way.
 
 - **The page renders this document, not arbitrary OpenAPI.** It handles the vocabulary
-  `app::describe` emits and no more. Three shapes it has to see through, each of which reads as
+  `app::openapi::description` emits and no more. Three shapes it has to see through, each of which reads as
   a fault when it does not: a nullable field is `oneOf[null, T]` and must be reported as `T`; a
   tagged variant's tag is the heading and is not repeated among its fields; a component that is
   an `allOf` of others is flattened, since a `#[serde(flatten)]` group is a Rust arrangement and
@@ -1048,8 +1091,8 @@ both by compiling. Everything below is about keeping that true, and readable.
   and not the rows it returns — these catalogs are 150 to 370 columns wide, and asking for all
   of them is ten to seventy seconds where four named ones are about one. So every example names
   a few columns, and a catalog example carries a circle, without which the query reads every
-  partition. `app::example` takes the columns and the condition as arguments, since they belong
-  to the target.
+  partition. `description::example` takes the columns and the condition as arguments, since
+  they belong to the target.
 
   **The targets differ on purpose, and one of them is a single file.** The catalog examples
   name Gaia DR3, which is all-sky and evenly partitioned, so a reader who moves the circle gets
@@ -1062,7 +1105,7 @@ both by compiling. Everything below is about keeping that true, and readable.
 
 - **`utoipa`'s generics need naming by hand.** `ToSchema::schemas` composes a type argument
   into the name — `PlanBody_T` — while `ToSchema::name` drops it and answers `PlanBody` for
-  every instantiation. `app::named` registers under `ToSchema::name`, so two instantiations of
+  every instantiation. `description::named` registers under `ToSchema::name`, so two instantiations of
   one generic registered through it land at one key, where the second silently replaces the
   first. A generic request or response type needs its name passed in. A recursive type also
   needs `#[schema(no_recursion)]`, or building the document overflows the stack.
