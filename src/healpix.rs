@@ -750,6 +750,17 @@ fn inside_a_zone(
     depth: u8,
 ) -> RangeMOC<u64, Hpx<u64>> {
     if ra_span >= 360.0 {
+        // The same upstream panic [`ring`] steps around, and the opposite substitution. This
+        // is the *inner* covering, which may lose cells and may never gain one, so a disk —
+        // larger than the ring — would be a wrong answer here rather than a wide one. Nothing
+        // is what a ring this small was going to be worth anyway: it is smaller than a cell,
+        // so no cell lies wholly inside it, and the rows it would have spared the geometry
+        // are rows the geometry answers correctly.
+        //
+        // See <https://github.com/cds-astro/cds-healpix-rust/issues/27>.
+        if 90.0 - dec_from < SMALL_RING * cell_side(depth) {
+            return RangeMOC::new_empty(depth);
+        }
         return RangeMOC::from_ring(
             0.0,
             FRAC_PI_2,
@@ -805,7 +816,28 @@ fn declinations_within(dec_from: f64, dec_to: f64, depth: u8) -> RangeMOC<u64, H
 }
 
 /// The cells a ring of these radii about `lat` touches, both radii in degrees.
+///
+/// **A ring small next to a cell is taken as the disk it sits in.** `ring_coverage_approx_custom`
+/// panics — `Wrong hash value: too large`, from an assertion inside `cdshealpix` — once the
+/// outer radius falls under about a tenth of a cell's side at the depth it was asked for:
+/// roughly six degrees at depth 0, a fifth of a degree at depth 5, a hundredth at depth 10.
+/// That is [`SMALL_RING`]'s case, and a panic is the one answer this service cannot turn into
+/// a response, so it is kept away from rather than caught.
+///
+/// See <https://github.com/cds-astro/cds-healpix-rust/issues/27>.
+/// `the_small_ring_upstream_panic_is_still_there` is the canary: it fails once the fix is
+/// released, and then this whole function goes back to being the `from_ring` call alone.
+///
+/// The disk is the right substitute rather than a convenience. This builds the **outer**
+/// covering, where every widening is allowed and only a narrowing loses rows, and the disk of
+/// the outer radius contains the ring by construction. At this size it is the same cells
+/// anyway: the ring's hole is smaller than a cell, so no cell the ring misses is one the disk
+/// keeps. `from_cone` has no such floor — a milliarcsecond cone comes back fine — which is
+/// why an ordinary `circle` never met this.
 fn ring(lat: f64, inner: f64, outer: f64, depth: u8) -> RangeMOC<u64, Hpx<u64>> {
+    if outer < SMALL_RING * cell_side(depth) {
+        return cone(0.0, lat.to_degrees(), outer, depth, CellSelection::All);
+    }
     RangeMOC::from_ring(
         0.0,
         lat,
@@ -815,6 +847,22 @@ fn ring(lat: f64, inner: f64, outer: f64, depth: u8) -> RangeMOC<u64, Hpx<u64>> 
         CONE_DELTA,
         CellSelection::All,
     )
+}
+
+/// How small a ring may be, against a cell's side, before [`ring`] takes it as a disk.
+///
+/// The panic starts at about a tenth of a cell, so this is ten times what the fault needs —
+/// the margin being cheap and the failure being a dropped connection. A ring this small has a
+/// hole smaller than a cell, so the substitution is invisible in the covering either way, and
+/// nothing here is tuned to sit just outside an upstream assertion.
+const SMALL_RING: f64 = 1.0;
+
+/// A cell's side at `depth`, in degrees.
+///
+/// The same nominal scale [`BASE_CELL_AREA`] is: cells are not squares and their sides vary
+/// over the sphere, and both callers want an order of magnitude rather than a measurement.
+fn cell_side(depth: u8) -> f64 {
+    BASE_CELL_AREA.sqrt() / f64::from(1_u32 << depth.min(MAX_ORDER))
 }
 
 /// The cells a cone of `radius` degrees about a position in degrees touches, or those it
@@ -1379,6 +1427,30 @@ mod tests {
                 dec_from: -90.0,
                 dec_to: 90.0,
             },
+            // Bands close enough to a pole that the ring they are covered by is small next
+            // to a cell, which is the case `ring` substitutes a disk for. Both poles, and one
+            // that stops short of the pole rather than reaching it — the substitution is
+            // about the ring's size and not about touching the pole. These panicked before
+            // the substitution, so they are here to be answered at all as much as to be
+            // bracketed.
+            Shape::Zone {
+                ra_from: 0.0,
+                ra_span: 360.0,
+                dec_from: 89.9,
+                dec_to: 90.0,
+            },
+            Shape::Zone {
+                ra_from: 0.0,
+                ra_span: 10.0,
+                dec_from: 89.999,
+                dec_to: 89.9999,
+            },
+            Shape::Zone {
+                ra_from: 0.0,
+                ra_span: 360.0,
+                dec_from: -90.0,
+                dec_to: -89.9,
+            },
         ]
     }
 
@@ -1835,5 +1907,39 @@ mod tests {
         (0..360).flat_map(|ra| {
             (-90..=90).map(move |dec| (f64::from(ra) + 0.37, f64::from(dec) * 0.999))
         })
+    }
+
+    /// **A canary, and it fails when the bug it watches is fixed.**
+    ///
+    /// [`ring`] substitutes a disk for a ring too small for its depth, because
+    /// `ring_coverage_approx_custom` panics on one. That workaround is worth exactly as long
+    /// as the panic is, and nothing else here would notice it going away — the substitution
+    /// returns the same cells, so every other test passes either way and the workaround would
+    /// sit in the covering forever.
+    ///
+    /// So this asserts the fault. When `cdshealpix` releases the fix this test fails —
+    /// `test did not panic as expected` — and that failure is the instruction: delete
+    /// [`SMALL_RING`], delete the branch at the top of [`ring`], delete the one in
+    /// [`inside_a_zone`], and delete this.
+    ///
+    /// `expected` pins the assertion rather than merely the fact of a panic, so an unrelated
+    /// fault in the same call is a failure here rather than a canary that goes on looking
+    /// healthy while watching the wrong thing.
+    ///
+    /// See <https://github.com/cds-astro/cds-healpix-rust/issues/27>.
+    #[test]
+    #[should_panic(expected = "Wrong hash value: too large")]
+    fn the_small_ring_upstream_panic_is_still_there() {
+        // Not `ring`, which is the thing being guarded, and not through `moc`, whose
+        // `from_ring` only forwards to this. The arguments are the ones the covering would
+        // have reached it with for a `zone` of `dec: [89.9, 90]` at depth 5.
+        cdshealpix::nested::ring_coverage_approx_custom(
+            5,
+            CONE_DELTA,
+            0.0,
+            FRAC_PI_2,
+            0.0_f64.to_radians(),
+            0.1_f64.to_radians(),
+        );
     }
 }

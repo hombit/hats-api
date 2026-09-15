@@ -27,7 +27,8 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A `region` of a few hundred shapes, or a `moc` of a few hundred ranges, aborted the process with a stack overflow instead of answering.
+- A `region` of a few hundred shapes, or a `moc` of a few hundred ranges, aborted the process with a stack overflow instead of answering. [#43](https://github.com/hombit/hats-api/pull/43)
+- A `zone` whose declination band lies near a pole dropped the connection instead of answering. [#45](https://github.com/hombit/hats-api/pull/45), [cds-healpix-rust#27](https://github.com/cds-astro/cds-healpix-rust/issues/27)
 
 ### Security
 
