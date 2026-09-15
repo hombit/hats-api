@@ -716,7 +716,7 @@ fn options_clause_for(scheme: &str) -> String {
 #[cfg(test)]
 mod tests {
     use crate::storage::parse_url;
-    use crate::storage::tests::{SECRET, no_options, open, options};
+    use crate::storage::store::tests::{SECRET, no_options, open, options};
 
     use super::*;
 

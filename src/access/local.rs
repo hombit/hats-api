@@ -11,7 +11,8 @@ use std::path::{Component, Path, PathBuf};
 use url::Url;
 
 use crate::access::mount::{self, Mount};
-use crate::access::{AccessPolicy, LOCAL_SCHEME, describe};
+use crate::access::policy::describe;
+use crate::access::{AccessPolicy, LOCAL_SCHEME};
 use crate::error::ApiError;
 
 impl AccessPolicy {
@@ -203,7 +204,7 @@ mod tests {
 
     use crate::access::Target;
     use crate::access::mount::Mounts;
-    use crate::access::tests::{temp_dir, url, with_paths};
+    use crate::access::policy::tests::{temp_dir, url, with_paths};
     use crate::config::{AccessConfig, DataConfig, MountConfig};
 
     use super::*;
