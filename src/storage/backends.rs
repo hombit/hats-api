@@ -15,10 +15,10 @@ use url::Url;
 
 use crate::access::{AccessPolicy, Backend, EndpointScheme, describe_endpoint_schemes};
 use crate::error::ApiError;
-use crate::storage::file_url;
 use crate::storage::options::{
     AzureOptions, GcsOptions, S3Options, StorageOptions, WebdavOptions, WebdavTransport,
 };
+use crate::storage::store::file_url;
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
@@ -581,7 +581,7 @@ fn is_base64(value: &str) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use crate::storage::tests::{SECRET, no_options, open, options, store_key, transfers};
+    use crate::storage::store::tests::{SECRET, no_options, open, options, store_key, transfers};
     use crate::storage::{self, RemoteFile, parse_url};
 
     use super::*;
