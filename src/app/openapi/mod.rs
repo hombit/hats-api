@@ -8,6 +8,8 @@
 //! It describes API mode only. The file-server mode has no route set to enumerate — every
 //! url below a mount is a data path — so OpenAPI would have to invent a shape for it.
 
+pub(in crate::app) mod description;
+
 use utoipa::openapi::path::{Operation, OperationBuilder};
 use utoipa::openapi::request_body::RequestBodyBuilder;
 use utoipa::openapi::{
