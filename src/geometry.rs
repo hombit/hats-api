@@ -70,7 +70,7 @@ fn position() -> DataType {
 /// **Only a context that can prune by them.** On a single file the rewrite is the whole
 /// saving, since the covering is what row-group statistics skip on. A catalog is chosen
 /// partition by partition before any file is opened, and that choice is made from a
-/// `region` field — a `contains` in the `where` of a catalog route would prune inside each
+/// `region` field — a `contains` in the `filters` of a catalog route would prune inside each
 /// partition and still open every one of them. So these are not on the context every route
 /// shares; a query that can say a region as a function is one whose planner also decides what
 /// to scan, and that is the context which registers them.
@@ -637,10 +637,10 @@ mod tests {
             .map_err(|error| error.to_string())
     }
 
-    /// One `where`, planned and optimized the way a request's is.
+    /// One predicate, planned and optimized the way a request's is.
     fn planned(sql: &str, index: bool) -> Result<String, String> {
         let (ctx, df) = frame(index);
-        let expr = sql::predicate(&ctx.state(), df.schema(), sql, limits())
+        let expr = sql::filters(&ctx.state(), df.schema(), sql, limits())
             .map_err(|error| error.to_string())?;
         optimized(df.filter(expr).map_err(|error| error.to_string())?)
     }
@@ -745,25 +745,29 @@ mod tests {
     /// told so rather than handed a value.
     #[tokio::test]
     async fn a_position_is_not_a_value() {
-        let (ctx, df) = frame(true);
-        let exprs = sql::projection(&ctx.state(), df.schema(), "point(ra, dec)", limits()).unwrap();
-        let error = df.select(exprs).unwrap().collect().await.unwrap_err();
+        let error = selected("point(ra, dec)").await.unwrap_err();
         assert!(error.to_string().contains("not a value"), "{error}");
+    }
+
+    /// One select list over the fixture, which is where a function is a value rather than a
+    /// region test.
+    async fn selected(list: &str) -> datafusion::error::Result<Vec<RecordBatch>> {
+        let ctx = session_context(false);
+        register(&ctx);
+        ctx.register_batch("t", batch(true))?;
+        ctx.sql(&format!("SELECT {list} FROM t"))
+            .await?
+            .collect()
+            .await
     }
 
     /// The constructors evaluate to the region's own text, which is what the `region` field
     /// takes — so the two ways of saying a circle are the same document.
     #[tokio::test]
     async fn a_constructor_is_the_region_field_written_out() {
-        let (ctx, df) = frame(true);
-        let exprs = sql::projection(
-            &ctx.state(),
-            df.schema(),
-            "circle(45.0, -20.0, 0.1)",
-            limits(),
-        )
-        .expect("a constructor is an ordinary expression");
-        let batches = df.select(exprs).unwrap().collect().await.unwrap();
+        let batches = selected("circle(45.0, -20.0, 0.1)")
+            .await
+            .expect("a constructor is an ordinary expression");
         let column = batches[0].column(0).as_string::<i32>();
         assert_eq!(column.len(), 1);
         let region: Region =

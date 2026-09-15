@@ -23,7 +23,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 2.5 | Hugging Face | deferred | until the redirect hop is decided. Still droppable |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
-| 3.3 | API request shape (`select`/`where`, `region`) | done | what `region` may still gain is §5.2 |
+| 3.3 | API request shape (`columns`/`filters`, `region`) | done | what `region` may still gain is §5.2 |
 | 3.4 | file-server request shape | done | |
 | 4 | file-server interface | done | never tried against a real `lsdb` client, which is the one check it cannot do by reading |
 | 4.1 | write the README | done | |
@@ -122,7 +122,7 @@ with; decide whether it gets one, since what it would return is metadata rather 
 
 **A projection could be checked before any partition is read.**
 `dataset/_common_metadata` is the schema and nothing else, so one small `GET` would say
-whether a `select` names a column the catalog has. Worth having once there is a reason to
+whether `columns` names a column the catalog has. Worth having once there is a reason to
 pay for the request: today the first partition's footer answers on the way to reading it.
 
 Nothing is cached, so every request against a catalog pays two `GET`s before a row.
@@ -381,7 +381,7 @@ of spelling differences, so the route rewrites the parsed statement where the tw
 refuses what neither would answer correctly, and hands DataFusion a syntax tree over tables
 registered by the caller's names. Grouping, ordering, joins, subqueries and set operations
 are the planner's, and nothing here re-decides what they mean. It is a different execution
-path from the `expr` and `simple` routes on purpose: those fan a selection out over
+path from the `simple` routes on purpose: those fan a selection out over
 partitions and make promises about order and work lists that a planned statement does not.
 Where the two share code it is because the code is the same thing — the region covering, the
 storage layer, the answer writers — not to keep one path.
@@ -432,7 +432,7 @@ DaCHS, whose spelling §10.7 follows.
 - **`RESPONSEFORMAT` is not taken; the existing `format` is.** VOTable, JSON and parquet are
   already answered per §7.5 and are what a TAP layer will need anyway.
 
-Whether the `hats` expression routes later move onto `hats_table`'s provider is deferred, not
+Whether the `simple/hats` routes later move onto `hats_table`'s provider is deferred, not
 assumed: they promise an order and answer with a work list, and it does neither.
 
 ### 10.5 Stage three — one large table and small ones

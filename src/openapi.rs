@@ -2,8 +2,8 @@
 //!
 //! The schemas come from the same types the routes deserialize, so a field added to a
 //! request appears here by compiling rather than by being remembered. The paths do not: they
-//! are built from the same loop that registers the routes ([`crate::app::router`]), which is
-//! what keeps a vocabulary from being served and undescribed.
+//! are registered beside the routes ([`crate::app::router`]), which is what keeps a route from
+//! being served and undescribed.
 //!
 //! It describes API mode only. The file-server mode has no route set to enumerate — every
 //! url below a mount is a data path — so OpenAPI would have to invent a shape for it.
@@ -82,15 +82,14 @@ pub(crate) fn post(paths: &mut Paths, path: &str, operation: Operation) {
 /// drop the parts they were made of.
 ///
 /// A `#[serde(flatten)]` is a Rust arrangement — `StorageOptions` groups its fields per backend
-/// so that a backend function cannot reach another's, a request body holds its vocabulary that
-/// way, and the plan body holds the whole catalog query that way — and the wire form stays one
-/// flat object. The derived schema records each as `allOf`, which would show a caller nested
-/// objects a body has none of, and show a `$ref` in place of the fields it stands for. What a
-/// caller sends is one flat set of keys, so that is what is described.
+/// so that a backend function cannot reach another's — and the wire form stays one flat object.
+/// The derived schema records each as `allOf`, which would show a caller nested objects a body
+/// has none of, and show a `$ref` in place of the fields it stands for. What a caller sends is
+/// one flat set of keys, so that is what is described.
 ///
-/// A part is dropped only after every component has been flattened, since two of them absorb
-/// the same vocabulary — a request body and a plan entry's body both flatten it — and removing
-/// it for the first would leave the second describing a `$ref` to nothing.
+/// A part is dropped only after every component has been flattened, since two components may
+/// absorb the same part, and removing it for the first would leave the second describing a
+/// `$ref` to nothing.
 fn flatten_components(components: &mut Components) {
     // Names first: flattening rewrites the map.
     let names = components.schemas.keys().cloned().collect::<Vec<_>>();
@@ -132,37 +131,6 @@ fn flatten_component(components: &mut Components, name: &str) -> Vec<String> {
     flat.description = all_of.description;
     components.schemas.insert(name.to_owned(), flat.into());
     absorbed
-}
-
-/// Put one component's fields in the order given, and anything the order does not name after
-/// them, in whatever order it was in.
-///
-/// The order a body is written in is not one this module can work out. A `#[serde(flatten)]`
-/// is an `allOf` in the schema and the flattened part always comes first, so a request's
-/// projection would sit above the `url` it is a projection of — and no rule over "required"
-/// and "not" recovers it either. So the endpoint that owns the fields states the order, and
-/// this applies it.
-///
-/// A field the order does not name still appears: a description that omitted a field would be
-/// wrong in a way a caller acts on, while one that lists it last is only untidy.
-pub(crate) fn order_fields(document: &mut OpenApi, component: &str, order: &[&str]) {
-    let Some(components) = document.components.as_mut() else {
-        return;
-    };
-    let Some(RefOr::T(Schema::Object(object))) = components.schemas.get_mut(component) else {
-        return;
-    };
-    let mut fields = std::mem::take(&mut object.properties)
-        .into_iter()
-        .collect::<Vec<_>>();
-    let rank = |name: &String| {
-        order
-            .iter()
-            .position(|field| field == name)
-            .unwrap_or(order.len())
-    };
-    fields.sort_by_key(|(name, _)| rank(name));
-    object.properties.extend(fields);
 }
 
 /// Say which url schemes each storage option applies to, on the option itself.
@@ -233,10 +201,8 @@ pub(crate) fn document(paths: Paths, mut components: Components) -> OpenApi {
                      Every query route is a `POST`: the body carries a url and, where the \
                      store needs them, the caller's own credentials — which a query string \
                      would write into every proxy's access log on the way. A body also has \
-                     no url-length limit, which a long select list reaches.\n\n\
-                     The first path segment is the vocabulary the body is written in — both \
-                     say the same thing and lower to the same plan, differing in what a field \
-                     may hold — and the rest names what the request is against. Each route \
+                     no url-length limit, which a long column list reaches.\n\n\
+                     The last path segment names what the request is against. Each route \
                      takes its own body, listed below it, and a key that is not one of its \
                      fields is refused rather than ignored.\n\n\
                      This describes the API. A deployment may also serve directories of \
@@ -250,7 +216,7 @@ pub(crate) fn document(paths: Paths, mut components: Components) -> OpenApi {
         .build()
 }
 
-/// The health route, which is the one operation belonging to no vocabulary.
+/// The health route, which is the one operation that queries nothing.
 pub(crate) fn health(paths: &mut Paths, path: &str) {
     let operation = OperationBuilder::new()
         .tag("service")
@@ -317,8 +283,8 @@ pub(crate) fn page(document: &OpenApi, document_url: &str) -> String {
             id = escape_attr(&group_anchor(&tag)),
             tag = escape(&tag),
         ));
-        // The vocabulary's own line, once above its routes rather than repeated in each: it
-        // is the same sentence three times, and three of them read as three facts.
+        // The group's own line, once above its routes rather than repeated in each: it is the
+        // same sentence three times, and three of them read as three facts.
         if let Some(note) = operations
             .first()
             .and_then(|(_, _, op)| op.description.as_deref())
@@ -427,7 +393,7 @@ fn contents(document: &OpenApi) -> String {
 
 /// The operations by tag, each group in the order the paths were registered.
 ///
-/// A `BTreeMap` would put the vocabularies in alphabetical order, which is an order nobody
+/// A `BTreeMap` would put the groups in alphabetical order, which is an order nobody
 /// chose; registration order is the one the routes are declared in.
 type Operations<'a> = Vec<(String, String, &'a Operation)>;
 

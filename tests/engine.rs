@@ -364,10 +364,6 @@ async fn observe_with(
 
     let df = match selection.predicate {
         Predicate::All => df,
-        Predicate::Where(sql) => {
-            let expr = hats_api::sql::predicate(&state, df.schema(), sql, LIMITS).expect("where");
-            df.filter(expr).expect("filter")
-        }
         Predicate::Filters(conditions) => {
             let expr =
                 hats_api::sql::filters(&state, df.schema(), conditions, LIMITS).expect("filters");
@@ -381,11 +377,6 @@ async fn observe_with(
     };
     let df = match selection.projection {
         Projection::All => df,
-        Projection::Select(sql) => {
-            let exprs =
-                hats_api::sql::projection(&state, df.schema(), sql, LIMITS).expect("select");
-            df.select(exprs).expect("project")
-        }
         Projection::Columns(names) => {
             let exprs =
                 hats_api::sql::columns(&state, df.schema(), names, LIMITS).expect("columns");
@@ -550,7 +541,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "point lookup by id",
             Selection {
                 projection: Projection::All,
-                predicate: Predicate::Where(point),
+                predicate: Predicate::Filters(point),
                 spatial: None,
                 limit: None,
             },
@@ -559,7 +550,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "range over a sorted column",
             Selection {
                 projection: Projection::All,
-                predicate: Predicate::Where(range),
+                predicate: Predicate::Filters(range),
                 spatial: None,
                 limit: None,
             },
@@ -568,7 +559,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "cut on scattered values",
             Selection {
                 projection: Projection::All,
-                predicate: Predicate::Where("mag < 0.05"),
+                predicate: Predicate::Filters("mag < 0.05"),
                 spatial: None,
                 limit: None,
             },
@@ -577,7 +568,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "the same, no statistics written",
             Selection {
                 projection: Projection::All,
-                predicate: Predicate::Where("mag_nostats < 0.05"),
+                predicate: Predicate::Filters("mag_nostats < 0.05"),
                 spatial: None,
                 limit: None,
             },
@@ -586,7 +577,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "narrow projection and a cut",
             Selection {
                 projection: Projection::ColumnText("objectid, mag"),
-                predicate: Predicate::Where("mag < 0.05"),
+                predicate: Predicate::Filters("mag < 0.05"),
                 spatial: None,
                 limit: None,
             },
@@ -604,7 +595,7 @@ fn shapes(rows: i64) -> Vec<(&'static str, Selection<'static>)> {
             "limit after a cut",
             Selection {
                 projection: Projection::All,
-                predicate: Predicate::Where("mag < 0.05"),
+                predicate: Predicate::Filters("mag < 0.05"),
                 spatial: None,
                 limit: Some(100),
             },
@@ -1007,7 +998,7 @@ async fn what_a_bloom_filter_is_worth() {
                     Box::leak(format!("objectid = {id}").into_boxed_str());
                 let selection = Selection {
                     projection: Projection::All,
-                    predicate: Predicate::Where(predicate),
+                    predicate: Predicate::Filters(predicate),
                     spatial: None,
                     limit: None,
                 };

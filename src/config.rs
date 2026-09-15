@@ -210,7 +210,7 @@ pub struct LimitsConfig {
     /// is refused here rather than after it has been held in memory.
     ///
     /// It is also the only bound on `region`, which `max_expression_nodes` never sees: that
-    /// counts a `select` or `where`, and a region is a structured field lowered straight to a
+    /// counts the caller's SQL, and a region is a structured field lowered straight to a
     /// predicate. Both of the shapes that get large live there — a serialized `moc`, which is
     /// a coverage map in one string, and a long list of circles, which is how a caller
     /// cross-matches a catalog of their own against one served here. Those two set this
@@ -221,11 +221,11 @@ pub struct LimitsConfig {
     /// before any of its work begins — and, `region` having no count of its own, it is what
     /// decides how many shapes one request may carry into the covering and the predicate.
     pub max_request_body_bytes: ByteSize,
-    /// How deeply a `select` or `where` expression may nest. The parser enforces it, so
+    /// How deeply a `columns`, `filters` or ADQL `query` may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
     pub max_expression_depth: usize,
-    /// How many terms a `select` or `where` expression may have, counted after planning.
+    /// How many terms a `columns`, `filters` or ADQL `query` may have, counted after planning.
     /// Depth does not bound this: an `IN` list is one node wide and arbitrarily long,
     /// and a chain of `OR`s is shallow. Nothing to do with how many rows come back.
     pub max_expression_nodes: usize,
