@@ -1,6 +1,6 @@
 //! A HATS catalog as a table a statement can name.
 //!
-//! `hats_query.rs` answers a catalog by fanning a selection out over its partitions; this
+//! `hats::query` answers a catalog by fanning a selection out over its partitions; this
 //! answers one by handing the planner a table and letting it decide. The two read the same
 //! catalog through the same `hats/` code and choose the same partitions for the same region —
 //! what differs is who is asking, and therefore what may be asked.
@@ -33,11 +33,11 @@ use datafusion::physical_optimizer::pruning::{PruningPredicateBuilder, PruningSt
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 
-use crate::data::DataFiles;
+use crate::access::data::DataFiles;
 use crate::error::ApiError;
-use crate::geometry;
 use crate::hats::partitions::COMMON_METADATA;
 use crate::hats::{Catalog, HatsPartition};
+use crate::sky::geometry;
 use crate::storage::RemoteDir;
 
 /// What one catalog table may spend.
@@ -98,7 +98,7 @@ impl HatsTable {
         let index = columns
             .as_ref()
             .map(|columns| columns.healpix.0.to_owned())
-            .or_else(|| Some(crate::healpix::DEFAULT_HEALPIX_COLUMN_NAME.to_owned()))
+            .or_else(|| Some(crate::sky::healpix::DEFAULT_HEALPIX_COLUMN_NAME.to_owned()))
             .filter(|name| schema.field_with_name(name).is_ok());
         let schema = match &columns {
             Some(columns) => marked(&schema, columns.ra, columns.dec),
@@ -344,7 +344,7 @@ fn conjunction(filters: &[Expr]) -> Option<Expr> {
 
 /// The two columns `hats_col_ra` and `hats_col_dec` name, marked in the schema the planner sees.
 ///
-/// What reads the mark is [`crate::geometry`], which refuses a region over any other pair: the
+/// What reads the mark is [`crate::sky::geometry`], which refuses a region over any other pair: the
 /// partitions here are chosen by an index over these two columns and describe no others. The
 /// catalog is the only thing that can say which they are, and the schema is the only thing that
 /// reaches the expression where the question is asked.

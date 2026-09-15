@@ -20,7 +20,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use serde::Serialize;
 
-use crate::data::DataFiles;
+use crate::access::data::DataFiles;
 
 /// What a url path segment may not carry literally.
 ///

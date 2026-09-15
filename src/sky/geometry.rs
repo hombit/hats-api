@@ -1,6 +1,6 @@
 //! The region test as a function a query can call.
 //!
-//! `region.rs` decides what a shape means and `healpix.rs` what cells it covers; this is the
+//! `region` decides what a shape means and `healpix` what cells it covers; this is the
 //! same two things reached from inside a query rather than from a field beside it —
 //! `contains(point(ra, dec), circle(45.0, -20.0, 0.1))`, which is what ADQL's own region
 //! test comes to once its comparison with 1 is taken off. [`register`] says which contexts
@@ -42,12 +42,12 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::{SessionContext, lit, when};
 
-use crate::region::{self, Region, Spatial};
+use crate::sky::region::{self, Region, Spatial};
 
 /// The metadata key a table marks its own coordinate columns with, and the two values it takes.
 ///
 /// A file says nothing about which of its columns are a position, so the caller naming them is
-/// the only claim there is; a catalog does say, and [`crate::hats_table`] writes what it says
+/// the only claim there is; a catalog does say, and [`crate::hats::table`] writes what it says
 /// into the schema the planner sees. `declared_position` below is what reads it back.
 pub const COORDINATE: &str = "hats.coordinate";
 pub const RA: &str = "ra";
@@ -102,7 +102,7 @@ impl Default for Point {
         Self {
             // Two numbers, whatever width the file wrote them at. Coercion puts a cast
             // around a `Float32` column, which `Contains` looks through — the arithmetic is
-            // widened to `f64` in `region.rs` regardless.
+            // widened to `f64` in `region` regardless.
             signature: Signature::uniform(2, vec![DataType::Float64], Volatility::Immutable),
         }
     }
@@ -239,7 +239,7 @@ impl ScalarUDFImpl for Contains {
         Ok(DataType::Boolean)
     }
 
-    /// **This is where the work happens.** The call becomes the predicate `region.rs` builds
+    /// **This is where the work happens.** The call becomes the predicate `region` builds
     /// for the same shape, against the same schema, with the same covering in front of the
     /// same geometry.
     ///
@@ -587,8 +587,8 @@ mod tests {
     use datafusion::prelude::DataFrame;
 
     use super::*;
-    use crate::query::session_context;
-    use crate::sql;
+    use crate::engine::query::session_context;
+    use crate::engine::sql;
 
     /// One catalog-shaped row: a position, a HEALPix index the covering can prune on, and
     /// something to select.

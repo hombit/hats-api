@@ -1,3 +1,6 @@
+pub mod listing;
+pub mod openapi;
+
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::path::Path;
@@ -25,26 +28,22 @@ use tower_http::trace::TraceLayer;
 // here and is a literal `+` in a path segment.
 use url::{Url, form_urlencoded};
 
+use crate::access::data::DataFiles;
+use crate::access::mount::{self, Mount, Mounts};
 use crate::access::{self, AccessPolicy};
 use crate::adql;
-use crate::adql_query;
+use crate::app::listing::Listing;
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
-use crate::data::DataFiles;
-use crate::dsv;
+use crate::engine::query::{self, Order, Predicate, Projection, QueryResult, Selection};
+use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats;
-use crate::hats_query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
-use crate::healpix::Cover;
-use crate::listing::{self, Listing};
-use crate::materialize::Transfers;
-use crate::mount::{self, Mount, Mounts};
-use crate::openapi;
-use crate::parquet_out;
-use crate::query::{self, Order, Predicate, Projection, QueryResult, Selection};
-use crate::region::{self, Healpix, Region, Spatial};
-use crate::sql;
+use crate::hats::query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
+use crate::output::{dsv, votable};
+use crate::sky::healpix::Cover;
+use crate::sky::region::{self, Healpix, Region, Spatial};
+use crate::storage::materialize::Transfers;
 use crate::storage::{self, RemoteFile, SourceUrl, StorageOptions, parse_url};
-use crate::votable;
 
 /// What every request needs and no request may change: the rules, the shared scratch
 /// budget, and the url space each mode claims. All built once at startup, so a request
@@ -62,7 +61,7 @@ pub struct Service {
     /// What a request against a whole catalog may spend.
     pub catalog_limits: CatalogLimits,
     /// What one ADQL statement may spend.
-    pub adql_limits: adql_query::Limits,
+    pub adql_limits: adql::query::Limits,
     /// The widest circle a query string may ask for. The file-server mode's bound alone: a
     /// url is followed rather than fanned out, so what it asks for has to fit in one answer.
     max_query_radius_arcsec: f64,
@@ -1716,10 +1715,10 @@ const HEALPIX_PAIR: &str = "healpix_column and healpix_order must be given toget
 enum Format {
     Json,
     Parquet,
-    /// The XML table format IVOA tools read. Flat columns only — `votable.rs` says which
+    /// The XML table format IVOA tools read. Flat columns only — `output::votable` says which
     /// ones are refused and why.
     Votable,
-    /// Delimiter-separated values, one encoder and two delimiters — `dsv.rs` says what
+    /// Delimiter-separated values, one encoder and two delimiters — `output::dsv` says what
     /// neither of them can carry. One variant carrying which, rather than two beside each
     /// other, so that every site handling it is handed the kind instead of recovering it.
     Dsv(dsv::Dsv),
@@ -2072,7 +2071,7 @@ async fn query_adql(
                         files.describe()
                     )));
                 }
-                adql_query::Source::File(storage::open(
+                adql::query::Source::File(storage::open(
                     &url,
                     &table.storage,
                     &service.policy,
@@ -2084,7 +2083,7 @@ async fn query_adql(
             // `data_files` answers below rather than one about this url.
             TableKind::Hats => {
                 data_files = Some(service.data_files_for(&url).clone());
-                adql_query::Source::Catalog(storage::open_dir(
+                adql::query::Source::Catalog(storage::open_dir(
                     &url,
                     &table.storage,
                     &service.policy,
@@ -2092,7 +2091,7 @@ async fn query_adql(
                 )?)
             }
         };
-        tables.push(adql_query::Table {
+        tables.push(adql::query::Table {
             name: name.clone(),
             source,
         });
@@ -2101,7 +2100,7 @@ async fn query_adql(
     // Whichever mount governs a catalog this request named, else the service's own list. A
     // request with no catalog never asks.
     let data_files = data_files.unwrap_or_else(|| service.data_files.as_ref().clone());
-    let result = adql_query::run(&translated, &tables, &data_files, service.adql_limits).await?;
+    let result = adql::query::run(&translated, &tables, &data_files, service.adql_limits).await?;
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     let response = adql_answer(&result, &output, started)?;
@@ -2125,7 +2124,7 @@ async fn query_adql(
 /// Its own function because the parquet case differs: a single-file answer is laid out like
 /// the file it came from, and a statement may have read several files or none whose layout
 /// means anything for a set of groups. So the writer's own defaults, which is what
-/// [`parquet_out::SourceLayout::default`] is.
+/// [`crate::output::parquet::SourceLayout::default`] is.
 fn adql_answer(
     result: &QueryResult,
     output: &Output,
@@ -2136,7 +2135,10 @@ fn adql_answer(
         Format::Parquet => Ok((
             attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
             counters(result, result.num_rows(), started),
-            parquet_out::encode(result, &parquet_out::SourceLayout::default())?,
+            crate::output::parquet::encode(
+                result,
+                &crate::output::parquet::SourceLayout::default(),
+            )?,
         )
             .into_response()),
         Format::Votable => Ok((
@@ -2504,7 +2506,7 @@ fn below(catalog: &Url, path: &str) -> Result<String, ApiError> {
 /// nearest thing to "the source file" a catalog has. A request that read nothing gets the
 /// writer's own defaults, there being no file to copy from.
 async fn hats_answer(
-    result: &crate::hats_query::CatalogResult,
+    result: &hats::query::CatalogResult,
     output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError> {
@@ -2525,10 +2527,10 @@ async fn hats_answer(
         }
         Format::Parquet => {
             let layout = match &result.source {
-                Some(file) => parquet_out::read_layout(file).await?,
-                None => parquet_out::SourceLayout::default(),
+                Some(file) => crate::output::parquet::read_layout(file).await?,
+                None => crate::output::parquet::SourceLayout::default(),
             };
-            let body = parquet_out::encode(&result.rows, &layout)?;
+            let body = crate::output::parquet::encode(&result.rows, &layout)?;
             Ok((
                 attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
                 hats_counters(result, num_rows, started),
@@ -2565,7 +2567,7 @@ fn attachment(content_type: &str, name: &str) -> [(header::HeaderName, String); 
 
 /// What a catalog request reports beside its rows, whichever encoding carries them.
 fn hats_counters(
-    result: &crate::hats_query::CatalogResult,
+    result: &hats::query::CatalogResult,
     num_rows: usize,
     started: Instant,
 ) -> [(&'static str, String); 4] {
@@ -2671,8 +2673,8 @@ async fn parquet_response(
     num_rows: usize,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    let layout = parquet_out::read_layout(file).await?;
-    let body = parquet_out::encode(result, &layout)?;
+    let layout = crate::output::parquet::read_layout(file).await?;
+    let body = crate::output::parquet::encode(result, &layout)?;
     Ok((
         attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
         counters(result, num_rows, started),
@@ -2728,7 +2730,7 @@ mod tests {
     }
 
     /// A `POST /api/v1/simple/parquet` with the given body, under a policy that allows
-    /// everything — what the policy allows is `access.rs`'s business.
+    /// everything — what the policy allows is `access`'s business.
     async fn post_parquet(body: serde_json::Value) -> (StatusCode, String) {
         send(
             Request::builder()
@@ -3513,14 +3515,14 @@ mod tests {
     /// The route end to end: a body naming a catalog by a mount's path comes back with the
     /// rows the region holds, and with the count of partitions they came out of.
     ///
-    /// What `hats_query` tests is which partitions get read and which rows come back. What
+    /// What `hats::query` tests is which partitions get read and which rows come back. What
     /// this adds is that the request shape reaches it — the same body the parquet route
     /// takes, with the column names left to the catalog.
     #[tokio::test]
     async fn the_hats_route_answers_a_region_over_a_catalog() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[0].clone();
-        let expected = crate::hats_query::tests::inside(&region);
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
         assert!(!expected.is_empty(), "the cone selects nothing");
 
         let (status, body) = ask_hats(
@@ -3551,15 +3553,15 @@ mod tests {
 
     /// The route end to end with a cross-match's worth of circles on it.
     ///
-    /// [`crate::region::tests::many_shapes_do_not_build_a_tree_as_deep_as_they_are_long`] is
+    /// [`crate::sky::region::tests::many_shapes_do_not_build_a_tree_as_deep_as_they_are_long`] is
     /// the same guarantee stated about the expression; this is the one that would actually
     /// have taken the process down. The circles are clustered inside one partition on
     /// purpose, so that the partition bound does not refuse the request before the predicate
     /// those shapes build is ever put together.
     #[tokio::test]
     async fn a_cross_matchs_worth_of_circles_is_answered() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let inside = crate::hats_query::tests::regions()[0].clone();
+        let dir = hats::query::tests::fixture(true);
+        let inside = hats::query::tests::regions()[0].clone();
         let Region::Circle { ra, dec, .. } = inside else {
             panic!("the fixture's first region is a circle");
         };
@@ -3605,7 +3607,7 @@ mod tests {
     /// See <https://github.com/cds-astro/cds-healpix-rust/issues/27>.
     #[tokio::test]
     async fn a_zone_at_a_pole_is_answered() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let zones = [
             // A polar cap, reaching the pole from either side.
             serde_json::json!({"type": "zone", "ra": [0.0, 360.0], "dec": [89.9, 90.0]}),
@@ -3662,7 +3664,7 @@ mod tests {
     /// catalog routes.
     #[tokio::test]
     async fn a_catalog_route_refuses_column_names() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         for field in ["ra_column", "dec_column", "healpix_column", "healpix_order"] {
             let value = match field {
                 "healpix_order" => serde_json::json!(29),
@@ -3691,7 +3693,7 @@ mod tests {
 
     /// The centre of the fixture's first cone, which is where its rows are.
     fn centre() -> (f64, f64) {
-        let Region::Circle { ra, dec, .. } = crate::hats_query::tests::regions()[0] else {
+        let Region::Circle { ra, dec, .. } = hats::query::tests::regions()[0] else {
             unreachable!("the fixture's regions are circles")
         };
         (ra, dec)
@@ -3717,9 +3719,9 @@ mod tests {
     /// the geometry's and not the route's.
     #[tokio::test]
     async fn a_catalog_url_answers_a_cone_search() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[0].clone();
-        let expected = crate::hats_query::tests::inside(&region);
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
         assert!(!expected.is_empty(), "the cone selects nothing");
         let (ra, dec) = centre();
 
@@ -3756,7 +3758,7 @@ mod tests {
     /// the radius are the same radius, so both are measured against it.
     #[tokio::test]
     async fn a_cone_wider_than_the_url_answers_is_refused() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let (ra, dec) = centre();
         let service = || mounted(dir.path(), &ApiConfig::default());
 
@@ -3788,7 +3790,7 @@ mod tests {
     /// did not write, and they cannot tell that from the ones they asked for.
     #[tokio::test]
     async fn a_catalog_url_refuses_the_column_names() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let (ra, dec) = centre();
         for field in ["ra_column", "dec_column"] {
             let response = respond(
@@ -3813,7 +3815,7 @@ mod tests {
     /// service reads is listed too, there being no question in it.
     #[tokio::test]
     async fn a_directory_with_no_query_surface_is_listed_parameters_and_all() {
-        let catalog = crate::hats_query::tests::fixture(true);
+        let catalog = hats::query::tests::fixture(true);
         let plain = tempfile::TempDir::new().unwrap();
         std::fs::write(plain.path().join("part0.parquet"), b"x").unwrap();
         let (ra, dec) = centre();
@@ -3850,7 +3852,7 @@ mod tests {
     /// really is the whole catalog, and the partition bound says so before anything is read.
     #[tokio::test]
     async fn a_limit_asks_a_catalog_for_its_front() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         // Tighter than the fixture has partitions, so a request that read them all would be
         // refused and one that stops early is not.
         let service = || {
@@ -3895,7 +3897,7 @@ mod tests {
     /// have is not what this url named.
     #[tokio::test]
     async fn a_parquet_url_answers_a_cone_search_when_it_is_told_the_columns() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let (ra, dec) = centre();
         let file = format!("/{}", hats::HatsPartition::new(3, 64).path(".parquet"));
         let service = || mounted(dir.path(), &ApiConfig::default());
@@ -3931,7 +3933,7 @@ mod tests {
     /// directory's.
     #[tokio::test]
     async fn a_catalog_s_page_offers_the_search_from_anywhere_inside_it() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let plain = tempfile::TempDir::new().unwrap();
         std::fs::create_dir(plain.path().join("Norder=3")).unwrap();
 
@@ -4020,7 +4022,7 @@ mod tests {
         .unwrap();
         let inside = dir.path().join("inside");
         std::fs::create_dir(&inside).unwrap();
-        let fixture = crate::hats_query::tests::fixture(true);
+        let fixture = hats::query::tests::fixture(true);
         for name in std::fs::read_dir(fixture.path()).unwrap() {
             let name = name.unwrap().path();
             let to = inside.join(name.file_name().unwrap());
@@ -4030,7 +4032,7 @@ mod tests {
             }
         }
 
-        let region = crate::hats_query::tests::regions()[0].clone();
+        let region = hats::query::tests::regions()[0].clone();
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/simple/hats/plan",
@@ -4072,8 +4074,8 @@ mod tests {
     /// a url that does not name anything, a local file being addressed by its mount.
     #[tokio::test]
     async fn a_plan_is_requests_the_caller_could_send() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[1].clone();
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[1].clone();
         let (status, plan) = ask_plan(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/simple/hats/plan",
@@ -4121,9 +4123,9 @@ mod tests {
     /// rows the catalog route would have returned.
     #[tokio::test]
     async fn following_a_plan_gives_the_same_rows() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[1].clone();
-        let expected = crate::hats_query::tests::inside(&region);
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[1].clone();
+        let expected = hats::query::tests::inside(&region);
         let body = serde_json::json!({"url": "file:///", "columns": ["id"], "region": [region]});
 
         let (_, plan) = ask_plan(
@@ -4164,7 +4166,7 @@ mod tests {
     /// would ever be built, and the rendering is the part that could copy one.
     #[tokio::test]
     async fn a_plan_never_carries_the_credentials() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let service = mounted(dir.path(), &ApiConfig::default());
         let params = CatalogQuery {
             url: "file:///".to_owned().into(),
@@ -4176,7 +4178,7 @@ mod tests {
                 },
                 ..Default::default()
             },
-            region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
+            region: Some(vec![hats::query::tests::regions()[1].clone()]),
             columns: Some(vec!["id".to_owned()]),
             filters: None,
             format: None,
@@ -4217,7 +4219,7 @@ mod tests {
     /// at all, since an empty object would read as "these are the options" and they are not.
     #[tokio::test]
     async fn a_plan_returns_the_credentials_only_when_asked() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let service = mounted(dir.path(), &ApiConfig::default());
         let plan = async |storage: StorageOptions, return_storage: bool| {
             // The plan route's own body: it is the one that has a `return_storage` to set.
@@ -4444,7 +4446,7 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
-    /// The volatility rule holds inside a statement. It is the one thing `sql.rs` checks that
+    /// The volatility rule holds inside a statement. It is the one thing `engine::sql` checks that
     /// a planner will not: `random()` is an ordinary scalar function to DataFusion.
     ///
     /// `LOG` is the case that shows the translation is what decides. `sql::AMBIGUOUS` refuses
@@ -4484,7 +4486,7 @@ mod tests {
 
     /// A region test through the route, which is the whole path nothing else runs end to end:
     /// the statement is translated, the table registered, `CONTAINS` becomes the function
-    /// `geometry` registers, and that rewrites itself into the predicate `region.rs` builds.
+    /// `geometry` registers, and that rewrites itself into the predicate `sky::region` builds.
     ///
     /// Every spelling ADQL gives a region test, against rows a degree apart, so a test that
     /// read one the wrong way round returns a different row rather than the same count.
@@ -4558,9 +4560,9 @@ mod tests {
     /// catalog and the planner reads the partitions a region reaches.
     #[tokio::test]
     async fn the_adql_route_answers_a_catalog() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[0].clone();
-        let expected = crate::hats_query::tests::inside(&region);
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
         assert!(!expected.is_empty(), "the cone selects nothing");
         let (ra, dec, radius) = match &region {
             Region::Circle {
@@ -4604,7 +4606,7 @@ mod tests {
     /// route can answer: the partition fan-out cannot combine rows across partitions.
     #[tokio::test]
     async fn the_adql_route_aggregates_a_catalog() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let (status, body) = post_json(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/adql",
@@ -4635,7 +4637,7 @@ mod tests {
     /// statement has no plan route to be answered with instead.
     #[tokio::test]
     async fn a_catalog_scan_wider_than_the_partition_bound_is_refused() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let limits = LimitsConfig {
             max_partitions: 2,
             ..LimitsConfig::default()
@@ -4665,8 +4667,8 @@ mod tests {
     /// one is refused for reaching them all.
     #[tokio::test]
     async fn a_region_prunes_the_partitions_a_statement_reads() {
-        let dir = crate::hats_query::tests::fixture(true);
-        let region = crate::hats_query::tests::regions()[0].clone();
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
         let (ra, dec, radius) = match &region {
             Region::Circle {
                 ra,
@@ -4727,13 +4729,13 @@ mod tests {
     /// is refused here rather than answered slowly.
     #[tokio::test]
     async fn the_adql_route_crossmatches_two_catalogs() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let limits = LimitsConfig {
             max_partitions: 1,
             ..LimitsConfig::default()
         };
-        let region = crate::hats_query::tests::regions()[0].clone();
-        let expected = crate::hats_query::tests::inside(&region);
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
         let (ra, dec, radius) = match &region {
             Region::Circle {
                 ra,
@@ -4812,7 +4814,7 @@ mod tests {
     /// empty — fewer rows than the shape holds, with nothing saying why.
     #[tokio::test]
     async fn a_region_over_a_catalogs_other_columns_is_refused() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let (status, body) = post_json(
             mounted(dir.path(), &ApiConfig::default()),
             "/api/v1/adql",
@@ -5040,7 +5042,7 @@ mod tests {
     /// bound that stopped it named.
     #[tokio::test]
     async fn too_much_work_is_answered_with_the_plan_for_it() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let limits = LimitsConfig {
             max_partitions: 2,
             ..LimitsConfig::default()
@@ -5100,7 +5102,7 @@ mod tests {
     /// two numbers rather than failing part way through.
     #[tokio::test]
     async fn a_request_over_too_many_partitions_is_refused() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let limits = LimitsConfig {
             max_partitions: 2,
             ..LimitsConfig::default()
@@ -5135,7 +5137,7 @@ mod tests {
     /// them is never looked at. Hence `422` here and `413` only for the bytes.
     #[tokio::test]
     async fn a_costly_query_and_an_oversized_body_are_told_apart() {
-        let dir = crate::hats_query::tests::fixture(true);
+        let dir = hats::query::tests::fixture(true);
         let tiny = LimitsConfig {
             max_partitions: 1,
             max_request_body_bytes: bytesize::ByteSize::b(256),
@@ -5686,7 +5688,7 @@ mod tests {
     }
 
     /// Delimiter-separated values off the same route, which is what says the format reached
-    /// the answer rather than only the parser. The nested refusal is `dsv.rs`'s and lands as
+    /// the answer rather than only the parser. The nested refusal is `output::dsv`'s and lands as
     /// a `400` here for the same reason the VOTable one does: a body that has begun cannot
     /// take back a column it could not write.
     #[tokio::test]
@@ -5780,7 +5782,7 @@ mod tests {
             assert!(body.contains("csv and tsv"), "{format}: {body}");
         }
 
-        // Checked before it is used, by the rule `dsv.rs` states — and a tab is refused for
+        // Checked before it is used, by the rule `output::dsv` states — and a tab is refused for
         // a csv answer too, the sentinel not knowing which format will carry it.
         let (status, body) = ask("format=csv&dsv_null_value=a%09b").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

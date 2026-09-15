@@ -263,7 +263,7 @@ pub(crate) fn page(document: &OpenApi, document_url: &str) -> String {
          <h1>{title}<span class=\"version\">{version}</span></h1>\n",
         title = escape(&info.title),
         version = escape(&info.version),
-        css = include_str!("openapi/page.css"),
+        css = include_str!("page.css"),
     ));
     for paragraph in info.description.as_deref().unwrap_or("").split("\n\n") {
         html.push_str(&format!("<p class=\"lede\">{}</p>\n", escape(paragraph)));
@@ -317,7 +317,7 @@ pub(crate) fn page(document: &OpenApi, document_url: &str) -> String {
         "<p class=\"footer\">This describes the API. Where the deployment also serves \
          directories, every url below a mount is a data path and has no route set to \
          enumerate.</p>\n<script>\n{script}</script>\n</body>\n</html>\n",
-        script = include_str!("openapi/page.js"),
+        script = include_str!("page.js"),
     ));
     html
 }

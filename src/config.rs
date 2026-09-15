@@ -375,7 +375,7 @@ pub struct AccessConfig {
 
 /// Which addresses a request may reach, whatever backend it goes through: the
 /// destination is a property of the address rather than of the protocol. See
-/// [`crate::network`].
+/// [`crate::access::network`].
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkConfig {

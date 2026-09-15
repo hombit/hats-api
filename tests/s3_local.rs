@@ -8,8 +8,8 @@
 mod common;
 
 use common::{FIXTURE_ROWS, TestS3, lookup, permissive_policy, row_count};
+use hats_api::engine::query::{Predicate, Projection, Selection};
 use hats_api::error::ApiError;
-use hats_api::query::{Predicate, Projection, Selection};
 use hats_api::storage::{S3Options, StorageOptions};
 
 /// The baseline: a file put in a bucket comes back through the whole path, and the

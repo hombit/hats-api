@@ -6,8 +6,8 @@
 //! spatial query needs before it can choose anything to read: the column names, and the
 //! partition list in HEALPix order.
 //!
-//! **Nothing here decides what to read.** Choosing partitions is `healpix.rs`'s, and
-//! running a query against one is `query.rs`'s. This is the part that has to talk to the
+//! **Nothing here decides what to read.** Choosing partitions is `sky::healpix`'s, and
+//! running a query against one is `engine::query`'s. This is the part that has to talk to the
 //! catalog's own files, and it is kept apart so that the pixel arithmetic stays testable
 //! without a catalog and the catalog stays readable without a request.
 //!
@@ -23,6 +23,8 @@ mod catalog;
 pub mod local;
 pub mod partitions;
 pub mod properties;
+pub mod query;
+pub mod table;
 
 pub use catalog::{Catalog, Columns, Partitioned};
 pub use partitions::{HatsPartition, HatsPartitionList};

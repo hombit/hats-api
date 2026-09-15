@@ -18,7 +18,7 @@ use std::ops::Range;
 use datafusion::parquet::file::metadata::ParquetMetaDataReader;
 
 use crate::error::ApiError;
-use crate::healpix;
+use crate::sky::healpix;
 use crate::storage::RemoteDir;
 
 /// Where a catalog's data files live, below the catalog directory.

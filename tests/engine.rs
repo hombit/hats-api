@@ -41,8 +41,8 @@ use datafusion::physical_plan::{
     ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned, displayable,
 };
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
-use hats_api::query::{self, Order, Predicate, Projection, Selection};
-use hats_api::sql::Limits;
+use hats_api::engine::query::{self, Order, Predicate, Projection, Selection};
+use hats_api::engine::sql::Limits;
 use hats_api::storage::{self, RemoteFile};
 use tempfile::TempDir;
 
@@ -365,26 +365,26 @@ async fn observe_with(
     let df = match selection.predicate {
         Predicate::All => df,
         Predicate::Filters(conditions) => {
-            let expr =
-                hats_api::sql::filters(&state, df.schema(), conditions, LIMITS).expect("filters");
+            let expr = hats_api::engine::sql::filters(&state, df.schema(), conditions, LIMITS)
+                .expect("filters");
             df.filter(expr).expect("filter")
         }
         Predicate::FilterText(text) => {
-            let expr =
-                hats_api::sql::filter_text(&state, df.schema(), text, LIMITS).expect("filters");
+            let expr = hats_api::engine::sql::filter_text(&state, df.schema(), text, LIMITS)
+                .expect("filters");
             df.filter(expr).expect("filter")
         }
     };
     let df = match selection.projection {
         Projection::All => df,
         Projection::Columns(names) => {
-            let exprs =
-                hats_api::sql::columns(&state, df.schema(), names, LIMITS).expect("columns");
+            let exprs = hats_api::engine::sql::columns(&state, df.schema(), names, LIMITS)
+                .expect("columns");
             df.select(exprs).expect("project")
         }
         Projection::ColumnText(list) => {
-            let exprs =
-                hats_api::sql::column_text(&state, df.schema(), list, LIMITS).expect("columns");
+            let exprs = hats_api::engine::sql::column_text(&state, df.schema(), list, LIMITS)
+                .expect("columns");
             df.select(exprs).expect("project")
         }
     };
@@ -444,8 +444,8 @@ async fn partition_spans(
     let df = match selection.projection {
         Projection::Columns(names) => {
             let state = ctx.state();
-            let exprs =
-                hats_api::sql::columns(&state, df.schema(), names, LIMITS).expect("columns");
+            let exprs = hats_api::engine::sql::columns(&state, df.schema(), names, LIMITS)
+                .expect("columns");
             df.select(exprs).expect("project")
         }
         _ => df,
@@ -1178,7 +1178,7 @@ async fn round_trips_per_answer() {
         let scan_bytes = counter.bytes();
 
         counter.reset();
-        let layout = hats_api::parquet_out::read_layout(&file).await;
+        let layout = hats_api::output::parquet::read_layout(&file).await;
         let footer = counter.requests();
         assert!(layout.is_ok(), "{name}");
 

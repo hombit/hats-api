@@ -37,8 +37,8 @@ use datafusion::arrow::datatypes::{
     Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
 };
 
+use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::query::QueryResult;
 
 /// The media type IVOA registers for a VOTable document.
 pub const CONTENT_TYPE: &str = "application/x-votable+xml";

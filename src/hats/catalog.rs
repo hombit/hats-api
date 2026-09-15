@@ -1,6 +1,6 @@
 //! Opening a catalog: which of its own files describe it, and where its partitions are.
 
-use crate::data::DataFiles;
+use crate::access::data::DataFiles;
 use crate::error::ApiError;
 use crate::storage::{RemoteDir, RemoteFile};
 
@@ -257,8 +257,8 @@ mod tests {
     use super::*;
     use crate::access::AccessPolicy;
     use crate::config::{AccessConfig, LimitsConfig};
-    use crate::materialize::Transfers;
     use crate::storage::StorageOptions;
+    use crate::storage::materialize::Transfers;
 
     /// The cells `small_sky_order3_source` is cut into, cut down to a handful. Mixed with
     /// a coarse one, which is what a real catalog does where the sky is empty.
@@ -269,7 +269,7 @@ mod tests {
     const MOUNT: &str = "/catalog";
 
     fn opened(root: &Path, max_metadata_bytes: u64) -> Result<Catalog, ApiError> {
-        let mounts = crate::mount::Mounts::new(
+        let mounts = crate::access::mount::Mounts::new(
             &[crate::config::MountConfig {
                 path: MOUNT.to_owned(),
                 source: root.display().to_string(),

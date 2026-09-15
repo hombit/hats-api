@@ -45,10 +45,10 @@ use moc::moc::range::{CellSelection, RangeMOC};
 use moc::qty::Hpx;
 use moc::ranges::SNORanges;
 
+use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats::{HatsPartition, HatsPartitionList};
-use crate::region::Shape;
-use crate::sql;
+use crate::sky::region::Shape;
 
 /// The deepest HEALPix order a cell number fits a 64-bit integer at, and the order HATS
 /// recommends a catalog write its column at.

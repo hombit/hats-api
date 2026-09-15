@@ -1,8 +1,8 @@
 //! The functions ADQL requires that DataFusion has not got.
 //!
-//! One so far. [`crate::geometry`] is the other half of what an ADQL context registers, and
+//! One so far. [`crate::sky::geometry`] is the other half of what an ADQL context registers, and
 //! is a module of its own because a region is a thing this service already has its own
-//! meaning for: those functions lower into the predicate `region.rs` builds, and could serve
+//! meaning for: those functions lower into the predicate `sky::region` builds, and could serve
 //! a route that never mentions ADQL. These are here because the standard asks for them.
 
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 /// ADQL's name for the random function, which is what a caller writes and what
-/// [`crate::sql`] lets through the volatility rule.
+/// [`crate::engine::sql`] lets through the volatility rule.
 pub const RAND: &str = "rand";
 
 /// Put ADQL's own functions on a context.
@@ -98,7 +98,7 @@ mod tests {
     use datafusion::arrow::datatypes::Float64Type;
 
     use super::*;
-    use crate::query::session_context;
+    use crate::engine::query::session_context;
 
     /// Ten rows, so a column of one repeated value is visible as one.
     async fn values(query: &str) -> Vec<f64> {
