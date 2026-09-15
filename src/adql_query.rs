@@ -270,7 +270,7 @@ fn resolve_identifiers(statement: &mut Statement, schemas: &[SchemaRef]) {
             // The last segment and never one before it. Everything ahead of the column names
             // the table it is in — `gaia.ra`, or an alias's `g.ra` — which is the planner's to
             // resolve and not a spelling this knows anything about. A statement has no other
-            // reading of a dotted name: what the expression routes read as a step into a
+            // reading of a dotted name: what the `simple` routes read as a step into a
             // struct column is ADQL's table beside its column.
             SqlExpr::CompoundIdentifier(parts) => {
                 if let Some(column) = parts.last_mut() {

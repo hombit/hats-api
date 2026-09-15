@@ -212,7 +212,7 @@ everything about what SQL means here is decided there.
   rather than the head of something longer: without the end-of-input check, `1 UNION
   SELECT …` parses as `1` and the rest is dropped in silence. Never assemble a caller's
   text into a SQL statement and check the plan afterwards — the check would be the only
-  thing standing between a select list and a join.
+  thing standing between a column list and a join.
 - **`allowed` is an allowlist over an exhaustive match**, not a list of what is refused.
   A DataFusion upgrade that adds an expression kind is then a compile error, and someone
   decides whether it belongs in a per-row expression rather than a caller discovering
@@ -253,7 +253,7 @@ everything about what SQL means here is decided there.
   other reader of that language also has. `CONTAINS` and `RAND` are ADQL's, written down in
   a standard, so a statement that works here works against any ADQL service — which is what
   `lg` could not say and why `lg` was the mistake. The two registers are per route and never
-  on `session_context`, so the expression routes keep exactly DataFusion's own list.
+  on `session_context`, so the `simple` routes keep exactly DataFusion's own list.
 - **A column answers to its own name and to its name in lowercase, and to nothing else.**
   Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
   `objectId` — and a caller reads them off the file, so the file's spelling has to work;
@@ -292,13 +292,13 @@ everything about what SQL means here is decided there.
     a path packs the column into a struct named after the table.
 
 - **`columns` is names and `filters` is an expression.** A caller who wants a computed
-  column or an alias writes ADQL, which is where a projection is a select list. The predicate
-  is the full expression language: a smaller grammar would be a second parser and a second
-  allowlist, and it could not express what `lsdb` pushes down, which is a disjunction.
+  column or an alias writes ADQL. The predicate is the full expression language: a smaller
+  grammar would be a second parser and a second allowlist, and it could not express what
+  `lsdb` pushes down, which is a disjunction.
 
-  Do not widen `columns` back into expressions. The ADQL route already answers a computed
-  column, over the same tables and with a planner that sees the whole statement, so a select
-  list in a field would be a second way to say it with nothing to choose between the two.
+  Do not widen `columns` into expressions. The ADQL route already answers a computed column,
+  over the same tables and with a planner that sees the whole statement, so expressions in a
+  field would be a second way to say it with nothing to choose between the two.
 
   **The separators belong to the query string alone.** A body writes a list of names and an
   `AND`; a url has one `columns=` and one `filters=`, so the comma between names and the

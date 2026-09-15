@@ -368,8 +368,6 @@ fields you named, the way `pyarrow` reads a subset of a struct:
 columns: ["id", "sources.mjd", "sources.mag"]  ->  id, sources{mjd, mag}
 columns: ["sources"]                           ->  sources{every field}
 columns: ["sources", "sources.mjd"]            ->  sources{every field}
-select:  "sources.mjd AS mjd"                  ->  mjd   (an alias is your own column)
-select:  "get_field(sources,'mjd') AS m"       ->  m     (an expression, not part of sources)
 ```
 
 In a url the same names are one parameter separated by commas —

@@ -1689,8 +1689,9 @@ fn takes(fields: &[&str]) -> String {
 ///
 /// Each request type collects them into a flattened map and every route refuses them before it
 /// does anything: a request this service cannot read as written is not one it may answer part
-/// of. A dropped `where` would return every row — which the caller cannot tell from a
-/// predicate that matched them all, the failure this service keeps finding in a new place.
+/// of. A misspelled `filters` dropped would return every row — which the caller cannot tell
+/// from a predicate that matched them all, the failure this service keeps finding in a new
+/// place.
 ///
 /// The refusal names what the endpoint does take, which is also where a caller who wrote
 /// another route's field reads that it is not this one's.
@@ -2728,7 +2729,7 @@ mod tests {
 
     /// A `POST /api/v1/simple/parquet` with the given body, under a policy that allows
     /// everything — what the policy allows is `access.rs`'s business.
-    async fn select_with(body: serde_json::Value) -> (StatusCode, String) {
+    async fn post_parquet(body: serde_json::Value) -> (StatusCode, String) {
         send(
             Request::builder()
                 .method("POST")
@@ -2771,14 +2772,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_field_is_named() {
-        let (status, body) = select_with(serde_json::json!({"filters": "x = 1"})).await;
+        let (status, body) = post_parquet(serde_json::json!({"filters": "x = 1"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("url"), "{body}");
     }
 
     #[tokio::test]
     async fn a_misspelled_field_is_named_rather_than_ignored() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet",
             "storage": {"regoin": "us-west-2"},
         }))
@@ -2814,7 +2815,7 @@ mod tests {
                 }),
             ),
         ] {
-            let (status, body) = select_with(body).await;
+            let (status, body) = post_parquet(body).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{what}: {body}");
             assert!(body.contains("region"), "{what}: {body}");
         }
@@ -2825,7 +2826,7 @@ mod tests {
     /// which one it had used.
     #[tokio::test]
     async fn a_radius_says_its_unit() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet",
             "region": [{"type": "circle", "ra": 320.6, "dec": -12.4, "radius": 0.01}],
             "ra_column": "objra",
@@ -2841,7 +2842,7 @@ mod tests {
     /// would be a region matching nothing.
     #[tokio::test]
     async fn a_misspelled_field_inside_a_region_is_named() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet",
             "region": [{"type": "circle", "ra": 320.6, "dec": -12.4, "radus": 0.01}],
         }))
@@ -2854,7 +2855,7 @@ mod tests {
     /// exactly where a secret would be sitting.
     #[tokio::test]
     async fn a_body_that_does_not_fit_is_not_quoted_back() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet",
             "storage": SECRET,
         }))
@@ -2880,7 +2881,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_schemes_are_rejected() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "ftp://example.com/a.parquet",
         }))
         .await;
@@ -2892,7 +2893,7 @@ mod tests {
     /// and dropping them would turn a credentialed read into an anonymous one.
     #[tokio::test]
     async fn storage_options_in_the_url_are_refused() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": format!("s3://b/k.parquet?secret_access_key={SECRET}"),
         }))
         .await;
@@ -2929,7 +2930,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_formats_are_rejected() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet", "format": "arrow",
         }))
         .await;
@@ -5323,17 +5324,17 @@ mod tests {
         assert!(error.contains("nothing to serve"), "{error}");
     }
 
-    /// A `select` or a `where` is refused, and the refusal names the fields this route does
-    /// take, so the caller can see what to write instead.
+    /// A field a route has not got is refused, and the refusal names the fields it does take,
+    /// so the caller can see what to write instead.
     ///
-    /// Dropped, a `where` would return every row — which the caller cannot tell from a
-    /// predicate that matched them all.
+    /// Dropped, a misspelled `filters` would return every row — which the caller cannot tell
+    /// from a predicate that matched them all.
     #[tokio::test]
-    async fn an_expression_field_is_refused_and_placed() {
+    async fn a_misspelled_field_is_refused_and_placed() {
         for (route, field, takes) in [
-            ("/api/v1/simple/parquet", "select", "columns"),
-            ("/api/v1/simple/parquet", "where", "filters"),
-            ("/api/v1/simple/hats", "where", "filters"),
+            ("/api/v1/simple/parquet", "column", "columns"),
+            ("/api/v1/simple/parquet", "filter", "filters"),
+            ("/api/v1/simple/hats", "filter", "filters"),
         ] {
             let (status, body) = post_json(
                 api_only(),
@@ -5342,7 +5343,10 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{route} {field}: {body}");
-            assert!(body.contains(field), "{route} {field}: {body}");
+            assert!(
+                body.contains(&format!("{field};")),
+                "{route} {field}: {body}"
+            );
             assert!(body.contains(takes), "{route} {field}: {body}");
         }
     }
@@ -5401,7 +5405,7 @@ mod tests {
     /// A misspelled field is named too, rather than ignored.
     #[tokio::test]
     async fn an_unknown_field_is_named_rather_than_dropped() {
-        let (status, body) = select_with(serde_json::json!({
+        let (status, body) = post_parquet(serde_json::json!({
             "url": "s3://b/k.parquet",
             "wehre": "objectid = 1",
         }))
@@ -6143,7 +6147,7 @@ mod tests {
             "s3://b/hats/part0.csv",
             "s3://b/hats/",
         ] {
-            let (status, body) = select_with(serde_json::json!({"url": url})).await;
+            let (status, body) = post_parquet(serde_json::json!({"url": url})).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{url}");
             // The refusal says what would have been read, so a caller can see why.
             assert!(body.contains("*.parquet"), "{url}: {body}");
@@ -6168,7 +6172,7 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_urls_are_rejected() {
-        let (status, body) = select_with(serde_json::json!({"url": "not-a-url"})).await;
+        let (status, body) = post_parquet(serde_json::json!({"url": "not-a-url"})).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("invalid url"), "{body}");
     }
