@@ -37,7 +37,7 @@ use std::ops::Range;
 
 use cdshealpix::nested::n_hash;
 use datafusion::arrow::datatypes::DataType;
-use datafusion::common::{Column, DFSchema, ScalarValue};
+use datafusion::common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::lit;
 use moc::elem::range::MocRange;
@@ -505,9 +505,12 @@ impl SpatialIndex {
     /// Two of them is the interesting case. A schema may carry one name twice, and then
     /// "the `_healpix_29` column" names neither, exactly as `sql::resolve_identifiers` has
     /// it for a name two columns share.
-    pub fn discover(schema: &DFSchema) -> Option<Self> {
-        let mut found = schema
-            .fields()
+    pub fn discover(schema: &DFSchema, relation: Option<&TableReference>) -> Option<Self> {
+        // One table's fields where a table was named. Two joined catalogs each have a
+        // `_healpix_29`, and searching the whole plan's schema would find both and conclude
+        // that neither names a column — which is the right rule applied to the wrong list.
+        let fields = sql::fields_of(schema, relation);
+        let mut found = fields
             .iter()
             .filter(|field| field.name() == DEFAULT_HEALPIX_COLUMN_NAME);
         let field = found.next()?;
@@ -519,7 +522,7 @@ impl SpatialIndex {
             return None;
         }
         Some(Self {
-            column: Expr::Column(Column::new_unqualified(field.name())),
+            column: Expr::Column(Column::new(relation.cloned(), field.name())),
             cell_type,
             order: MAX_ORDER,
         })
@@ -535,6 +538,7 @@ impl SpatialIndex {
     /// type's own range is a comparison arrow answers by saturating rather than by failing.
     pub fn resolve(
         schema: &DFSchema,
+        relation: Option<&TableReference>,
         column: &str,
         order: u8,
         field: &str,
@@ -544,7 +548,7 @@ impl SpatialIndex {
                 "{field}: {order} is past {MAX_ORDER}, the deepest HEALPix order"
             )));
         }
-        let (column, cell_type) = sql::integer_column(schema, column, "healpix_column")?;
+        let (column, cell_type) = sql::integer_column(schema, relation, column, "healpix_column")?;
         let cells = n_hash(order);
         match capacity(&cell_type) {
             Some(capacity) if capacity >= cells - 1 => Ok(Self {
@@ -1508,10 +1512,13 @@ mod tests {
         let schema = |fields: Vec<Field>| DFSchema::try_from(Schema::new(fields)).unwrap();
         let cell = |name: &str, of: DataType| Field::new(name, of, false);
 
-        let found = SpatialIndex::discover(&schema(vec![
-            cell("ra", DataType::Float64),
-            cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Int64),
-        ]));
+        let found = SpatialIndex::discover(
+            &schema(vec![
+                cell("ra", DataType::Float64),
+                cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Int64),
+            ]),
+            None,
+        );
         let found = found.expect("the recommended column should be recognised");
         assert_eq!(found.order, MAX_ORDER, "found at the order its name says");
         assert_eq!(found.cell_type, DataType::Int64);
@@ -1525,7 +1532,7 @@ mod tests {
             vec![cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::Float64)],
         ] {
             assert!(
-                SpatialIndex::discover(&schema(reason.clone())).is_none(),
+                SpatialIndex::discover(&schema(reason.clone()), None).is_none(),
                 "{reason:?} should not be taken for an index column"
             );
         }
@@ -1537,7 +1544,7 @@ mod tests {
             cell(DEFAULT_HEALPIX_COLUMN_NAME, DataType::UInt64),
         ]);
         assert!(
-            SpatialIndex::discover(&DFSchema::try_from(twice).unwrap()).is_none(),
+            SpatialIndex::discover(&DFSchema::try_from(twice).unwrap(), None).is_none(),
             "one name on two columns names neither"
         );
     }
@@ -1781,7 +1788,13 @@ mod tests {
             false,
         )]))
         .unwrap();
-        SpatialIndex::resolve(&schema, DEFAULT_HEALPIX_COLUMN_NAME, order, "healpix_order")
+        SpatialIndex::resolve(
+            &schema,
+            None,
+            DEFAULT_HEALPIX_COLUMN_NAME,
+            order,
+            "healpix_order",
+        )
     }
 
     fn spatial_index(order: u8) -> SpatialIndex {

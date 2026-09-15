@@ -12,8 +12,10 @@
 //! - **`TOP n`** is ADQL's row limit, and becomes `LIMIT n`.
 //! - **A region test compares with 1**, ADQL having no boolean: `1 = CONTAINS(p, r)` is the
 //!   `contains(p, r)` that [`crate::geometry`] registers, and `0 = CONTAINS(p, r)` its
-//!   negation. `INTERSECTS` against a point is the same test. `DISTANCE(p, c) < r` is the
-//!   circle of radius `r` around `c`, said as a region test so that it prunes like one.
+//!   negation. `INTERSECTS` against a point is the same test. `DISTANCE(p, c) < r` around a
+//!   position written out is the circle of radius `r` around `c`, said as a region test so
+//!   that it prunes like one; between two rows' positions it is a crossmatch and stays a
+//!   separation, there being no one shape to carry a covering.
 //! - **Four function names mean something else to DataFusion**: `CEILING`, `TRUNCATE`,
 //!   `LOG` — the natural logarithm in ADQL — and `MOD`, which DataFusion writes as `%`.
 //!
@@ -190,10 +192,6 @@ impl VisitorMut for Translator {
                 "{FIELD}: {name} is a region test and is compared with 1, as in \
                  1 = {name}(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))"
             ))),
-            "DISTANCE" => ControlFlow::Break(ApiError::bad_request(format!(
-                "{FIELD}: DISTANCE is answered as a bound on a separation, as in \
-                 DISTANCE(POINT(ra, dec), POINT(45.0, -20.0)) < 0.1"
-            ))),
             "MOD" => into_result(modulo(call).map(|remainder| *expr = remainder)),
             _ => {
                 if let Some((_, datafusion)) = RENAMED.iter().find(|(adql, _)| *adql == name) {
@@ -265,7 +263,7 @@ fn region_test(expr: &Expr) -> Result<Option<Expr>, ApiError> {
         }));
     }
     if let Some((call, radius)) = bounded_distance(left, op, right) {
-        return within(call, radius).map(Some);
+        return within(call, radius);
     }
     Ok(None)
 }
@@ -355,14 +353,21 @@ fn contains(call: &Function) -> Result<Expr, ApiError> {
     ))
 }
 
-/// `DISTANCE(…) < r`, as the circle of radius `r` it is.
+/// `DISTANCE(…) < r` around a position written out, as the circle of radius `r` it is.
 ///
-/// Both of ADQL's spellings: two points, and the four coordinates 2.1 added. The position
-/// that is a pair of numbers written out is the centre; the other is the row's.
-fn within(call: &Function, radius: &Expr) -> Result<Expr, ApiError> {
+/// Both of ADQL's spellings: two points, and the four coordinates 2.1 added. The position that
+/// is a pair of numbers written out is the centre; the other is the row's.
+///
+/// **A separation between two rows' positions is not a circle and is left alone**, which is
+/// `None`. It is a crossmatch — the shape is a different one for every row of the one side —
+/// so it stays `DISTANCE(…)`, which resolves to the separation `geometry` registers, and the
+/// comparison around it stays the comparison the caller wrote. Nothing is lost by that: a
+/// circle is worth recognising because it carries a covering, and there is no covering to be
+/// had here.
+fn within(call: &Function, radius: &Expr) -> Result<Option<Expr>, ApiError> {
     let wrong = || {
         ApiError::bad_request(format!(
-            "{FIELD}: a bounded DISTANCE compares a row's position with a position written as \
+            "{FIELD}: a bounded DISTANCE compares two positions, each of them two columns or \
              two numbers, as in DISTANCE(POINT(ra, dec), POINT(45.0, -20.0)) < 0.1"
         ))
     };
@@ -371,7 +376,7 @@ fn within(call: &Function, radius: &Expr) -> Result<Expr, ApiError> {
         [first, second] => match (constant_point(first), constant_point(second)) {
             (None, Some(centre)) => ((*first).clone(), centre),
             (Some(centre), None) => ((*second).clone(), centre),
-            _ => return Err(wrong()),
+            _ => return Ok(None),
         },
         [a, b, c, d] => match (constant(a) && constant(b), constant(c) && constant(d)) {
             (false, true) => (
@@ -382,17 +387,17 @@ fn within(call: &Function, radius: &Expr) -> Result<Expr, ApiError> {
                 call_to("POINT", vec![(*c).clone(), (*d).clone()]),
                 ((*a).clone(), (*b).clone()),
             ),
-            _ => return Err(wrong()),
+            _ => return Ok(None),
         },
         _ => return Err(wrong()),
     };
     if !is_call(&row, "POINT") {
         return Err(wrong());
     }
-    Ok(call_to(
+    Ok(Some(call_to(
         "contains",
         vec![row, call_to("CIRCLE", vec![ra, dec, radius.clone()])],
-    ))
+    )))
 }
 
 /// `MOD(x, y)`, which DataFusion writes `x % y`.
@@ -756,10 +761,26 @@ mod tests {
         assert!(refusal.contains("point first"), "{refusal}");
     }
 
+    /// A separation is a value wherever a number is one, so nothing here recognises it: the
+    /// name resolves to the function `geometry` registers and the statement is passed through
+    /// as written.
     #[test]
-    fn an_unbounded_distance_is_refused() {
-        let refusal = refusal("SELECT DISTANCE(POINT(ra, dec), POINT(1, 2)) FROM t");
-        assert!(refusal.contains("bound on a separation"), "{refusal}");
+    fn an_unbounded_distance_is_a_value() {
+        assert_eq!(
+            translated("SELECT DISTANCE(POINT(ra, dec), POINT(1, 2)) AS d FROM t ORDER BY d"),
+            "SELECT DISTANCE(POINT(ra, dec), POINT(1, 2)) AS d FROM t ORDER BY d"
+        );
+    }
+
+    /// Bounded, but between two rows' positions rather than around one written out. There is
+    /// no circle in it — the centre moves from row to row — so it is left as the separation
+    /// and the comparison, and only the constant-centre form becomes a region test.
+    #[test]
+    fn a_separation_between_two_tables_stays_a_separation() {
+        let translated =
+            translated("SELECT a.id FROM a JOIN b ON DISTANCE(a.ra, a.dec, b.ra, b.dec) < 0.1");
+        assert!(translated.contains("DISTANCE("), "{translated}");
+        assert!(!translated.contains("contains("), "{translated}");
     }
 
     #[test]

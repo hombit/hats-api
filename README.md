@@ -523,7 +523,29 @@ columns are the query's to name.
 }
 ```
 
-Declare two tables to run cross-table queries.
+Declare two tables to run cross-table queries. A crossmatch is ADQL's own spelling — a circle
+around each row of one side — here matching Gaia DR3 against Euclid Q1 within an arcsecond:
+
+```json
+{
+  "query": "SELECT g.source_id, e.object_id FROM gaia AS g JOIN euclid AS e ON 1 = CONTAINS(POINT(e.ra, e.dec), CIRCLE(g.ra, g.dec, 0.000278)) WHERE 1 = CONTAINS(POINT(g.ra, g.dec), CIRCLE(269.73, 66.02, 0.0167)) AND 1 = CONTAINS(POINT(e.ra, e.dec), CIRCLE(269.73, 66.02, 0.0167))",
+  "tables": {
+    "gaia": { "type": "hats", "url": "s3://stpubdata/gaia/gaia_dr3/public/hats" },
+    "euclid": { "type": "hats", "url": "s3://nasa-irsa-euclid-q1/contributed/q1/merged_objects/hats" }
+  }
+}
+```
+
+**Narrow each side.** The `WHERE` gives both catalogs their own arcminute circle, which is what
+chooses the partitions; the join condition then says which of the surviving pairs match. A
+circle centred on a column is a different circle for every row, so nothing about it prunes,
+and a side the `WHERE` says nothing about is the whole catalog — refused for reaching more
+partitions than `max_partitions` rather than read. It need not be a circle: any condition that
+narrows a side will do.
+
+`DISTANCE` is a value, in degrees, so
+`DISTANCE(POINT(g.ra, g.dec), POINT(e.ra, e.dec)) * 3600 AS sep_arcsec` reports each pair's
+separation, and an `ORDER BY` sorts on it.
 
 `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
 answered. Where ADQL spells something differently from SQL, the query is translated:
@@ -533,7 +555,7 @@ answered. Where ADQL spells something differently from SQL, the query is transla
 | `TOP n` | `LIMIT n`                              |
 | `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
 | `1 = INTERSECTS(point, shape)` | the same test, either argument first   |
-| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r`               |
+| `DISTANCE(POINT(ra, dec), POINT(45.0, -20.0)) < r` | the circle of radius `r`               |
 | `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
 | `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%`             |
 

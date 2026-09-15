@@ -862,6 +862,8 @@ impl FileQuery {
                     healpix: None,
                     // A url naming one file names no catalog above it.
                     partition: None,
+                    // And names one table, so a column needs no qualifier.
+                    relation: None,
                 })
             }
         };
@@ -1544,6 +1546,8 @@ impl<D: Dialect> ParquetQuery<D> {
             // A url naming one file names no catalog, so nothing here says the file is a
             // partition of one. The HATS routes fill this in.
             partition: None,
+            // And names one table, so a column needs no qualifier.
+            relation: None,
         }))
     }
 }
@@ -4673,6 +4677,97 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// A crossmatch: two catalogs joined on the separation between their rows, which is
+    /// ADQL's own spelling of one — a circle whose centre is a row of the other side.
+    ///
+    /// Each side carries its own region, which is what chooses the partitions; the join
+    /// condition only says which of the surviving pairs match, and nothing about it prunes.
+    /// The fixture's rows are cell centres well apart, so at a radius far below that spacing
+    /// the only pairs are each row with itself — an answer a test can state exactly.
+    ///
+    /// **Run with one partition allowed**, which is what shows each side's own region still
+    /// pruning. With two catalogs in scope a bare `ra` belongs to both and so does
+    /// `_healpix_29`; a predicate that lost track of which side it was about would either
+    /// fail to plan or quietly drop the covering, and dropping it reaches every partition and
+    /// is refused here rather than answered slowly.
+    #[tokio::test]
+    async fn the_adql_route_crossmatches_two_catalogs() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let region = crate::hats_query::tests::regions()[0].clone();
+        let expected = crate::hats_query::tests::inside(&region);
+        let (ra, dec, radius) = match &region {
+            Region::Circle {
+                ra,
+                dec,
+                radius_deg,
+                ..
+            } => (*ra, *dec, radius_deg.unwrap()),
+            other => panic!("the fixture's first region is a circle: {other:?}"),
+        };
+
+        let mut service = mounted(dir.path(), &ApiConfig::default());
+        service.adql_limits = (&limits).into();
+        let (status, body) = post_json(
+            service,
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": format!(
+                    "SELECT a.id AS aid, b.id AS bid \
+                     FROM left AS a JOIN right AS b \
+                       ON 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, 0.0001)) \
+                     WHERE 1 = CONTAINS(POINT(a.ra, a.dec), CIRCLE({ra}, {dec}, {radius})) \
+                       AND 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE({ra}, {dec}, {radius})) \
+                     ORDER BY aid"
+                ),
+                "tables": {
+                    "left": {"type": "hats", "url": "file:///"},
+                    "right": {"type": "hats", "url": "file:///"},
+                },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let rows = answer["rows"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row["aid"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{body}"
+        );
+        // Each row matched itself and nothing else, which is what makes the count above a
+        // statement about the join rather than about the two regions.
+        assert!(rows.iter().all(|row| row["aid"] == row["bid"]), "{body}");
+    }
+
+    /// A separation as a value, which is what a crossmatch reports beside the pair.
+    #[tokio::test]
+    async fn the_adql_route_answers_a_separation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("part0.parquet"),
+            query::tests::sky_fixture(),
+        )
+        .unwrap();
+        let (status, body) = ask_adql(
+            dir.path(),
+            "SELECT TOP 1 DISTANCE(POINT(ra, dec), POINT(42.0, -20.0)) AS sep FROM t \
+             ORDER BY sep",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let separation = answer["rows"][0]["sep"].as_f64().unwrap();
+        // The fixture's rows are a degree apart along a meridian and the circle is on one of
+        // them, so the nearest is that row itself.
+        assert!(separation < 1e-9, "{body}");
     }
 
     /// A catalog's positions are where the catalog says they are, and a region over any other

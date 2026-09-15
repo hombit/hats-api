@@ -46,7 +46,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.3 | the statement planned, over parquet tables | done | every function ADQL makes mandatory is answered; the geometry it leaves optional is §10.7's |
 | 10.4 | HATS catalogs as tables | done | partitions pruned by `PruningPredicate` over each cell's span, not by recognising a region |
 | 10.5 | one large table and small ones | todo | |
-| 10.6 | two large catalogs | todo | an equijoin once the left row is expanded to cells; three things to measure first |
+| 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
 
 §2–§7 are the phases in order, §8 the conditions every phase must keep, §9 what is
 deferred.
@@ -442,9 +442,15 @@ the memory pool and allowed to fail, or bounded up front by the entry's own kind
 
 ### 10.6 Stage four — two large catalogs
 
-A crossmatch, as an ordinary equijoin. Each left row is expanded into the order-*k* cells
-its match disk touches, the sides are joined on that cell, and `DISTANCE(…) < r` is the
-residual filter:
+**A crossmatch is answered already, and what is left is making it scale.** ADQL's own
+spelling — a circle centred on the other side's row — plans as a `NestedLoopJoinExec` over
+whatever each side's own region left, which is the right answer wherever both sides are
+narrow and the wrong shape as soon as one is not. So this stage is a plan for the same
+query, not a new surface, and nothing in it changes what a caller writes.
+
+The shape: an ordinary equijoin. Each left row is expanded into the order-*k* cells its
+match disk touches, the sides are joined on that cell, and the separation is the residual
+filter:
 
 ```
 left row  →  cells covering the disk of radius r around it   -- one column of lists, unnested
@@ -531,9 +537,6 @@ error rather than a number 2.3 times off.
 
 **Still to add, each small and none blocking a stage:**
 
-- **`DISTANCE` as a value**, for a select list or an `ORDER BY`. It is answered only bounded
-  above, as the region test it then is; anywhere else it needs a distance function and is
-  refused until there is one.
 - **`INTERSECTS` between two shapes.** Against a point it is `CONTAINS`; between a circle and
   a MOC it is a covering intersection nothing builds yet (§5.2).
 - **`LOWER`, `UPPER`, `ILIKE`.** `string_expressions` is off, and turning it on is `CLAUDE.md`'s

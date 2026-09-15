@@ -591,6 +591,28 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
     predicate is made. So a region said as a function reads exactly the bytes the `region`
     field reads, which `naming_the_healpix_column_reads_less_of_the_file` asserts.
 
+- **A shape built out of columns is a crossmatch, and it carries no covering.**
+  `contains(point(b.ra, b.dec), circle(a.ra, a.dec, r))` is ADQL's own spelling of one, and
+  the circle is a different circle for every row of `a` — so there is no one covering, no
+  pruning, and what it becomes is `region::within`, the separation and the bound. That it
+  prunes nothing is not a gap to be closed by recognising the pattern harder: a scan is
+  pruned by one predicate, and this is a predicate over two rows. What bounds such a query
+  is each side's *own* region, which does prune, and `max_partitions` refusing a side that
+  has none.
+
+  `region::separation` is the one haversine, and both forms go through it: a cone, a
+  crossmatch, and `distance(...)` as a value. A second copy of that formula is how two ways
+  of asking the same question come to disagree about which pairs are a degree apart.
+
+- **A region test in a statement has to say which table it is about.** `region::Spatial`
+  carries a `relation` for that, and `geometry::Contains` fills it in from the caller's own
+  `point(...)`. With two catalogs joined, a bare `ra` is a column of each and the predicate
+  will not plan — and `_healpix_29` is a column of each too, which is worse: `SpatialIndex`
+  finds two, reports that neither names an index, and the covering is silently dropped. Both
+  halves are needed, and `sql::fields_of` is what narrows the search to one table's fields.
+  `the_adql_route_crossmatches_two_catalogs` runs with one partition allowed, so a lost
+  covering is a refusal rather than a slow pass.
+
 - **A region function goes only on a context whose planner also chooses what to scan.**
   The covering prunes row groups inside a file; a catalog's partitions are chosen before any
   file is opened, from a `region` field. On a catalog route `contains` would prune within

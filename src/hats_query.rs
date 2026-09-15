@@ -582,6 +582,8 @@ impl Search {
                 order: *order,
             }),
             partition: Some((chosen.partition.order, chosen.partition.pixel)),
+            // One partition is read at a time, so there is one table and nothing to qualify.
+            relation: None,
         })
     }
 }
