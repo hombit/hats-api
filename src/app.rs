@@ -30,6 +30,7 @@ use crate::adql;
 use crate::adql_query;
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
 use crate::data::DataFiles;
+use crate::dsv;
 use crate::error::ApiError;
 use crate::hats;
 use crate::hats_query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
@@ -1439,9 +1440,10 @@ struct ParquetQuery<D> {
     #[schema(example = 29)]
     healpix_order: Option<u8>,
     /// `json`, the default; `parquet` for the answer as a parquet file laid out like the file
-    /// it came from; `votable` for a VOTable, which takes flat columns only and refuses a
-    /// nested one by name. Anything but `json` carries its counts in `x-hats-*` response
-    /// headers, there being no room in the body.
+    /// it came from; `votable` for a VOTable, `csv` for comma-separated text and `tsv` for
+    /// tab-separated. The last three take flat columns only and refuse a nested one by name.
+    /// Anything but `json` carries its counts in `x-hats-*` response headers, there being no
+    /// room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// At most this many rows. The order is not promised, but the same request returns the
@@ -1584,9 +1586,10 @@ struct CatalogQuery<D> {
     /// The columns it is tested against are the catalog's own, from its `properties`.
     region: Option<Vec<Region>>,
     /// `json`, the default; `parquet` for the answer as a parquet file laid out like the
-    /// partitions it came from; `votable` for a VOTable, which takes flat columns only and
-    /// refuses a nested one by name. Anything but `json` carries its counts in `x-hats-*`
-    /// response headers, there being no room in the body.
+    /// partitions it came from; `votable` for a VOTable, `csv` for comma-separated text and
+    /// `tsv` for tab-separated. The last three take flat columns only and refuse a nested one
+    /// by name. Anything but `json` carries its counts in `x-hats-*` response headers, there
+    /// being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// At most this many rows, taken from the front of the catalog's own order. The same
@@ -1758,9 +1761,9 @@ struct AdqlQuery {
     /// A name the statement reads and this does not declare is an error.
     tables: BTreeMap<String, AdqlTable>,
     /// `json`, the default; `parquet` for the answer as a parquet file; `votable` for a
-    /// VOTable, which takes flat columns only and refuses a nested one by name. Anything but
-    /// `json` carries its counts in `x-hats-*` response headers, there being no room in the
-    /// body.
+    /// VOTable, `csv` for comma-separated text and `tsv` for tab-separated. The last three
+    /// take flat columns only and refuse a nested one by name. Anything but `json` carries
+    /// its counts in `x-hats-*` response headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// Every key the body carried that this endpoint has no field for.
@@ -1866,11 +1869,21 @@ enum Format {
     /// The XML table format IVOA tools read. Flat columns only — `votable.rs` says which
     /// ones are refused and why.
     Votable,
+    /// Delimiter-separated values, one encoder and two delimiters — `dsv.rs` says what
+    /// neither of them can carry. One variant carrying which, rather than two beside each
+    /// other, so that every site handling it is handed the kind instead of recovering it.
+    Dsv(dsv::Dsv),
 }
 
 impl Format {
     /// Every format, in the order a refusal lists them. The default is the first.
-    const ALL: [Self; 3] = [Self::Json, Self::Parquet, Self::Votable];
+    const ALL: [Self; 5] = [
+        Self::Json,
+        Self::Parquet,
+        Self::Votable,
+        Self::Dsv(dsv::Dsv::Csv),
+        Self::Dsv(dsv::Dsv::Tsv),
+    ];
 
     /// The one place a format's name is written. [`Self::parse`] and the list in a
     /// refusal are both derived from it, so a format cannot be renamed in one and not
@@ -1880,6 +1893,7 @@ impl Format {
             Self::Json => "json",
             Self::Parquet => "parquet",
             Self::Votable => "votable",
+            Self::Dsv(kind) => kind.name(),
         }
     }
 
@@ -2208,6 +2222,12 @@ fn adql_answer(
             attachment(votable::CONTENT_TYPE, "query.vot"),
             counters(result, result.num_rows(), started),
             votable::encode(result)?,
+        )
+            .into_response()),
+        Format::Dsv(kind) => Ok((
+            attachment(kind.content_type(), &format!("query.{}", kind.name())),
+            counters(result, result.num_rows(), started),
+            dsv::encode(result, kind)?,
         )
             .into_response()),
     }
@@ -2600,6 +2620,12 @@ async fn hats_answer(
             votable::encode(&result.rows)?,
         )
             .into_response()),
+        Format::Dsv(kind) => Ok((
+            attachment(kind.content_type(), &format!("selection.{}", kind.name())),
+            hats_counters(result, num_rows, started),
+            dsv::encode(&result.rows, kind)?,
+        )
+            .into_response()),
     }
 }
 
@@ -2678,6 +2704,12 @@ async fn answer(
             attachment(votable::CONTENT_TYPE, &download_name(file, "vot")),
             counters(result, result.num_rows(), started),
             votable::encode(result)?,
+        )
+            .into_response()),
+        Format::Dsv(kind) => Ok((
+            attachment(kind.content_type(), &download_name(file, kind.name())),
+            counters(result, result.num_rows(), started),
+            dsv::encode(result, kind)?,
         )
             .into_response()),
     }
@@ -2958,6 +2990,14 @@ mod tests {
             Format::parse(Some("parquet"), Format::Json).unwrap(),
             Format::Parquet
         );
+        assert_eq!(
+            Format::parse(Some("csv"), Format::Json).unwrap(),
+            Format::Dsv(dsv::Dsv::Csv)
+        );
+        assert_eq!(
+            Format::parse(Some("tsv"), Format::Json).unwrap(),
+            Format::Dsv(dsv::Dsv::Tsv)
+        );
         // Absent is the mode's own default, which is why it is passed in.
         assert_eq!(Format::parse(None, Format::Json).unwrap(), Format::Json);
         assert_eq!(
@@ -2969,12 +3009,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_formats_are_rejected() {
         let (status, body) = select_with(serde_json::json!({
-            "url": "s3://b/k.parquet", "format": "csv",
+            "url": "s3://b/k.parquet", "format": "arrow",
         }))
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(body.contains("unknown format"), "{body}");
-        assert!(body.contains("json, parquet, votable"), "{body}");
+        assert!(body.contains("json, parquet, votable, csv, tsv"), "{body}");
     }
 
     #[test]
@@ -5727,6 +5767,63 @@ mod tests {
         let body = body_of(response).await;
         assert!(body.contains("sources"), "{body}");
         assert!(body.contains("nested"), "{body}");
+    }
+
+    /// Delimiter-separated values off the same route, which is what says the format reached
+    /// the answer rather than only the parser. The nested refusal is `dsv.rs`'s and lands as
+    /// a `400` here for the same reason the VOTable one does: a body that has begun cannot
+    /// take back a column it could not write.
+    #[tokio::test]
+    async fn a_dsv_answer_carries_a_header_row_and_its_counts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        std::fs::write(
+            dir.path().join("nested.parquet"),
+            query::tests::nested_fixture(),
+        )
+        .unwrap();
+
+        for (format, content_type, name, separator) in [
+            ("csv", dsv::Dsv::Csv.content_type(), "part0.csv", ','),
+            ("tsv", dsv::Dsv::Tsv.content_type(), "part0.tsv", '\t'),
+        ] {
+            let response = respond(
+                mounted(dir.path(), &ApiConfig::default()),
+                Request::builder().uri(format!(
+                    "/part0.parquet?columns=objectid,band&limit=2&format={format}"
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            let headers = response.headers().clone();
+            assert_eq!(headers[header::CONTENT_TYPE], content_type, "{format}");
+            assert_eq!(
+                headers[header::CONTENT_DISPOSITION],
+                format!("attachment; filename=\"{name}\""),
+                "{format}"
+            );
+            assert_eq!(headers[NUM_ROWS_HEADER], "2", "{format}");
+
+            let body = body_of(response).await;
+            let mut lines = body.lines();
+            assert_eq!(
+                lines.next().unwrap(),
+                format!("objectid{separator}band"),
+                "{format}"
+            );
+            assert_eq!(lines.next().unwrap(), format!("0{separator}g"), "{format}");
+        }
+
+        for format in ["csv", "tsv"] {
+            let response = respond(
+                mounted(dir.path(), &ApiConfig::default()),
+                Request::builder().uri(format!("/nested.parquet?format={format}")),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{format}");
+            let body = body_of(response).await;
+            assert!(body.contains("sources"), "{format}: {body}");
+        }
     }
 
     /// A struct column names its own fields, and the name that is built out of them

@@ -71,7 +71,7 @@ GET /gaia?ra=348.077&dec=-29.339&radius_arcsec=30&columns=source_id,phot_g_mean_
 | `columns` | comma-separated column names. Absent returns every column. |
 | `filters` | one row predicate; `&&` spells `AND`. Absent returns every row. |
 | `limit` | most rows to return. |
-| `format` | `parquet` (the default here), `json`, or `votable`. |
+| `format` | `parquet` (the default here), `json`, `votable`, `csv` or `tsv`. |
 | `ra`, `dec` | the centre of a cone, in degrees. |
 | `radius_arcsec`, `radius_deg` | its radius; exactly one of the two. |
 | `ra_column`, `dec_column` | which columns hold the position. Refused against a catalog, which names its own; required with a cone against a parquet file. |
@@ -206,7 +206,7 @@ The rest of the body is the same in both vocabularies:
 | `ra_column`, `dec_column` | which columns hold the position. Required with a `region` for `/api/v1/*/parquet`, not for HATS, which names its own |
 | `healpix_column`, `healpix_order` | [a HEALPix index column](#the-healpix-column), if the parquet file has one                                    |
 | `limit` | most rows to return                                                                                           |
-| `format` | [`json`](#the-three-formats), the default here, `parquet` or `votable`                                        |
+| `format` | [`json`](#the-formats), the default here, `parquet`, `votable`, `csv` or `tsv`                                |
 | `storage` | [how to reach the store](#storage-options): endpoint, credentials, headers                                    |
 | `return_storage` | write this request's own `storage` into each plan entry. `/api/v1/hats/plan` only                             |
 
@@ -403,7 +403,7 @@ no `fields` key:
              { "name": "mag", "type": "List(Float64)" }] }
 ```
 
-#### The three formats
+#### The formats
 
 `format` is a body field in API mode and a query parameter in file-server mode, defaulting
 to `json` and to `parquet` respectively. Anything but `json` carries its counts in the
@@ -420,6 +420,23 @@ reads the original. It carries the values above as themselves.
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
 `-Inf` written as themselves. Flat columns only: selection of a nested column fails
 the request.
+
+**`csv` and `tsv`.** Delimited text with a header row, comma-separated as
+`text/csv;header=present` and tab-separated as `text/tab-separated-values`. `NaN`, `inf`
+and `-inf` are written as those three, which `float()` in Python reads back. Flat columns
+only, the same as `votable` — delimited text has no form for a nested column, so selecting
+one fails the request naming the column. A query that matched nothing still returns its
+header row.
+
+A null is written as an empty field, and so is an empty string, so the two cannot be told
+apart. Ask for `json` or `parquet` where that difference matters.
+
+One thing to know when a query returns **a single column**: an empty field is written `""`
+there rather than bare, because a bare one would be a blank line, and a blank line is not a
+row with one empty value — `csv.reader` returns it as a record of no fields and
+`pandas.read_csv` drops it under its default `skip_blank_lines=True`. With two or more
+columns the row is `,` and needs no quoting, which is why you only see this in the
+one-column case.
 
 ### Selecting a region of the sky
 

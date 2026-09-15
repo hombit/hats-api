@@ -37,6 +37,7 @@ pub mod adql_query;
 pub mod app;
 pub mod config;
 pub mod data;
+pub mod dsv;
 pub mod error;
 pub mod geometry;
 pub mod hats;
