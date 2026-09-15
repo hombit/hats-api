@@ -7,9 +7,9 @@ A query narrows a catalog three ways:
 - A **row predicate** written as a SQL expression.
 - And the **columns** you want.
 
-The answer is rows, as JSON, parquet or a VOTable. A query too large to run at once comes
-back as a **plan** instead: the same work split into one request per partition, for the
-client to fan out itself.
+The answer is rows, as JSON, parquet, a VOTable, or csv/tsv. A query too large to run at
+once comes back as a **plan** instead: the same work split into one request per partition,
+for the client to fan out itself.
 
 The catalog can sit on local disk or in S3, GCS, Azure Blob, WebDAV, or behind a plain
 HTTP server. A single parquet file is queryable the same way.
@@ -208,7 +208,7 @@ The rest of the body is the same in both vocabularies:
 | `healpix_column`, `healpix_order` | [a HEALPix index column](#the-healpix-column), if the parquet file has one                                    |
 | `limit` | most rows to return                                                                                           |
 | `format` | [`json`](#the-formats), the default here, `parquet`, `votable`, `csv` or `tsv`                                |
-| `dsv_null_value` | what a null is written as, for `csv` and `tsv`. Empty by default; refused by the other three              |
+| `dsv_null_value` | what a null is written as, for `csv` and `tsv`. Empty by default                                              |
 | `storage` | [how to reach the store](#storage-options): endpoint, credentials, headers                                    |
 | `return_storage` | write this request's own `storage` into each plan entry. `/api/v1/hats/plan` only                             |
 
@@ -423,29 +423,10 @@ reads the original. It carries the values above as themselves.
 `-Inf` written as themselves. Flat columns only: selection of a nested column fails
 the request.
 
-**`csv` and `tsv`.** Delimited text with a header row, comma-separated as
-`text/csv;header=present` and tab-separated as `text/tab-separated-values`. `NaN`, `inf`
-and `-inf` are written as those three, which `float()` in Python reads back. Flat columns
-only, the same as `votable` — delimited text has no form for a nested column, so selecting
-one fails the request naming the column. A query that matched nothing still returns its
-header row.
-
-A null is written as an empty field, and so is an empty string, so the two cannot be told
-apart. **Set `dsv_null_value` if you need to** — `dsv_null_value=\N` writes that for a null
-and leaves an empty string empty. It takes at most 128 bytes, and no separator or line
-terminator (`,`, tab, newline, carriage return) whichever of the two formats you asked for;
-any other format refuses it rather than ignoring it.
-
-No default sentinel is chosen for you: every candidate is a string some catalog holds as a
-real value, and one that collides turns that value into a null — a wrong value rather than
-an error. Ask for `json` or `parquet` where no sentinel is safe.
-
-One thing to know when a query returns **a single column**: an empty field is written `""`
-there rather than bare, because a bare one would be a blank line, and a blank line is not a
-row with one empty value — `csv.reader` returns it as a record of no fields and
-`pandas.read_csv` drops it under its default `skip_blank_lines=True`. With two or more
-columns the row is `,` and needs no quoting, which is why you only see this in the
-one-column case. A non-empty `dsv_null_value` avoids the question entirely.
+**`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
+`-inf` written as those three, which `float()` in Python reads back. Flat columns only.
+A null and an empty string are both an empty field, which `dsv_null_value` overrides for
+nulls.
 
 ### Selecting a region of the sky
 

@@ -28,8 +28,16 @@
 //!   single field is written bare is a blank line, which `csv.reader` returns as a record of
 //!   *no* fields and `pandas.read_csv` drops outright under its default
 //!   `skip_blank_lines=True`: the row disappears rather than arriving empty. With two columns
-//!   the same row is `,`, which is unambiguous, which is why nothing is quoted there. Do not
-//!   "tidy" the one-column case into a bare line.
+//!   the same row is `,`, which is unambiguous, which is why nothing is quoted there.
+//!
+//!   Dropping the quoting has been weighed and refused, and the readers disagree about it:
+//!   measured against pandas 3.0.5, pyarrow 25.0.1, polars 1.44.2 and duckdb 1.5.5, every
+//!   one keeps the row as written today, while `polars` alone would read the one-column
+//!   field as a null if it were bare and reads it as an empty string quoted. That is one
+//!   reader preferring bare against one losing the row entirely, so the quoting stays. None
+//!   of this is a null the reader can rely on either way — `pyarrow` calls an empty field an
+//!   empty string in *both* shapes unless asked otherwise — which is what `dsv_null_value`
+//!   is for and why no default sentinel can stand in for it.
 //! - **A non-finite float is written the way Rust prints one** — `NaN`, `inf`, `-inf` — which
 //!   no CSV convention settles and which `float()` in Python reads back correctly for all
 //!   three. `to_json`'s three strings are a different set because JSON's number grammar
@@ -284,16 +292,20 @@ mod tests {
     /// anything may compare against.
     #[test]
     fn a_null_and_an_empty_string_are_one_spelling() {
-        let document = encode(
-            &one(
-                "x",
-                Arc::new(StringArray::from(vec![None, Some(""), Some("a")])),
-            ),
-            Dsv::Csv,
-            "",
-        )
-        .unwrap();
-        assert_eq!(document, "x\n\"\"\n\"\"\na\n");
+        for kind in [Dsv::Csv, Dsv::Tsv] {
+            let document = encode(
+                &one(
+                    "x",
+                    Arc::new(StringArray::from(vec![None, Some(""), Some("a")])),
+                ),
+                kind,
+                "",
+            )
+            .unwrap();
+            // Quoted, and in both formats: a lone bare empty field would be a blank line,
+            // which is a record of no fields rather than a row holding one empty value.
+            assert_eq!(document, "x\n\"\"\n\"\"\na\n", "{kind:?}");
+        }
     }
 
     /// A sentinel separates the two spellings the default leaves sharing one, which is the
