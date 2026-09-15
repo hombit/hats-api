@@ -299,7 +299,7 @@ fn push_text(value: &str, out: &mut String) -> Result<(), ApiError> {
 }
 
 /// One attribute value — a column's name, which came out of a file someone else wrote or
-/// out of the caller's own select list. Both are markup until they are escaped, and
+/// out of an alias in the caller's own query. Both are markup until they are escaped, and
 /// neither may carry a character XML has no form for.
 fn attribute(value: &str) -> Result<String, ApiError> {
     if value.bytes().any(|byte| byte < 0x20) {

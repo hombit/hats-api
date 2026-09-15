@@ -420,7 +420,7 @@ function viaLsdb(route, body, got) {
 }
 
 /* A column as `lsdb` wants it: the name itself, not the SQL spelling of it. A name that
-   needs quoting in a select list is a plain string in a Python list. */
+   needs quoting in `columns` is a plain string in a Python list. */
 function bare(name) {
   const written = name.startsWith('"') ? name.slice(1, -1).replace(/""/g, '"') : name;
   return text(written);

@@ -170,24 +170,16 @@ fn column_part(
     // has — instead of this one saying they wrote an expression when they did not.
     match projected_path(&item, schema) {
         Some(path) => Ok(Part::Path(path)),
-        None if column_path(&item).is_some() => plan(
-            state,
-            schema,
-            ExprWithAlias {
-                expr: item,
-                alias: None,
-            },
-            FIELD,
-            limits,
-        )
-        .map(Part::Planned),
+        None if column_path(&item).is_some() => {
+            plan(state, schema, item, FIELD, limits).map(Part::Planned)
+        }
         None => Err(ApiError::bad_request(format!(
             "{FIELD} takes column names; write an ADQL query to compute one"
         ))),
     }
 }
 
-/// The row predicate: one boolean expression, no alias and no second expression after it.
+/// The row predicate: one boolean expression, and no second expression after it.
 ///
 /// The separators a query string needs are not part of it: `&&`, `,` and `;` are
 /// [`filter_text`]'s, for a carrier that has to join two conditions inside one parameter. A
@@ -260,8 +252,8 @@ pub fn coordinate_column(
 /// into a `500` — so it takes the process down with every other request in flight.
 ///
 /// **Both of the shapes that reach this are unbounded by construction.** A `region` is one
-/// term per shape and nothing counts them — `max_expression_nodes` is about `select` and
-/// `where`, and never sees a structured field — so a cross-match sending one circle per
+/// term per shape and nothing counts them — `max_expression_nodes` is about `columns` and
+/// `filters`, and never sees a structured field — so a cross-match sending one circle per
 /// source is as many terms as the body holds. A `moc` is one term per range and skips
 /// [`crate::healpix`]'s range budget entirely, the ranges being the whole answer there
 /// rather than a saving. Pairing terms until one is left makes both `⌈log₂ n⌉` deep instead:
@@ -351,7 +343,7 @@ pub fn fields_of(schema: &DFSchema, relation: Option<&TableReference>) -> Fields
         .collect()
 }
 
-/// One boolean expression, however it was spelled: no alias, and nothing after it.
+/// One boolean expression, however it was spelled, and nothing after it.
 fn plan_predicate(
     state: &SessionState,
     schema: &DFSchema,
@@ -360,13 +352,7 @@ fn plan_predicate(
     limits: Limits,
 ) -> Result<Expr, ApiError> {
     let expr = parse(tokens, field, limits, Parser::parse_expr)?;
-    plan(
-        state,
-        schema,
-        ExprWithAlias { expr, alias: None },
-        field,
-        limits,
-    )
+    plan(state, schema, expr, field, limits)
 }
 
 /// Rewrite `&&` into `AND`, and a top-level `,` and `;` into `AND` and `OR`, on the tokens
@@ -497,7 +483,7 @@ enum Slot {
 /// nothing the caller wrote is dropped.
 ///
 /// The order is the caller's — a column appears where they first named it, and its fields
-/// in the order they wrote them — which is what a select list does everywhere else.
+/// in the order they wrote them.
 fn regrouped(
     state: &SessionState,
     schema: &DFSchema,
@@ -618,13 +604,7 @@ fn plan_path(
         [one] => SqlExpr::Identifier(one.clone()),
         parts => SqlExpr::CompoundIdentifier(parts.to_vec()),
     };
-    plan(
-        state,
-        schema,
-        ExprWithAlias { expr, alias: None },
-        field,
-        limits,
-    )
+    plan(state, schema, expr, field, limits)
 }
 
 /// The caller's text as tokens, which is as far as anything gets before the grammar has
@@ -670,18 +650,18 @@ fn parse<T>(
 fn plan(
     state: &SessionState,
     schema: &DFSchema,
-    mut expr: ExprWithAlias,
+    mut expr: SqlExpr,
     field: &str,
     limits: Limits,
 ) -> Result<Expr, ApiError> {
     // Idempotent, and `column_part` has already done it so that a bare path's output name
     // is the file's spelling rather than the caller's.
-    resolve_identifiers(&mut expr.expr, schema);
+    resolve_identifiers(&mut expr, schema);
     // Every failure here is the caller's expression not fitting the caller's file:
     // an unknown column, a type that will not compare, a function that is not
     // registered.
     let expr = state
-        .create_logical_expr_from_sql_expr(expr, schema)
+        .create_logical_expr_from_sql_expr(ExprWithAlias { expr, alias: None }, schema)
         .map_err(|error| {
             ApiError::bad_request(format!("{field}: {}", unqualified(&error.to_string())))
         })?;
@@ -1334,8 +1314,8 @@ mod tests {
         assert!(error.contains("one row"), "{error}");
     }
 
-    /// The wildcard arm in `allowed` is unreachable, and this is why: an expression is
-    /// not a select item, and `sqlparser`'s expression parser has no `*` in it.
+    /// The wildcard arm in `allowed` is unreachable, and this is why: `sqlparser`'s
+    /// expression parser has no `*` in it.
     #[test]
     fn no_expression_is_a_wildcard() {
         for sql in ["*", "t.*", "lightcurve.*"] {

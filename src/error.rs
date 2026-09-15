@@ -221,7 +221,7 @@ impl ApiError {
             // The remote file being missing or unreadable reaches us wrapped in a
             // DataFusionError, and is the caller's problem, not ours.
             Self::DataFusion(DataFusionError::ObjectStore(error)) => object_store_status(error),
-            // Every input to planning — the url, the select list, the predicate —
+            // Every input to planning — the url, the columns, the predicate —
             // comes from the caller, so a planning failure is a bad request. A missing
             // file lands here, as a failure to infer a schema from nothing.
             Self::DataFusion(DataFusionError::Plan(_)) => StatusCode::BAD_REQUEST,

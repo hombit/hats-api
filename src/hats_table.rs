@@ -79,7 +79,7 @@ impl HatsTable {
     /// Open a catalog and read what a statement needs to know about it before planning.
     ///
     /// Two reads: the catalog's own metadata, which `hats/` decides the cost of, and its schema.
-    /// The second is what the expression routes do without — they learn the columns from the
+    /// The second is what the `simple` routes do without — they learn the columns from the
     /// first partition they were going to open anyway — and a planner cannot, a statement being
     /// checked against a schema before anything is read.
     pub async fn open(
@@ -370,7 +370,7 @@ fn marked(schema: &SchemaRef, ra: &str, dec: &str) -> SchemaRef {
 ///
 /// `dataset/_common_metadata` first: it is the schema and no rows, so it is one small `GET`
 /// and it describes every partition rather than the one that answered. A catalog that has not
-/// got it falls back to the first partition, which is what the expression routes do — they
+/// got it falls back to the first partition, which is what the `simple` routes do — they
 /// learn the columns from the file they were going to open anyway. The fallback is a footer
 /// read of a real partition, so it is the more expensive of the two and second for that
 /// reason.

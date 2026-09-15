@@ -745,17 +745,17 @@ mod tests {
     /// told so rather than handed a value.
     #[tokio::test]
     async fn a_position_is_not_a_value() {
-        let error = selected("point(ra, dec)").await.unwrap_err();
+        let error = evaluated("point(ra, dec)").await.unwrap_err();
         assert!(error.to_string().contains("not a value"), "{error}");
     }
 
-    /// One select list over the fixture, which is where a function is a value rather than a
-    /// region test.
-    async fn selected(list: &str) -> datafusion::error::Result<Vec<RecordBatch>> {
+    /// One expression evaluated as a column of a statement over the fixture, which is where a
+    /// function is a value rather than a region test.
+    async fn evaluated(expr: &str) -> datafusion::error::Result<Vec<RecordBatch>> {
         let ctx = session_context(false);
         register(&ctx);
         ctx.register_batch("t", batch(true))?;
-        ctx.sql(&format!("SELECT {list} FROM t"))
+        ctx.sql(&format!("SELECT {expr} FROM t"))
             .await?
             .collect()
             .await
@@ -765,7 +765,7 @@ mod tests {
     /// takes — so the two ways of saying a circle are the same document.
     #[tokio::test]
     async fn a_constructor_is_the_region_field_written_out() {
-        let batches = selected("circle(45.0, -20.0, 0.1)")
+        let batches = evaluated("circle(45.0, -20.0, 0.1)")
             .await
             .expect("a constructor is an ordinary expression");
         let column = batches[0].column(0).as_string::<i32>();
