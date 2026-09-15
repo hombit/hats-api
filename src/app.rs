@@ -3592,6 +3592,50 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
+    /// The route end to end with a cross-match's worth of circles on it.
+    ///
+    /// [`crate::region::tests::many_shapes_do_not_build_a_tree_as_deep_as_they_are_long`] is
+    /// the same guarantee stated about the expression; this is the one that would actually
+    /// have taken the process down. The circles are clustered inside one partition on
+    /// purpose, so that the partition bound does not refuse the request before the predicate
+    /// those shapes build is ever put together.
+    #[tokio::test]
+    async fn a_cross_matchs_worth_of_circles_is_answered() {
+        let dir = crate::hats_query::tests::fixture(true);
+        let inside = crate::hats_query::tests::regions()[0].clone();
+        let Region::Circle { ra, dec, .. } = inside else {
+            panic!("the fixture's first region is a circle");
+        };
+
+        // Past the few hundred that overflowed a left-deep union, and no further: the cost
+        // of planning is linear in the terms, so a larger figure here buys the same
+        // guarantee and spends the test's whole budget on arithmetic.
+        let circles: Vec<serde_json::Value> = (0..500)
+            .map(|i| {
+                let offset = f64::from(i) / 500.0;
+                serde_json::json!({
+                    "type": "circle",
+                    "ra": ra + offset * 0.01,
+                    "dec": dec + offset * 0.01,
+                    "radius_arcsec": 1.0,
+                })
+            })
+            .collect();
+
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({"url": "file:///", "select": "id", "region": circles}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            answer["num_partitions"], 1,
+            "the cluster reached past its own partition: {body}"
+        );
+    }
+
     /// A catalog that says nothing about its position columns cannot be region-searched, and
     /// says so rather than answering without a spatial test.
     #[tokio::test]

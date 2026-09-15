@@ -586,14 +586,13 @@ impl SpatialIndex {
         if bounds.is_empty() || too_many {
             return None;
         }
-        bounds
-            .into_iter()
-            .map(|(low, high)| {
-                self.column
-                    .clone()
-                    .between(self.cell(low), self.cell(high - 1))
-            })
-            .reduce(Expr::or)
+        // Balanced rather than folded: a `moc` skips the budget above, so the range count
+        // here is the caller's MOC and a left-deep chain is a stack frame per range.
+        sql::any_of(bounds.into_iter().map(|(low, high)| {
+            self.column
+                .clone()
+                .between(self.cell(low), self.cell(high - 1))
+        }))
     }
 
     /// One cell number as a literal of the column's own type.

@@ -255,10 +255,13 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
     // A shape with no coordinate test contributes no term here and is answered by the
     // covering alone, so `false` is the right identity: it is what says "none of the shapes
     // that test a position matched", and the covering is `OR`ed in front of it.
-    let exact = shapes
-        .iter()
-        .filter_map(|shape| shape.predicate(coordinates.as_ref()))
-        .reduce(Expr::or);
+    // Balanced rather than folded: one term per shape, and nothing bounds how many shapes a
+    // body carries, so a left-deep chain is a stack frame per circle in a cross-match.
+    let exact = sql::any_of(
+        shapes
+            .iter()
+            .filter_map(|shape| shape.predicate(coordinates.as_ref())),
+    );
     // Which is also what makes the covering compulsory rather than a saving. Dropping it
     // would leave `false`, and a region that returns no rows is one a caller cannot tell
     // from a region that holds none.
@@ -1690,6 +1693,50 @@ mod tests {
 
     fn refuse(region: Region) -> String {
         plan(&[region]).unwrap_err().to_string()
+    }
+
+    /// How deep the expression tree is, which is how many stack frames a walk over it takes.
+    ///
+    /// Written with an explicit stack rather than recursively, so that measuring a tree too
+    /// deep to walk does not overflow in the same way the thing being measured would.
+    fn depth(expr: &Expr) -> usize {
+        let mut deepest = 0;
+        let mut pending = vec![(expr, 1_usize)];
+        while let Some((expr, level)) = pending.pop() {
+            deepest = deepest.max(level);
+            if let Expr::BinaryExpr(binary) = expr {
+                pending.push((&binary.left, level + 1));
+                pending.push((&binary.right, level + 1));
+            }
+        }
+        deepest
+    }
+
+    /// A cross-match sends one circle per source, and nothing bounds how many: `region` is a
+    /// structured field, so `max_expression_nodes` never sees it, and the body limit allows
+    /// tens of thousands of circles at about seventy bytes each.
+    ///
+    /// Folded left, that many terms is a tree as deep as it is long, and every walk over an
+    /// `Expr` is recursive — DataFusion's traversals, each optimizer pass, and the derived
+    /// `Drop`. The thread's stack runs out somewhere in the low hundreds of circles, and a
+    /// stack overflow is not an error this service can answer with: it aborts the process,
+    /// taking every other request in flight with it. So the guarantee is about the shape of
+    /// the tree and not about any one depth limit.
+    #[test]
+    fn many_shapes_do_not_build_a_tree_as_deep_as_they_are_long() {
+        let circles: Vec<Region> = (0..10_000)
+            .map(|i| circle_at(f64::from(i % 360), f64::from(i % 180 - 90), 1.0))
+            .collect();
+
+        let expr = plan(&circles).expect("ten thousand circles plan");
+
+        // Two levels per circle — the terms of its own bounding test — above a union that
+        // should be `log2(10_000)`, fourteen, rather than ten thousand.
+        assert!(
+            depth(&expr) < 64,
+            "the union is folded rather than balanced: depth {}",
+            depth(&expr)
+        );
     }
 
     /// A shape that describes no region is the caller's mistake. Every one of these would

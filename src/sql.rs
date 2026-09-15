@@ -308,6 +308,47 @@ pub fn coordinate_column(
     Ok(column)
 }
 
+/// The union of many terms, combined into a balanced tree rather than a left-deep chain.
+///
+/// `Iterator::reduce` folds left, so `n` terms come out as `(((a ∨ b) ∨ c) ∨ d) …` — a tree
+/// of depth `n`. Every walk over an `Expr` is recursive: DataFusion's `TreeNode` traversals,
+/// each optimizer pass, and `Expr`'s own derived `Drop`. So a left-deep chain needs a stack
+/// frame per term, and the thread dies on a body this service otherwise accepts. It is an
+/// abort rather than an error — a stack overflow is `SIGSEGV`, which no handler here turns
+/// into a `500` — so it takes the process down with every other request in flight.
+///
+/// **Both of the shapes that reach this are unbounded by construction.** A `region` is one
+/// term per shape and nothing counts them — `max_expression_nodes` is about `select` and
+/// `where`, and never sees a structured field — so a cross-match sending one circle per
+/// source is as many terms as the body holds. A `moc` is one term per range and skips
+/// [`crate::healpix`]'s range budget entirely, the ranges being the whole answer there
+/// rather than a saving. Pairing terms until one is left makes both `⌈log₂ n⌉` deep instead:
+/// thirty thousand circles is fifteen frames rather than thirty thousand.
+///
+/// The grouping is not observable in the answer — `OR` is associative, and DataFusion
+/// flattens what it wants to flatten in its own normalization — so this buys the depth and
+/// changes no rows.
+pub fn any_of(terms: impl IntoIterator<Item = Expr>) -> Option<Expr> {
+    balanced(terms.into_iter().collect(), Expr::or)
+}
+
+/// [`any_of`]'s shape, for whichever operator: pair the terms up, then pair the pairs, until
+/// one is left. An odd term at the end of a round is carried into the next one untouched.
+fn balanced(mut terms: Vec<Expr>, combine: fn(Expr, Expr) -> Expr) -> Option<Expr> {
+    while terms.len() > 1 {
+        let mut paired = Vec::with_capacity(terms.len().div_ceil(2));
+        let mut rest = terms.into_iter();
+        while let Some(left) = rest.next() {
+            paired.push(match rest.next() {
+                Some(right) => combine(left, right),
+                None => left,
+            });
+        }
+        terms = paired;
+    }
+    terms.pop()
+}
+
 /// A column of whole numbers a structured field names, with the integer type it is written
 /// at.
 ///
@@ -1021,6 +1062,8 @@ mod tests {
 
     use axum::http::StatusCode;
     use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
+    use datafusion::logical_expr::Operator;
+    use datafusion::prelude::lit;
 
     use super::*;
 
@@ -1555,5 +1598,54 @@ mod tests {
     fn the_nested_field_access_is_allowed() {
         let exprs = projection(&state(), &schema(), "lightcurve.mag", limits()).unwrap();
         assert!(allowed(&exprs[0], Shape::Row).is_ok());
+    }
+
+    /// The depth is what the shape is for, and it is logarithmic rather than merely smaller:
+    /// a constant factor off a left-deep fold would still overflow, further along.
+    #[test]
+    fn a_union_of_many_terms_is_logarithmically_deep() {
+        fn depth(expr: &Expr) -> usize {
+            match expr {
+                Expr::BinaryExpr(binary) => 1 + depth(&binary.left).max(depth(&binary.right)),
+                _ => 1,
+            }
+        }
+        // A literal, so that every level the walk counts is one this function put there.
+        let term = |i: i32| lit(i);
+
+        assert_eq!(any_of(std::iter::empty()), None);
+        assert_eq!(any_of([term(1)]), Some(term(1)));
+        assert_eq!(depth(&any_of((0..2).map(term)).unwrap()), 2);
+        for (terms, levels) in [(4, 3), (16, 5), (1024, 11), (10_000, 15)] {
+            assert_eq!(
+                depth(&any_of((0..terms).map(term)).unwrap()),
+                levels,
+                "{terms} terms"
+            );
+        }
+    }
+
+    /// An odd term has nowhere to pair and is carried up untouched, which is the step that
+    /// would otherwise drop it or double it.
+    #[test]
+    fn an_odd_number_of_terms_keeps_every_one_of_them() {
+        fn leaves(expr: &Expr, into: &mut Vec<String>) {
+            match expr {
+                Expr::BinaryExpr(binary) if binary.op == Operator::Or => {
+                    leaves(&binary.left, into);
+                    leaves(&binary.right, into);
+                }
+                other => into.push(other.to_string()),
+            }
+        }
+        for terms in [3_usize, 5, 7, 9, 11, 101] {
+            let union = any_of((0..terms).map(|i| lit(i as u64))).unwrap();
+            let mut found = Vec::new();
+            leaves(&union, &mut found);
+            assert_eq!(found.len(), terms, "{terms} terms");
+            found.sort_unstable();
+            found.dedup();
+            assert_eq!(found.len(), terms, "{terms} terms, after dedup");
+        }
     }
 }
