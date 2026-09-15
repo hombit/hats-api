@@ -29,7 +29,7 @@ use datafusion::execution::context::SessionState;
 use datafusion::functions::core::expr_fn::named_struct;
 use datafusion::logical_expr::{Expr, UNNAMED_TABLE, Volatility};
 use datafusion::sql::sqlparser::ast::{
-    Expr as SqlExpr, ExprWithAlias, Ident, visit_expressions_mut,
+    Expr as SqlExpr, ExprWithAlias, Ident, Statement, visit_expressions_mut,
 };
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
@@ -59,6 +59,38 @@ impl From<&LimitsConfig> for Limits {
             max_nodes: config.max_expression_nodes,
         }
     }
+}
+
+/// One whole statement, parsed and no further.
+///
+/// The one thing here that reads a statement, for the route whose caller writes a query
+/// rather than a pair of fields. Everything else in this module is an expression because an
+/// expression is all those routes take; this parses and stops, and what becomes of the
+/// statement is the caller's route's to decide. No text is ever assembled into one.
+///
+/// One statement, and the parser must reach the end of it. A trailing `;` is allowed and is
+/// the only thing that may follow, so a second statement written after the first is refused
+/// rather than dropped.
+pub fn statement(sql: &str, field: &str, limits: Limits) -> Result<Statement, ApiError> {
+    let refuse = |error: &dyn std::fmt::Display| {
+        ApiError::bad_request(format!("{field} is not a query: {error}"))
+    };
+    let tokens = Tokenizer::new(&DIALECT, sql)
+        .tokenize_with_location()
+        .map_err(|error| refuse(&error))?;
+    let mut parser = Parser::new(&DIALECT)
+        .with_recursion_limit(limits.max_depth)
+        .with_tokens_with_locations(tokens);
+    let parsed = parser.parse_statement().map_err(|error| refuse(&error))?;
+    if parser.peek_token().token == Token::SemiColon {
+        parser.next_token();
+    }
+    if parser.peek_token().token != Token::EOF {
+        return Err(ApiError::bad_request(format!(
+            "{field} must be one statement; this one does not end where it should"
+        )));
+    }
+    Ok(parsed)
 }
 
 /// The select list, as one expression per output column.
