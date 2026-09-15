@@ -8,15 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- The numeric functions — `sqrt`, `log10`, `power`, `abs`, `degrees`, the trigonometric ones — are callable in `select` and `where`. `log` is refused as ambiguous.
-- `POST {api.prefix}/adql`, taking an ADQL statement over tables the request declares, each a parquet file or a HATS catalog. `RAND()` is answered there and refused everywhere else. A region over a `hats` table names the catalog's own position columns. A crossmatch is `1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, r))`, and `DISTANCE(...)` is a value in degrees.
-- `[limits] max_query_memory_bytes`, `1GiB` by default.
+--
 
 ### Changed
 
-- **Breaking** The `box` region is now `zone`, ADQL spelling a different shape `BOX`. [#28](https://github.com/hombit/hats-api/pull/28)
-- **Breaking** `[limits] max_request_body_bytes` is `2MiB` by default, down from `16MiB`. [#44](https://github.com/hombit/hats-api/pull/44)
-- **Breaking** A query over `max_partitions`, `max_bytes_fetched` or `max_rows` answers `422` instead of `413`; `413` is now a body over `max_request_body_bytes` alone. [#42](https://github.com/hombit/hats-api/pull/42)
+--
 
 ### Deprecated
 
@@ -28,12 +24,32 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A `region` of a few hundred shapes, or a `moc` of a few hundred ranges, aborted the process with a stack overflow instead of answering. [#43](https://github.com/hombit/hats-api/pull/43)
-- A `zone` whose declination band lies near a pole dropped the connection instead of answering. [#45](https://github.com/hombit/hats-api/pull/45), [cds-healpix-rust#27](https://github.com/cds-astro/cds-healpix-rust/issues/27)
+--
 
 ### Security
 
 --
+
+## [0.0.5] - 2026-09-15
+
+### Added
+
+- `POST {api.prefix}/adql`, taking an ADQL statement over tables the request declares, each a parquet file or a HATS catalog. [#36](https://github.com/hombit/hats-api/pull/36), [#37](https://github.com/hombit/hats-api/pull/37), [#41](https://github.com/hombit/hats-api/pull/41), [#47](https://github.com/hombit/hats-api/pull/47)
+- A crossmatch, `1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, r))`, and `DISTANCE(...)` as a value in degrees. [#47](https://github.com/hombit/hats-api/pull/47)
+- `RAND()`, on the ADQL route and refused everywhere else. [#41](https://github.com/hombit/hats-api/pull/41)
+- The numeric functions — `sqrt`, `log10`, `power`, `abs`, `degrees`, the trigonometric ones — are callable in `select` and `where`. `log` is refused as ambiguous. [#30](https://github.com/hombit/hats-api/pull/30), [#33](https://github.com/hombit/hats-api/pull/33)
+- `[limits] max_query_memory_bytes`, `1GiB` by default. [#41](https://github.com/hombit/hats-api/pull/41)
+
+### Changed
+
+- **Breaking** The `box` region is now `zone`, ADQL spelling a different shape `BOX`. [#28](https://github.com/hombit/hats-api/pull/28)
+- **Breaking** `[limits] max_request_body_bytes` is `2MiB` by default, down from `16MiB`. [#44](https://github.com/hombit/hats-api/pull/44)
+- **Breaking** A query over `max_partitions`, `max_bytes_fetched` or `max_rows` answers `422` instead of `413`. [#42](https://github.com/hombit/hats-api/pull/42)
+
+### Fixed
+
+- A `region` of a few hundred shapes, or a `moc` of a few hundred ranges, aborted the process with a stack overflow instead of answering. [#43](https://github.com/hombit/hats-api/pull/43)
+- A `zone` whose declination band lies near a pole dropped the connection instead of answering. [#45](https://github.com/hombit/hats-api/pull/45), [cds-healpix-rust#27](https://github.com/cds-astro/cds-healpix-rust/issues/27)
 
 ## [0.0.4] - 2026-09-13
 
@@ -64,7 +80,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.5...HEAD
+[0.0.5]: https://github.com/hombit/hats-api/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/hombit/hats-api/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/hombit/hats-api/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/hombit/hats-api/compare/v0.0.1...v0.0.2
