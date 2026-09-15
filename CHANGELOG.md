@@ -15,6 +15,7 @@ Release dates are in the UTC time zone.
 ### Changed
 
 - **Breaking** The `box` region is now `zone`, ADQL spelling a different shape `BOX`. [#28](https://github.com/hombit/hats-api/pull/28)
+- **Breaking** `[limits] max_request_body_bytes` is `2MiB` by default, down from `16MiB`. [#44](https://github.com/hombit/hats-api/pull/44)
 
 ### Deprecated
 
