@@ -39,7 +39,7 @@ use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats;
 use crate::hats::query::{CatalogLimits, CatalogSelection, Exceeded, Outcome, Search};
-use crate::output::{dsv, votable};
+use crate::output::{dsv, json, parquet, votable};
 use crate::sky::healpix::Cover;
 use crate::sky::region::{self, Healpix, Region, Spatial};
 use crate::storage::materialize::Transfers;
@@ -2124,7 +2124,7 @@ async fn query_adql(
 /// Its own function because the parquet case differs: a single-file answer is laid out like
 /// the file it came from, and a statement may have read several files or none whose layout
 /// means anything for a set of groups. So the writer's own defaults, which is what
-/// [`crate::output::parquet::SourceLayout::default`] is.
+/// [`parquet::SourceLayout::default`] is.
 fn adql_answer(
     result: &QueryResult,
     output: &Output,
@@ -2135,10 +2135,7 @@ fn adql_answer(
         Format::Parquet => Ok((
             attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
             counters(result, result.num_rows(), started),
-            crate::output::parquet::encode(
-                result,
-                &crate::output::parquet::SourceLayout::default(),
-            )?,
+            parquet::encode(result, &parquet::SourceLayout::default())?,
         )
             .into_response()),
         Format::Votable => Ok((
@@ -2513,7 +2510,7 @@ async fn hats_answer(
     let num_rows = result.rows.num_rows();
     match output.format {
         Format::Json => {
-            let rows = query::to_json(&result.rows)?;
+            let rows = json::to_json(&result.rows)?;
             let schema = columns_of(&result.rows);
             Ok(Json(HatsResponse {
                 num_rows: rows.len(),
@@ -2527,10 +2524,10 @@ async fn hats_answer(
         }
         Format::Parquet => {
             let layout = match &result.source {
-                Some(file) => crate::output::parquet::read_layout(file).await?,
-                None => crate::output::parquet::SourceLayout::default(),
+                Some(file) => parquet::read_layout(file).await?,
+                None => parquet::SourceLayout::default(),
             };
-            let body = crate::output::parquet::encode(&result.rows, &layout)?;
+            let body = parquet::encode(&result.rows, &layout)?;
             Ok((
                 attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
                 hats_counters(result, num_rows, started),
@@ -2653,7 +2650,7 @@ fn counters(
 }
 
 fn json_response(result: &QueryResult, started: Instant) -> Result<Response, ApiError> {
-    let rows = query::to_json(result)?;
+    let rows = json::to_json(result)?;
     let schema = columns_of(result);
     Ok(Json(SelectResponse {
         num_rows: rows.len(),
@@ -2673,8 +2670,8 @@ async fn parquet_response(
     num_rows: usize,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    let layout = crate::output::parquet::read_layout(file).await?;
-    let body = crate::output::parquet::encode(result, &layout)?;
+    let layout = parquet::read_layout(file).await?;
+    let body = parquet::encode(result, &layout)?;
     Ok((
         attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
         counters(result, num_rows, started),
