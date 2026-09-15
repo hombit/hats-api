@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `format=csv` and `format=tsv` on every query route, as `text/csv;header=present` and `text/tab-separated-values`. [#52](https://github.com/hombit/hats-api/pull/52)
 
 ### Changed
 
