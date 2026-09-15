@@ -619,7 +619,7 @@ async fn serve_mounted(
     let radius = service.max_query_radius_arcsec;
     let mut requested = mount.source().to_owned();
     requested.extend(&segments);
-    let mut file = access::authorize_mounted(mount, &requested)?;
+    let mut file = access::local::authorize_mounted(mount, &requested)?;
     if file.is_dir() {
         // A catalog is the one directory that answers a question about itself, and the
         // question comes before the page: a directory with an `index.html` still has
@@ -646,7 +646,7 @@ async fn serve_mounted(
         // decides is what a request for the *directory* answers with, not whether an
         // `index.html` exists.
         let index = match service.serve_index_html {
-            true => access::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)).ok(),
+            true => access::local::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)).ok(),
             false => None,
         };
         match index {
