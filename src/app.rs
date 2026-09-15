@@ -758,6 +758,7 @@ struct FileQuery {
     columns: Option<String>,
     filters: Option<String>,
     format: Option<String>,
+    dsv_null_value: Option<String>,
     limit: Option<String>,
     /// The circle, built and checked at parse time so that everything downstream can borrow
     /// it — a [`Selection`] holds the shapes rather than owning them. One element: a query
@@ -789,6 +790,7 @@ impl FileQuery {
                 "columns" => &mut query.columns,
                 "filters" => &mut query.filters,
                 "format" => &mut query.format,
+                "dsv_null_value" => &mut query.dsv_null_value,
                 "limit" => &mut query.limit,
                 "ra_column" => &mut query.ra_column,
                 "dec_column" => &mut query.dec_column,
@@ -986,7 +988,11 @@ async fn query_mounted(
         return Err(ApiError::method_not_allowed("a query is read, not written"));
     }
     let started = Instant::now();
-    let format = Format::parse(query.format.as_deref(), Format::Parquet)?;
+    let output = Output::parse(
+        query.format.as_deref(),
+        query.dsv_null_value.as_deref(),
+        Format::Parquet,
+    )?;
     let selection = query.selection()?;
     let opened = storage::open_mounted(file)?;
     // Through `from_mount`, both of them: a store's own message about a local file names
@@ -1000,7 +1006,7 @@ async fn query_mounted(
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, &opened, format, started)
+    let response = answer(&result, &opened, &output, started)
         .await
         .map_err(|error| error.from_mount(file))?;
     tracing::info!(
@@ -1010,7 +1016,7 @@ async fn query_mounted(
         path = request.uri.path(),
         projected = query.columns.is_some(),
         filtered = query.filters.is_some(),
-        format = format.name(),
+        format = output.format.name(),
         num_rows,
         // What the pruning was worth, next to the time it took. Free to record and the
         // one number that says whether a slow request was slow because it read the file.
@@ -1047,7 +1053,11 @@ async fn query_catalog_mounted(
     let started = Instant::now();
     // Parquet, as it is for a file: adding a query string to a url should not change what
     // media type it answers with, and the page asks for JSON by name.
-    let format = Format::parse(query.format.as_deref(), Format::Parquet)?;
+    let output = Output::parse(
+        query.format.as_deref(),
+        query.dsv_null_value.as_deref(),
+        Format::Parquet,
+    )?;
     let selection = query.catalog_selection()?;
     // Every message from here down names the operator's directory, this being a local store.
     let hide_the_path = |error: ApiError| error.from_mount(dir);
@@ -1073,7 +1083,7 @@ async fn query_catalog_mounted(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, format, started)
+    let response = hats_answer(&result, &output, started)
         .await
         .map_err(hide_the_path)?;
     tracing::info!(
@@ -1084,7 +1094,7 @@ async fn query_catalog_mounted(
         partitions_read,
         projected = query.columns.is_some(),
         filtered = query.filters.is_some(),
-        format = format.name(),
+        format = output.format.name(),
         num_rows,
         data_bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
@@ -1446,6 +1456,12 @@ struct ParquetQuery<D> {
     /// room in the body.
     #[schema(example = "json")]
     format: Option<String>,
+    /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
+    /// spelling an empty string also has, so the two cannot be told apart until this is set.
+    /// At most 128 bytes, and no `,`, tab, newline or carriage return, whichever of the two
+    /// formats was asked for.
+    #[schema(example = "NULL")]
+    dsv_null_value: Option<String>,
     /// At most this many rows. The order is not promised, but the same request returns the
     /// same rows.
     #[schema(example = 100)]
@@ -1476,7 +1492,7 @@ impl<D: Dialect> ParquetQuery<D> {
             "healpix_order",
         ];
         fields.extend(D::FIELDS);
-        fields.extend(["format", "limit"]);
+        fields.extend(["format", "dsv_null_value", "limit"]);
         fields
     }
 
@@ -1592,6 +1608,12 @@ struct CatalogQuery<D> {
     /// being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
+    /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
+    /// spelling an empty string also has, so the two cannot be told apart until this is set.
+    /// At most 128 bytes, and no `,`, tab, newline or carriage return, whichever of the two
+    /// formats was asked for.
+    #[schema(example = "NULL")]
+    dsv_null_value: Option<String>,
     /// At most this many rows, taken from the front of the catalog's own order. The same
     /// request returns the same rows.
     #[schema(example = 100)]
@@ -1608,7 +1630,7 @@ impl<D: Dialect> CatalogQuery<D> {
     fn fields() -> Vec<&'static str> {
         let mut fields = vec!["url", "storage", "region"];
         fields.extend(D::FIELDS);
-        fields.extend(["format", "limit"]);
+        fields.extend(["format", "dsv_null_value", "limit"]);
         fields
     }
 
@@ -1624,6 +1646,7 @@ impl<D: Dialect> CatalogQuery<D> {
             url: &self.url,
             storage: &self.storage,
             query: &self.query,
+            dsv_null_value: self.dsv_null_value.as_deref(),
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
@@ -1663,6 +1686,12 @@ struct CatalogPlanQuery<D> {
     /// not the plan's own: a plan is JSON.
     #[schema(example = "json")]
     format: Option<String>,
+    /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
+    /// spelling an empty string also has, so the two cannot be told apart until this is set.
+    /// At most 128 bytes, and no `,`, tab, newline or carriage return, whichever of the two
+    /// formats was asked for.
+    #[schema(example = "NULL")]
+    dsv_null_value: Option<String>,
     /// Written into each entry as you wrote it. Each answers at most this many rows, and the
     /// first `limit` of the concatenation is what this service would have returned.
     #[schema(example = 100)]
@@ -1701,6 +1730,7 @@ impl<D: Dialect> CatalogPlanQuery<D> {
             url: &self.url,
             storage: &self.storage,
             query: &self.query,
+            dsv_null_value: self.dsv_null_value.as_deref(),
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
@@ -1724,6 +1754,7 @@ struct Lowered<'a, D> {
     query: &'a D,
     region: Option<&'a [Region]>,
     format: Option<&'a str>,
+    dsv_null_value: Option<&'a str>,
     limit: Option<usize>,
     /// The caller's own storage options, to be written into every entry of a plan. `Some`
     /// only from an endpoint that has a `return_storage` to have asked with.
@@ -1766,6 +1797,12 @@ struct AdqlQuery {
     /// its counts in `x-hats-*` response headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
+    /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
+    /// spelling an empty string also has, so the two cannot be told apart until this is set.
+    /// At most 128 bytes, and no `,`, tab, newline or carriage return, whichever of the two
+    /// formats was asked for.
+    #[schema(example = "NULL")]
+    dsv_null_value: Option<String>,
     /// Every key the body carried that this endpoint has no field for.
     #[serde(flatten)]
     #[schema(ignore)]
@@ -1808,7 +1845,7 @@ enum TableKind {
 impl AdqlQuery {
     /// Every field this endpoint takes, in the order a body is written in.
     fn fields() -> Vec<&'static str> {
-        vec!["query", "tables", "format"]
+        vec!["query", "tables", "format", "dsv_null_value"]
     }
 
     /// The same list, as the sentence a refusal ends with.
@@ -1885,6 +1922,22 @@ impl Format {
         Self::Dsv(dsv::Dsv::Tsv),
     ];
 
+    /// Whether this format writes delimiter-separated values, which is what
+    /// `dsv_null_value` applies to and what the other three refuse it for.
+    const fn is_dsv(self) -> bool {
+        matches!(self, Self::Dsv(_))
+    }
+
+    /// The names that do take a `dsv_null_value`, for a refusal to list.
+    fn dsv_names() -> String {
+        Self::ALL
+            .into_iter()
+            .filter(|format| format.is_dsv())
+            .map(Self::name)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    }
+
     /// The one place a format's name is written. [`Self::parse`] and the list in a
     /// refusal are both derived from it, so a format cannot be renamed in one and not
     /// the others, or added and left unparseable.
@@ -1914,6 +1967,55 @@ impl Format {
                     Self::ALL.map(Self::name).join(", ")
                 ))
             })
+    }
+}
+
+/// The encoding an answer is written in, and what writing it takes.
+///
+/// One type rather than two arguments travelling together, so that the refusal below happens
+/// once: a `dsv_null_value` is meaningless for the three formats that have a null of their
+/// own, and a parameter this service acts on is honoured or refused, never dropped.
+#[derive(Debug, Clone)]
+struct Output {
+    format: Format,
+    /// What a null is written as, where the format is one that has no other way to say it.
+    /// The request's own, or [`DEFAULT_DSV_NULL`] where it named none.
+    dsv_null: String,
+}
+
+/// What a null is written as in `csv` and `tsv` where a request asks for nothing else.
+///
+/// A constant rather than a configured default, so that the document at `/docs` states one
+/// answer rather than whatever this deployment was started with — a caller reading it
+/// somewhere else would otherwise be told the wrong thing. Empty is also what `arrow-csv`
+/// does on its own, so the two cannot drift.
+const DEFAULT_DSV_NULL: &str = "";
+
+impl Output {
+    /// The default format is the caller's mode, as [`Format::parse`] has it.
+    fn parse(
+        raw_format: Option<&str>,
+        raw_null: Option<&str>,
+        default_format: Format,
+    ) -> Result<Self, ApiError> {
+        let format = Format::parse(raw_format, default_format)?;
+        let dsv_null = match raw_null {
+            None => DEFAULT_DSV_NULL.to_owned(),
+            Some(value) => {
+                if !format.is_dsv() {
+                    return Err(ApiError::bad_request(format!(
+                        "dsv_null_value applies to {}, and this request asked for {}",
+                        Format::dsv_names(),
+                        format.name()
+                    )));
+                }
+                dsv::check_null_value(value).map_err(|reason| {
+                    ApiError::bad_request(format!("dsv_null_value {value:?}: {reason}"))
+                })?;
+                value.to_owned()
+            }
+        };
+        Ok(Self { format, dsv_null })
     }
 }
 
@@ -2049,7 +2151,11 @@ async fn query_parquet<D: Dialect>(
     let started = Instant::now();
     refuse_unknown(&params.unknown, &ParquetQuery::<D>::takes())?;
     // Everything decidable from the request alone, before anything is opened.
-    let format = Format::parse(params.format.as_deref(), Format::Json)?;
+    let output = Output::parse(
+        params.format.as_deref(),
+        params.dsv_null_value.as_deref(),
+        Format::Json,
+    )?;
     let selection = params.selection()?;
     let url = parse_url(params.url.as_str())?;
     // The API has only one thing to do with an object, so a url naming something it does
@@ -2084,7 +2190,7 @@ async fn query_parquet<D: Dialect>(
     let data_bytes_read = result.data_bytes_read;
     // Both of them, the way the mounted path does it: encoding a parquet answer reads
     // the source file's layout, so it raises the store's messages too.
-    let response = answer(&result, &file, format, started)
+    let response = answer(&result, &file, &output, started)
         .await
         .map_err(hide_the_path)?;
     tracing::info!(
@@ -2099,7 +2205,7 @@ async fn query_parquet<D: Dialect>(
         // numbers would be logging the caller's own coordinates for no purpose the
         // count does not already serve.
         regions = params.region.as_ref().map_or(0, Vec::len),
-        format = format.name(),
+        format = output.format.name(),
         num_rows,
         // Over a remote store this is also what the request cost the origin, which the
         // elapsed time on its own does not distinguish from a slow network.
@@ -2118,7 +2224,11 @@ async fn query_adql(
     let Json(params) = body.map_err(|rejection| adql_body_error(&rejection))?;
     let started = Instant::now();
     refuse_unknown(&params.unknown, &AdqlQuery::takes())?;
-    let format = Format::parse(params.format.as_deref(), Format::Json)?;
+    let output = Output::parse(
+        params.format.as_deref(),
+        params.dsv_null_value.as_deref(),
+        Format::Json,
+    )?;
     // Everything decidable from the request alone, before a store is built. The statement is
     // read first because it says which of the declared tables are even needed, and because a
     // statement this service will not answer costs nothing to refuse.
@@ -2183,14 +2293,14 @@ async fn query_adql(
     let result = adql_query::run(&translated, &tables, &data_files, service.adql_limits).await?;
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = adql_answer(&result, format, started)?;
+    let response = adql_answer(&result, &output, started)?;
     tracing::info!(
         // The names and not the urls: a url may carry credentials, and which tables a
         // statement read is what a log is for. The statement itself is the caller's own text
         // and can be large, so what is recorded is its size.
         tables = %translated.tables.iter().cloned().collect::<Vec<_>>().join(","),
         query_bytes = params.query.len(),
-        format = format.name(),
+        format = output.format.name(),
         num_rows,
         data_bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
@@ -2207,10 +2317,10 @@ async fn query_adql(
 /// [`parquet_out::SourceLayout::default`] is.
 fn adql_answer(
     result: &QueryResult,
-    format: Format,
+    output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    match format {
+    match output.format {
         Format::Json => json_response(result, started),
         Format::Parquet => Ok((
             attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
@@ -2227,7 +2337,7 @@ fn adql_answer(
         Format::Dsv(kind) => Ok((
             attachment(kind.content_type(), &format!("query.{}", kind.name())),
             counters(result, result.num_rows(), started),
-            dsv::encode(result, kind)?,
+            dsv::encode(result, kind, &output.dsv_null)?,
         )
             .into_response()),
     }
@@ -2272,14 +2382,14 @@ struct Opened {
     /// from. The opened directory's url is the store's, and for a mount a store's url is the
     /// operator's path on disk.
     url: Url,
-    format: Format,
+    output: Output,
 }
 
 async fn open_catalog<D: Dialect>(
     service: &Service,
     params: &Lowered<'_, D>,
 ) -> Result<Opened, ApiError> {
-    let format = Format::parse(params.format, Format::Json)?;
+    let output = Output::parse(params.format, params.dsv_null_value, Format::Json)?;
     let url = parse_url(params.url.as_str())?;
     // A directory rather than an object: `open_dir` drops only the refusal of a url naming
     // no object, and every policy check `open` makes still runs. There is no `[data]`
@@ -2296,7 +2406,7 @@ async fn open_catalog<D: Dialect>(
     Ok(Opened {
         search,
         url,
-        format,
+        output,
     })
 }
 
@@ -2318,7 +2428,7 @@ async fn query_hats<D: Dialect>(
     let Opened {
         search,
         url,
-        format,
+        output,
     } = open_catalog(&service, &params).await?;
     let on_disk = url.to_file_path().ok();
     let hide_the_path = |error: ApiError| match &on_disk {
@@ -2351,7 +2461,7 @@ async fn query_hats<D: Dialect>(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, format, started)
+    let response = hats_answer(&result, &output, started)
         .await
         .map_err(&hide_the_path)?;
     tracing::info!(
@@ -2367,7 +2477,7 @@ async fn query_hats<D: Dialect>(
         // How many shapes, not what they were: logging the numbers would be logging the
         // caller's own coordinates for no purpose the count does not already serve.
         regions = params.region.map_or(0, <[Region]>::len),
-        format = format.name(),
+        format = output.format.name(),
         num_rows,
         data_bytes_read,
         elapsed_ms = started.elapsed().as_millis(),
@@ -2478,6 +2588,8 @@ struct PlanBody<D> {
     healpix_order: Option<u8>,
     #[serde(skip_serializing_if = "Option::is_none")]
     format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dsv_null_value: Option<String>,
     /// Carried as the caller wrote it. Each entry returns at most this many, and the client
     /// takes the first `limit` of the concatenation — which is the same rows this service
     /// would have returned, the entries being in the same order.
@@ -2544,6 +2656,7 @@ async fn plan_of<D: Dialect>(
                     healpix_column: named.and(healpix).map(|(column, _)| column.clone()),
                     healpix_order: named.and(healpix).map(|(_, order)| *order),
                     format: params.format.map(str::to_owned),
+                    dsv_null_value: params.dsv_null_value.map(str::to_owned),
                     limit: params.limit,
                     storage: params.echo.clone(),
                 },
@@ -2583,11 +2696,11 @@ fn below(catalog: &Url, path: &str) -> Result<String, ApiError> {
 /// writer's own defaults, there being no file to copy from.
 async fn hats_answer(
     result: &crate::hats_query::CatalogResult,
-    format: Format,
+    output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError> {
     let num_rows = result.rows.num_rows();
-    match format {
+    match output.format {
         Format::Json => {
             let rows = query::to_json(&result.rows)?;
             let schema = columns_of(&result.rows);
@@ -2623,7 +2736,7 @@ async fn hats_answer(
         Format::Dsv(kind) => Ok((
             attachment(kind.content_type(), &format!("selection.{}", kind.name())),
             hats_counters(result, num_rows, started),
-            dsv::encode(&result.rows, kind)?,
+            dsv::encode(&result.rows, kind, &output.dsv_null)?,
         )
             .into_response()),
     }
@@ -2694,10 +2807,10 @@ fn column_of(field: &datafusion::arrow::datatypes::FieldRef) -> Column {
 async fn answer(
     result: &QueryResult,
     file: &RemoteFile,
-    format: Format,
+    output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    match format {
+    match output.format {
         Format::Json => json_response(result, started),
         Format::Parquet => parquet_response(result, file, result.num_rows(), started).await,
         Format::Votable => Ok((
@@ -2709,7 +2822,7 @@ async fn answer(
         Format::Dsv(kind) => Ok((
             attachment(kind.content_type(), &download_name(file, kind.name())),
             counters(result, result.num_rows(), started),
-            dsv::encode(result, kind)?,
+            dsv::encode(result, kind, &output.dsv_null)?,
         )
             .into_response()),
     }
@@ -3066,6 +3179,7 @@ mod tests {
             healpix_column: None,
             healpix_order: None,
             format: None,
+            dsv_null_value: None,
             limit: None,
             unknown: BTreeMap::new(),
         };
@@ -4266,6 +4380,7 @@ mod tests {
             },
             region: Some(vec![crate::hats_query::tests::regions()[1].clone()]),
             format: None,
+            dsv_null_value: None,
             limit: None,
             unknown: BTreeMap::new(),
         };
@@ -4315,6 +4430,7 @@ mod tests {
                 },
                 region: None,
                 format: None,
+                dsv_null_value: None,
                 limit: None,
                 return_storage,
                 unknown: BTreeMap::new(),
@@ -5533,14 +5649,21 @@ mod tests {
             ("simple", "columns", "filters"),
         ] {
             let common = [
-                "url", "storage", "region", projection, predicate, "format", "limit",
+                "url",
+                "storage",
+                "region",
+                projection,
+                predicate,
+                "format",
+                "dsv_null_value",
+                "limit",
             ];
             assert_eq!(
                 fields(&format!("/api/v1/{vocabulary}/parquet")),
                 [
                     &["url", "storage", "region"][..],
                     &["ra_column", "dec_column", "healpix_column", "healpix_order"],
-                    &[projection, predicate, "format", "limit"],
+                    &[projection, predicate, "format", "dsv_null_value", "limit"],
                 ]
                 .concat(),
             );
@@ -5824,6 +5947,51 @@ mod tests {
             let body = body_of(response).await;
             assert!(body.contains("sources"), "{format}: {body}");
         }
+    }
+
+    /// `dsv_null_value` reaches the encoder, and the three formats that have a null of their
+    /// own refuse it rather than dropping it — a caller who named one and got the default
+    /// spelling back cannot tell that from the service having honoured it.
+    #[tokio::test]
+    async fn a_null_value_is_honoured_by_the_two_formats_that_take_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("nulls.parquet"),
+            query::tests::null_fixture(),
+        )
+        .unwrap();
+        let ask = async |query: &str| {
+            let response = respond(
+                mounted(dir.path(), &ApiConfig::default()),
+                Request::builder().uri(format!("/nulls.parquet?{query}")),
+            )
+            .await;
+            (response.status(), body_of(response).await)
+        };
+
+        // The null takes the sentinel and the empty string does not, which is the whole of
+        // what the option is for.
+        let (status, body) = ask("format=csv&dsv_null_value=%5CN").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body.lines().nth(1).unwrap(), "0,\\N", "{body}");
+        assert_eq!(body.lines().nth(2).unwrap(), "1,", "{body}");
+
+        // Left out, the two share a spelling — which is what the option is for.
+        let (_, body) = ask("format=csv").await;
+        assert_eq!(body.lines().nth(1).unwrap(), "0,", "{body}");
+        assert_eq!(body.lines().nth(2).unwrap(), "1,", "{body}");
+
+        for format in ["json", "parquet", "votable"] {
+            let (status, body) = ask(&format!("format={format}&dsv_null_value=X")).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{format}: {body}");
+            assert!(body.contains("csv and tsv"), "{format}: {body}");
+        }
+
+        // Checked before it is used, by the rule `dsv.rs` states — and a tab is refused for
+        // a csv answer too, the sentinel not knowing which format will carry it.
+        let (status, body) = ask("format=csv&dsv_null_value=a%09b").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("separates"), "{body}");
     }
 
     /// A struct column names its own fields, and the name that is built out of them

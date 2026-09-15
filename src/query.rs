@@ -650,6 +650,26 @@ pub(crate) mod tests {
         buffer
     }
 
+    /// Three rows holding a null, an empty string and an ordinary value in one text column.
+    ///
+    /// The first two are what the delimited formats cannot tell apart without a sentinel, so
+    /// a test of `dsv_null_value` needs a file carrying both rather than either alone.
+    pub(crate) fn null_fixture() -> Vec<u8> {
+        let objectid: ArrayRef = Arc::new(Int64Array::from_iter_values(0..3));
+        let band: ArrayRef = Arc::new(StringArray::from(vec![None, Some(""), Some("g")]));
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            ("objectid", objectid, false),
+            ("band", band, true),
+        ])
+        .expect("the fixture batch");
+
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).expect("a writer");
+        writer.write(&batch).expect("write the batch");
+        writer.close().expect("close the file");
+        buffer
+    }
+
     /// Ten rows spread along a line of declination, with an id to select.
     ///
     /// Positions rather than values, for the tests that ask a region something: they are far
