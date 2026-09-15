@@ -4930,7 +4930,7 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert!(body.contains("more than 50 rows"), "{body}");
     }
 
