@@ -8,8 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `format=csv` and `format=tsv` on every query route, as `text/csv;header=present` and `text/tab-separated-values`. [#52](https://github.com/hombit/hats-api/pull/52)
-- `dsv_null_value`, what a null is written as under `format=csv` and `format=tsv`. [#53](https://github.com/hombit/hats-api/pull/53)
+--
 
 ### Changed
 
@@ -30,6 +29,13 @@ Release dates are in the UTC time zone.
 ### Security
 
 --
+
+## [0.0.6] - 2026-09-15
+
+### Added
+
+- `format=csv` and `format=tsv` on every query route, as `text/csv;header=present` and `text/tab-separated-values`. [#52](https://github.com/hombit/hats-api/pull/52)
+- `dsv_null_value`, what a null is written as under `format=csv` and `format=tsv`. [#53](https://github.com/hombit/hats-api/pull/53)
 
 ## [0.0.5] - 2026-09-15
 
@@ -81,7 +87,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.5...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.6...HEAD
+[0.0.6]: https://github.com/hombit/hats-api/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/hombit/hats-api/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/hombit/hats-api/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/hombit/hats-api/compare/v0.0.2...v0.0.3
