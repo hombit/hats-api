@@ -2,7 +2,7 @@
 //! of the caller's expression.
 //!
 //! Structured because the constraint has to be *recognised* to be planned on. A named
-//! field is recognised by construction; a `cone_contains(…)` call inside `where` would be
+//! field is recognised by construction; a `cone_contains(…)` call inside `filters` would be
 //! a pattern match against whatever phrasing the caller happened to use, and an
 //! unrecognised one degrades to reading every partition without saying so.
 //!
@@ -226,7 +226,7 @@ pub struct Healpix<'a> {
 /// The union of every shape, as one predicate over the file's columns.
 ///
 /// The array is a union rather than an intersection, which is worth saying in a refusal
-/// too: a caller coming from `where` reads a list as something joined by `AND`.
+/// too: a caller coming from `filters` reads a list as something joined by `AND`.
 ///
 /// The geometric test is the answer; a named HEALPix column only puts cheaper tests in
 /// front of it, and [`crate::healpix`] is where that happens.
@@ -1238,7 +1238,7 @@ mod tests {
             .read_parquet(indexed.url.as_str(), options)
             .await
             .unwrap();
-        let predicate = sql::predicate(
+        let predicate = sql::filters(
             &ctx.state(),
             df.schema(),
             "contains(point(objRA, objDec), circle(120.0, 20.0, 1.0))",
@@ -1369,7 +1369,7 @@ mod tests {
         assert_eq!(union, band);
     }
 
-    /// The array is a union, which is the part a caller coming from `where` will expect to
+    /// The array is a union, which is the part a caller coming from `filters` will expect to
     /// be an intersection. Two disjoint shapes are the case that says which it is.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_array_of_regions_is_a_union() {

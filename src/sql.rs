@@ -1,16 +1,15 @@
-//! The caller's SQL: a projection list and a row predicate.
+//! The caller's SQL: a list of column names, a row predicate, and the one statement the ADQL
+//! route takes.
 //!
-//! Each is sayable two ways. `select` and `where` take expressions; `columns` and
-//! `filters` are the narrower pair a file-server client writes in a query string. Both
-//! pairs lower to the same planned expression and meet the same allowlist below, so
-//! which one a request used changes the wording and nothing else — a divergence in what
-//! they mean would be a bug rather than a feature.
+//! `columns` and `filters` each arrive in two wire forms — a body's and a query string's —
+//! which lower through the same code and meet the same allowlist below, so which one a
+//! request used changes nothing about what it means.
 //!
-//! Expressions, never statements. Each piece is parsed on its own — one select item, one
-//! boolean expression — and the parser must reach the end of the string, so there is no
-//! `FROM` to hang a join off and no way to write a second query into either field. The
-//! target is named by the request's path and its identity by `url`, neither of which the
-//! expressions can reach.
+//! Expressions, never statements. Each piece is parsed on its own — one name, one boolean
+//! expression — and the parser must reach the end of the string, so there is no `FROM` to
+//! hang a join off and no way to write a second query into either field. The target is
+//! named by the request's path and its identity by `url`, neither of which the expressions
+//! can reach.
 //!
 //! Parsing as an expression is not the whole check, though: an aggregate, a window
 //! function and a call to `random()` are all expressions. So what the planner returns is
@@ -95,67 +94,11 @@ pub fn statement(sql: &str, field: &str, limits: Limits) -> Result<Statement, Ap
     Ok(parsed)
 }
 
-/// The select list, as one expression per output column.
-///
-/// A bare dotted path is aliased to the path the caller wrote. Unaliased, DataFusion
-/// names the column after the access it planned — `lightcurve.mag` comes back as
-/// `t.lightcurve[mag]` — and the caller then has to guess the key their own request
-/// produced.
-pub fn projection(
-    state: &SessionState,
-    schema: &DFSchema,
-    sql: &str,
-    limits: Limits,
-) -> Result<Vec<Expr>, ApiError> {
-    const FIELD: &str = "select";
-
-    if sql.trim() == "*" {
-        return Err(ApiError::bad_request(
-            "omit select rather than writing *: absent means every column",
-        ));
-    }
-    let items = parse(tokenize(sql, FIELD)?, FIELD, limits, |parser| {
-        parser.parse_comma_separated(Parser::parse_expr_with_alias)
-    })?;
-    let parts = items
-        .into_iter()
-        .map(|mut item| {
-            resolve_identifiers(&mut item.expr, schema);
-            // After resolving, so a path is grouped and named by the file's spelling rather
-            // than the caller's.
-            //
-            // An alias makes it the caller's own output column and not a piece of one:
-            // `lightcurve.mag AS mag` asked for that name, so it is planned as written. An
-            // expression over a subfield is likewise not a narrowing of the column — only a
-            // bare path into it is.
-            match (&item.alias, projected_path(&item.expr, schema)) {
-                (None, Some(path)) => Ok(Part::Path(path)),
-                _ => plan(state, schema, item, FIELD, limits).map(Part::Planned),
-            }
-        })
-        .collect::<Result<Vec<_>, ApiError>>()?;
-    regrouped(state, schema, parts, FIELD, limits)
-}
-
-/// The row predicate: one boolean expression, no alias and no second expression after it.
-pub fn predicate(
-    state: &SessionState,
-    schema: &DFSchema,
-    sql: &str,
-    limits: Limits,
-) -> Result<Expr, ApiError> {
-    const FIELD: &str = "where";
-
-    plan_predicate(state, schema, tokenize(sql, FIELD)?, FIELD, limits)
-}
-
-/// The projection as column names — `columns`, the other of the two ways to say one, with
-/// one name per element.
+/// The projection as column names, one name per element.
 ///
 /// A name, and nothing else. `Gmag` and `lightcurve.mag` are the whole language here;
-/// `mag - 0.1 AS corrected` is [`projection`]'s to accept. Widening this one to
-/// expressions would leave two spellings for one thing with nothing to choose between
-/// them, and a caller who wants an expression already has the field for it.
+/// `mag - 0.1 AS corrected` is a statement's to compute, and the ADQL route is where a
+/// caller writes one.
 ///
 /// A name that is not an ordinary identifier is quoted, the way SQL quotes one:
 /// `"E(BP-RP)"`. Unquoted it parses as a call to a function named `E`, which is a
@@ -239,17 +182,16 @@ fn column_part(
         )
         .map(Part::Planned),
         None => Err(ApiError::bad_request(format!(
-            "{FIELD} takes column names; write select for an expression"
+            "{FIELD} takes column names; write an ADQL query to compute one"
         ))),
     }
 }
 
-/// The row predicate as the narrower vocabulary spells it: one boolean expression.
+/// The row predicate: one boolean expression, no alias and no second expression after it.
 ///
-/// [`predicate`]'s language exactly — the two fields mean the same thing, so they parse and
-/// plan through the same code and reach the same allowlist. The separators a query string
-/// needs are not part of it: `&&`, `,` and `;` are [`filter_text`]'s, for a carrier that has
-/// to join two conditions inside one parameter. A body writes `AND`.
+/// The separators a query string needs are not part of it: `&&`, `,` and `;` are
+/// [`filter_text`]'s, for a carrier that has to join two conditions inside one parameter. A
+/// body writes `AND`.
 pub fn filters(
     state: &SessionState,
     schema: &DFSchema,
@@ -527,8 +469,8 @@ enum Part {
     /// A name into the file's columns, kept as its resolved segments so that the pieces
     /// naming one column can be put back together under it. Never empty.
     Path(Vec<Ident>),
-    /// Anything else: an expression, or a name the caller aliased. Already planned, and
-    /// named the way it was written.
+    /// A name whose head is not one of the file's columns, planned as written so that the
+    /// planner is the one that reads a qualifier or names the closest column.
     Planned(Expr),
 }
 
@@ -732,7 +674,7 @@ fn plan(
     field: &str,
     limits: Limits,
 ) -> Result<Expr, ApiError> {
-    // Idempotent, and `projection` has already done it so that a bare path's output name
+    // Idempotent, and `column_part` has already done it so that a bare path's output name
     // is the file's spelling rather than the caller's.
     resolve_identifiers(&mut expr.expr, schema);
     // Every failure here is the caller's expression not fitting the caller's file:
@@ -1042,7 +984,7 @@ fn allowed(expr: &Expr, shape: Shape) -> Result<(), String> {
         // the match is exhaustive, which is the point of writing it that way.
         #[expect(deprecated, reason = "matched to keep the match exhaustive")]
         Expr::Wildcard { .. } => {
-            Err("omit select rather than writing *: absent means every column".to_owned())
+            Err("omit columns rather than writing *: absent means every column".to_owned())
         }
         // A statement's `SELECT *` is expanded by the planner into the columns it names, so
         // one reaching here is `UNNEST(…)` written out — which turns one row into many and
@@ -1099,17 +1041,6 @@ mod tests {
         Limits::from(&LimitsConfig::default())
     }
 
-    fn names(sql: &str) -> Result<Vec<String>, ApiError> {
-        Ok(projection(&state(), &schema(), sql, limits())?
-            .iter()
-            .map(|expr| expr.schema_name().to_string())
-            .collect())
-    }
-
-    fn filter(sql: &str) -> Result<String, ApiError> {
-        Ok(predicate(&state(), &schema(), sql, limits())?.to_string())
-    }
-
     /// One way of writing a projection, as the test drives it: a string in, the output
     /// column names out.
     type Spelling = dyn Fn(&str) -> Result<Vec<String>, ApiError>;
@@ -1127,14 +1058,14 @@ mod tests {
     }
 
     /// The same names comma-separated, which is what a query string sends.
-    fn column_names_of_text(list: &str) -> Result<Vec<String>, ApiError> {
+    fn names(list: &str) -> Result<Vec<String>, ApiError> {
         Ok(column_text(&state(), &schema(), list, limits())?
             .iter()
             .map(|expr| expr.schema_name().to_string())
             .collect())
     }
 
-    fn filters_of(text: &str) -> Result<String, ApiError> {
+    fn filter(text: &str) -> Result<String, ApiError> {
         Ok(filters(&state(), &schema(), text, limits())?.to_string())
     }
 
@@ -1142,7 +1073,7 @@ mod tests {
         Ok(filter_text(&state(), &schema(), text, limits())?.to_string())
     }
 
-    /// The narrower vocabulary: names, in the file's own spelling of them.
+    /// Names, in the file's own spelling of them.
     ///
     /// A name into a nested column comes back as that column — the row's light curve is one
     /// value, and asking for part of it is asking for less of that value rather than for a
@@ -1162,16 +1093,13 @@ mod tests {
         // read as both: that spelling is the query string's, where there is nowhere else to
         // put the comma.
         assert!(column_names(&["objectid, objra"]).is_err());
-        assert_eq!(
-            column_names_of_text("objectid, objra").unwrap(),
-            ["objectid", "objra"]
-        );
+        assert_eq!(names("objectid, objra").unwrap(), ["objectid", "objra"]);
     }
 
-    /// Both wire forms of one vocabulary: a body writes the names as a list, a query string
+    /// Both wire forms of one field: a body writes the names as a list, a query string
     /// writes them separated by commas, and what comes back is the same columns.
     #[test]
-    fn the_list_and_the_comma_separated_text_are_one_vocabulary() {
+    fn the_list_and_the_comma_separated_text_are_one_field() {
         for (list, text) in [
             (&["objectid", "gmag"][..], "objectid, gmag"),
             (
@@ -1181,16 +1109,12 @@ mod tests {
             // Quoted in both, and the comma inside the quotes belongs to the name.
             (&["\"Gmag\""], "\"Gmag\""),
         ] {
-            assert_eq!(
-                column_names(list).unwrap(),
-                column_names_of_text(text).unwrap(),
-                "{text}"
-            );
+            assert_eq!(column_names(list).unwrap(), names(text).unwrap(), "{text}");
         }
     }
 
-    /// The pieces of a nested column come back as that column, and the two vocabularies
-    /// agree about it.
+    /// The pieces of a nested column come back as that column, and both wire forms agree
+    /// about it.
     ///
     /// A row's light curve is one value. A caller who names two of its fields has asked for
     /// less of that value, so what comes back is one column carrying those two fields —
@@ -1198,13 +1122,13 @@ mod tests {
     /// again, against a schema that no longer matches the file's.
     #[test]
     fn the_pieces_of_a_nested_column_come_back_as_that_column() {
-        // The three spellings of one request: a select list, `columns` as a query string
-        // writes it, and `columns` as a body writes it.
+        // The two spellings of one request: `columns` as a query string writes it, and
+        // `columns` as a body writes it.
         // Split on the comma alone, so every element but the first arrives with a leading
         // space: an element is tokenized, and whitespace around a name is nothing to a
         // tokenizer.
         let as_a_list = |text: &str| column_names(&text.split(',').collect::<Vec<_>>());
-        let spellings: [&Spelling; 3] = [&names, &column_names_of_text, &as_a_list];
+        let spellings: [&Spelling; 2] = [&names, &as_a_list];
         for named in spellings {
             // Two fields of one column are one column, and it keeps its place in the list.
             assert_eq!(
@@ -1249,24 +1173,18 @@ mod tests {
         assert!(!whole.to_string().contains("named_struct"), "{whole}");
     }
 
-    /// Narrower, and staying narrower: the field for an expression is `select`, and the
-    /// refusal says so rather than leaving the caller to guess which half was wrong.
+    /// Names and nothing computed, and the refusal says where a computed column is written
+    /// rather than leaving the caller to guess.
     #[test]
     fn columns_refuses_an_expression() {
         for name in ["objra - 0.1", "count(objectid)", "1"] {
             let error = column_names(&[name]).unwrap_err().to_string();
             assert!(error.contains("column names"), "{name}: {error}");
+            assert!(error.contains("ADQL"), "{name}: {error}");
         }
         // An alias is refused by the grammar rather than by the check above: `columns`
         // parses one expression per name and `AS` is not part of one.
         assert!(column_names(&["objra AS ra"]).is_err());
-    }
-
-    /// The two predicate fields are one language under two names.
-    #[test]
-    fn filters_is_the_same_expression_where_is() {
-        let expected = filter("objectid > 1 AND objra < 2").unwrap();
-        assert_eq!(filters_of("objectid > 1 AND objra < 2").unwrap(), expected);
     }
 
     /// The separators are the query string's, and only the query string's.
@@ -1288,10 +1206,10 @@ mod tests {
         );
         // In a body, `&&` is an operator this service does not run, and it is refused as one
         // rather than read as `AND`.
-        assert!(filters_of("objectid > 1 && objra < 2").is_err());
+        assert!(filter("objectid > 1 && objra < 2").is_err());
         // A `;` is the end of one statement and the start of another, which is the one thing
         // this field is parsed so as never to accept.
-        assert!(filters_of("objectid > 1;objra < 2").is_err());
+        assert!(filter("objectid > 1;objra < 2").is_err());
     }
 
     /// The rewrite is on the tokens, so `&&` inside a string is data and stays data.
@@ -1347,25 +1265,6 @@ mod tests {
         );
     }
 
-    /// An alias is the caller naming their own output column, so it is planned as written
-    /// and never packed back into the column it came out of.
-    #[test]
-    fn a_select_list_keeps_the_names_the_caller_wrote() {
-        assert_eq!(
-            names("objectid, lightcurve.mag, objra AS ra").unwrap(),
-            ["objectid", "lightcurve", "ra"]
-        );
-        assert_eq!(
-            names("lightcurve.mag AS mag, objra AS ra").unwrap(),
-            ["mag", "ra"]
-        );
-    }
-
-    #[test]
-    fn a_select_item_can_compute() {
-        assert_eq!(names("objra - 0.1 AS ra_corr").unwrap(), ["ra_corr"]);
-    }
-
     /// A column answers to its own name and to its name in lowercase. `Gmag` is what the
     /// file calls it and what a caller reads off the file; `gmag` is what SQL says an
     /// unquoted name means. Nested fields resolve the same way, a segment at a time.
@@ -1411,9 +1310,9 @@ mod tests {
             Field::new("FLUX", DataType::Float64, true),
         ]))
         .unwrap();
-        assert!(predicate(&state(), &schema, "Flux > 1", limits()).is_ok());
-        assert!(predicate(&state(), &schema, "FLUX > 1", limits()).is_ok());
-        assert!(predicate(&state(), &schema, "flux > 1", limits()).is_err());
+        assert!(filters(&state(), &schema, "Flux > 1", limits()).is_ok());
+        assert!(filters(&state(), &schema, "FLUX > 1", limits()).is_ok());
+        assert!(filters(&state(), &schema, "flux > 1", limits()).is_err());
     }
 
     /// A name matching nothing is left for DataFusion, whose message names the closest
@@ -1461,14 +1360,14 @@ mod tests {
             "objectid = 1 FROM other",
         ] {
             let error = filter(sql).unwrap_err().to_string();
-            assert!(error.contains("where"), "{sql}: {error}");
+            assert!(error.contains("filters"), "{sql}: {error}");
         }
     }
 
     #[test]
-    fn a_select_item_cannot_smuggle_a_from() {
+    fn a_name_cannot_smuggle_a_from() {
         let error = names("objectid FROM other").unwrap_err().to_string();
-        assert!(error.contains("select"), "{error}");
+        assert!(error.contains("columns"), "{error}");
     }
 
     #[test]
@@ -1483,12 +1382,6 @@ mod tests {
         assert!(names("").is_err());
         assert!(filter("").is_err());
         assert!(filter("   ").is_err());
-    }
-
-    #[test]
-    fn a_star_says_to_omit_the_field() {
-        let error = names("*").unwrap_err().to_string();
-        assert!(error.contains("omit select"), "{error}");
     }
 
     /// An unknown column is the caller's mistake, and is named back to them.
@@ -1569,7 +1462,7 @@ mod tests {
             max_nodes: 100,
             ..limits()
         };
-        let error = predicate(&state(), &schema(), &thousand, narrow)
+        let error = filters(&state(), &schema(), &thousand, narrow)
             .unwrap_err()
             .to_string();
         assert!(
@@ -1589,15 +1482,16 @@ mod tests {
             max_depth: 3,
             ..limits()
         };
-        assert!(predicate(&state(), &schema(), &nested(10), shallow).is_err());
+        assert!(filters(&state(), &schema(), &nested(10), shallow).is_err());
     }
 
     /// `get_field` is what a dotted path plans to, so the volatility rule has to let it
     /// through — a rule that refused it would refuse every nested column.
     #[test]
     fn the_nested_field_access_is_allowed() {
-        let exprs = projection(&state(), &schema(), "lightcurve.mag", limits()).unwrap();
-        assert!(allowed(&exprs[0], Shape::Row).is_ok());
+        let expr = filters(&state(), &schema(), "lightcurve.mag IS NOT NULL", limits()).unwrap();
+        assert!(expr.to_string().contains("lightcurve"), "{expr}");
+        assert!(allowed(&expr, Shape::Row).is_ok());
     }
 
     /// The depth is what the shape is for, and it is logarithmic rather than merely smaller:

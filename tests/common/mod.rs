@@ -266,18 +266,14 @@ pub async fn lookup(
     filter_value: &str,
     columns: Option<&[String]>,
 ) -> Result<QueryResult, ApiError> {
-    let select = columns.map(|columns| columns.join(", "));
     let predicate = format!("{filter_column} = {}", sql_literal(filter_value));
     query(
         raw_url,
         options,
         policy,
         &Selection {
-            projection: match select.as_deref() {
-                Some(list) => Projection::Select(list),
-                None => Projection::All,
-            },
-            predicate: Predicate::Where(&predicate),
+            projection: columns.map_or(Projection::All, Projection::Columns),
+            predicate: Predicate::Filters(&predicate),
             spatial: None,
             limit: None,
         },

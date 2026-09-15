@@ -517,8 +517,8 @@ fn api_note(prefix: &str) -> String {
          body naming the file as <code>file://\u{2026}</code> — this page's own path. A \
          file's panel writes the request out for <code>curl</code> and for the Python \
          readers, each with the <code>pip install</code> line it needs.</p>\n",
-        // The vocabulary the panel's own fields are written in, so that the sentence and the
-        // request the panel builds name one route.
+        // The route the panel's own request goes to, so that the sentence and the request the
+        // panel builds name one route.
         route = html_escape::encode_text(&route(prefix, "simple/parquet")),
     )
 }

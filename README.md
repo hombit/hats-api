@@ -170,47 +170,37 @@ An error is a status code and a one-field body, `{"error": "…"}`.
 
 ### The routes
 
-Every route is a pair: which kind of **target** it takes, and which **vocabulary** the
-body is written in. Both go in the path, under `[api] prefix`, `/api/v1` by default.
+Each route names the kind of **target** it takes, under `[api] prefix`, `/api/v1` by default.
 
-| target | in `expr` | in `simple` |
-|---|---|---|
-| one parquet file | `POST /api/v1/expr/parquet` | `POST /api/v1/simple/parquet` |
-| a whole catalog | `POST /api/v1/expr/hats` | `POST /api/v1/simple/hats` |
-| a catalog query, resolved but not run | `POST /api/v1/expr/hats/plan` | `POST /api/v1/simple/hats/plan` |
+| target | route |
+|---|---|
+| one parquet file | `POST /api/v1/simple/parquet` |
+| a whole catalog | `POST /api/v1/simple/hats` |
+| a catalog query, resolved but not run | `POST /api/v1/simple/hats/plan` |
 
-Plus `POST /api/v1/adql`, which takes a whole query rather than a target and two fields,
-and `GET /api/v1/health`.
+Plus [`POST /api/v1/adql`](#adql), which takes a whole query rather than a target and two
+fields, and `GET /api/v1/health`.
 
 The `hats` routes pick the partitions the query touches; `hats/plan` takes the same body
 and returns the requests that query would take.
 
-The two vocabularies differ in how the projection and the predicate are spelled:
-
-| vocabulary | projection | predicate                                    |
-|---|---|----------------------------------------------|
-| `expr` | `select`: a SQL select list, so `mag - 0.1 AS mag_corr` works | `where`: single boolean SQL expression       |
-| `simple` | `columns`: a list of names | `filters`: one row condition, in the same language as `where` |
-
-Think of an `expr` query as `SELECT {select} FROM {url} WHERE {where}`: you write the two
-fields, and `url` is the table. `simple` narrows the projection to a list of names — nothing
-computed and no aliases — and keeps the same expression language for the condition. It is
-also the pair a URL query string carries, which is why file-server mode reads it out of one;
-there the names are one parameter separated by commas, a url having nowhere to put a list.
-
-The rest of the body is the same in both vocabularies:
-
 | field | means                                                                                                         |
 |---|---------------------------------------------------------------------------------------------------------------|
 | `url` | the resource to query. The only required field                                                                |
+| `columns` | a list of column names to return. Nothing computed and no aliases; for those, write [ADQL](#adql)          |
+| `filters` | one row condition, a boolean SQL expression                                                                   |
 | `region` | [a shape on the sky](#selecting-a-region-of-the-sky): a circle, a zone or a MOC                                |
-| `ra_column`, `dec_column` | which columns hold the position. Required with a `region` for `/api/v1/*/parquet`, not for HATS, which names its own |
+| `ra_column`, `dec_column` | which columns hold the position. Required with a `region` for `/api/v1/simple/parquet`, not for HATS, which names its own |
 | `healpix_column`, `healpix_order` | [a HEALPix index column](#the-healpix-column), if the parquet file has one                                    |
 | `limit` | most rows to return                                                                                           |
 | `format` | [`json`](#the-formats), the default here, `parquet`, `votable`, `csv` or `tsv`                                |
 | `dsv_null_value` | what a null is written as, for `csv` and `tsv`. Empty by default                                              |
 | `storage` | [how to reach the store](#storage-options): endpoint, credentials, headers                                    |
-| `return_storage` | write this request's own `storage` into each plan entry. `/api/v1/hats/plan` only                             |
+| `return_storage` | write this request's own `storage` into each plan entry. `/api/v1/simple/hats/plan` only                      |
+
+`columns` and `filters` are also the pair a URL query string carries, which is why
+file-server mode reads them out of one; there the names are one parameter separated by
+commas, a url having nowhere to put a list.
 
 ### A whole catalog
 
@@ -220,19 +210,18 @@ which partitions the region falls in, and reads those alone.
 Gaia DR3 is public and readable anonymously, so this one runs as it stands:
 
 ```
-curl -s https://example.com/api/v1/expr/hats -H 'content-type: application/json' -d '
+curl -s https://example.com/api/v1/simple/hats -H 'content-type: application/json' -d '
 {
   "url": "s3://stpubdata/gaia/gaia_dr3/public/hats",
-  "select": "source_id, ra, dec, 1000 / parallax AS dist_pc",
-  "where": "parallax > 1 AND phot_bp_rp_excess_factor < 1.3 + 0.06 * bp_rp * bp_rp",
+  "columns": ["source_id", "ra", "dec"],
+  "filters": "parallax > 1 AND phot_bp_rp_excess_factor < 1.3 + 0.06 * bp_rp * bp_rp",
   "region": [{ "type": "circle", "ra": 30.0, "dec": 5.0, "radius_arcsec": 300 }],
   "limit": 2
 }'
 ```
 
-Stars within a kiloparsec, with the usual BP/RP excess cut. `select` does arithmetic and
-names the result, so `dist_pc` is a new column. `where` takes any expression, so a cut can
-use columns on both sides.
+Stars within a kiloparsec, with the usual BP/RP excess cut. `filters` takes any row
+expression, so a cut can use columns on both sides.
 
 ```json
 {
@@ -241,16 +230,13 @@ use columns on both sides.
   "schema": [
     { "name": "source_id", "type": "Int64" },
     { "name": "ra", "type": "Float64" },
-    { "name": "dec", "type": "Float64" },
-    { "name": "dist_pc", "type": "Float64" }
+    { "name": "dec", "type": "Float64" }
   ],
   "data_bytes_read": 10161744,
   "elapsed_ms": 2129,
   "rows": [
-    { "source_id": 2518878678495119104, "ra": 29.974869483196265,
-      "dec": 4.929369328907767, "dist_pc": 275.82239199631914 },
-    { "source_id": 2518878717150249728, "ra": 29.98507241901302,
-      "dec": 4.938764009556236, "dist_pc": 556.812777041018 }
+    { "source_id": 2518878678495119104, "ra": 29.974869483196265, "dec": 4.929369328907767 },
+    { "source_id": 2518878717150249728, "ra": 29.98507241901302, "dec": 4.938764009556236 }
   ]
 }
 ```
@@ -331,7 +317,7 @@ file standing on its own. There is no catalog to ask which columns hold a positi
 `region` here comes with `ra_column` and `dec_column`, and `healpix_column` and
 `healpix_order` are available where the file has such a column.
 
-One partition of ZTF DR24, in the `simple` vocabulary, reaching into a nested column:
+One partition of ZTF DR24, reaching into a nested column:
 
 ```
 curl -s https://example.com/api/v1/simple/parquet -H 'content-type: application/json' -d '
@@ -475,7 +461,7 @@ order returns no rows.
 
 ### The SQL
 
-`select` and `where` are planned against the file's own schema, so
+`columns` and `filters` are planned against the file's own schema, so
 `source_id = 1383212200036217` is an `Int64` compared against row-group statistics, the
 page index and a bloom filter.
 
@@ -644,7 +630,7 @@ and the limit is measured on the expanded body.
 
 The default is set by the largest thing a query legitimately carries, which is `region`: a
 serialized `moc`, or one circle per source of a catalog being cross-matched against one
-served here. The expression bounds count a `select` and a `where` and never see either, so
+served here. The expression bounds count `columns`, `filters` and ADQL and never see either, so
 this is the only bound on both — at about seventy bytes a circle, `2MiB` is some tens of
 thousands of them.
 

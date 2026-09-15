@@ -163,7 +163,7 @@ pub struct Chosen {
     pub cover: Cover,
 }
 
-/// What to read from each partition, in whichever vocabulary the request used.
+/// What to read from each partition.
 ///
 /// The spatial part is deliberately not here. It differs per partition — a partition the
 /// region contains whole needs none at all — and deciding that is this module's job rather

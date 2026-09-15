@@ -325,7 +325,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
             "secret_access_key": SECRET_ACCESS_KEY,
             "allow_http": true,
         },
-        "where": "objectid = 1",
+        "filters": "objectid = 1",
     });
 
     let router = app::router(
@@ -343,7 +343,7 @@ async fn a_credentialed_request_through_the_router_logs_no_secret() {
         .oneshot(
             http::Request::builder()
                 .method("POST")
-                .uri("/api/v1/expr/parquet")
+                .uri("/api/v1/simple/parquet")
                 .header("content-type", "application/json")
                 .body(axum::body::Body::from(body.to_string()))
                 .expect("request"),

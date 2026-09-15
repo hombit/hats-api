@@ -20,7 +20,7 @@ Release dates are in the UTC time zone.
 
 ### Removed
 
---
+- **Breaking** `POST {api.prefix}/expr/parquet`, `/expr/hats` and `/expr/hats/plan`, with their `select` and `where` fields; use the `simple` routes or `POST {api.prefix}/adql`.
 
 ### Fixed
 

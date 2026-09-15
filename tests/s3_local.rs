@@ -59,11 +59,11 @@ async fn a_point_lookup_finds_one_row_among_fifty_thousand() {
     assert_eq!(result.schema.fields().len(), 2);
 }
 
-/// The query language against a real file, rather than against a schema: a computed and
-/// aliased select item, a predicate over two columns, and a row cap. `sql.rs` checks
-/// what each of these plans to; this checks that what they plan to actually runs.
+/// The query language against a real file, rather than against a schema: a column list, a
+/// predicate over two columns, and a row cap. `sql.rs` checks what each of these plans to;
+/// this checks that what they plan to actually runs.
 #[tokio::test]
-async fn a_select_list_and_a_predicate_run_against_a_real_file() {
+async fn a_column_list_and_a_predicate_run_against_a_real_file() {
     let server = TestS3::anonymous().await;
     server.put_parquet("catalog/part0.parquet");
 
@@ -72,8 +72,8 @@ async fn a_select_list_and_a_predicate_run_against_a_real_file() {
         &server.options(),
         &permissive_policy(),
         &Selection {
-            projection: Projection::Select("objectid, objra - 0.5 AS ra_corr"),
-            predicate: Predicate::Where("band = 'g' AND objectid < 100"),
+            projection: Projection::ColumnText("objectid, objra"),
+            predicate: Predicate::Filters("band = 'g' AND objectid < 100"),
             spatial: None,
             limit: Some(10),
         },
@@ -89,7 +89,7 @@ async fn a_select_list_and_a_predicate_run_against_a_real_file() {
         .iter()
         .map(|field| field.name().as_str())
         .collect();
-    assert_eq!(names, ["objectid", "ra_corr"]);
+    assert_eq!(names, ["objectid", "objra"]);
 }
 
 /// A key that does not end in `.parquet`, which a HATS catalog's own metadata files do
@@ -112,7 +112,7 @@ async fn a_parquet_object_is_read_whatever_its_key_ends_in() {
             &server.options(),
             &permissive_policy(),
             &Selection {
-                predicate: Predicate::Where("objectid = 42"),
+                predicate: Predicate::Filters("objectid = 42"),
                 spatial: None,
                 ..Default::default()
             },

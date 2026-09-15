@@ -74,8 +74,8 @@ nav.contents {
 /* The type list is names only, so it reads as a column of chips rather than a list of rows. */
 ul.toc-types { columns: 2; column-gap: 1.5rem; }
 
-/* The two vocabularies are the page's top-level division, because choosing one is the
-   first thing a caller does and every route below is the same request in that spelling. */
+/* A group of routes is the page's top-level division, because choosing one is the first
+   thing a caller does. */
 section.group { margin: 1.6rem 0 0; }
 section.group > h2 {
   font: 600 0.9rem var(--mono);

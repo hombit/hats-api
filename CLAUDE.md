@@ -280,12 +280,10 @@ everything about what SQL means here is decided there.
 
   `sql::regrouped` and `sql::packed` are where that happens, which is why it is in `sql.rs`
   with the rest of what a projection means rather than in the route that took the parameter:
-  both vocabularies reach it, and a bare path means the same in either. Three rules go with
-  it, and each is a case someone will otherwise write the other way:
+  a body's list and a query string's comma-separated text both reach it, and a path means the
+  same in either. Two rules go with it, and each is a case someone will otherwise write the
+  other way:
 
-  - **Only a bare path is a narrowing.** An alias makes it the caller's own output column —
-    `lightcurve.mag AS mag` asked for that name — and an expression over a subfield is a
-    computed value, not part of a column. Both are planned as written.
   - **A name that reaches a whole column takes it whole.** `lightcurve` and `lightcurve.mag`
     together are `lightcurve`, every field: the deeper name asks for part of what the
     shallower one already returns, so the union is the column and neither is dropped.
@@ -293,16 +291,14 @@ everything about what SQL means here is decided there.
     whose head is not is a qualified column reference and stays the planner's; treating it as
     a path packs the column into a struct named after the table.
 
-- **Two vocabularies, one meaning, and a route each.** `select`/`where` take expressions and
-  `columns`/`filters` take the narrower pair — a list of names, and one row condition — but
-  both lower to the same planned expression and meet the same allowlist. A difference in what
-  they mean is a bug, not a feature — so a change to one is a change to `sql.rs`, where they
-  share the code, rather than a second path beside it.
+- **`columns` is names and `filters` is an expression.** A caller who wants a computed
+  column or an alias writes ADQL, which is where a projection is a select list. The predicate
+  is the full expression language: a smaller grammar would be a second parser and a second
+  allowlist, and it could not express what `lsdb` pushes down, which is a disjunction.
 
-  **Only the projection is narrowed.** `columns` takes names, and a caller who wants a
-  computed column or an alias writes `select`. The predicate is the same language under both
-  names: a second, smaller grammar would be a second parser and a second allowlist, and it
-  could not express what `lsdb` pushes down, which is a disjunction.
+  Do not widen `columns` back into expressions. The ADQL route already answers a computed
+  column, over the same tables and with a planner that sees the whole statement, so a select
+  list in a field would be a second way to say it with nothing to choose between the two.
 
   **The separators belong to the query string alone.** A body writes a list of names and an
   `AND`; a url has one `columns=` and one `filters=`, so the comma between names and the
@@ -312,36 +308,30 @@ everything about what SQL means here is decided there.
   expression with and without the separator rewrite. Accepting a separator in a body would
   leave one meaning with two spellings in the carrier that needs neither.
 
-  **Which vocabulary a body is written in is which route it was sent to**, not a pair of
-  fields that may or may not be there: `app::Dialect` is the vocabulary and its `SEGMENT` is
-  the first path segment. That is what keeps "the caller wrote both" from being a case at
-  all, and it is why a third vocabulary is an implementation and three route lines rather
-  than two more fields and another pairwise refusal everywhere the fields are read. A
-  vocabulary answers on every target or the exceptions become something a caller has to
-  remember, so they are registered together.
+  **The three query routes answer on every target together.** `app::with_queries` registers
+  them as one set and `app::describe_queries` describes the same set, since a request that
+  answered on only some targets would be exceptions a caller has to remember.
 
-  **Each endpoint takes its own request type**, generic over the vocabulary: `ParquetQuery`
-  carries the column names a file cannot supply for itself, `CatalogQuery` carries none of
-  them, `CatalogPlanQuery` adds the one field that only means something where a plan is the
-  answer. A field an endpoint has no use for is not a field of its request, so there is
-  nothing there to drop in silence, nothing to honour by a later change, and the description
-  shows each route what that route takes. Both catalog types lower to `app::Lowered`, which
-  is what everything below the routes works in — so a further catalog endpoint is a wire
-  type and a `lowered()`. The vocabulary stays a type parameter because it is the axis that
-  must *not* diverge; the target is the one that does.
+  **Each endpoint takes its own request type**: `ParquetQuery` carries the column names a file
+  cannot supply for itself, `CatalogQuery` carries none of them, `CatalogPlanQuery` adds the
+  one field that only means something where a plan is the answer. A field an endpoint has no
+  use for is not a field of its request, so there is nothing there to drop in silence, nothing
+  to honour by a later change, and the description shows each route what that route takes.
+  Both catalog types lower to `app::Lowered`, which is what everything below the routes works
+  in — so a further catalog endpoint is a wire type and a `lowered()`.
 
-  **The order the fields are described in is the endpoint's to state.** `ParquetQuery::fields`
-  and its siblings list them as a body is written — url, storage, region, then the projection
-  and predicate, then how the answer comes back — and that one list is the order `/docs`
-  renders and the sentence a refusal ends with. It cannot be derived: a `#[serde(flatten)]`
-  is an `allOf` and its part always lands first.
+  **A request type declares its fields in the order a body is written** — url, storage,
+  region, then the projection and predicate, then how the answer comes back — because that
+  declaration is the order `/docs` renders. `ParquetQuery::fields` and its siblings repeat the
+  list for the sentence a refusal ends with, and `each_route_describes_its_own_body` holds the
+  two to one order. A `#[serde(flatten)]` field would break this: it is an `allOf` and its part
+  always lands first.
 
-  **The body stays flat on the wire.** `{url, select, where, region}`, never a nested query
-  object — which is why each request type flattens its dialect. `flatten` is why they cannot
-  use `deny_unknown_fields`: serde ignores it there and drops unmatched keys in silence, so
-  the leftovers are collected into `unknown` and refused by `app::refuse_unknown`, which
-  names what the endpoint does take. Anything added to one of those structs must keep both
-  halves — flat outside, nothing dropped.
+  **The body stays flat on the wire.** `{url, columns, filters, region}`, never a nested query
+  object. Keys a route has no field for are collected into a flattened `unknown` and refused by
+  `app::refuse_unknown`, which names what the endpoint does take — which `deny_unknown_fields`
+  would not, and which the `flatten` on `unknown` rules out anyway. Anything added to one of
+  those structs must keep both halves: flat outside, nothing dropped.
 - **A parameter this service acts on is honoured or refused, never dropped.** A `filters`
   that does not parse, or that names a column the file has not got, is a 400. Ignoring it
   returns every row, which the caller cannot tell from a predicate that matched every row
@@ -397,7 +387,7 @@ than being validated twice.
   treating the circle as the thing that makes a query a query.
 - **A catalog under a mount refuses `ra_column` and `dec_column`**, and a lone file requires
   them. That is the same split the API's `parquet` and `hats` targets make, for the same
-  reason, and it is why both vocabularies lower to one `Selection` rather than each deciding.
+  reason, and it is why a url and a body lower to one `Selection` rather than each deciding.
 - **`hats::local` is a hint and never the answer.** It recognises a catalog from a filename
   and one small read, because a page has to know before anyone asks; everything it says yes
   to is opened by `Catalog::open` a moment later, and a directory that lied gets the refusal
@@ -1028,7 +1018,7 @@ both by compiling. Everything below is about keeping that true, and readable.
   is — that is the url" becomes "the url says which object to read; these say how to reach
   it". A reader wants the thing itself, and a caller cannot act on what something is not.
 
-- **Describe what a caller writes, not what the service does with it.** `select` says how to
+- **Describe what a caller writes, not what the service does with it.** `columns` says how to
   spell a column and quote it; it does not say which spellings `resolve_identifiers` matches,
   because that is the service's business and unactionable. Say the constraint that changes what
   they type — both halves of a pair, exactly one of two radii, which backends take an option.
@@ -1058,8 +1048,8 @@ both by compiling. Everything below is about keeping that true, and readable.
   and not the rows it returns — these catalogs are 150 to 370 columns wide, and asking for all
   of them is ten to seventy seconds where four named ones are about one. So every example names
   a few columns, and a catalog example carries a circle, without which the query reads every
-  partition. `Dialect::example` takes the projection and the predicate as arguments and decides
-  only which pair of field names the body spells them with; the columns belong to the target.
+  partition. `app::example` takes the columns and the condition as arguments, since they belong
+  to the target.
 
   **The targets differ on purpose, and one of them is a single file.** The catalog examples
   name Gaia DR3, which is all-sky and evenly partitioned, so a reader who moves the circle gets
@@ -1070,12 +1060,12 @@ both by compiling. Everything below is about keeping that true, and readable.
   makes picking a small one free: at 180 KB against nearly 4 GB for ZTF's largest, it costs the
   example nothing and saves it a second.
 
-- **`utoipa`'s generics need naming by hand.** `ToSchema::schemas` composes the type argument
-  into the name — `PlanBody_Expr` — while `ToSchema::name` drops it and answers `PlanBody` for
-  every instantiation. Registering a generic under the latter puts both dialects at one key,
-  where the second silently replaces the first and every route ends up describing whichever was
-  built last. `app::named` takes the name for that reason. A recursive type also needs
-  `#[schema(no_recursion)]`, or building the document overflows the stack.
+- **`utoipa`'s generics need naming by hand.** `ToSchema::schemas` composes a type argument
+  into the name — `PlanBody_T` — while `ToSchema::name` drops it and answers `PlanBody` for
+  every instantiation. `app::named` registers under `ToSchema::name`, so two instantiations of
+  one generic registered through it land at one key, where the second silently replaces the
+  first. A generic request or response type needs its name passed in. A recursive type also
+  needs `#[schema(no_recursion)]`, or building the document overflows the stack.
 
 ## Tests
 

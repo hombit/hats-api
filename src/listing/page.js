@@ -282,12 +282,10 @@ function snippet(panel) {
    shape: a file names itself and a catalog names itself and a shape on the sky, and the
    column names are the catalog's own to answer — which is why they appear in neither.
 
-   Both sit under `simple`, which is the vocabulary the panel's fields are — the same pair a
-   url carries. `columns` is a list in a body, since a body can hold one and a url cannot, so
-   the names are split here the way the url form parses them; `filters` is one condition
-   either way and goes across as it is. The `expr` routes take a select list and one SQL
-   expression instead, and a body written for one is refused by the other rather than
-   half-read. */
+   Both sit under `simple`, whose fields are the panel's — the same pair a url carries.
+   `columns` is a list in a body, since a body can hold one and a url cannot, so the names are
+   split here the way the url form parses them; `filters` is one condition either way and goes
+   across as it is. */
 function request(panel) {
   const {ra, dec, radius_arcsec, columns, ...rest} = asked(panel);
   const catalog = panel.dataset.catalog !== undefined;
@@ -547,8 +545,7 @@ function describe(panel, at) {
 /* The columns as buttons, each struct column followed by its own fields.
 
    A catalog carrying light curves packs them into a struct per row, so the column is
-   `sources` and what a reader wants is `sources.mjd` — a spelling both vocabularies already
-   plan. The names were the missing part: they are in the type, and reading them off it would
+   `sources` and what a reader wants is `sources.mjd` — a spelling `columns` already plans. The names were the missing part: they are in the type, and reading them off it would
    mean parsing arrow's own `Display`, so the server names them in `fields` instead. */
 function chipsFrom(panel, schema) {
   const count = panel.querySelector('.count');
