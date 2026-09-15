@@ -14,19 +14,22 @@
 //! Two things a reader of the output cannot recover, both of which are the format's and
 //! neither of which has a spelling to choose instead:
 //!
-//! - **A null is written as an empty field, and so is an empty string.** `with_null` would
-//!   put some other text there, and any text a caller's own data can equal is worse than the
-//!   ambiguity — it turns a value into a null rather than leaving two values sharing one
-//!   spelling. A caller who needs the difference wants json or parquet.
+//! - **A null is written as an empty field by default, and so is an empty string.** The two
+//!   are one spelling until a caller says otherwise, which `dsv_null_value` is for: a
+//!   sentinel separates them, and choosing one is the caller's because any text is text
+//!   their own data might contain. This service picks none on their behalf — a default
+//!   sentinel would turn some caller's real value into a null, which is worse than two
+//!   values sharing a spelling. Whoever needs the difference and has no safe sentinel wants
+//!   json or parquet.
 //!
 //!   An empty field is written `""` where it is the *only* column, and bare wherever there
-//!   is another column beside it, so the spelling is not a fixed string and nothing may
-//!   compare against one. The quoting there is load-bearing rather than cosmetic: a row
-//!   whose single field is written bare is a blank line, which `csv.reader` returns as a
-//!   record of *no* fields and `pandas.read_csv` drops outright under its default
-//!   `skip_blank_lines=True` — the row disappears rather than arriving empty. With two
-//!   columns the same row is `,`, which is unambiguous, which is why nothing is quoted
-//!   there. Do not "tidy" the one-column case into a bare line.
+//!   is another column beside it. So the spelling is not a fixed string and nothing may
+//!   compare against one — and the quoting is load-bearing rather than cosmetic. A row whose
+//!   single field is written bare is a blank line, which `csv.reader` returns as a record of
+//!   *no* fields and `pandas.read_csv` drops outright under its default
+//!   `skip_blank_lines=True`: the row disappears rather than arriving empty. With two columns
+//!   the same row is `,`, which is unambiguous, which is why nothing is quoted there. Do not
+//!   "tidy" the one-column case into a bare line.
 //! - **A non-finite float is written the way Rust prints one** — `NaN`, `inf`, `-inf` — which
 //!   no CSV convention settles and which `float()` in Python reads back correctly for all
 //!   three. `to_json`'s three strings are a different set because JSON's number grammar
@@ -83,13 +86,14 @@ impl Dsv {
 ///
 /// The whole body is built in memory, which is what the other three encodings already do
 /// with the same rows.
-pub fn encode(result: &QueryResult, kind: Dsv) -> Result<String, ApiError> {
+pub fn encode(result: &QueryResult, kind: Dsv, null: &str) -> Result<String, ApiError> {
     refuse_nested(&result.schema)?;
 
     let mut out = Vec::new();
     let mut writer = WriterBuilder::new()
         .with_header(true)
         .with_delimiter(kind.delimiter())
+        .with_null(null.to_owned())
         .build(&mut out);
 
     if result.batches.is_empty() {
@@ -115,6 +119,54 @@ fn write_batch<W: std::io::Write>(
     writer
         .write(batch)
         .map_err(|error| ApiError::internal(format!("writing delimited output failed: {error}")))
+}
+
+/// The longest a null sentinel may be, in bytes.
+///
+/// A sentinel is a token a reader compares whole cells against — `NULL`, `\N`, `NaN` — so
+/// anything approaching this is a mistake rather than a use. The bound exists to keep one
+/// from being a place to put a kilobyte, not because any particular length breaks.
+pub const MAX_NULL_VALUE: usize = 128;
+
+/// A separator or a row terminator, refused in a sentinel whichever format is being written.
+///
+/// Both of them, not the one this format uses: the option is checked before the format is
+/// known to be the one that cares, and a sentinel that is legal under `csv` and ruinous under
+/// `tsv` is a trap rather than a convenience.
+const SEPARATORS: [char; 4] = [',', '\t', '\n', '\r'];
+
+/// Check a caller's null sentinel before anything is written with it.
+///
+/// The writer quotes whatever it is given, so none of this is about the document staying
+/// well-formed — a sentinel holding a comma does come out as a correctly quoted field. It is
+/// about what the token is for. A sentinel is compared against a whole cell by whatever reads
+/// the answer, and:
+///
+/// - **A separator or a terminator is refused.** CSV's quoting would carry one, but TSV has
+///   no quoting convention every reader implements, so a tab inside a sentinel splits a row
+///   for anyone who splits on tabs — which is most readers of a TSV. A newline does the same
+///   to a row-at-a-time reader of either.
+/// - **Any other control character is refused** as a token nothing would compare against.
+/// - **A sentinel longer than [`MAX_NULL_VALUE`] is refused**, which no real one approaches.
+///
+/// The reason is returned rather than an `ApiError`, so that the sentence is this module's
+/// and the status is the caller's.
+pub fn check_null_value(value: &str) -> Result<(), String> {
+    if value.len() > MAX_NULL_VALUE {
+        return Err(format!(
+            "it is {} bytes and at most {MAX_NULL_VALUE} are taken",
+            value.len()
+        ));
+    }
+    if let Some(bad) = value.chars().find(|c| SEPARATORS.contains(c)) {
+        return Err(format!(
+            "it holds {bad:?}, which separates one value or one row from the next"
+        ));
+    }
+    if let Some(bad) = value.chars().find(|c| c.is_control()) {
+        return Err(format!("it holds the control character {bad:?}"));
+    }
+    Ok(())
 }
 
 /// Refuse a nested column before any of the body exists.
@@ -176,8 +228,8 @@ mod tests {
         .unwrap();
         let rows = result(batch);
 
-        assert_eq!(encode(&rows, Dsv::Csv).unwrap(), "a,b\n1,2\n");
-        assert_eq!(encode(&rows, Dsv::Tsv).unwrap(), "a\tb\n1\t2\n");
+        assert_eq!(encode(&rows, Dsv::Csv, "").unwrap(), "a,b\n1,2\n");
+        assert_eq!(encode(&rows, Dsv::Tsv, "").unwrap(), "a\tb\n1\t2\n");
     }
 
     /// A caller reads the columns off the first line, so a query that matched nothing still
@@ -193,7 +245,7 @@ mod tests {
             batches: Vec::new(),
             data_bytes_read: 0,
         };
-        assert_eq!(encode(&empty, Dsv::Csv).unwrap(), "a,b\n");
+        assert_eq!(encode(&empty, Dsv::Csv, "").unwrap(), "a,b\n");
     }
 
     /// What the three non-finite floats are actually written as. Pinned rather than assumed:
@@ -201,7 +253,12 @@ mod tests {
     #[test]
     fn a_non_finite_float_is_written_as_itself() {
         let values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.5];
-        let document = encode(&one("x", Arc::new(Float64Array::from(values))), Dsv::Csv).unwrap();
+        let document = encode(
+            &one("x", Arc::new(Float64Array::from(values))),
+            Dsv::Csv,
+            "",
+        )
+        .unwrap();
         assert_eq!(document, "x\nNaN\ninf\n-inf\n1.5\n");
     }
 
@@ -212,36 +269,91 @@ mod tests {
         let document = encode(
             &one("x", Arc::new(Float32Array::from(vec![1.1_f32]))),
             Dsv::Csv,
+            "",
         )
         .unwrap();
         assert_eq!(document, "x\n1.1\n");
     }
 
-    /// The one thing the format cannot say, asserted so that it is a known limitation rather
-    /// than a surprise: a null and an empty string are one spelling in a text column.
+    /// The one thing the format cannot say without a sentinel, asserted so that it is a known
+    /// limitation rather than a surprise: a null and an empty string are one spelling.
+    ///
+    /// `""` rather than a bare empty field because this answer has a single column, and the
+    /// `csv` crate quotes a one-field record so that it is not an empty line. With a second
+    /// column both come out bare — which is why the rule is "an empty field" and not a string
+    /// anything may compare against.
     #[test]
     fn a_null_and_an_empty_string_are_one_spelling() {
-        let values = || Arc::new(StringArray::from(vec![None, Some(""), Some("a")])) as ArrayRef;
-
-        // One column: quoted, because a bare empty field would be a blank line and a blank
-        // line is a record of no fields rather than a row holding an empty one.
-        let document = encode(&one("x", values()), Dsv::Csv).unwrap();
+        let document = encode(
+            &one(
+                "x",
+                Arc::new(StringArray::from(vec![None, Some(""), Some("a")])),
+            ),
+            Dsv::Csv,
+            "",
+        )
+        .unwrap();
         assert_eq!(document, "x\n\"\"\n\"\"\na\n");
+    }
 
-        // Two: bare, the row being unambiguous once there is a delimiter on it.
+    /// A sentinel separates the two spellings the default leaves sharing one, which is the
+    /// whole of what the option is for. Two columns, so that the empty string is written
+    /// bare rather than quoted by the one-field rule above.
+    #[test]
+    fn a_sentinel_separates_a_null_from_an_empty_string() {
         let batch = RecordBatch::try_from_iter_with_nullable([
             (
                 "id",
                 Arc::new(Int64Array::from(vec![0_i64, 1, 2])) as ArrayRef,
                 false,
             ),
-            ("x", values(), true),
+            (
+                "x",
+                Arc::new(StringArray::from(vec![None, Some(""), Some("a")])) as ArrayRef,
+                true,
+            ),
         ])
         .unwrap();
         assert_eq!(
-            encode(&result(batch), Dsv::Csv).unwrap(),
-            "id,x\n0,\n1,\n2,a\n"
+            encode(&result(batch), Dsv::Csv, "\\N").unwrap(),
+            "id,x\n0,\\N\n1,\n2,a\n"
         );
+    }
+
+    /// The writer quotes the sentinel like any other value, so a document written with an
+    /// awkward one is still well-formed — which is why `check_null_value` is about what a
+    /// reader can do with it rather than about the document.
+    #[test]
+    fn a_sentinel_is_quoted_like_any_other_value() {
+        let document = encode(
+            &one("x", Arc::new(StringArray::from(vec![None, Some("a")]))),
+            Dsv::Csv,
+            "p,q",
+        )
+        .unwrap();
+        assert_eq!(document, "x\n\"p,q\"\na\n");
+    }
+
+    /// Both bounds, and the two that are fine either side of them.
+    #[test]
+    fn a_sentinel_is_checked_before_it_is_used() {
+        for good in ["", "NULL", "\\N", "NaN", &"x".repeat(MAX_NULL_VALUE)] {
+            assert!(check_null_value(good).is_ok(), "{good:?}");
+        }
+
+        let long = "x".repeat(MAX_NULL_VALUE + 1);
+        let error = check_null_value(&long).unwrap_err();
+        assert!(error.contains("at most"), "{error}");
+
+        // Both delimiters and both terminators, whichever format is being written: a
+        // sentinel legal under one and ruinous under the other is a trap.
+        for bad in ["a,b", "a\tb", "a\nb", "a\rb"] {
+            let error = check_null_value(bad).unwrap_err();
+            assert!(error.contains("separates"), "{bad:?}: {error}");
+        }
+
+        let error = check_null_value("\u{0}").unwrap_err();
+        assert!(error.contains("control character"), "{error}");
     }
 
     /// A value carrying the delimiter is quoted rather than splitting the row.
@@ -250,6 +362,7 @@ mod tests {
         let document = encode(
             &one("x", Arc::new(StringArray::from(vec![Some("a,b")]))),
             Dsv::Csv,
+            "",
         )
         .unwrap();
         assert_eq!(document, "x\n\"a,b\"\n");
@@ -265,7 +378,7 @@ mod tests {
                 Some(vec![Some(1_i64)]),
             ]);
         for kind in [Dsv::Csv, Dsv::Tsv] {
-            let error = encode(&one("lc", Arc::new(values.clone())), kind).unwrap_err();
+            let error = encode(&one("lc", Arc::new(values.clone())), kind, "").unwrap_err();
             let message = format!("{error:?}");
             assert!(message.contains("lc"), "{message}");
             assert!(message.contains("json or parquet"), "{message}");
@@ -290,7 +403,7 @@ mod tests {
             ("lc", values, true),
         ])
         .unwrap();
-        let error = encode(&result(batch), Dsv::Csv).unwrap_err();
+        let error = encode(&result(batch), Dsv::Csv, "").unwrap_err();
         assert!(format!("{error:?}").contains("lc"));
     }
 
