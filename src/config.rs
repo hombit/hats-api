@@ -157,6 +157,18 @@ pub struct LimitsConfig {
     /// Not the caller's `limit`, which is them asking for fewer. This is the operator's
     /// ceiling on the answer, and it binds a request that set no limit at all.
     pub max_rows: usize,
+    /// How much memory one ADQL statement's own working set may take.
+    ///
+    /// The ADQL route's alone. Every other route evaluates one expression per row and holds
+    /// the answer; a statement builds a join's hash table, an aggregate's groups and a sort's
+    /// heap, none of which `max_rows` bounds — a `GROUP BY` over a million distinct values
+    /// holds them all while returning one row at a time.
+    ///
+    /// Reached, the query is refused. It does not spill: the disk manager is off on that
+    /// route, so this bound cannot quietly become a bound on the operator's scratch space
+    /// instead. It is per request and not across them, so a server answering several at once
+    /// may hold several of these.
+    pub max_query_memory_bytes: ByteSize,
     /// How many partitions of one request are read at once.
     ///
     /// A performance knob rather than a bound: the read is over a network whose latency is
@@ -240,6 +252,11 @@ impl Default for LimitsConfig {
             max_partitions: 16,
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
+            // Room for a real aggregate — a `GROUP BY` over a few million distinct values,
+            // or a join whose build side is a catalog's worth of positions — while leaving a
+            // server that answers several requests at once well short of its memory. An
+            // operator who has given the process more can raise it.
+            max_query_memory_bytes: ByteSize::gib(1),
             max_concurrent_partitions: 4,
             // Long enough for a wide catalog query against a cold remote store, and short
             // enough that a caller waiting on one finds out rather than holding a

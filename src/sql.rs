@@ -27,7 +27,7 @@ use datafusion::execution::context::SessionState;
 // fields back into it needs something that makes a struct. Imported rather than looked up in
 // the registry, so a build without it is a compile error instead of a request that fails.
 use datafusion::functions::core::expr_fn::named_struct;
-use datafusion::logical_expr::{Expr, UNNAMED_TABLE, Volatility};
+use datafusion::logical_expr::{Expr, LogicalPlan, UNNAMED_TABLE, Volatility};
 use datafusion::sql::sqlparser::ast::{
     Expr as SqlExpr, ExprWithAlias, Ident, Statement, visit_expressions_mut,
 };
@@ -35,6 +35,7 @@ use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
 use datafusion::sql::sqlparser::tokenizer::{Token, TokenWithSpan, Tokenizer};
 
+use crate::adql_functions;
 use crate::config::LimitsConfig;
 use crate::error::ApiError;
 
@@ -801,19 +802,71 @@ fn ambiguous(name: &str) -> Option<&'static str> {
 /// Walk the planned expression and refuse everything this service will not run.
 fn check(expr: &Expr, field: &str, limits: Limits) -> Result<(), ApiError> {
     let mut nodes = 0usize;
+    walk(expr, Shape::Row, field, limits, &mut nodes)
+}
+
+/// The same judgement over every expression of a planned statement.
+///
+/// **The rules that are about the answer hold; the one about a row does not.** A statement
+/// is planned as a whole, so an aggregate, a window function and a subquery are what the
+/// caller asked for rather than something a per-row expression smuggled in — and refusing
+/// them here would refuse most of what a statement is written for. What still holds is
+/// everything that is true of any answer this service gives: a volatile function makes one
+/// request differ from the next, and the ambiguous-name list refuses a function whose answer
+/// is not the one the caller read their own text as asking for.
+///
+/// **`rand` is the one exception, and it is this shape's alone.** ADQL makes it mandatory, so
+/// a route answering ADQL has to have it; every other route is refused it, which is what
+/// scoping the exception to a statement means. It is the first answer this service gives that
+/// differs between two identical requests — see [`crate::adql_functions`].
+///
+/// The node budget is the whole plan's rather than one expression's. A statement has many
+/// expressions and no single one of them is the size worth bounding.
+pub fn check_plan(plan: &LogicalPlan, limits: Limits) -> Result<(), ApiError> {
+    const FIELD: &str = "query";
+
+    let mut nodes = 0usize;
+    let mut refusal = None;
+    // Subqueries too: they are expressions of the plan they sit in, and a `now()` inside one
+    // is as unreproducible as a `now()` outside it.
+    let _ = plan.apply_with_subqueries(|node| {
+        node.apply_expressions(|expr| {
+            match walk(expr, Shape::Statement, FIELD, limits, &mut nodes) {
+                Ok(()) => Ok(TreeNodeRecursion::Continue),
+                Err(error) => {
+                    refusal = Some(error);
+                    Ok(TreeNodeRecursion::Stop)
+                }
+            }
+        })
+    });
+    match refusal {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// One expression, judged node by node, counting into a budget it may share with others.
+fn walk(
+    expr: &Expr,
+    shape: Shape,
+    field: &str,
+    limits: Limits,
+    nodes: &mut usize,
+) -> Result<(), ApiError> {
     let mut refusal = None;
     // The closure cannot fail, so the walk itself cannot: the refusal is carried out
     // rather than raised, and the walk stops at the first one.
     let _ = expr.apply(|node| {
-        nodes += 1;
-        if nodes > limits.max_nodes {
+        *nodes += 1;
+        if *nodes > limits.max_nodes {
             refusal = Some(format!(
                 "{field} is too large: more than {} terms",
                 limits.max_nodes
             ));
             return Ok(TreeNodeRecursion::Stop);
         }
-        match allowed(node) {
+        match allowed(node, shape) {
             Ok(()) => Ok(TreeNodeRecursion::Continue),
             Err(reason) => {
                 refusal = Some(format!("{field}: {reason}"));
@@ -827,13 +880,22 @@ fn check(expr: &Expr, field: &str, limits: Limits) -> Result<(), ApiError> {
     }
 }
 
+/// What an expression is part of, which decides the one rule the two differ on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// A field of a request, evaluated one row at a time. Nothing that combines rows.
+    Row,
+    /// An expression of a statement the planner built, where combining rows is the point.
+    Statement,
+}
+
 /// One node of a planned expression, judged.
 ///
 /// Written as an allowlist with an exhaustive match rather than as a list of what is
 /// refused: a DataFusion upgrade that adds an expression kind is then a compile error
 /// here, and someone decides whether it belongs in a per-row expression instead of a
 /// caller finding out that it already did.
-fn allowed(expr: &Expr) -> Result<(), String> {
+fn allowed(expr: &Expr, shape: Shape) -> Result<(), String> {
     match expr {
         Expr::Alias(_)
         | Expr::Column(_)
@@ -867,6 +929,10 @@ fn allowed(expr: &Expr) -> Result<(), String> {
         // volatility cannot see.
         Expr::ScalarFunction(call) => match ambiguous(call.func.name()) {
             Some(reason) => Err(reason.to_owned()),
+            // The one name let *through* a rule it fails, where `AMBIGUOUS` is a list of names
+            // refused by one they pass. Opposite senses, so they are two lists: under one
+            // name, whoever comes next extends the wrong one.
+            None if shape == Shape::Statement && call.func.name() == adql_functions::RAND => Ok(()),
             None => match call.func.signature().volatility {
                 Volatility::Immutable => Ok(()),
                 Volatility::Stable | Volatility::Volatile => Err(format!(
@@ -876,18 +942,27 @@ fn allowed(expr: &Expr) -> Result<(), String> {
             },
         },
 
-        Expr::AggregateFunction(_) | Expr::WindowFunction(_) | Expr::GroupingSet(_) => Err(
-            "this is an expression over one row; aggregates, window functions and \
-             grouping sets summarize many"
-                .to_owned(),
-        ),
+        // The two kinds that combine rows, and the one place the two shapes part. A field is
+        // evaluated per row and a statement is planned whole, so what is smuggled into the
+        // first is asked for outright by the second.
+        Expr::AggregateFunction(_) | Expr::WindowFunction(_) | Expr::GroupingSet(_) => {
+            match shape {
+                Shape::Statement => Ok(()),
+                Shape::Row => Err("this is an expression over one row; aggregates, window \
+                               functions and grouping sets summarize many"
+                    .to_owned()),
+            }
+        }
         Expr::Exists(_)
         | Expr::InSubquery(_)
         | Expr::ScalarSubquery(_)
         | Expr::SetComparison(_)
-        | Expr::OuterReferenceColumn(..) => {
-            Err("a subquery reads a second table, and a request names one".to_owned())
-        }
+        | Expr::OuterReferenceColumn(..) => match shape {
+            Shape::Statement => Ok(()),
+            Shape::Row => {
+                Err("a subquery reads a second table, and a request names one".to_owned())
+            }
+        },
         Expr::ScalarVariable(..) | Expr::Placeholder(_) => {
             Err("a variable has no value here; write the value itself".to_owned())
         }
@@ -899,6 +974,9 @@ fn allowed(expr: &Expr) -> Result<(), String> {
         Expr::Wildcard { .. } => {
             Err("omit select rather than writing *: absent means every column".to_owned())
         }
+        // A statement's `SELECT *` is expanded by the planner into the columns it names, so
+        // one reaching here is `UNNEST(…)` written out — which turns one row into many and
+        // is not something either shape asks for yet.
         Expr::Unnest(_) => {
             Err("unnest turns one row into many, so it is not an expression here".to_owned())
         }
@@ -1447,6 +1525,6 @@ mod tests {
     #[test]
     fn the_nested_field_access_is_allowed() {
         let exprs = projection(&state(), &schema(), "lightcurve.mag", limits()).unwrap();
-        assert!(allowed(&exprs[0]).is_ok());
+        assert!(allowed(&exprs[0], Shape::Row).is_ok());
     }
 }

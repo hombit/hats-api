@@ -75,10 +75,6 @@ const REFUSED: &[(&str, &str)] = &[
         "REGION",
         "it takes an STC-S string, which ADQL 2.1 deprecated",
     ),
-    (
-        "RAND",
-        "an answer that differs every time it is asked is not one this service returns yet",
-    ),
 ];
 
 /// ADQL's names for functions DataFusion registers under another name.
@@ -628,6 +624,68 @@ mod tests {
         );
     }
 
+    /// **Every mathematical function ADQL 2.1 makes mandatory**, planned and run rather than
+    /// merely translated: they are §2.3 of the specification and carry no optional-feature
+    /// URI, so a name that does not resolve is a hole in what this route claims to answer.
+    #[tokio::test]
+    async fn the_mandatory_mathematical_functions_resolve() {
+        use std::sync::Arc;
+
+        use datafusion::arrow::array::{ArrayRef, Float64Array, RecordBatch};
+        use datafusion::sql::parser::Statement as DfStatement;
+
+        let ctx = crate::query::session_context(false);
+        crate::adql_functions::register(&ctx);
+        let rows = RecordBatch::try_from_iter([(
+            "x",
+            Arc::new(Float64Array::from(vec![2.0])) as ArrayRef,
+        )])
+        .unwrap();
+        ctx.register_batch("t", rows).unwrap();
+
+        for call in [
+            "ABS(x)",
+            "CEILING(x)",
+            "DEGREES(x)",
+            "EXP(x)",
+            "FLOOR(x)",
+            "LOG(x)",
+            "LOG10(x)",
+            "MOD(x, 2)",
+            "PI()",
+            "POWER(x, 2)",
+            "RADIANS(x)",
+            "RAND()",
+            // The argument ADQL defines and leaves undefined, which has to parse and run.
+            "RAND(42)",
+            "ROUND(x)",
+            "SQRT(x)",
+            "TRUNCATE(x)",
+            // The trigonometry of the same section.
+            "ACOS(1)",
+            "ASIN(1)",
+            "ATAN(x)",
+            "ATAN2(x, 2)",
+            "COS(x)",
+            "SIN(x)",
+            "TAN(x)",
+        ] {
+            let translated = translate(&format!("SELECT {call} FROM t"), LIMITS)
+                .unwrap_or_else(|error| panic!("{call} should translate: {error}"));
+            let plan = ctx
+                .state()
+                .statement_to_plan(DfStatement::Statement(Box::new(translated.statement)))
+                .await
+                .unwrap_or_else(|error| panic!("{call} should plan: {error}"));
+            ctx.execute_logical_plan(plan)
+                .await
+                .unwrap()
+                .collect()
+                .await
+                .unwrap_or_else(|error| panic!("{call} should run: {error}"));
+        }
+    }
+
     #[test]
     fn the_functions_adql_names_differently_are_renamed() {
         assert_eq!(
@@ -676,7 +734,6 @@ mod tests {
                 "SELECT ra FROM t WHERE 1 = CONTAINS(POINT(ra, dec), POLYGON(1, 2, 3, 4, 5, 6))",
             ),
             ("AREA", "SELECT AREA(CIRCLE(1, 2, 3)) FROM t"),
-            ("RAND", "SELECT RAND() FROM t"),
         ] {
             let refusal = refusal(adql);
             assert!(

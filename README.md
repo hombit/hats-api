@@ -178,7 +178,8 @@ body is written in. Both go in the path, under `[api] prefix`, `/api/v1` by defa
 | a whole catalog | `POST /api/v1/expr/hats` | `POST /api/v1/simple/hats` |
 | a catalog query, resolved but not run | `POST /api/v1/expr/hats/plan` | `POST /api/v1/simple/hats/plan` |
 
-Plus `GET /api/v1/health`.
+Plus `POST /api/v1/adql`, which takes a whole query rather than a target and two fields,
+and `GET /api/v1/health`.
 
 The `hats` routes pick the partitions the query touches; `hats/plan` takes the same body
 and returns the requests that query would take.
@@ -482,6 +483,55 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
 
+### ADQL
+
+`POST /api/v1/adql` takes an
+[ADQL](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html) query instead of a
+target and two fields. Every table the query reads is declared beside it, under the name the
+query uses. This one runs as written:
+
+```json
+{
+  "query": "SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag FROM gaia WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(254.45754, 35.34235, 0.000278))",
+  "tables": {
+    "gaia": {
+      "type": "parquet",
+      "url": "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia/dataset/Norder=3/Dir=0/Npix=148.parquet"
+    }
+  }
+}
+```
+
+Declare two tables to join them. A `FROM` naming a table `tables` does not declare is an
+error: a query cannot reach a file the request did not name.
+
+`type` is `parquet`, one file. A whole catalog is not supported yet, so query one through
+the `hats` routes, or use [`hats/plan`](#a-plan-instead-of-the-rows) to find the partition
+files a region covers and name those here.
+
+`GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
+answered. Where ADQL spells something differently from SQL, the query is translated:
+
+| ADQL | means |
+|---|---|
+| `TOP n` | `LIMIT n` |
+| `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
+| `1 = INTERSECTS(point, shape)` | the same test, either argument first |
+| `DISTANCE(POINT(ra, dec), POINT(ra, dec)) < r` | the circle of radius `r` |
+| `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
+| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%` |
+
+These ADQL functions are not supported: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
+`COORDSYS`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
+
+`RAND()` works here, and is refused on the other routes, which answer the same way twice.
+Two runs of the same query give different numbers. The standard's optional argument is
+accepted but changes nothing, because the standard leaves its meaning undefined and advises
+omitting it.
+
+An answer over the row cap is refused rather than truncated: rows cut off are a value you
+cannot tell from the whole answer.
+
 ### Storage options
 
 `storage` says how to reach the store; the URL says which object. Leave it out for a
@@ -636,6 +686,7 @@ either. A mount's own `filenames` replaces this for the files under it.
 max_partitions = 16             # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
+max_query_memory_bytes = "1GiB" # what one ADQL statement's joins and groups may hold
 max_request_seconds = 90        # how long one request has to answer; 0 is no bound
 max_request_body_bytes = "16MiB" # how large a body may be; 0 is no bound
 max_concurrent_partitions = 4   # a performance setting, not a bound

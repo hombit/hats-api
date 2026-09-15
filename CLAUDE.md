@@ -231,6 +231,14 @@ everything about what SQL means here is decided there.
   A function that is merely unwanted is left out of the build instead, where it is already
   an error naming it.
 
+  **`rand` is the one name let *through* the rule, and only inside a statement.** ADQL makes
+  it mandatory, so the route that answers ADQL has to have it; every other route refuses it,
+  which is what scoping the exception to `sql::Shape::Statement` means. Keep it out of
+  `AMBIGUOUS`: that is a list of names refused by a rule they pass, this is a name passed by
+  one it fails, and two lists with opposite senses under one name is how the wrong one gets
+  extended. It is the only answer this service gives that differs between two identical
+  requests, which is a fact worth checking against before adding a second.
+
   Refusing a name is only allowed where what it meant has another spelling already —
   `log10`, `ln` and `log2` for `log` — and the refusal names them. **Do not add the missing
   spelling by registering one.** The registry a request plans against is DataFusion's, whole
@@ -238,6 +246,14 @@ everything about what SQL means here is decided there.
   so an expression that works here would fail everywhere the caller takes it. Every request
   builds its context in `query::session_context`, which is what keeps that one list rather
   than one per call site.
+
+  **What a *language* requires is the other case, and it is not an exception to that.**
+  `geometry::register` and `adql_functions::register` put `contains`, `point`, `circle`,
+  `moc` and `rand` on the ADQL route's context, and the test is the same one: a name every
+  other reader of that language also has. `CONTAINS` and `RAND` are ADQL's, written down in
+  a standard, so a statement that works here works against any ADQL service — which is what
+  `lg` could not say and why `lg` was the mistake. The two registers are per route and never
+  on `session_context`, so the expression routes keep exactly DataFusion's own list.
 - **A column answers to its own name and to its name in lowercase, and to nothing else.**
   Astronomy column names are mixed-case as a matter of course — `Gmag`, `Norder`,
   `objectId` — and a caller reads them off the file, so the file's spelling has to work;
