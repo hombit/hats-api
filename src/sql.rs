@@ -18,10 +18,11 @@
 
 use std::collections::VecDeque;
 use std::ops::ControlFlow;
+use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Fields};
 use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, DFSchema, ScalarValue};
+use datafusion::common::{Column, DFSchema, ScalarValue, TableReference};
 use datafusion::execution::context::SessionState;
 // The one function this module *builds* rather than lets through: packing a nested column's
 // fields back into it needs something that makes a struct. Imported rather than looked up in
@@ -292,8 +293,13 @@ pub fn filter_text(
 /// holds strings reaches the planner as a subtraction of a number from text, and what
 /// comes back is DataFusion's account of a coercion rather than anything naming the field
 /// the caller filled in.
-pub fn coordinate_column(schema: &DFSchema, name: &str, field: &str) -> Result<Expr, ApiError> {
-    let (column, data_type) = named_column(schema, name, field)?;
+pub fn coordinate_column(
+    schema: &DFSchema,
+    relation: Option<&TableReference>,
+    name: &str,
+    field: &str,
+) -> Result<Expr, ApiError> {
+    let (column, data_type) = named_column(schema, relation, name, field)?;
     if !data_type.is_numeric() {
         return Err(ApiError::bad_request(format!(
             "{field}: {name:?} holds {data_type:?}; a coordinate must be a number"
@@ -313,10 +319,11 @@ pub fn coordinate_column(schema: &DFSchema, name: &str, field: &str) -> Result<E
 /// column is at.
 pub fn integer_column(
     schema: &DFSchema,
+    relation: Option<&TableReference>,
     name: &str,
     field: &str,
 ) -> Result<(Expr, DataType), ApiError> {
-    let (column, data_type) = named_column(schema, name, field)?;
+    let (column, data_type) = named_column(schema, relation, name, field)?;
     if !data_type.is_integer() {
         return Err(ApiError::bad_request(format!(
             "{field}: {name:?} holds {data_type:?}; a HEALPix cell must be a whole number"
@@ -326,17 +333,39 @@ pub fn integer_column(
 }
 
 /// One column name in the file's own spelling, with the type it holds.
-fn named_column(schema: &DFSchema, name: &str, field: &str) -> Result<(Expr, DataType), ApiError> {
+/// **The relation narrows both halves, and it has to.** Where several tables are in scope a
+/// bare `ra` is a column of each of them, so the name is resolved among one table's fields and
+/// the column that comes back carries that table — an unqualified one is ambiguous, which the
+/// planner answers with an error rather than a choice.
+fn named_column(
+    schema: &DFSchema,
+    relation: Option<&TableReference>,
+    name: &str,
+    field: &str,
+) -> Result<(Expr, DataType), ApiError> {
+    let fields = fields_of(schema, relation);
     let mut ident = Ident::new(name);
-    let Some(data_type) = resolve_segment(&mut ident, schema.fields()) else {
+    let Some(data_type) = resolve_segment(&mut ident, &fields) else {
         return Err(ApiError::bad_request(format!(
             "{field}: this file has no column named {name:?}"
         )));
     };
     Ok((
-        Expr::Column(Column::new_unqualified(ident.value)),
+        Expr::Column(Column::new(relation.cloned(), ident.value)),
         data_type,
     ))
+}
+
+/// One table's fields, or every field where no table was named.
+pub fn fields_of(schema: &DFSchema, relation: Option<&TableReference>) -> Fields {
+    let Some(relation) = relation else {
+        return schema.fields().clone();
+    };
+    schema
+        .iter()
+        .filter(|(qualifier, _)| *qualifier == Some(relation))
+        .map(|(_, field)| Arc::clone(field))
+        .collect()
 }
 
 /// One boolean expression, however it was spelled: no alias, and nothing after it.

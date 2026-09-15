@@ -9,7 +9,7 @@ Release dates are in the UTC time zone.
 ### Added
 
 - The numeric functions — `sqrt`, `log10`, `power`, `abs`, `degrees`, the trigonometric ones — are callable in `select` and `where`. `log` is refused as ambiguous.
-- `POST {api.prefix}/adql`, taking an ADQL statement over parquet tables the request declares. `RAND()` is answered there and refused everywhere else.
+- `POST {api.prefix}/adql`, taking an ADQL statement over tables the request declares, each a parquet file or a HATS catalog. `RAND()` is answered there and refused everywhere else. A region over a `hats` table names the catalog's own position columns. A crossmatch is `1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, r))`, and `DISTANCE(...)` is a value in degrees.
 - `[limits] max_query_memory_bytes`, `1GiB` by default.
 
 ### Changed

@@ -476,6 +476,20 @@ quote and no second parser.
   which of its columns are coordinates, and a guess from conventional names would answer a
   different question than the one asked without saying so. A catalog's `properties` is the
   one thing allowed to supply them.
+
+  **Where a catalog supplies them they are also the only pair allowed**, and a region over
+  any other of its columns is refused. A catalog's partitions are chosen by a HEALPix index,
+  and that index says where `hats_col_ra` and `hats_col_dec` put a row and nothing about any
+  other column — so a region over a different pair is pruned by statistics that do not
+  describe it, and the partitions dropped can be exactly the ones holding the positions asked
+  for. Fewer rows than the shape contains, with nothing in the answer to say why. A file
+  declares nothing and so constrains nothing: naming the two columns is the caller's only
+  claim there, and there is nothing for it to contradict.
+
+  How the claim reaches the check is a mark on the schema — `geometry::COORDINATE` on the two
+  fields, written by `hats_table::marked` and read by `geometry::declared_position`. It rides
+  on the field, so an alias, a join or a subquery between the table and the region test
+  changes nothing; a registry keyed by table name would have to resolve all three.
 - **A shape that reads two ways is refused, not resolved.** A `zone`'s `ra` runs eastward
   from the first value to the second, so `[350, 10]` and `[10, 350]` are different zones
   and both are legal; the two values naming the *same* point is refused, because it reads
@@ -576,6 +590,28 @@ which rows of one it cannot. `cdshealpix` computes the coverings and `moc` holds
     expression `region::predicate` builds, and that pass runs before the scan's pruning
     predicate is made. So a region said as a function reads exactly the bytes the `region`
     field reads, which `naming_the_healpix_column_reads_less_of_the_file` asserts.
+
+- **A shape built out of columns is a crossmatch, and it carries no covering.**
+  `contains(point(b.ra, b.dec), circle(a.ra, a.dec, r))` is ADQL's own spelling of one, and
+  the circle is a different circle for every row of `a` — so there is no one covering, no
+  pruning, and what it becomes is `region::within`, the separation and the bound. That it
+  prunes nothing is not a gap to be closed by recognising the pattern harder: a scan is
+  pruned by one predicate, and this is a predicate over two rows. What bounds such a query
+  is each side's *own* region, which does prune, and `max_partitions` refusing a side that
+  has none.
+
+  `region::separation` is the one haversine, and both forms go through it: a cone, a
+  crossmatch, and `distance(...)` as a value. A second copy of that formula is how two ways
+  of asking the same question come to disagree about which pairs are a degree apart.
+
+- **A region test in a statement has to say which table it is about.** `region::Spatial`
+  carries a `relation` for that, and `geometry::Contains` fills it in from the caller's own
+  `point(...)`. With two catalogs joined, a bare `ra` is a column of each and the predicate
+  will not plan — and `_healpix_29` is a column of each too, which is worse: `SpatialIndex`
+  finds two, reports that neither names an index, and the covering is silently dropped. Both
+  halves are needed, and `sql::fields_of` is what narrows the search to one table's fields.
+  `the_adql_route_crossmatches_two_catalogs` runs with one partition allowed, so a lost
+  covering is a refusal rather than a slow pass.
 
 - **A region function goes only on a context whose planner also chooses what to scan.**
   The covering prunes row groups inside a file; a catalog's partitions are chosen before any

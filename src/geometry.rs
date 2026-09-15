@@ -18,24 +18,40 @@
 //! contiguous* interval, and a covering is tens of disjoint ranges — so it can say what a
 //! monotone function inverts to and cannot say what a cone covers.
 //!
-//! **A region is a constant.** The covering is computed once, at plan time, from the
-//! literals the caller wrote; a circle whose radius came out of a column would need a
-//! different covering per row, which is not a thing a scan can be pruned by. So the
+//! **A region that prunes is a constant.** The covering is computed once, at plan time, from
+//! the literals the caller wrote; a circle whose centre came out of a column is a different
+//! circle per row, and a scan cannot be pruned by a different shape per row. So the
 //! constructors answer with the region's own JSON — the same text the `region` field takes —
-//! and a call over anything but constants is refused.
+//! and only a circle built out of numbers reaches [`region::predicate`].
+//!
+//! A circle around a column is the other case and is answered rather than refused: it is a
+//! crossmatch, `contains(point(b.ra, b.dec), circle(a.ra, a.dec, r))`, and what it becomes is
+//! the separation and the bound with nothing in front of them. Each side's own region is what
+//! chooses the partitions; this only says which of the pairs match.
 
 use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, Fields};
-use datafusion::common::{DFSchema, ScalarValue};
+use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::error::{DataFusionError, Result as DfResult};
+use datafusion::functions::math::expr_fn::{asin, degrees, sqrt};
 use datafusion::logical_expr::simplify::{ExprSimplifyResult, SimplifyContext};
 use datafusion::logical_expr::{
-    ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
+    Volatility,
 };
-use datafusion::prelude::SessionContext;
+use datafusion::prelude::{SessionContext, lit, when};
 
 use crate::region::{self, Region, Spatial};
+
+/// The metadata key a table marks its own coordinate columns with, and the two values it takes.
+///
+/// A file says nothing about which of its columns are a position, so the caller naming them is
+/// the only claim there is; a catalog does say, and [`crate::hats_table`] writes what it says
+/// into the schema the planner sees. `declared_position` below is what reads it back.
+pub const COORDINATE: &str = "hats.coordinate";
+pub const RA: &str = "ra";
+pub const DEC: &str = "dec";
 
 /// What a position is, as a type: two fields and no values.
 ///
@@ -64,6 +80,7 @@ pub fn register(ctx: &SessionContext) {
         ScalarUDF::new_from_impl(Circle::default()),
         ScalarUDF::new_from_impl(Moc::default()),
         ScalarUDF::new_from_impl(Contains::default()),
+        ScalarUDF::new_from_impl(Distance::default()),
     ] {
         ctx.register_udf(function);
     }
@@ -230,16 +247,31 @@ impl ScalarUDFImpl for Contains {
     /// make, and what it would evaluate is a haversine over every row of every partition —
     /// the right answer at a cost the caller cannot tell from a slow link, which is the thing
     /// the whole region machinery exists to avoid.
+    ///
+    /// **A circle whose centre is a row's own position is the other case**, and it is a
+    /// crossmatch: `contains(point(b.ra, b.dec), circle(a.ra, a.dec, r))` is every pair of
+    /// rows within `r` of each other. There is no covering to be had — the shape is a
+    /// different one for every row of `a` — so what it becomes is the separation and the
+    /// bound, and nothing prunes. Narrow both sides first; each one's own region is what
+    /// chooses the partitions, and this only says which of the surviving pairs match.
     fn simplify(&self, args: Vec<Expr>, info: &SimplifyContext) -> DfResult<ExprSimplifyResult> {
         let [point, shape] = args.as_slice() else {
             return Err(shape_of_a_region_test());
         };
+        if let Some([ra, dec, radius]) = per_row_circle(shape) {
+            let (row_ra, row_dec) = position_of(point)?;
+            return Ok(ExprSimplifyResult::Simplified(region::within(
+                &row_ra, &row_dec, ra, dec, radius,
+            )));
+        }
         let (ra_column, dec_column) = coordinates(point)?;
+        let schema: &DFSchema = info.schema();
+        declared_position(schema, &ra_column, &dec_column)?;
         let regions = [region_of(shape)?];
         let spatial = Spatial {
             regions: &regions,
-            ra_column: Some(&ra_column),
-            dec_column: Some(&dec_column),
+            ra_column: Some(&ra_column.name),
+            dec_column: Some(&dec_column.name),
             // Discovered from the file's own schema, which is the rule everywhere else: a
             // column named `_healpix_29` carries its order in its name, and any other index
             // column has to be named — which a function call has no way to do.
@@ -247,8 +279,11 @@ impl ScalarUDFImpl for Contains {
             // A function says nothing about a catalog above the file, so the covering gets
             // no partition to put a floor under its depth or to be cut to.
             partition: None,
+            // The table the caller's own `point(...)` named. In a join both sides have an
+            // `ra` and a `_healpix_29`, so this is what keeps the predicate about one of
+            // them.
+            relation: ra_column.relation.as_ref(),
         };
-        let schema: &DFSchema = info.schema();
         region::predicate(schema, &spatial)
             .map(ExprSimplifyResult::Simplified)
             .map_err(|error| DataFusionError::Plan(error.to_string()))
@@ -268,7 +303,7 @@ impl ScalarUDFImpl for Contains {
 /// before this runs, and the arithmetic below widens to `f64` anyway — so the cast says
 /// nothing this needs, while the column underneath is the whole point: the covering has to
 /// be a test on a column for row-group statistics to prune on it.
-fn coordinates(point: &Expr) -> DfResult<(String, String)> {
+fn coordinates(point: &Expr) -> DfResult<(Column, Column)> {
     let Expr::ScalarFunction(call) = point else {
         return Err(shape_of_a_region_test());
     };
@@ -289,14 +324,57 @@ fn coordinates(point: &Expr) -> DfResult<(String, String)> {
 }
 
 /// The column an expression is, under whatever the planner wrapped it in.
-fn column(expr: &Expr) -> Option<String> {
+fn column(expr: &Expr) -> Option<Column> {
     match expr {
-        Expr::Column(column) => Some(column.name.clone()),
+        Expr::Column(column) => Some(column.clone()),
         Expr::Cast(cast) => column(&cast.expr),
         Expr::TryCast(cast) => column(&cast.expr),
         Expr::Alias(alias) => column(&alias.expr),
         _ => None,
     }
+}
+
+/// Refuse a region over a table's columns other than the ones it says hold a position.
+///
+/// **A catalog's partitions are chosen by its HEALPix index, and that index describes one pair
+/// of columns.** The covering this rewrite produces is a test on that index, so a cone written
+/// over some other pair would be answered from partitions chosen by a column that says nothing
+/// about it — and the partitions dropped could be exactly the ones holding the positions asked
+/// for. Fewer rows than the shape contains, with nothing in the answer to say so.
+///
+/// Swapping the two is the way it actually happens: `point(dec, ra)` is a cone somewhere else
+/// entirely, and over a small catalog it comes back empty rather than wrong.
+///
+/// A table that marks nothing constrains nothing. That is every parquet file, where which
+/// columns hold a position is the caller's to say and this is the saying of it.
+fn declared_position(schema: &DFSchema, ra: &Column, dec: &Column) -> DfResult<()> {
+    // A column the planner left unqualified is looked up by name, so that a statement over one
+    // table — where there is no qualifier to write — is checked like any other.
+    let table = match &ra.relation {
+        Some(relation) => Some(relation.clone()),
+        None => schema
+            .iter()
+            .find(|(_, field)| field.name() == &ra.name)
+            .and_then(|(relation, _)| relation.cloned()),
+    };
+    let role = |want: &str| {
+        schema.iter().find_map(|(relation, field)| {
+            (relation == table.as_ref()
+                && field.metadata().get(COORDINATE).map(String::as_str) == Some(want))
+            .then(|| field.name().clone())
+        })
+    };
+    let (Some(its_ra), Some(its_dec)) = (role(RA), role(DEC)) else {
+        return Ok(());
+    };
+    if ra.name == its_ra && dec.name == its_dec {
+        return Ok(());
+    }
+    Err(DataFusionError::Plan(format!(
+        "this catalog's positions are in {its_ra} and {its_dec}, and its partitions are chosen \
+         by an index over those two; a region over ({}, {}) cannot be answered from them",
+        ra.name, dec.name
+    )))
 }
 
 /// The shape an expression is, where it is a constant one.
@@ -374,12 +452,130 @@ fn constant(name: &str) -> DataFusionError {
     ))
 }
 
+/// `distance(point(ra, dec), point(ra, dec))` — the angle between two positions, in degrees.
+///
+/// **A value, where `contains` is a test, and that is the whole difference between them.** A
+/// region test is answered from one shape known at plan time, so it carries a covering and
+/// prunes; a separation between two positions that are both a row's is known only once the
+/// two rows are in front of each other, so there is nothing to prune with and it is
+/// arithmetic like any other. That is what makes it the thing a join can be written on.
+///
+/// It rewrites itself into `region::separation` for the same reason `contains` does: one
+/// account of what the angle between two points is, so a crossmatch and a cone agree about
+/// which pairs are a degree apart.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Distance {
+    signature: Signature,
+}
+
+impl Default for Distance {
+    fn default() -> Self {
+        Self {
+            // Both of ADQL's spellings: two positions, and the four coordinates 2.1 added.
+            signature: Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![position(), position()]),
+                    TypeSignature::Uniform(4, vec![DataType::Float64]),
+                ],
+                Volatility::Immutable,
+            ),
+        }
+    }
+}
+
+impl ScalarUDFImpl for Distance {
+    fn name(&self) -> &str {
+        "distance"
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _args: &[DataType]) -> DfResult<DataType> {
+        Ok(DataType::Float64)
+    }
+
+    /// The haversine, turned back into an angle.
+    ///
+    /// `contains` compares haversines and never pays this `asin`, the comparison being
+    /// monotone either way. A value has to be the angle itself, so here it is paid — once per
+    /// pair of rows, which is what asking for a distance costs.
+    ///
+    /// **The clamp is not decoration.** The haversine of a pair a whole turn apart is 1, and
+    /// rounding can put the sum a bit over it, where `asin` is `NaN`. A separation reported as
+    /// `NaN` instead of 180 is a value the caller cannot tell from a null coordinate.
+    fn simplify(&self, args: Vec<Expr>, _info: &SimplifyContext) -> DfResult<ExprSimplifyResult> {
+        let [ra_a, dec_a, ra_b, dec_b] = match args.as_slice() {
+            [first, second] => {
+                let (ra_a, dec_a) = position_of(first)?;
+                let (ra_b, dec_b) = position_of(second)?;
+                [ra_a, dec_a, ra_b, dec_b]
+            }
+            [ra_a, dec_a, ra_b, dec_b] => {
+                [ra_a.clone(), dec_a.clone(), ra_b.clone(), dec_b.clone()]
+            }
+            _ => return Err(shape_of_a_separation()),
+        };
+        let haversine = region::separation(&ra_a, &dec_a, &ra_b, &dec_b);
+        let bounded = when(haversine.clone().gt(lit(1.0)), lit(1.0)).otherwise(haversine)?;
+        let radians = lit(2.0) * asin(sqrt(bounded));
+        Ok(ExprSimplifyResult::Simplified(degrees(radians)))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
+        // `simplify` answers with the arithmetic or with an error, so nothing reaches here.
+        Err(DataFusionError::Internal(
+            "distance(...) was not rewritten before the plan ran".to_owned(),
+        ))
+    }
+}
+
+/// A `circle(...)` still standing as a call, which is a circle this plan has no one value for.
+///
+/// A circle over literals is folded to its encoded region before this runs — constant folding
+/// and this rewrite are the same pass, and it works inwards out — so a call that is still a
+/// call is one that took an argument from a column. That is the whole test, and it looks at no
+/// argument to make it: what makes a shape prunable is being one shape for the whole scan, not
+/// being written out of numbers.
+fn per_row_circle(shape: &Expr) -> Option<&[Expr; 3]> {
+    let Expr::ScalarFunction(call) = shape else {
+        return None;
+    };
+    (call.func.name() == "circle").then(|| call.args.as_slice().try_into().ok())?
+}
+
+/// The two expressions a `point(...)` holds.
+///
+/// Anything numeric, unlike [`coordinates`]: a separation is arithmetic over whatever it is
+/// given, and one of its two positions being a pair of literals is an ordinary way to ask how
+/// far each row is from somewhere.
+fn position_of(point: &Expr) -> DfResult<(Expr, Expr)> {
+    let Expr::ScalarFunction(call) = point else {
+        return Err(shape_of_a_separation());
+    };
+    if call.func.name() != "point" {
+        return Err(shape_of_a_separation());
+    }
+    let [ra, dec] = call.args.as_slice() else {
+        return Err(shape_of_a_separation());
+    };
+    Ok((ra.clone(), dec.clone()))
+}
+
 /// What a region test looks like, said once because every way of getting it wrong ends here.
 fn shape_of_a_region_test() -> DataFusionError {
     DataFusionError::Plan(
         "a region test is contains(point(ra, dec), circle(45.0, -20.0, 0.1)), with a region \
          built by circle(...) or moc(...)"
             .to_owned(),
+    )
+}
+
+/// What a separation looks like, for the same reason.
+fn shape_of_a_separation() -> DataFusionError {
+    DataFusionError::Plan(
+        "a separation is distance(point(ra, dec), point(ra, dec)), in degrees".to_owned(),
     )
 }
 
@@ -458,6 +654,7 @@ mod tests {
             dec_column: Some("dec"),
             healpix: None,
             partition: None,
+            relation: None,
         };
         let expr = region::predicate(df.schema(), &spatial).expect("the field form should plan");
         optimized(df.filter(expr).unwrap()).expect("the field form should optimize")
@@ -516,11 +713,20 @@ mod tests {
         assert!(error.contains("HEALPix column"), "{error}");
     }
 
-    /// The region has to be the same for every row, since the covering is computed once.
+    /// A circle centred on a column is a different circle for every row, so it is answered as
+    /// the separation between the two positions and carries no covering — which is what makes
+    /// it a crossmatch rather than a region test.
     #[test]
-    fn a_region_built_from_a_column_is_refused() {
-        let error = planned("contains(point(ra, dec), circle(ra, dec, 0.1))", true).unwrap_err();
-        assert!(error.contains("written out"), "{error}");
+    fn a_circle_around_a_column_is_a_pair_test() {
+        let planned = planned("contains(point(ra, dec), circle(ra, dec, 0.1))", true)
+            .expect("a circle around a column is a separation");
+        let filter = planned
+            .lines()
+            .find(|line| line.trim_start().starts_with("Filter:"))
+            .unwrap_or_default();
+        // The file has an index column and the plan does not touch it: there is no covering
+        // to be had, the shape being a different one for every row.
+        assert!(!filter.contains("_healpix_29"), "{planned}");
     }
 
     /// A position is two of the file's columns. An expression over them cannot be pruned on,

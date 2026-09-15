@@ -809,6 +809,10 @@ impl std::fmt::Debug for RemoteFile {
 /// `_metadata` and a tree of parquet files, none of which the caller names — so this is
 /// what a caller's catalog url opens as, and every file read out of it is named relative
 /// to this rather than by a url of its own.
+///
+/// `Clone` shares the store rather than building a second one: the handle is an `Arc`, and
+/// two of them are the same connection pool and the same policy decision.
+#[derive(Clone)]
 pub struct RemoteDir {
     pub store: Arc<dyn ObjectStore>,
     pub base: Url,

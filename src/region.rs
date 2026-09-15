@@ -21,7 +21,7 @@
 
 use std::f64::consts::PI;
 
-use datafusion::common::DFSchema;
+use datafusion::common::{DFSchema, TableReference};
 use datafusion::functions::math::expr_fn::{cos, sin};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::lit;
@@ -195,6 +195,14 @@ pub struct Spatial<'a> {
     /// It says nothing about which rows qualify. A partition the region contains whole
     /// carries no [`Spatial`] at all rather than an empty one.
     pub partition: Option<(u8, u64)>,
+    /// Which table the columns above belong to, where more than one is in scope.
+    ///
+    /// A request that names one file has one table and needs none of this. A statement may
+    /// join several, and then a bare `ra` is a column of each of them: the predicate has to
+    /// name the side it is about, and `_healpix_29` has to be looked for among that side's
+    /// fields rather than among every field in the plan — where two of them would be found
+    /// and the index given up on.
+    pub relation: Option<&'a TableReference>,
 }
 
 /// A HEALPix index column: which column, and what order its values are at.
@@ -232,11 +240,13 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
         true => Some((
             sql::coordinate_column(
                 schema,
+                spatial.relation,
                 required(spatial.ra_column, "ra_column")?,
                 "ra_column",
             )?,
             sql::coordinate_column(
                 schema,
+                spatial.relation,
                 required(spatial.dec_column, "dec_column")?,
                 "dec_column",
             )?,
@@ -264,6 +274,7 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
         // without it contradicts what they said, and that is a fault met on the way.
         Some(Healpix { column, order }) => Some(healpix::SpatialIndex::resolve(
             schema,
+            spatial.relation,
             column,
             order,
             "healpix_order",
@@ -271,7 +282,7 @@ pub fn predicate(schema: &DFSchema, spatial: &Spatial<'_>) -> Result<Expr, ApiEr
         // Nobody did, so the file is asked. `_healpix_29` is the one column whose name says
         // its order as well as which column it is, which is what makes it recognisable
         // without being told; any other index column has to be named.
-        None => healpix::SpatialIndex::discover(schema),
+        None => healpix::SpatialIndex::discover(schema, spatial.relation),
     };
     let Some(index) = index else {
         return without_cells(exact, cells);
@@ -516,6 +527,38 @@ fn eastward_span(from: f64, to: f64) -> Result<f64, ApiError> {
     Ok(span)
 }
 
+/// The haversine of the angle between two positions in degrees — `sin²(θ/2)`, not `θ`.
+///
+/// Haversine is monotone in the separation across the whole range an angular distance can
+/// take, so a bound on the angle is a bound on this and recovering `θ` with an `asin` would
+/// be one more function per row, and one more rounding, for the same set of rows. It also
+/// makes the right ascension need no wrapping: the difference enters as `sin²(Δ/2)`, which a
+/// whole turn leaves alone, so a file writing `[0, 360)` and one writing `[-180, 180)` give
+/// the same answer with no arithmetic on the column.
+///
+/// Every factor is an `f64`, so a `Float32` column is widened before any of this runs rather
+/// than the trigonometry being done at the column's precision. Where a position is a pair of
+/// literals the whole of its half is folded to one number before the plan runs.
+pub fn separation(ra_a: &Expr, dec_a: &Expr, ra_b: &Expr, dec_b: &Expr) -> Expr {
+    let hav_dec = squared(sin((dec_a.clone() - dec_b.clone()) * lit(HALF_DEGREE)));
+    let hav_ra = squared(sin((ra_a.clone() - ra_b.clone()) * lit(HALF_DEGREE)));
+    hav_dec + cos(dec_b.clone() * lit(DEGREE)) * cos(dec_a.clone() * lit(DEGREE)) * hav_ra
+}
+
+/// Whether two positions are within `radius` degrees of each other, every one of the five an
+/// expression.
+///
+/// The bound is compared as a haversine rather than as an angle, for the reason
+/// [`separation`] gives: monotone either way, and an `asin` per row for the same rows.
+///
+/// **Nothing here prunes, and nothing can.** The coordinate bounds that go around a cone
+/// contain one circle known before the scan; a radius around a column is a different circle
+/// per row, and the covering behind it a different covering. What bounds a query written this
+/// way is what each side was narrowed by before the two met.
+pub fn within(ra_a: &Expr, dec_a: &Expr, ra_b: &Expr, dec_b: &Expr, radius: &Expr) -> Expr {
+    separation(ra_a, dec_a, ra_b, dec_b).lt_eq(squared(sin(radius.clone() * lit(HALF_DEGREE))))
+}
+
 /// Everything within `radius` degrees of `(ra, dec)`.
 ///
 /// Two parts, and only the first is the answer. The haversine test is exact and reads both
@@ -523,20 +566,7 @@ fn eastward_span(from: f64, to: f64) -> Result<f64, ApiError> {
 /// circle, so they are what lets row-group statistics and the page index throw row groups
 /// away before the trigonometry runs over any of their rows.
 fn circle(ra_column: &Expr, dec_column: &Expr, ra: f64, dec: f64, radius: f64) -> Expr {
-    // The haversine of the separation, compared as a haversine rather than as an angle.
-    // Haversine is monotone in the separation across the whole range an angular distance
-    // can take, so recovering the angle with an `asin` would be one more function evaluated
-    // per row, and one more rounding, for the same set of rows. It also makes the right
-    // ascension need no wrapping: the difference enters as `sin²(Δ/2)`, which a whole turn
-    // leaves alone, so a file writing `[0, 360)` and one writing `[-180, 180)` give the
-    // same answer with no arithmetic on the column.
-    //
-    // Each literal is an `f64`, so a `Float32` column is widened before any of this runs
-    // rather than the trigonometry being done at the column's precision.
-    let hav_dec = squared(sin((dec_column.clone() - lit(dec)) * lit(HALF_DEGREE)));
-    let hav_ra = squared(sin((ra_column.clone() - lit(ra)) * lit(HALF_DEGREE)));
-    let separation =
-        hav_dec + lit(dec.to_radians().cos()) * cos(dec_column.clone() * lit(DEGREE)) * hav_ra;
+    let separation = separation(ra_column, dec_column, &lit(ra), &lit(dec));
     // Inclusive, so a point exactly the radius away is inside.
     let exact = separation.lt_eq(lit((radius * HALF_DEGREE).sin().powi(2)));
 
@@ -1031,6 +1061,7 @@ mod tests {
                     order: FIXTURE_ORDER,
                 }),
                 partition: None,
+                relation: None,
             }),
             limit: None,
         };
@@ -1151,6 +1182,7 @@ mod tests {
                     // it is queried on the geometry, and that difference is the measurement.
                     healpix: None,
                     partition: None,
+                    relation: None,
                 }),
                 limit: None,
             };
@@ -1651,6 +1683,7 @@ mod tests {
                 dec_column: Some("dec"),
                 healpix: None,
                 partition: None,
+                relation: None,
             },
         )
     }
