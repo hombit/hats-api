@@ -168,7 +168,14 @@ class Report:
         # is not the sum of the rows above it: a check speaks to more than one question,
         # so those overlap, and this counts each check once.
         whole = " | ".join(f"**{self.count(outcome)}**" for outcome in shown)
-        total = f"| **every check, counted once** | {whole} |"
+        # An empty row before it, which is the nearest thing Markdown has to the second
+        # rule a total deserves. A table cannot carry one and this stays a table — the
+        # HTML that could do it properly is not worth what it costs everywhere else the
+        # report is read.
+        total = [
+            "| " + " | ".join("" for _ in range(len(shown) + 1)) + " |",
+            f"| **every check, counted once** | {whole} |",
+        ]
         # The three rows above overlap — a check that goes through a client is usually
         # reading the standard too — so they do not add up to the last one, and a reader
         # who tries to add them deserves to be told why rather than left to wonder.
@@ -182,13 +189,13 @@ class Report:
         for question, asked in QUESTIONS.items():
             counts = " | ".join(str(self.asking(question, outcome)) for outcome in shown)
             out.append(f"| {asked} | {counts} |")
-        out += [total, "", note]
+        out += [*total, "", note]
         if full:
             out += ["", f"| area |{header[1:]}", rule]
             for area in self.areas():
                 counts = " | ".join(str(self.count(outcome, area)) for outcome in shown)
                 out.append(f"| {area} | {counts} |")
-            out.append(total)
+            out += total
 
         if not full:
             # A comment is read for the score and for which of the three questions
