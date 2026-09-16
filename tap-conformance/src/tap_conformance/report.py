@@ -39,9 +39,9 @@ WORDS = {
 #: own: it says what must be there, not whether this service does it, not whether the
 #: clients can use what it does, and not whether the answers are right.
 QUESTIONS = {
-    "standard": "follows the standard",
-    "clients": "works through pyvo and STILTS",
-    "answers": "answers what a reference service answers",
+    "standard": "checks that read the standard",
+    "clients": "checks that go through a client",
+    "answers": "checks against a reference answer",
 }
 
 
@@ -146,7 +146,6 @@ class Report:
                 *[f"> - {cell(reason, 400)}" for reason in self.broken],
                 "",
             ]
-        out += [f"**{self.summary()}**", ""]
         # The target is worth naming when it is somebody's service and worth nothing
         # when it is a port this run opened and closed. What always belongs here is
         # which clients produced the numbers, a suite run a year from now against newer
@@ -165,15 +164,31 @@ class Report:
         header = "| " + " | ".join(WORDS[outcome] for outcome in shown) + " |"
         rule = "|---|" + "--:|" * len(shown)
 
+        # The whole run, as the last row rather than as a sentence above the table. It
+        # is not the sum of the rows above it: a check speaks to more than one question,
+        # so those overlap, and this counts each check once.
+        whole = " | ".join(f"**{self.count(outcome)}**" for outcome in shown)
+        total = f"| **every check, counted once** | {whole} |"
+        # The three rows above overlap — a check that goes through a client is usually
+        # reading the standard too — so they do not add up to the last one, and a reader
+        # who tries to add them deserves to be told why rather than left to wonder.
+        note = (
+            "_The first three overlap: most checks speak to more than one question. "
+            "The last row counts each of the "
+            f"{len(self.results)} checks once._"
+        )
+
         out += ["", f"| |{header[1:]}", rule]
         for question, asked in QUESTIONS.items():
             counts = " | ".join(str(self.asking(question, outcome)) for outcome in shown)
             out.append(f"| {asked} | {counts} |")
+        out += [total, "", note]
         if full:
             out += ["", f"| area |{header[1:]}", rule]
             for area in self.areas():
                 counts = " | ".join(str(self.count(outcome, area)) for outcome in shown)
                 out.append(f"| {area} | {counts} |")
+            out.append(total)
 
         if not full:
             # A comment is read for the score and for which of the three questions
