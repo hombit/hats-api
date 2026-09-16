@@ -28,7 +28,7 @@ use std::ops::ControlFlow;
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
     LimitClause, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor, Top,
-    TopQuantity, UnaryOperator, Value, VisitMut, VisitorMut,
+    TopQuantity, UnaryOperator, Value, VisitMut, VisitorMut, visit_expressions_mut,
 };
 
 use crate::engine::sql;
@@ -101,9 +101,12 @@ pub fn translate(query: &str, limits: sql::Limits) -> Result<Translated, ApiErro
     let mut statement = sql::statement(query, FIELD, limits)?;
     if !matches!(statement, Statement::Query(_)) {
         return Err(ApiError::bad_request(format!(
-            "{FIELD}: only a SELECT is answered; this service reads and never writes"
+            "{FIELD}: only a SELECT is answered"
         )));
     }
+    // Before anything reads a geometry's arguments, so that the two spellings of one are
+    // one shape by the time the rewrite below looks at it.
+    drop_coordinate_systems(&mut statement)?;
     let mut translator = Translator::default();
     if let ControlFlow::Break(refusal) = statement.visit(&mut translator) {
         return Err(refusal);
@@ -114,6 +117,72 @@ pub fn translate(query: &str, limits: sql::Limits) -> Result<Translated, ApiErro
         .cloned()
         .collect();
     Ok(Translated { statement, tables })
+}
+
+/// The geometry that carried a coordinate system in ADQL 2.0.
+const WITH_COORDINATE_SYSTEM: [&str; 4] = ["POINT", "CIRCLE", "BOX", "POLYGON"];
+
+/// The coordinate systems this service answers in, as ADQL 2.0 spells them.
+///
+/// The empty string and `UNKNOWN` are that standard's own words for "whatever the service
+/// works in", which here is ICRS — the frame HATS positions are written in.
+const SYSTEMS: [&str; 3] = ["", "ICRS", "UNKNOWN"];
+
+/// Take the coordinate system off a geometry, and refuse one this service cannot answer.
+///
+/// ADQL 2.0 wrote the system as the first argument — `POINT('ICRS', ra, dec)` — and 2.1
+/// removed it. Both arrive: a query saved against an archive that has been answering since
+/// 2.0 carries one, which is most of the queries anybody has written down, and `LANG` may
+/// name either version.
+///
+/// **A system this service does not work in is refused rather than dropped.** Reading
+/// `GALACTIC` as if it were ICRS would answer a region somewhere else on the sky with the
+/// same numbers in it — a wrong answer rather than an error, and one nothing in the
+/// response would mark.
+///
+/// A string literal is what says the first argument is a system: a coordinate never is one.
+/// ADQL 2.0 also let it be a column reference, which is left alone and fails to plan as an
+/// argument of the wrong type — nothing here can know what such a column holds.
+fn drop_coordinate_systems(statement: &mut Statement) -> Result<(), ApiError> {
+    let broke = visit_expressions_mut(statement, |node| {
+        let Expr::Function(call) = node else {
+            return ControlFlow::Continue(());
+        };
+        let Some(name) = adql_name(call) else {
+            return ControlFlow::Continue(());
+        };
+        if !WITH_COORDINATE_SYSTEM.contains(&name.as_str()) {
+            return ControlFlow::Continue(());
+        }
+        let FunctionArguments::List(list) = &mut call.args else {
+            return ControlFlow::Continue(());
+        };
+        let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(first))) = list.args.first() else {
+            return ControlFlow::Continue(());
+        };
+        let Expr::Value(value) = unnest(first) else {
+            return ControlFlow::Continue(());
+        };
+        let (Value::SingleQuotedString(system) | Value::DoubleQuotedString(system)) = &value.value
+        else {
+            return ControlFlow::Continue(());
+        };
+        if !SYSTEMS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(system.trim()))
+        {
+            return ControlFlow::Break(ApiError::bad_request(format!(
+                "{FIELD}: {name} names the coordinate system {system:?}, and this service \
+                 answers ICRS; converting a position between frames is not something it does"
+            )));
+        }
+        list.args.remove(0);
+        ControlFlow::Continue(())
+    });
+    match broke {
+        ControlFlow::Break(refusal) => Err(refusal),
+        ControlFlow::Continue(()) => Ok(()),
+    }
 }
 
 /// The rewrite, one node at a time.
@@ -152,14 +221,14 @@ impl VisitorMut for Translator {
                  request declares"
             )));
         }
-        match one_name(name) {
+        match written_name(name) {
             Some(table) => {
                 self.relations.insert(table);
                 ControlFlow::Continue(())
             }
             None => ControlFlow::Break(ApiError::bad_request(format!(
-                "{FIELD}: {name} is not a table name here; each table this request reads is \
-                 named by one word in its tables"
+                "{FIELD}: {name} is not a table name here; a table is named by one word, or \
+                 by a schema and a table"
             ))),
         }
     }
@@ -530,9 +599,28 @@ fn call_to(name: &str, args: Vec<Expr>) -> Expr {
 }
 
 /// A table name of one part, as written.
-fn one_name(name: &ObjectName) -> Option<String> {
-    match name.0.as_slice() {
-        [ObjectNamePart::Identifier(ident)] => Some(ident.value.clone()),
+/// The name a `FROM` wrote, as one string.
+///
+/// One word, or a schema and a table joined by the dot between them — which is how TAP
+/// publishes every name, `TAP_SCHEMA.tables` included. Deeper than that is refused: a
+/// third part would be a catalog, and nothing here has one for it to name.
+///
+/// The quoting is dropped, which is what makes the two spellings of a name one string.
+/// What may then be read against it is the route's business: a per-request table list
+/// resolves a name it declared, and the TAP tables are matched against what was
+/// published.
+fn written_name(name: &ObjectName) -> Option<String> {
+    let parts = name
+        .0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match parts.as_slice() {
+        [table] => Some((*table).to_owned()),
+        [schema, table] => Some(format!("{schema}.{table}")),
         _ => None,
     }
 }
@@ -727,6 +815,46 @@ mod tests {
         );
     }
 
+    /// ADQL 2.0's spelling, which is what every query anyone has saved against an archive
+    /// carries — and the one case that must not be read as ICRS anyway.
+    #[test]
+    fn a_geometry_may_name_its_coordinate_system() {
+        let expected =
+            r#"SELECT ra FROM gaia WHERE "contains"(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))"#;
+        for predicate in [
+            "1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 45.0, -20.0, 0.1))",
+            // The system on one side and not the other, which is what a hand-edited query
+            // ends up as.
+            "1 = CONTAINS(POINT('icrs', ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+            // ADQL 2.0's own words for "whatever the service works in".
+            "1 = CONTAINS(POINT('', ra, dec), CIRCLE('UNKNOWN', 45.0, -20.0, 0.1))",
+        ] {
+            assert_eq!(
+                translated(&format!("SELECT ra FROM gaia WHERE {predicate}")),
+                expected,
+                "{predicate}"
+            );
+        }
+        // And in a distance, which is the other place a POINT is written.
+        assert_eq!(
+            translated("SELECT DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', 1, 2)) AS d FROM t"),
+            "SELECT DISTANCE(POINT(ra, dec), POINT(1, 2)) AS d FROM t"
+        );
+
+        // A frame this service cannot convert to, which read as ICRS would answer a region
+        // somewhere else on the sky with the same numbers in it.
+        for system in ["GALACTIC", "FK5", "fk4"] {
+            let refusal = refusal(&format!(
+                "SELECT ra FROM gaia WHERE 1 = CONTAINS(POINT('{system}', ra, dec), \
+                 CIRCLE(45.0, -20.0, 0.1))"
+            ));
+            assert!(
+                refusal.contains(system) && refusal.contains("ICRS"),
+                "{system}: {refusal}"
+            );
+        }
+    }
+
     #[test]
     fn a_geometry_this_service_does_not_answer_is_refused_by_name() {
         for (name, adql) in [
@@ -792,9 +920,22 @@ mod tests {
         );
     }
 
+    /// A schema and a table, which is how every name TAP publishes is written. Deeper is
+    /// a catalog, and there is nothing here for one to name.
     #[test]
-    fn a_qualified_table_name_is_refused() {
-        let refusal = refusal("SELECT * FROM TAP_SCHEMA.tables");
+    fn a_table_is_named_by_one_word_or_by_two() {
+        let tables = |adql: &str| translate(adql, LIMITS).unwrap().tables;
+        assert_eq!(
+            tables("SELECT * FROM TAP_SCHEMA.tables"),
+            BTreeSet::from(["TAP_SCHEMA.tables".to_owned()])
+        );
+        // Quoted or not is one name: what a spelling is matched against belongs to
+        // whichever route read it.
+        assert_eq!(
+            tables("SELECT * FROM \"gaia_dr3\".\"gaia_source\""),
+            BTreeSet::from(["gaia_dr3.gaia_source".to_owned()])
+        );
+        let refusal = refusal("SELECT * FROM cat.schema.table");
         assert!(refusal.contains("one word"), "{refusal}");
     }
 

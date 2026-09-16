@@ -178,7 +178,8 @@ pub(in crate::app) async fn query_adql(
     // Whichever mount governs a catalog this request named, else the service's own list. A
     // request with no catalog never asks.
     let data_files = data_files.unwrap_or_else(|| service.data_files.as_ref().clone());
-    let result = adql::query::run(&translated, &tables, &data_files, service.adql_limits).await?;
+    let answer = adql::query::run(&translated, &tables, &data_files, service.adql_limits).await?;
+    let result = answer.result;
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     let response = adql_answer(&result, &output, started)?;
@@ -371,15 +372,15 @@ mod tests {
         assert_eq!(answer["rows"][0]["ra"], 45.0);
     }
 
-    /// A column answers to its own spelling and to its lowercase, and to nothing else — the
-    /// rule the query routes follow, which a statement does not get from the planner:
-    /// identifier normalization is off, so `gmag` would otherwise be a column no file has.
+    /// **An unquoted name is case-insensitive here, which is ADQL's own rule** (§2.1.3) and
+    /// not the one the `simple` routes follow. It has to be applied by hand because
+    /// identifier normalization is off: with it on DataFusion would lowercase `Gmag` and put
+    /// every mixed-case astronomy column out of reach.
     ///
-    /// **`GMAG` is refused, and that is the divergence from ADQL**, which folds an unquoted
-    /// name to uppercase. Resolving it would make the names a column answers to depend on
-    /// what else is in the file.
+    /// A delimited name is exact, which is the other half of the same rule and what makes a
+    /// column whose spelling a client read out of `TAP_SCHEMA` reachable unambiguously.
     #[tokio::test]
-    async fn an_adql_column_answers_to_its_own_spelling_and_its_lowercase() {
+    async fn an_adql_name_is_case_insensitive_unless_it_is_quoted() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("part0.parquet"),
@@ -390,10 +391,14 @@ mod tests {
         for query in [
             "SELECT Gmag FROM t",
             "SELECT gmag FROM t",
+            "SELECT GMAG FROM t",
+            "SELECT \"Gmag\" FROM t",
             // Qualified by the table, and by an alias, since the column is the last segment
             // either way.
             "SELECT t.gmag FROM t",
-            "SELECT a.gmag FROM t AS a",
+            "SELECT a.GMAG FROM t AS a",
+            // And the table's name by the same rule.
+            "SELECT objectid FROM T",
         ] {
             let (status, body) = ask_adql(dir.path(), query).await;
             assert_eq!(status, StatusCode::OK, "{query}: {body}");
@@ -401,11 +406,8 @@ mod tests {
             assert_eq!(answer["num_rows"], 10, "{query}");
         }
 
-        let (status, body) = ask_adql(dir.path(), "SELECT GMAG FROM t").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-
-        // The table's name by the same rule: as the request declared it, or in lowercase.
-        let (status, body) = ask_adql(dir.path(), "SELECT objectid FROM T").await;
+        // A delimited name is the file's own spelling and no other.
+        let (status, body) = ask_adql(dir.path(), "SELECT \"GMAG\" FROM t").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
@@ -620,6 +622,33 @@ mod tests {
         assert!(body.contains("partitions"), "{body}");
     }
 
+    /// **A `TOP` does not excuse that bound here**, although it bounds the reading: every
+    /// chosen partition is asked about before a row is read, so a limited scan over a
+    /// catalog of twelve thousand is twelve thousand requests to build a plan that then
+    /// opens one file. The `hats` routes let a limit through because they walk the
+    /// partitions themselves and stop, which is not a shape a `TableProvider` hands back.
+    #[tokio::test]
+    async fn a_limit_does_not_excuse_the_partition_bound() {
+        let dir = hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let mut service = mounted(dir.path(), &ApiConfig::default());
+        service.adql_limits = (&limits).into();
+        let (status, body) = post_json(
+            service,
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT TOP 3 id FROM c",
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("partitions"), "{body}");
+    }
+
     /// **That the pruning has teeth**, which the tests above cannot show: they would pass
     /// whether or not a partition was skipped, since skipping one changes what a query costs
     /// and not what it answers.
@@ -675,6 +704,52 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// **A region outside a catalog's coverage answers with no rows and the columns asked
+    /// for.** It is the ordinary case — a cone where the survey did not look — and the scan
+    /// that answers it reads nothing, so what it hands back is a schema rather than a file.
+    /// That schema has to be the projected one: the projection above it carries indices into
+    /// what the scan returns, and the whole catalog's schema resolves every one of them
+    /// against the wrong column.
+    ///
+    /// The column asked for is deliberately not the catalog's first. With `id` the mistake
+    /// is invisible, index 0 being right by luck.
+    #[tokio::test]
+    async fn a_region_that_reaches_no_partition_answers_the_columns_asked_for() {
+        let dir = hats::query::tests::fixture(true);
+        for region in [
+            // Nowhere near the fixture's cells.
+            "CIRCLE(180.0, 60.0, 0.001)",
+            // A MOC of cells the catalog does not hold, which has no coordinate test at
+            // all — so the scan is chosen by the covering alone.
+            "MOC('3/3 10')",
+        ] {
+            let (status, body) = post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": format!(
+                        "SELECT ra, dec FROM c WHERE 1 = CONTAINS(POINT(ra, dec), {region})"
+                    ),
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{region}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["num_rows"], 0, "{region}: {body}");
+            assert_eq!(
+                answer["schema"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|column| column["name"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ra", "dec"],
+                "{region}: {body}"
+            );
+        }
     }
 
     /// A crossmatch: two catalogs joined on the separation between their rows, which is

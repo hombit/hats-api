@@ -113,6 +113,23 @@ impl HatsTable {
         })
     }
 
+    /// Which of the catalog's columns hold a position, as the catalog declares them.
+    ///
+    /// The catalog's claim rather than a guess from the names, and unchecked against the
+    /// schema: what reads it is the metadata this service publishes, and a mark naming a
+    /// column the files have not got simply matches none of them.
+    pub fn coordinates(&self) -> Option<(&str, &str)> {
+        self.catalog
+            .columns()
+            .ok()
+            .map(|columns| (columns.ra, columns.dec))
+    }
+
+    /// The spatial index column a query prunes on, where the files have one.
+    pub fn index(&self) -> Option<&str> {
+        self.index.as_deref()
+    }
+
     /// The partitions a filter cannot rule out.
     ///
     /// Every partition where there is nothing to prune on — no index column, or no filter that
@@ -210,6 +227,14 @@ impl TableProvider for HatsTable {
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         let reached = self.reached(filters)?;
+        // **A pushed-down limit does not excuse this bound, although it bounds the reading.**
+        // Everything below is per chosen partition before a row is read: a directory-
+        // partitioned catalog is listed one partition at a time, and `ListingTable` asks
+        // after every path it is given. So `SELECT TOP 10 …` over a catalog of twelve
+        // thousand partitions is twelve thousand requests to build a plan that then reads
+        // one file. `hats::query` lets a limit through for the opposite reason — it walks
+        // the partitions itself and stops — and that is not a shape a `TableProvider` hands
+        // back.
         if reached.len() > self.limits.max_partitions {
             return Err(DataFusionError::Plan(format!(
                 "this query reaches {} partitions of {}; this server reads at most {} in one \
@@ -241,9 +266,20 @@ impl TableProvider for HatsTable {
         }
         // A scan of nothing still has to have the table's schema, which is what a caller reads
         // the columns of an empty answer from.
+        //
+        // **Projected, like any other scan's.** What sits above this is a projection whose
+        // columns carry indices into what the scan returns, so a plan handed the whole
+        // schema here resolves every one of them against the wrong field: `SELECT ra` comes
+        // back as an assertion naming whichever column is first. It is the ordinary answer
+        // for a region outside a catalog's coverage, and it was right only when the column
+        // asked for happened to be the one the catalog starts with.
         if paths.is_empty() {
+            let schema = match projection {
+                Some(indices) => Arc::new(self.schema.project(indices)?),
+                None => Arc::clone(&self.schema),
+            };
             return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-                Arc::clone(&self.schema),
+                schema,
             )));
         }
         // Everything about reading parquet is `ListingTable`'s: the row-group pruning the

@@ -13,7 +13,7 @@ use tower::ServiceExt;
 use crate::access::AccessPolicy;
 use crate::access::mount::Mounts;
 use crate::app::{Service, router};
-use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig};
+use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig, TapConfig};
 
 pub(in crate::app) const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
 
@@ -25,6 +25,7 @@ pub(in crate::app) fn api_only() -> Service {
         Arc::default(),
         &ApiConfig::default(),
         &DataConfig::default(),
+        &TapConfig::default(),
         &ServerConfig::default(),
     )
     .unwrap()
@@ -83,6 +84,17 @@ pub(in crate::app) fn with_server(
     limits: &LimitsConfig,
     server: &ServerConfig,
 ) -> Service {
+    with_tap(config, api, limits, server, &TapConfig::default())
+}
+
+/// The same, publishing a list of TAP tables over the mount.
+pub(in crate::app) fn with_tap(
+    config: crate::config::MountConfig,
+    api: &ApiConfig,
+    limits: &LimitsConfig,
+    server: &ServerConfig,
+    tap: &TapConfig,
+) -> Service {
     let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
     let policy = AccessPolicy::new(
         &crate::config::AccessConfig::default(),
@@ -90,7 +102,16 @@ pub(in crate::app) fn with_server(
         None,
     )
     .unwrap();
-    Service::new(policy, limits, mounts, api, &DataConfig::default(), server).unwrap()
+    Service::new(
+        policy,
+        limits,
+        mounts,
+        api,
+        &DataConfig::default(),
+        tap,
+        server,
+    )
+    .unwrap()
 }
 
 /// A `[[mount]]` publishing `dir` at `/`, which is what most of these want.

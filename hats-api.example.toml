@@ -119,6 +119,21 @@ allow_plain_http = false
 # the API answers 404.
 filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 
+# HATS catalogs published over IVOA's Table Access Protocol, at [api] prefix + /tap. The
+# TAP resources answer once at least one is listed.
+#
+# `name` is what goes in an ADQL query's FROM clause, as {schema}.{table}, and must be
+# unique. `url` points at the catalog and is checked at startup against [api.access]. No
+# storage options, such as credentials, are currently supported for remote catalogs.
+#
+# [[tap.table]]
+# name = "gaia_dr3.gaia_source"
+# url = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia"
+#
+# [[tap.table]]
+# name = "ztf.dr24_lc"
+# url = "file:///hats/ztf_dr24_lc"
+
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. Such
 # an object is copied to scratch once and read from local disk after that. Only http(s)

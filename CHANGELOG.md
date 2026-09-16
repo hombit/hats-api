@@ -10,10 +10,17 @@ Release dates are in the UTC time zone.
 
 - `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
 - `hf://` urls, with the `token` storage option and `[api.access.hf]`.
+- `[[tap.table]]`, the HATS catalogs published over IVOA's Table Access Protocol. [#68](https://github.com/hombit/hats-api/pull/68)
+- `{api.prefix}/tap/sync`, `GET` and `POST`, taking `QUERY`, `LANG`, `RESPONSEFORMAT`, `FORMAT`, `MAXREC`, `RUNID` and `REQUEST`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `{api.prefix}/tap/capabilities`, `/tap/availability`, `/tap/tables` and `/tap/tables/{name}`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `TAP_SCHEMA.schemas`, `.tables`, `.columns`, `.keys` and `.key_columns`, queryable through `/tap/sync`. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL 2.0's coordinate system argument, `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 
 - **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
+- An unquoted name in `/api/v1/adql` is matched case-insensitively, as ADQL has it. [#68](https://github.com/hombit/hats-api/pull/68)
+- A VOTable `FIELD` carries its name as `ID` as well. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Deprecated
 

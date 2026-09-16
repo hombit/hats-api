@@ -1074,6 +1074,7 @@ mod tests {
             mounts,
             &ApiConfig::default(),
             &DataConfig::default(),
+            &crate::config::TapConfig::default(),
             &ServerConfig::default(),
         )
         .unwrap();
@@ -1137,6 +1138,7 @@ mod tests {
             mounts,
             &ApiConfig::default(),
             &DataConfig::default(),
+            &crate::config::TapConfig::default(),
             &ServerConfig::default(),
         )
         .unwrap();
