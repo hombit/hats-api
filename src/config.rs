@@ -385,10 +385,14 @@ impl ServerConfig {
         }
     }
 
-    /// The product token with the operator's contact after it, where there is one.
-    fn signed(&self) -> Result<String, ConfigError> {
+    /// Who runs this deployment, checked.
+    ///
+    /// Not gated on `show_version`: that key is about publishing which build is running,
+    /// and a contact is about who to reach — an operator who hides the number still wants
+    /// their address on `/docs`.
+    pub fn contact(&self) -> Result<Option<&str>, ConfigError> {
         let Some(contact) = &self.contact else {
-            return Ok(PRODUCT.to_owned());
+            return Ok(None);
         };
         let contact = contact.trim();
         // It goes inside a header comment, where a parenthesis of the operator's own
@@ -403,7 +407,15 @@ impl ServerConfig {
                     .to_owned(),
             ));
         }
-        Ok(format!("{PRODUCT} ({contact})"))
+        Ok(Some(contact))
+    }
+
+    /// The product token with the operator's contact after it, where there is one.
+    fn signed(&self) -> Result<String, ConfigError> {
+        Ok(match self.contact()? {
+            Some(contact) => format!("{PRODUCT} ({contact})"),
+            None => PRODUCT.to_owned(),
+        })
     }
 }
 
@@ -624,6 +636,12 @@ mod tests {
         let config = server("[server]\nshow_version = false");
         assert_eq!(config.user_agent().unwrap().unwrap(), PRODUCT);
         assert_eq!(config.signature().unwrap(), None);
+
+        // `show_version` is about the build, so an operator who hides it is still
+        // reachable: the contact stays, for `/docs` to publish.
+        let config = server("[server]\nshow_version = false\ncontact = \"ops@example.org\"");
+        assert_eq!(config.signature().unwrap(), None);
+        assert_eq!(config.contact().unwrap(), Some("ops@example.org"));
     }
 
     /// A contact that would not survive the header it goes in is refused at startup

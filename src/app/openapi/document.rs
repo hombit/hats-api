@@ -4,8 +4,8 @@
 use utoipa::openapi::path::{Operation, OperationBuilder};
 use utoipa::openapi::request_body::RequestBodyBuilder;
 use utoipa::openapi::{
-    Components, ContentBuilder, HttpMethod, InfoBuilder, OpenApi, OpenApiBuilder, Paths, RefOr,
-    ResponseBuilder, ResponsesBuilder, Schema,
+    Components, ContactBuilder, ContentBuilder, HttpMethod, InfoBuilder, OpenApi, OpenApiBuilder,
+    Paths, RefOr, ResponseBuilder, ResponsesBuilder, Schema,
 };
 
 use crate::app::openapi::page::{nullable, referenced};
@@ -180,7 +180,15 @@ fn note_which_backend(components: &mut Components) {
 }
 
 /// The document around whatever paths and components the routes contributed.
-pub(in crate::app) fn document(paths: Paths, mut components: Components) -> OpenApi {
+///
+/// `contact` goes in as a `name` and never as an `email` or a `url`. An operator writes one
+/// free string and either of the typed fields would be this code deciding which of the two
+/// it was — a guess that renders a mailto link for something that is not an address.
+pub(in crate::app) fn document(
+    paths: Paths,
+    mut components: Components,
+    contact: Option<&str>,
+) -> OpenApi {
     flatten_components(&mut components);
     note_which_backend(&mut components);
     OpenApiBuilder::new()
@@ -188,6 +196,11 @@ pub(in crate::app) fn document(paths: Paths, mut components: Components) -> Open
             InfoBuilder::new()
                 .title("hats-api")
                 .version(env!("CARGO_PKG_VERSION"))
+                .contact(
+                    contact.map(|contact| {
+                        ContactBuilder::new().name(Some(contact.to_owned())).build()
+                    }),
+                )
                 .description(Some(
                     "Query HATS catalogs and parquet files over HTTP: a region of the sky, a \
                      row predicate and the columns you want, answered as JSON, parquet or a \

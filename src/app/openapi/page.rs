@@ -40,6 +40,15 @@ pub(crate) fn page(document: &OpenApi, document_url: &str) -> String {
          <a href=\"{url}\"><code>{url}</code></a></p>\n",
         url = escape_attr(document_url),
     ));
+    // Who runs this deployment, which is the one thing on this page that is not about the
+    // API itself. Plain text and not a link: the operator writes one free string and only
+    // they know whether it is an address, a url or a room number.
+    if let Some(contact) = info.contact.as_ref().and_then(|c| c.name.as_deref()) {
+        html.push_str(&format!(
+            "<p class=\"contact\">Run by {}</p>\n",
+            escape(contact)
+        ));
+    }
 
     html.push_str(&contents(document));
 

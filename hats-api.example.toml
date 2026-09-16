@@ -14,11 +14,9 @@ show_version = true
 # Serve a directory's own index.html in place of a generated listing. Off publishes the
 # generated page everywhere, and the file still answers to its own name.
 serve_index_html = true
-# Who runs this deployment. Written after the name wherever the service identifies
-# itself, so an archive being read has someone to contact.
+# Who runs this deployment, written wherever the service identifies itself.
 # contact = "ops@example.org"
-# What this service calls itself to an origin it reads from. true sends
-# "hats-api/x.y.z (ops@example.org)"; a string is sent as written; false sends no header.
+# true sends "hats-api/x.y.z (ops@example.org)"; a string as written; false no header.
 user_agent = true
 
 [api]

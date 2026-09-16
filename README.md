@@ -675,15 +675,14 @@ serve = true
 
 ### How it identifies itself
 
-`[server] contact` is who runs this deployment, written wherever the service names itself:
-`User-Agent` on every request it makes, under `user_agent`, and `Server` on every answer it
-gives, under `show_version`. The two directions are decided separately, and a `user_agent`
-string replaces the whole value rather than adding to it. Set `contact` to something an
-archive's operator can reach you at: through this service a whole deployment reads as one
-very heavy client.
+`[server] contact` is who runs this deployment. It goes in three places:
 
-A caller cannot set `User-Agent` through the `headers` storage option, and nothing about
-the caller goes out either: their address appears in no header this service sends.
+- `User-Agent`, on every request this service makes
+- `Server`, on every answer it gives, while `show_version` is on
+- `info.contact` in the API description, always
+
+`user_agent = false` sends no `User-Agent`; a string replaces the whole value, contact and
+all.
 
 ### Mounts
 

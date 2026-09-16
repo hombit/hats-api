@@ -63,6 +63,9 @@ pub struct Service {
     /// How the service signs what it answers — the `Server` header, and the foot of a
     /// generated listing. `None` where `[server] show_version` says not to sign at all.
     pub(in crate::app) signature: Option<HeaderValue>,
+    /// Who runs this deployment, for the API description's `info.contact`. Separate from
+    /// the signature above because it survives `show_version` being off.
+    pub(in crate::app) contact: Option<Arc<str>>,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
     pub(in crate::app) serve_index_html: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -132,6 +135,7 @@ impl Service {
                 bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
             },
             signature: server.signature()?,
+            contact: server.contact()?.map(Arc::from),
             serve_index_html: server.serve_index_html,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -177,7 +181,7 @@ pub fn router(service: Service) -> Router {
         // projection, which is the pair the other three routes take from the url and the body
         // separately.
         router = router.route(&route(&prefix, "adql"), post(query_adql));
-        router = with_description(router, &prefix);
+        router = with_description(router, &prefix, service.contact.clone());
     }
     let mut router = router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -338,9 +342,13 @@ pub(in crate::app) fn with_queries(router: Router<Service>, prefix: &str) -> Rou
 /// The document is built per request rather than once, because it names the prefix and the
 /// prefix is the operator's. It is a few hundred microseconds of `serde_json` on a route
 /// nothing calls in a loop.
-fn with_description(router: Router<Service>, prefix: &str) -> Router<Service> {
+fn with_description(
+    router: Router<Service>,
+    prefix: &str,
+    contact: Option<Arc<str>>,
+) -> Router<Service> {
     let document = route(prefix, "openapi.json");
-    let page = openapi::page(&describe(prefix), &document);
+    let page = openapi::page(&describe(prefix, contact.as_deref()), &document);
     router
         .route(
             &document,
@@ -348,7 +356,8 @@ fn with_description(router: Router<Service>, prefix: &str) -> Router<Service> {
                 let prefix = prefix.to_owned();
                 move || {
                     let prefix = prefix.clone();
-                    async move { Json(describe(&prefix)) }
+                    let contact = contact.clone();
+                    async move { Json(describe(&prefix, contact.as_deref())) }
                 }
             }),
         )
