@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from tap_conformance.votable import refusal
+
 
 @pytest.fixture
 def answer(raw, rows_query):
@@ -94,8 +96,4 @@ def test_unknown_format_is_refused(answer, record_property):
     Answering in VOTable instead gives a client bytes it will try to parse as what it
     asked for, which fails somewhere further away from the cause.
     """
-    response = answer("application/x-nonsense")
-    record_property("detail", f"status {response.status_code}")
-    assert response.status_code >= 400, (
-        f"an unknown RESPONSEFORMAT was answered with {response.status_code}"
-    )
+    record_property("detail", refusal(answer("application/x-nonsense")))

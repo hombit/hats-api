@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from tap_conformance.taplint import assert_clean
+from tap_conformance.votable import refusal
 
 
 def test_select_top(tap, rows_query, record_property):
@@ -60,11 +61,7 @@ def test_lang_unknown_is_refused(raw, rows_query, record_property):
     Answering it in ADQL anyway would give a client an answer to a question it did not
     ask, which is worse than the error it can act on.
     """
-    response = raw(rows_query(1), language="PQL")
-    record_property("detail", f"status {response.status_code}")
-    assert response.status_code >= 400 or b"ERROR" in response.content[:4000], (
-        f"LANG=PQL was answered with {response.status_code} and no error marker"
-    )
+    record_property("detail", refusal(raw(rows_query(1), language="PQL")))
 
 
 def test_request_doquery(raw, rows_query, record_property):

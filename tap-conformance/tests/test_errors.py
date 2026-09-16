@@ -57,12 +57,23 @@ def test_unknown_column(raw, queryable, record_property):
 
 
 def test_the_client_raises(tap, record_property):
-    """pyvo turns the error document into an exception rather than an empty table."""
+    """pyvo turns the error document into an exception rather than an empty table.
+
+    `DALQueryError` specifically, which is what pyvo raises when it has read a
+    QUERY_STATUS of ERROR. A `DALServiceError` is the transport failing — a 404 from a
+    service that has no `/sync` at all raises one, and accepting it here would make
+    this check pass against a service implementing nothing, which is how the last
+    version of it was found to be wrong.
+    """
     try:
         tap.run_sync("SELECT FROM WHERE")
-    except (pyvo.dal.DALQueryError, pyvo.dal.DALServiceError) as error:
-        record_property("detail", f"{type(error).__name__}: {str(error)[:200]}")
+    except pyvo.dal.DALQueryError as error:
+        record_property("detail", f"DALQueryError: {str(error)[:200]}")
         return
+    except pyvo.dal.DALServiceError as error:
+        raise AssertionError(
+            f"the client could not reach the query resource at all: {str(error)[:200]}"
+        ) from None
     raise AssertionError("a malformed query raised nothing in the client")
 
 

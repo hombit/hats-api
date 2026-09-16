@@ -12,7 +12,7 @@ import warnings
 import pyvo
 import pytest
 
-from tap_conformance.votable import overflow, statuses
+from tap_conformance.votable import overflow, refusal, statuses
 
 
 def test_zero(tap, rows_query, record_property):
@@ -97,17 +97,9 @@ def test_maxrec_above_what_matches(tap, queryable, record_property):
 
 def test_negative_maxrec_is_refused(raw, rows_query, record_property):
     """A MAXREC that is not a row count is an error (DALI 3.4)."""
-    response = raw(rows_query(3), MAXREC="-1")
-    record_property("detail", f"status {response.status_code}")
-    assert response.status_code >= 400 or b"ERROR" in response.content[:4000], (
-        f"MAXREC=-1 was answered with {response.status_code}"
-    )
+    record_property("detail", refusal(raw(rows_query(3), MAXREC="-1")))
 
 
 def test_unparsable_maxrec_is_refused(raw, rows_query, record_property):
     """Neither is a MAXREC that is not a number."""
-    response = raw(rows_query(3), MAXREC="lots")
-    record_property("detail", f"status {response.status_code}")
-    assert response.status_code >= 400 or b"ERROR" in response.content[:4000], (
-        f"MAXREC=lots was answered with {response.status_code}"
-    )
+    record_property("detail", refusal(raw(rows_query(3), MAXREC="lots")))

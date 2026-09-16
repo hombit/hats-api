@@ -167,10 +167,19 @@ class Report:
         for question, asked in QUESTIONS.items():
             counts = " | ".join(str(self.asking(question, outcome)) for outcome in shown)
             out.append(f"| {asked} | {counts} |")
-        out += ["", f"| area |{header[1:]}", rule]
-        for area in self.areas():
-            counts = " | ".join(str(self.count(outcome, area)) for outcome in shown)
-            out.append(f"| {area} | {counts} |")
+        if full:
+            out += ["", f"| area |{header[1:]}", rule]
+            for area in self.areas():
+                counts = " | ".join(str(self.count(outcome, area)) for outcome in shown)
+                out.append(f"| {area} | {counts} |")
+
+        if not full:
+            # What a comment on a pull request is for is the score and which parts of
+            # the standards moved. A hundred rows of detail under it is a page nobody
+            # scrolls, burying the two tables that are worth reading, and the run's
+            # artifact has all of it anyway.
+            out += ["", "_Every check, with what it found, is in the run's artifact._"]
+            return "\n".join(out) + "\n"
 
         failures = [result for result in self.results if result.outcome == "fail"]
         if failures:
@@ -186,28 +195,19 @@ class Report:
                 for result in news
             ]
 
-        absent = [result for result in self.results if result.outcome == "xfail"]
-        if absent:
-            out += ["", "### Absent on purpose", ""]
-            out += [
-                f"- `{result.id}` — {cell(result.description or result.detail, 200)}"
-                for result in absent
-            ]
-
-        if full:
-            out += [
-                "",
-                "<details><summary>Every check</summary>",
-                "",
-                "| check | area | outcome | detail |",
-                "|---|---|---|---|",
-            ]
-            for result in self.results:
-                out.append(
-                    f"| `{result.id}` | {result.area} | {WORDS[result.outcome]} "
-                    f"| {cell(result.detail)} |"
-                )
-            out += ["", "</details>"]
+        out += [
+            "",
+            "<details><summary>Every check</summary>",
+            "",
+            "| check | area | outcome | detail |",
+            "|---|---|---|---|",
+        ]
+        for result in self.results:
+            out.append(
+                f"| `{result.id}` | {result.area} | {WORDS[result.outcome]} "
+                f"| {cell(result.detail)} |"
+            )
+        out += ["", "</details>"]
         return "\n".join(out) + "\n"
 
 
@@ -232,15 +232,10 @@ def cell(text: str, limit: int = 300) -> str:
 
 
 def write(report: Report, directory: Path) -> Path:
-    """Both shapes, plus the trimmed one a comment is posted from."""
+    """Both shapes, plus the short one a comment is posted from."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "report.json").write_text(report.as_json())
     markdown = directory / "report.md"
     markdown.write_text(report.as_markdown(full=True))
-    comment = report.as_markdown(full=len(report.results) < 120)
-    # GitHub refuses a comment body over 65536 characters, and a refused comment is a
-    # run that reported nothing where it mattered most.
-    if len(comment) > 60_000:
-        comment = report.as_markdown(full=False)[:60_000]
-    (directory / "comment.md").write_text(comment)
+    (directory / "comment.md").write_text(report.as_markdown(full=False))
     return markdown

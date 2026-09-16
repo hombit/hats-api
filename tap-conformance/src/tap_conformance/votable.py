@@ -56,3 +56,30 @@ def overflow(body: str | bytes) -> Status | None:
         if status.value == "OVERFLOW":
             return status
     return None
+
+
+def refusal(response) -> str:
+    """Raise unless this is a service refusing something, rather than a missing route.
+
+    The difference matters more than it looks. A check that a bad parameter is refused
+    is satisfied by any 4xx if it only reads the status — and a service with no TAP at
+    all answers 404 to everything, so every such check passes against nothing. Which is
+    how this was found: the suite scored points against a service that implements none
+    of the protocol.
+
+    DALI §4.4 says what a refusal is — a VOTable carrying `QUERY_STATUS="ERROR"` — so
+    requiring it is both the stricter check and the correct one.
+    """
+    body = response.content[:8000]
+    if response.status_code < 400:
+        raise AssertionError(f"answered {response.status_code} rather than refusing")
+    if b"<VOTABLE" not in body.upper():
+        raise AssertionError(
+            f"refused with {response.status_code} but not as a VOTable, so this is a "
+            f"resource that is missing rather than a parameter that was read: "
+            f"{body[:160]!r}"
+        )
+    found = [status.value for status in statuses(body)]
+    if "ERROR" not in found:
+        raise AssertionError(f'no QUERY_STATUS="ERROR"; found {found or "none"}')
+    return f"refused with {response.status_code}, VOTable with QUERY_STATUS=ERROR"

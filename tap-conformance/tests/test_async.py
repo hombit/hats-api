@@ -26,13 +26,21 @@ def test_job_submission(tap, rows_query, record_property):
     assert len(found) == 2
 
 
-def test_the_resource_is_cleanly_absent(service, record_property):
+def test_the_resource_is_cleanly_absent(service, tap, record_property):
     """Absent means 404, not a hang and not a 500.
 
-    A resource that is not implemented has one correct way to say so. This is the
-    check that stays passing while the one above is an expected failure: how a service
+    A resource that is not implemented has one correct way to say so: how a service
     declines to offer something is its own business, but declining has to be legible.
+
+    It asks for the capabilities first, and skips if there are none. Otherwise this
+    passes against a service that has no TAP whatsoever — everything is 404 there, this
+    one included — and a suite that scores points against nothing is measuring nothing.
     """
+    try:
+        tap.capabilities
+    except Exception:  # noqa: BLE001 — whether it is a TAP service at all
+        pytest.skip("no capabilities document, so there is no TAP here to be missing a bit of")
+
     url = f"{service.base_url}/async"
     try:
         with urllib.request.urlopen(url, timeout=30) as answered:
