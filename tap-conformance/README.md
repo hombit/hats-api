@@ -117,7 +117,7 @@ rather than as two lists from two tools.
 | `test_examples.py` | DALI §2.3 — the examples a client offers in a menu, and whether they run |
 | `test_async.py` | TAP §2.2, UWS — expected failures, plus that the absence is legible |
 | `test_upload.py` | TAP §2.5 — expected failures, plus that capabilities and behaviour agree |
-| `test_reference_data.py` | not a standard: the same query, put to this service and to one that has been answering it for years |
+| `test_reference_data.py` | not a standard: the same query, asked here through both clients and read against what a service that has been answering it for years said |
 
 ## The data
 
@@ -145,26 +145,20 @@ Nothing downloaded here is committed.
 
 ## Client quirks worth knowing
 
-Found by running the suite against services known to be correct, and worked around here
-rather than reported as findings against anyone:
+`CLIENTS.md` beside this file is what running the suite against correct services turned
+up about pyvo and STILTS themselves — two of them worked around here, the rest worth
+knowing before publishing a TAP surface.
 
-- **`pyvo` drops `maxrec=0`.** It tests the value for truth before sending it, so
-  `run_sync(query, maxrec=0)` runs the query unlimited. The parameter is set by hand
-  where `MAXREC=0` is what is being asked about.
-- **`pyvo` does not warn about a truncation you asked for.** Given `MAXREC=n` and
-  exactly `n` rows back, it treats the overflow as expected and says nothing — so a
-  service that omits the marker entirely looks identical from up there. The marker is
-  read off the document instead.
-- **`taplint` is asked for its stages by name.** Not the default set: a STILTS release
-  that adds a stage would otherwise add a row to the report that nothing here has
-  decided the meaning of. ObsCore, ObsLocTAP and EPN-TAP are left out — they validate
-  data models a service chooses to publish, and one that publishes none of them is not
-  less conforming for it.
+One choice of this suite's own belongs with them: **`taplint` is asked for its stages by
+name**, not the default set. A STILTS release that adds a stage would otherwise add a
+row to the report that nothing here has decided the meaning of. ObsCore, ObsLocTAP and
+EPN-TAP are left out — they validate data models a service chooses to publish, and one
+that publishes none of them is not less conforming for it.
 
-## Where the reference services themselves fall short
+## Where a check and a working service disagree
 
-Running the suite against mature services turns up things they get wrong. That matters
-for the same reason the survey does: a check no established service passes is a check
-worth re-reading before treating it as a requirement, and a check they all pass is one
-this service has no excuse for. `REFERENCE_SERVICES.md` beside this file is what those
-runs found, written to be reviewed rather than acted on as it stands.
+Running the suite against mature services turns up places where this suite's reading of
+a clause and theirs part company. Each one is a question about the check: a reading no
+established service shares is more likely to be too strict than to have found several
+independent bugs, and one they all share is a reading to follow here.
+`REFERENCE_SERVICES.md` beside this file is the list, unsettled.
