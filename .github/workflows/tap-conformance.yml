@@ -1,16 +1,7 @@
 name: TAP conformance
 
-# What today's TAP clients make of this service, reported rather than enforced. The job
-# is green whatever the score: nobody here expects a hundred percent, and a gate that
-# is always red is a gate everyone learns to ignore. What it is for is the comment it
-# leaves on the pull request, which says which parts of the standards answer and which
-# do not, and moves as the work lands.
-#
-# This job puts questions to this service and to nothing else. The suite can also be
-# run against public TAP services — that is how it was checked before there was
-# anything here to check, and how the reference columns of its survey are made — but
-# that is done by hand and committed, never on a push. Putting somebody else's service
-# through a few dozen queries every time a branch moves is not ours to do.
+# Failing checks are this job's output and leave it green. It goes red only for a crash
+# of the service or of the suite. Questions go to this service and to nothing else.
 on:
   push:
     branches: [main]
@@ -32,34 +23,30 @@ jobs:
   conformance:
     name: pyvo and STILTS
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      # The comment below. A pull request from a fork gets a read-only token whatever
-      # this says, which is why the comment step tolerates its own failure.
       pull-requests: write
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
 
       - uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: tap-conformance/uv.lock
 
-      # STILTS is a Java program, and taplint is the validator TAP services are
-      # actually judged by.
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
 
-      # The jar rather than a distribution package: what apt offers is whatever the
-      # distribution froze, and the question this job asks is what today's validator
-      # makes of this service. Keyed by month so a run does not download it every time
-      # and no copy is read for longer than one — a release that changes what the
-      # validator says is the finding, not something to be pinned away from.
+      # Monthly: a release that changes what the validator says is the finding.
       - name: this month
         id: month
         run: echo "key=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
@@ -78,10 +65,6 @@ jobs:
           fi
           java -jar ~/stilts/stilts.jar -version
 
-      # The reference answers and the sample catalog, downloaded once and kept. The key
-      # is the fetch script, so changing what is asked for downloads it again and
-      # nothing else does — which is the point: a suite that re-fetched its reference
-      # answers every run would be comparing this service against a moving target.
       - name: cache the fetched data
         id: data-cache
         uses: actions/cache@v4
@@ -97,15 +80,8 @@ jobs:
       - name: build the service
         run: cargo build --bin hats-api
 
-      # This is the step that decides whether the job is green, and it is green for a
-      # service that answers very little: failing checks are the output. It goes red for
-      # the two things that are not results — the service under test falling over, and
-      # the suite failing to ask — which is also the only way the run finishes with no
-      # report to comment with.
-      #
-      # `-c pyproject.toml` names the configuration file rather than leaving pytest to
-      # find it from the paths on the command line, which it cannot do reliably here:
-      # every option this suite takes points outside the directory sooner or later.
+      # `-c` because every option here points outside the directory, and pytest cannot
+      # find its configuration from those paths.
       - name: run the suite
         working-directory: tap-conformance
         run: uv run pytest -c pyproject.toml --stilts-jar ~/stilts/stilts.jar
@@ -117,19 +93,8 @@ jobs:
           name: tap-conformance
           path: tap-conformance/report/
           retention-days: 30
-          # A run that wrote nothing has already failed the step above; a warning about
-          # an empty artifact on top of it says nothing further.
           if-no-files-found: ignore
 
-      # One comment per pull request, rewritten in place: a job that runs on every push
-      # would otherwise leave a column of stale scores behind it. A fork's token cannot
-      # write one, and that is not a failure of the run.
-      #
-      # `always()` so that a run whose checks failed still comments — that is the normal
-      # case and the whole output. What it must not do is comment when there is no
-      # report: a run that got that far did not measure anything, the step above has
-      # already failed the job, and a comment saying so would be a red job explaining
-      # itself twice in the place people read for the score.
       - name: comment on the pull request
         if: >-
           always() && github.event_name == 'pull_request'

@@ -29,6 +29,8 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -55,6 +57,8 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
       - run: cargo build --release
 
   # A real MinIO, which is what the deployments this serves actually run. No secret is
@@ -78,6 +82,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
 
       - name: start MinIO
         run: |
@@ -143,6 +150,9 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
 
       - name: start a WebDAV server
         run: |
