@@ -1,0 +1,50 @@
+[project]
+name = "tap-conformance"
+version = "0.0.0"
+description = "What today's TAP clients make of this service"
+requires-python = ">=3.14"
+# The clients the suite drives, and what runs them. Nothing here knows anything about
+# this service: every request is one pyvo or STILTS composed and sent.
+dependencies = [
+    # The TAP client astronomers already have.
+    "pyvo>=1.9",
+    # What pyvo answers in, and what reads a cached reference VOTable back.
+    "astropy>=8.0",
+    "numpy>=2.5",
+    "pytest>=9.0",
+]
+
+[project.scripts]
+# Downloading what the suite compares against. A command of its own because it runs
+# once and separately — a check that had to fetch its own reference answer would be
+# comparing this service against whatever the reference service says today.
+tap-conformance-fetch = "tap_conformance.fetch:main"
+# The same checks against this service and against services known to answer TAP well,
+# reported side by side. One pytest run talks to one service, so this runs several.
+tap-conformance-survey = "tap_conformance.survey:main"
+
+# `fetch` alone, and none of it validates anything: the sample catalog has to be built
+# before it can be published, and it is built by the importer the real catalogs are
+# written with rather than by a layout written here. Kept out of the dependencies above
+# so the environment a check runs in holds clients and nothing else.
+[dependency-groups]
+fixtures = [
+    "hats-import>=0.10",
+    "pyarrow>=25.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# A conformance run is a report rather than a gate, so a failure is data: the short
+# traceback keeps a failure to the assertion that carries it, and no cache is left
+# behind by a run whose whole output is written somewhere else.
+addopts = "-ra --tb=short -p no:cacheprovider"
+markers = [
+    "area(name): the part of the standards a test is about, as the report groups them",
+    "taplint(stage): the STILTS taplint stage a test reads, run once per session",
+    "asks(*questions): which of standard, clients, answers a check speaks to; derived when absent",
+]

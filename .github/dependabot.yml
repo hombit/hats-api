@@ -1,24 +1,17 @@
 version: 2
 
 updates:
-  # Cargo. The dependency that matters most here is the `object_store` version, which
-  # DataFusion and `object_store_opendal` must agree on: two copies are two distinct
-  # `ObjectStore` traits and the adapter stops fitting. A bump to either that breaks
-  # the match fails to compile, so CI catches it — but the reviewer should know that is
-  # what they are looking at.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: monthly
     open-pull-requests-limit: 5
     groups:
-      # One PR for the patch noise, so the individual ones are the interesting ones.
       patch-updates:
         update-types: [patch]
       # These move together or not at all. `reqwest` and the transport adapter are in
       # here for the same reason `object_store` is: `network` builds the client that
-      # OpenDAL then uses, so a bump that splits them is a type error rather than a
-      # version bump, and a lone PR for one of them can never be green.
+      # OpenDAL then uses.
       datafusion-stack:
         patterns:
           - datafusion
@@ -31,14 +24,18 @@ updates:
         dependency-type: development
         patterns:
           - "*"
-    # Every label named here must exist in the repository already: Dependabot cannot
-    # create one, and it reports the whole config as an error rather than skipping the
-    # label it could not find.
     labels: [dependencies]
 
-  # The two base images in the Dockerfile, which are pinned so that a tag rebuilds to
-  # the same thing. Pinning is what makes this entry necessary: without it the Rust
-  # toolchain the release image is built with would stay wherever it was pinned.
+  - package-ecosystem: uv
+    directory: /tap-conformance
+    schedule:
+      interval: monthly
+    groups:
+      conformance-clients:
+        patterns:
+          - "*"
+    labels: [dependencies]
+
   - package-ecosystem: docker
     directory: /
     schedule:
@@ -49,7 +46,6 @@ updates:
           - "*"
     labels: [dependencies]
 
-  # The actions used by the workflows in .github/workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:

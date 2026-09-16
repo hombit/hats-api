@@ -47,6 +47,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.4 | HATS catalogs as tables | done | partitions pruned by `PruningPredicate` over each cell's span, not by recognising a region |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
+| 11.0 | the conformance suite | done | `pyvo` and STILTS `taplint` against a built service, in CI as a report rather than a gate. Written before any of §11, so none of it is tuned to what was built |
 | 11.1 | the tables the service publishes | todo | a name and a url, no storage options; temporary until §9.5, and §0.2 holds only while the list is config |
 | 11.2 | `/sync` and the parameters | todo | form-encoded is a carrier no route takes today |
 | 11.3 | formats, `MAXREC`, `OVERFLOW`, errors | todo | csv and tsv are new writers; `output::votable::encode` needs a trailer |
@@ -578,6 +579,23 @@ References: [TAP 1.1](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.ht
 [DALI 1.1](https://www.ivoa.net/documents/DALI/20170517/REC-DALI-1.1.html),
 [VOSI 1.1](https://www.ivoa.net/documents/VOSI/20170524/REC-VOSI-1.1.html),
 [TAPRegExt 1.0](https://www.ivoa.net/documents/TAPRegExt/20120827/REC-TAPRegExt-1.0.html).
+
+**Each step below is measured rather than argued about.** `tap-conformance/` puts `pyvo`
+and STILTS `taplint` to a built service and reports which parts of the standards answer.
+It exists already and every step here moves its numbers; a step is not finished because
+the code reads right. Three things about it constrain what follows:
+
+- **A published table is a real catalog on S3 and a small sample beside it.** The sample
+  is what the validator works over, a validator asking for whole rows of a 153-column
+  catalog being slow rather than informative. So §11.1's list has to answer both a
+  `file://` url under a mount and an `s3://` one, which it does.
+- **What the suite calls a failure is not always this service's.** A check no established
+  TAP service passes is a check to re-read before treating it as a requirement, which is
+  what the survey against reference services is for. `tap-conformance/REFERENCE_SERVICES.md`
+  is the list as it stands, and it is unreviewed.
+- **Conforming and being usable are two results, not one.** The report counts them apart,
+  because a document can carry everything the standard asks for and still be one a client
+  cannot parse.
 
 **This phase is deliberately not a conforming TAP service, in exactly one place.** `/async`
 is a MUST (TAP §2.2) and is §9.4. Everything else a conforming service needs is here. What
