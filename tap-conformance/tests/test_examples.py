@@ -6,6 +6,8 @@ a menu, which is where most people's first query against a new service comes fro
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tap_conformance.taplint import assert_clean
@@ -18,12 +20,16 @@ def test_document(tap, record_property):
     assert found, "the examples document is empty"
 
 
-#: How many examples are run. A service is free to publish a hundred, and each one is a
-#: query against a real catalog — so without a cap this single check decides how long a
-#: run takes, and a service with a long menu of slow examples stalls it for as long as
-#: it likes. The first few answer the question either way: an examples document that is
-#: broken is broken near the top of it.
+#: What this check may spend, in examples and in seconds.
+#:
+#: Both bounds are needed and the second is the one that matters. A service is free to
+#: publish a hundred examples and each is a real query, so a count alone still lets one
+#: service with a menu of slow examples decide how long a whole run takes — which is not
+#: hypothetical: it stalled this suite twice, for forty minutes each time, before the
+#: clock was put on it. Whatever is answered inside the budget answers the question; an
+#: examples document that is broken is broken near the top of it.
 MOST = 10
+BUDGET = 90
 
 
 def test_examples_run(tap, record_property):
@@ -38,18 +44,24 @@ def test_examples_run(tap, record_property):
     published = tap.examples
     if not published:
         pytest.skip("no examples to run")
-    found = published[:MOST]
-    broken = []
-    for number, example in enumerate(found, start=1):
+
+    deadline = time.monotonic() + BUDGET
+    broken, ran = [], 0
+    for number, example in enumerate(published[:MOST], start=1):
+        if time.monotonic() > deadline:
+            break
         query = example.get("QUERY")
         if not query:
             broken.append(f"example {number}: carries no query")
             continue
+        ran += 1
         try:
             tap.run_sync(query, maxrec=5)
         except Exception as error:  # noqa: BLE001 — any failure is the finding
             broken.append(f"example {number}: {str(error)[:150]}")
-    record_property("detail", f"{len(found) - len(broken)} of {len(found)} run")
+    record_property(
+        "detail", f"{ran - len(broken)} of {ran} run, out of {len(published)} published"
+    )
     assert not broken, "; ".join(broken[:4])
 
 

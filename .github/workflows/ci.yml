@@ -50,6 +50,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      # Not for the binary, which nothing here uses: for the cache. Everything above
+      # builds `--all-targets`, which pulls in dev-dependencies and so enables extra
+      # features on shared crates; a plain build wants those same crates without them,
+      # which is a different fingerprint and a full rebuild. Building both here puts
+      # both in the one cache, and the conformance job stops compiling 200 crates to
+      # link one binary.
+      - name: cargo build
+        run: cargo build --bin hats-api
+
   build:
     name: release build
     runs-on: ubuntu-latest
