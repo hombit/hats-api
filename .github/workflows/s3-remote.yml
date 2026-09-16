@@ -1,12 +1,7 @@
 name: S3 against public deployments
 
-# Not on pull requests: these reach the network and depend on services nobody here
-# controls, so a failure usually means something changed on the outside — a bucket
-# moved, a catalog was rewritten, an endpoint went away — rather than something a
-# commit did. A weekly run is the right place to find that out.
-#
-# No secrets: both targets are anonymous. The MinIO coverage that needs credentials
-# runs in the main CI workflow, against a container it starts itself.
+# Not on pull requests: a failure here usually means something changed on the outside
+# rather than something a commit did.
 on:
   schedule:
     - cron: "17 5 * * 1"
@@ -22,8 +17,7 @@ env:
   # Without this a job whose configuration went missing would skip every test and
   # still be green.
   HATS_API_TEST_REQUIRE_REMOTE: "1"
-  # One at a time: these read the same large partitions from a shared service, and
-  # running them in parallel invites throttling that looks like a test failure.
+  # In parallel these invite throttling that looks like a test failure.
   RUST_TEST_THREADS: "1"
 
 jobs:
@@ -34,9 +28,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
 
-      # The target is the object the README documents, so this also fails if the
-      # README's example stops working.
       - name: read a public HATS partition
         run: cargo test --test s3_remote -- aws
         env:
@@ -49,10 +44,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
 
-      # The target is built into the test, like the AWS one, so this job needs no
-      # repository configuration. `HATS_API_TEST_SNAD_URL` and friends still override
-      # it for a one-off run against something else.
       - name: read from the SNAD deployment
         run: cargo test --test s3_remote -- snad
         env:

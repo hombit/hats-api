@@ -1,0 +1,122 @@
+name: TAP conformance
+
+# Failing checks are this job's output and leave it green. It goes red only for a crash
+# of the service or of the suite. Questions go to this service and to nothing else.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  conformance:
+    name: pyvo and STILTS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: tap-conformance/uv.lock
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Monthly: a release that changes what the validator says is the finding.
+      - name: this month
+        id: month
+        run: echo "key=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: cache stilts.jar
+        uses: actions/cache@v4
+        with:
+          path: ~/stilts/stilts.jar
+          key: stilts-${{ runner.os }}-${{ steps.month.outputs.key }}
+
+      - name: download stilts.jar
+        run: |
+          mkdir -p ~/stilts
+          if [ ! -s ~/stilts/stilts.jar ]; then
+            curl -fsSL -o ~/stilts/stilts.jar https://www.star.bris.ac.uk/~mbt/stilts/stilts.jar
+          fi
+          java -jar ~/stilts/stilts.jar -version
+
+      - name: cache the fetched data
+        id: data-cache
+        uses: actions/cache@v4
+        with:
+          path: tap-conformance/data
+          key: tap-data-${{ hashFiles('tap-conformance/src/tap_conformance/fetch.py') }}
+
+      - name: fetch the reference answers
+        if: steps.data-cache.outputs.cache-hit != 'true'
+        working-directory: tap-conformance
+        run: uv run --group fixtures tap-conformance-fetch --out data
+
+      - name: build the service
+        run: cargo build --bin hats-api
+
+      # `-c` because every option here points outside the directory, and pytest cannot
+      # find its configuration from those paths.
+      - name: run the suite
+        working-directory: tap-conformance
+        run: uv run pytest -c pyproject.toml --stilts-jar ~/stilts/stilts.jar
+
+      - name: upload the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tap-conformance
+          path: tap-conformance/report/
+          retention-days: 30
+          if-no-files-found: ignore
+
+      - name: comment on the pull request
+        if: >-
+          always() && github.event_name == 'pull_request'
+          && hashFiles('tap-conformance/report/comment.md') != ''
+        continue-on-error: true
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- tap-conformance -->';
+            const path = 'tap-conformance/report/comment.md';
+            const body = marker + '\n' + fs.readFileSync(path, 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number });
+            const mine = comments.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes(marker));
+            if (mine) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment(
+                { owner, repo, issue_number, body });
+            }

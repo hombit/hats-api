@@ -1,0 +1,1221 @@
+{
+  "generated": "2026-09-16T13:13:47+00:00",
+  "target": "https://gea.esac.esa.int/tap-server/tap",
+  "tools": {
+    "pyvo": "1.9.1",
+    "astropy": "8.0.1",
+    "python": "3.14.0",
+    "stilts": "skipped"
+  },
+  "provenance": "reference answers from ESA Gaia Archive, fetched 2026-09-16T10:23:12+00:00",
+  "broken": [],
+  "totals": {
+    "pass": 45,
+    "fail": 5,
+    "xpass": 0,
+    "xfail": 0,
+    "skip": 57
+  },
+  "questions": {
+    "standard": {
+      "pass": 45,
+      "fail": 5,
+      "xpass": 0,
+      "xfail": 0,
+      "skip": 25
+    },
+    "clients": {
+      "pass": 45,
+      "fail": 5,
+      "xpass": 0,
+      "xfail": 0,
+      "skip": 57
+    },
+    "answers": {
+      "pass": 0,
+      "fail": 0,
+      "xpass": 0,
+      "xfail": 0,
+      "skip": 32
+    }
+  },
+  "checks": [
+    {
+      "id": "adql/arithmetic_and_alias",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "An expression over columns is a column, and AS names it.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "adql/contains_a_circle",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A cone written as CONTAINS(POINT, CIRCLE) is answered.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "adql/delimited_identifier",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A name in double quotes is a delimited identifier, matched as written.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "adql/distance",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "DISTANCE between two points is a value a query can select and order by.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "adql/group_by",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "An aggregate with a grouping, which ADQL makes mandatory.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "adql/mandatory_functions[ABS(-1.5)]",
+      "area": "ADQL",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The numeric functions ADQL 2.1 requires of every service.",
+      "detail": "ABS(-1.5) = 1.5"
+    },
+    {
+      "id": "adql/mandatory_functions[CEILING(1.2)]",
+      "area": "ADQL",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The numeric functions ADQL 2.1 requires of every service.",
+      "detail": "CEILING(1.2) = 2.0"
+    },
+    {
+      "id": "adql/mandatory_functions[FLOOR(1.8)]",
+      "area": "ADQL",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The numeric functions ADQL 2.1 requires of every service.",
+      "detail": "FLOOR(1.8) = 1.0"
+    },
+    {
+      "id": "adql/mandatory_functions[SQRT(4.0)]",
+      "area": "ADQL",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The numeric functions ADQL 2.1 requires of every service.",
+      "detail": "SQRT(4.0) = 2.0"
+    },
+    {
+      "id": "adql/string_comparison",
+      "area": "ADQL",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "LIKE over string literals, which ADQL makes mandatory.",
+      "detail": "1 rows matched a LIKE over literals"
+    },
+    {
+      "id": "adql/where_and_order_by",
+      "area": "ADQL",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A predicate and an ordering, which is most of what a client writes.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "async/job_submission",
+      "area": "async",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query submitted as a job runs and its rows can be collected.",
+      "detail": "an async job returned 2 rows"
+    },
+    {
+      "id": "async/queries",
+      "area": "async",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Queries made in async mode are answered.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "async/the_resource_is_cleanly_absent",
+      "area": "async",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Absent means 404, not a hang and not a 500.",
+      "detail": "https://gea.esac.esa.int/tap-server/tap/async \u2192 200"
+    },
+    {
+      "id": "async/uws_job_model",
+      "area": "async",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The job's phases, its polling and its destruction are UWS's.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "availability/available",
+      "area": "VOSI availability",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "/availability answers, and says the service is up.",
+      "detail": "available=True"
+    },
+    {
+      "id": "availability/schema",
+      "area": "VOSI availability",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The availability document validates against its XML schema.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "capabilities/content",
+      "area": "VOSI capabilities",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Its TAP and TAPRegExt content is what those standards ask for.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "capabilities/declared_interfaces_exist",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Nothing is advertised that is not there.",
+      "detail": "<AccessURL use=base>https://gea.esac.esa.int/tap-server/tap</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/availability</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/tables</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/examples/</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/capabilities</AccessURL>"
+    },
+    {
+      "id": "capabilities/output_formats",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Every format the service will answer in is declared, VOTable among them.",
+      "detail": "formats=['application/x-votable+xml', 'application/x-votable+xml', 'application/x-votable+xml', 'text/csv', 'text/ecsv', 'text/tab-separated-values', 'application/json', 'application/fits', 'text/xml']"
+    },
+    {
+      "id": "capabilities/output_limits",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The row limits are declared, which is what a client reads MAXREC against.",
+      "detail": "default=3000000 hard=3000000"
+    },
+    {
+      "id": "capabilities/query_language",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "ADQL is declared as a supported language, which TAP makes mandatory.",
+      "detail": "languages=['ADQL']"
+    },
+    {
+      "id": "capabilities/schema",
+      "area": "VOSI capabilities",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The capabilities document validates against its XML schema.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "capabilities/tap_capability",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The TAP standard id is among the declared capabilities.",
+      "detail": "ivo://ivoa.net/std/tap, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables-1.1, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/vosi#capabilities"
+    },
+    {
+      "id": "capabilities/vosi_capabilities",
+      "area": "VOSI capabilities",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The three VOSI resources are declared alongside it.",
+      "detail": "declared: ivo://ivoa.net/std/tap, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables-1.1, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/vosi#capabilities"
+    },
+    {
+      "id": "errors/bad_query[syntax]",
+      "area": "errors",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query that cannot run comes back as an error document with a 4xx.",
+      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+    },
+    {
+      "id": "errors/bad_query[unclosed_string]",
+      "area": "errors",
+      "outcome": "fail",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query that cannot run comes back as an error document with a 4xx.",
+      "detail": "E   AssertionError: the error is not a VOTable: b'<html>\\n<head>\\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" />\\n<style type=\"text/css\">\\nbody { background-color: white; color: black; }\\nh2 { font-weight: bold; font-variant: small-' E   assert b'<VOTABLE' in b'<HTML>\\n<HEAD>\\n<META HTTP-EQUIV=\"CONTENT-TYPE\" CONTENT=\"TEXT/HTML; CHARSET=UTF-8\" />\\n<STYLE TYPE=\"TEXT/CSS\">\\nBODY...TOKENMGRERROR: LEXICAL ERROR AT LINE 1, COLUMN 54.  ENCOUNTERED: <EOF> AFTER : \"\\\\\\'X\"</LI>\\n</UL>\\n</BODY>\\n</HTML>\\n' E    +  where b'<HTML>\\n<HEAD>\\n<META HTTP-EQUIV=\"CONTENT-TYPE\" CONTENT=\"TEX"
+    },
+    {
+      "id": "errors/bad_query[unknown_table]",
+      "area": "errors",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query that cannot run comes back as an error document with a 4xx.",
+      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+    },
+    {
+      "id": "errors/the_client_raises",
+      "area": "errors",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "pyvo turns the error document into an exception rather than an empty table.",
+      "detail": "DALQueryError: Cannot parse query 'SELECT FROM WHERE' for job '5614ce5d-b1d0-11f1-a4dd-bc97e148b76b-O': Encountered \" \"FROM\" \"FROM \"\" at line 1, column 8.\nWas expecting one of:\n    \"(\" ...\n    \"+\" ...\n    \"-\" ...\n  "
+    },
+    {
+      "id": "errors/the_message_says_something",
+      "area": "errors",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The error names what was wrong with the query it was given.",
+      "detail": "<VOTABLE version=\"1.2\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.2\"> <RESOURCE type=\"results\"> <INFO name=\"QUERY_STATUS\" value=\"ERROR\"> Cannot parse query 'SELECT no_such_column FROM external.apassdr9' for job '56711f31-b1d0-11f1-a4dd-bc97e148b76b-O': 1 unresolved identifiers: no_such_column [l.1 c."
+    },
+    {
+      "id": "errors/unknown_column",
+      "area": "errors",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A column the table has not got is an error rather than an empty answer.",
+      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+    },
+    {
+      "id": "examples/content",
+      "area": "examples",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The examples document is marked up the way DALI asks.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "examples/document",
+      "area": "examples",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The examples endpoint answers, and has examples in it.",
+      "detail": "10 examples"
+    },
+    {
+      "id": "examples/examples_run",
+      "area": "examples",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The published examples are queries that run.",
+      "detail": "10 of 10 run, out of 10 published"
+    },
+    {
+      "id": "maxrec/a_complete_answer_is_not_marked",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "An answer that fits is not marked as truncated.",
+      "detail": "statuses: ['OK (before the table)']"
+    },
+    {
+      "id": "maxrec/maxrec_above_what_matches",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "MAXREC larger than the answer changes nothing about it.",
+      "detail": "3 rows"
+    },
+    {
+      "id": "maxrec/negative_maxrec_is_refused",
+      "area": "MAXREC and overflow",
+      "outcome": "fail",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A MAXREC that is not a row count is an error (DALI 3.4).",
+      "detail": "E   AssertionError: answered 200 rather than refusing"
+    },
+    {
+      "id": "maxrec/overrides_top",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "MAXREC wins over TOP, TAP 2.7.4 saying it is the smaller that applies.",
+      "detail": "3 rows"
+    },
+    {
+      "id": "maxrec/the_marker_follows_the_table",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "DALI 4.4 puts OVERFLOW after the TABLE, where OK goes before it.",
+      "detail": "OVERFLOW (after the table)"
+    },
+    {
+      "id": "maxrec/truncation_is_marked",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A truncated answer says so, with an OVERFLOW marker after the table.",
+      "detail": "200, statuses: ['OK (before the table)', 'OVERFLOW (after the table)']"
+    },
+    {
+      "id": "maxrec/unparsable_maxrec_is_refused",
+      "area": "MAXREC and overflow",
+      "outcome": "fail",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Neither is a MAXREC that is not a number.",
+      "detail": "E   AssertionError: answered 200 rather than refusing"
+    },
+    {
+      "id": "maxrec/zero",
+      "area": "MAXREC and overflow",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "MAXREC=0 returns the columns and no rows.",
+      "detail": "0 rows, 25 columns"
+    },
+    {
+      "id": "output_formats/csv",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "text/csv, a SHOULD of TAP 2.7.3.",
+      "detail": "200, text/csv"
+    },
+    {
+      "id": "output_formats/declared_formats_are_answered",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Every format the capabilities document declares can actually be asked for.",
+      "detail": "9 declared: application/x-votable+xml, application/x-votable+xml, application/x-votable+xml, text/csv, text/ecsv, text/tab-separated-values, application/json, application/fits, text/xml"
+    },
+    {
+      "id": "output_formats/default_is_votable",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query naming no format is answered in VOTable.",
+      "detail": "200, application/x-votable+xml"
+    },
+    {
+      "id": "output_formats/format_parameter_is_accepted",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "FORMAT is accepted as the equivalent of RESPONSEFORMAT (TAP 2.7.3).",
+      "detail": "status 200"
+    },
+    {
+      "id": "output_formats/tsv",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "text/tab-separated-values, the other SHOULD of TAP 2.7.3.",
+      "detail": "200, text/tab-separated-values"
+    },
+    {
+      "id": "output_formats/unknown_format_is_refused",
+      "area": "output formats",
+      "outcome": "fail",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A format the service has not got is refused, not silently replaced.",
+      "detail": "E   AssertionError: answered 200 rather than refusing"
+    },
+    {
+      "id": "output_formats/votable",
+      "area": "output formats",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "RESPONSEFORMAT=votable, the mandatory format.",
+      "detail": "200, application/x-votable+xml"
+    },
+    {
+      "id": "reference_data/matches_the_reference[aggregate@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[aggregate@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[aggregate@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[aggregate@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[cone@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[cone@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[cone@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[cone@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[count@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[count@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[count@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[count@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[distance@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[distance@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[distance@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[distance@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "sync_query/empty_answer_still_has_columns",
+      "area": "sync query",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A query matching nothing is an empty table, not an error and not no table.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "sync_query/get_mode",
+      "area": "sync query",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Queries sent as a GET are answered.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "sync_query/lang_adql",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "LANG=ADQL is accepted, being the one language TAP makes mandatory.",
+      "detail": "1 rows"
+    },
+    {
+      "id": "sync_query/lang_unknown_is_refused",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A language the service does not implement is refused rather than guessed at.",
+      "detail": "refused with 400, VOTable with QUERY_STATUS=ERROR"
+    },
+    {
+      "id": "sync_query/parameter_names_are_case_insensitive",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "DALI 3.1: a parameter name means the same however it is cased.",
+      "detail": "status 200"
+    },
+    {
+      "id": "sync_query/post_mode",
+      "area": "sync query",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Queries sent as a form-encoded POST are answered.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "sync_query/request_doquery",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "REQUEST=doQuery is accepted, a TAP 1.0 client still sending it.",
+      "detail": "status 200"
+    },
+    {
+      "id": "sync_query/results_match_declared_metadata",
+      "area": "sync query",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A result's columns are the ones the metadata said they would be.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "sync_query/runid",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "RUNID is accepted and changes nothing about the answer (DALI 3.4.6).",
+      "detail": "status 200"
+    },
+    {
+      "id": "sync_query/select_list_is_the_answer",
+      "area": "sync query",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The columns come back in the number, order and name the SELECT wrote.",
+      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+    },
+    {
+      "id": "sync_query/select_top",
+      "area": "sync query",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A sync query returns the rows TOP asked for.",
+      "detail": "5 rows, 25 columns"
+    },
+    {
+      "id": "tables_metadata/columns_are_readable_by_the_client",
+      "area": "VOSI tables",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "pyvo can read the column list of every table, and each column has a datatype.",
+      "detail": "6614 columns over 248 tables"
+    },
+    {
+      "id": "tables_metadata/content",
+      "area": "VOSI tables",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Its content is what VOSI asks for.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "tables_metadata/nested_columns_declared",
+      "area": "VOSI tables",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A table holding a nested column declares it by names a query can write.",
+      "detail": "Skipped: ztf.dr24_lc is not published here"
+    },
+    {
+      "id": "tables_metadata/positional_ucds",
+      "area": "VOSI tables",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The coordinate columns carry the UCDs a client finds a position by.",
+      "detail": "Skipped: none of the suite's tables is published"
+    },
+    {
+      "id": "tables_metadata/schema",
+      "area": "VOSI tables",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The table metadata validates against its XML schema.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "tables_metadata/tables_listed",
+      "area": "VOSI tables",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "/tables lists the published tables.",
+      "detail": "248 tables: external.apassdr9, external.catwise2020, external.gaia_eso_survey, external.gaiadr2_astrophysical_parameters, external.gaiadr2_geometric_distance, external.gaiaedr3_distance, external.gaiaedr3_gcns_main_1, external.gaiaedr3_gcns_rejected_1"
+    },
+    {
+      "id": "tables_metadata/units_and_ucds",
+      "area": "VOSI tables",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The units and UCDs on the columns are ones the standards define.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "tap_schema/bootstrap_name_is_case_insensitive",
+      "area": "TAP_SCHEMA",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "TAP_SCHEMA's own name resolves however a client spells it.",
+      "detail": "the lowercase spelling answered with 247 rows"
+    },
+    {
+      "id": "tap_schema/consistent_with_tables_resource",
+      "area": "TAP_SCHEMA",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "TAP_SCHEMA and /tables describe the same tables the same way.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "tap_schema/content",
+      "area": "TAP_SCHEMA",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "The content of TAP_SCHEMA is what TAP 4 asks for.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    },
+    {
+      "id": "tap_schema/published_names_are_queryable",
+      "area": "TAP_SCHEMA",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A name TAP_SCHEMA publishes is a name a query can be built out of.",
+      "detail": "selected raj2000, dej2000, e_ra, e_dec, nobs, mobs, b_v, e_b_v"
+    },
+    {
+      "id": "tap_schema/the_five_tables_answer",
+      "area": "TAP_SCHEMA",
+      "outcome": "fail",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "All five tables of TAP 4 can be queried, an empty one being a legal answer.",
+      "detail": "E   UnicodeDecodeError: 'ascii' codec can't decode byte 0xa0 in position 404: ordinal not in range(128) E   pyvo.dal.exceptions.DALFormatError: UnicodeDecodeError: 'ascii' codec can't decode byte 0xa0 in position 404: ordinal not in range(128)"
+    },
+    {
+      "id": "upload/capabilities_agree_with_behaviour",
+      "area": "uploads",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "What the service says about upload is what it does.",
+      "detail": "declared: <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-inline\"/>, <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-http\"/>, <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-ftp\"/>"
+    },
+    {
+      "id": "upload/inline_upload",
+      "area": "uploads",
+      "outcome": "pass",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "A table uploaded with the query is queryable as TAP_UPLOAD.",
+      "detail": "3 rows came back from an upload"
+    },
+    {
+      "id": "upload/queries_with_uploads",
+      "area": "uploads",
+      "outcome": "skip",
+      "asks": [
+        "standard",
+        "clients"
+      ],
+      "description": "Queries carrying an uploaded table are answered.",
+      "detail": "Skipped: the validator did not run: asked not to run"
+    }
+  ]
+}

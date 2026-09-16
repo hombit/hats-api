@@ -1,1 +1,11 @@
 /target
+
+# The conformance suite fetches its reference answers once and writes its report
+# per run; neither is worth committing, and the data is somebody else's.
+/tap-conformance/data
+/tap-conformance/report
+/tap-conformance/.venv
+
+# Python bytecode from the conformance suite.
+__pycache__/
+*.pyc
