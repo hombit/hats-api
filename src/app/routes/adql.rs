@@ -34,6 +34,11 @@ pub(in crate::app) struct AdqlQuery {
     /// The tables the statement may read, each under the name it is written as in the query.
     /// A name the statement reads and this does not declare is an error.
     tables: BTreeMap<String, AdqlTable>,
+    /// Which language the statement is written in: `ADQL`, or a version after the name —
+    /// `ADQL-2.0` or `ADQL-2.1`. Absent is `ADQL`. It is TAP's `LANG` under another carrier,
+    /// and answers to the same values.
+    #[schema(example = "ADQL")]
+    lang: Option<String>,
     /// `json`, the default; `parquet` for the answer as a parquet file; `votable` for a
     /// VOTable, `csv` for comma-separated text and `tsv` for tab-separated. The last three
     /// take flat columns only and refuse a nested one by name. Anything but `json` carries
@@ -88,7 +93,7 @@ enum TableKind {
 impl AdqlQuery {
     /// Every field this endpoint takes, in the order a body is written in.
     fn fields() -> Vec<&'static str> {
-        vec!["query", "tables", "format", "dsv_null_value"]
+        vec!["query", "tables", "lang", "format", "dsv_null_value"]
     }
 
     /// The same list, as the sentence a refusal ends with.
@@ -117,6 +122,9 @@ pub(in crate::app) async fn query_adql(
         params.dsv_null_value.as_deref(),
         Format::Json,
     )?;
+    if let Some(asked) = &params.lang {
+        adql::language::check("lang", asked)?;
+    }
     // Everything decidable from the request alone, before a store is built. The statement is
     // read first because it says which of the declared tables are even needed, and because a
     // statement this service will not answer costs nothing to refuse.
@@ -494,10 +502,10 @@ mod tests {
         assert_eq!(answer["num_rows"], 9);
     }
 
-    /// A shape this service does not test, refused by name rather than as an unknown function
-    /// — which is what a caller would otherwise be told about `BOX`.
+    /// An ADQL function this service does not implement says so, rather than being reported as
+    /// a function nobody has heard of.
     #[tokio::test]
-    async fn an_adql_geometry_this_service_refuses_says_so() {
+    async fn an_adql_function_this_service_does_not_implement_says_so() {
         let dir = adql_fixture();
         let (status, body) = ask_adql(
             dir.path(),
@@ -506,7 +514,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
-            body.contains("BOX") && body.contains("not answered"),
+            body.contains("BOX") && body.contains("not implemented"),
             "{body}"
         );
     }
@@ -884,6 +892,41 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// `lang` is TAP's `LANG` under another carrier, and answers to the same values — a
+    /// query moved between the two routes carries the same one. A language this service
+    /// does not answer is refused rather than parsed as ADQL and failed later.
+    #[tokio::test]
+    async fn an_adql_request_may_say_which_language_it_wrote() {
+        let dir = adql_fixture();
+        let ask = async |lang: serde_json::Value| {
+            post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": "SELECT TOP 1 objectid FROM t",
+                    "tables": {"t": {"type": "parquet", "url": "file:///part0.parquet"}},
+                    "lang": lang,
+                }),
+            )
+            .await
+        };
+
+        // Absent is ADQL, and a version after the name is the same language.
+        for lang in [
+            serde_json::Value::Null,
+            "ADQL".into(),
+            "ADQL-2.0".into(),
+            "adql-2.1".into(),
+        ] {
+            let (status, body) = ask(lang.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{lang}: {body}");
+        }
+
+        let (status, body) = ask("PQL".into()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("PQL") && body.contains("ADQL"), "{body}");
     }
 
     /// Reserved now, before a TAP layer needs them, so that no caller writes a statement

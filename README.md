@@ -522,6 +522,9 @@ around each row of one side — here matching Gaia DR3 against Euclid Q1 within 
 }
 ```
 
+`lang` names the language version: `ADQL`, `ADQL-2.0` or `ADQL-2.1`, the same values TAP's
+`LANG` takes. It is optional and defaults to `ADQL`.
+
 See [ADQL](#adql) for the language itself, and for how to narrow a query over a large
 catalog.
 
@@ -559,6 +562,9 @@ language. Two routes take it, and the language is the same in both:
 - [`POST /api/v1/adql`](#an-adql-query), where the query declares its own tables by URL.
 - [`/api/v1/tap/sync`](#tap), where it names catalogs the server publishes.
 
+Both accept ADQL 2.0 and 2.1, named by `lang` and `LANG` respectively. 2.1 is what is
+implemented; a 2.0 query is valid 2.1.
+
 `GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations all
 work. Where ADQL spells something differently from SQL, the query is translated:
 
@@ -571,8 +577,8 @@ work. Where ADQL spells something differently from SQL, the query is translated:
 | `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
 | `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%`             |
 
-These ADQL functions are not supported: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
-`COORDSYS`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
+These ADQL functions are not implemented: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
+`COORDSYS`, `IN_UNIT`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
 
 `RAND()` works in ADQL, and is refused in `columns` and `filters`, which answer the same
 way twice. Two runs of the same query give different numbers. The standard's optional
@@ -581,8 +587,9 @@ and advises omitting it.
 
 ### Geometry
 
-Write a point either way: `POINT(ra, dec)` as in ADQL 2.1, or `POINT('ICRS', ra, dec)` as
-in 2.0. Coordinates are ICRS.
+The coordinate system argument is optional, so `POINT(ra, dec)` and
+`POINT('ICRS', ra, dec)` both work — ADQL 2.0 required it and 2.1 deprecated it.
+Coordinates are ICRS, and naming another system is an error.
 
 Over a catalog, `POINT` names the catalog's own position columns, the ones its
 `hats_col_ra` and `hats_col_dec` declare. Any other pair is refused: the partitions are
@@ -674,7 +681,9 @@ search: `SELECT TOP 10 * FROM ztf.dr24_lc` counts all 12,485 partitions against
 | `/api/v1/tap/capabilities` | what the service supports |
 | `/api/v1/tap/availability` | whether it is up |
 | `/api/v1/tap/tables` | tables and columns; `?detail=min` for names only, `…/tables/{name}` for one |
-| `TAP_SCHEMA` | the same metadata, as five tables you can query |
+
+The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables`,
+`TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
 
 `sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
 `RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`.

@@ -13,6 +13,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use serde::Deserialize;
 
+use crate::adql::language;
 use crate::app::routes::tap::answer::{answered, base_url, document};
 use crate::app::routes::tap::format;
 use crate::app::routes::tap::published::describe;
@@ -22,6 +23,59 @@ use crate::tap::metadata::TableMetadata;
 
 /// Where the TAP resources sit under the API's own prefix.
 const TAP_SEGMENT: &str = "tap";
+
+/// The optional halves of ADQL 2.1 this service answers, each by the feature type that
+/// declares it and the forms it covers.
+///
+/// **Naming the version is not a claim to the language.** ADQL 2.1 makes the geometry,
+/// `CAST`, `COALESCE`, `ILIKE`, `WITH`, the set operators and `OFFSET` each optional, so
+/// this is where a client learns what it may write — TOPCAT offers what is here and not
+/// what is missing. A partial set is said by listing the forms rather than by leaving the
+/// type out, which is what the geometry needs: five of the thirteen forms that type covers
+/// are answered, and the rest are refused by name.
+///
+/// Every entry was measured against a running service. Reading it off the code would
+/// declare what this crate registers rather than what a query gets, and most of these come
+/// from DataFusion rather than from anything written here.
+const LANGUAGE_FEATURES: &[(&str, &[&str])] = &[
+    (
+        "ivo://ivoa.net/std/tapregext#features-adqlgeo",
+        &["POINT", "CIRCLE", "CONTAINS", "INTERSECTS", "DISTANCE"],
+    ),
+    (
+        "ivo://ivoa.net/std/tapregext#features-adql-string",
+        &["LOWER", "UPPER", "ILIKE"],
+    ),
+    (
+        "ivo://ivoa.net/std/tapregext#features-adql-common-table",
+        &["WITH"],
+    ),
+    (
+        "ivo://ivoa.net/std/tapregext#features-adql-sets",
+        &["UNION", "EXCEPT", "INTERSECT"],
+    ),
+    ("ivo://ivoa.net/std/tapregext#features-adql-type", &["CAST"]),
+    (
+        "ivo://ivoa.net/std/tapregext#features-adql-conditional",
+        &["COALESCE"],
+    ),
+    (
+        "ivo://ivoa.net/std/tapregext#features-adql-offset",
+        &["OFFSET"],
+    ),
+];
+
+/// Where a function this service has beyond the language is declared.
+const UDF_FEATURE: &str = "ivo://ivoa.net/std/tapregext#features-udf";
+
+/// Those functions, as a signature and what it does — the form TAPRegExt asks a UDF to
+/// take, and what a client shows a user who is looking for it.
+const UDFS: &[(&str, &str)] = &[(
+    "MOC(serialization VARCHAR) -> REGION",
+    "A Multi-Order Coverage map as a region, in IVOA's ASCII serialization: \
+     MOC('4/30-33 38 52'). Compared with CONTAINS like any other shape, and tested \
+     against the table's HEALPix column rather than its coordinates.",
+)];
 
 /// Is the service up.
 ///
@@ -77,15 +131,35 @@ pub(in crate::app) async fn capabilities(
         "<capability xsi:type=\"tr:TableAccess\" standardID=\"ivo://ivoa.net/std/TAP\">\n",
     );
     interface(&mut out, &base, "base", Some("1.1"));
-    // Every version this service will answer a LANG of, and the one it implements. A
-    // client reads the list to decide whether its own query will be understood.
+    // Both versions, because a `LANG` of either is answered. 2.1 is what is implemented and
+    // 2.0 is what it also reads — everything that standard wrote is valid 2.1, the
+    // coordinate system argument of a geometry included.
     out.push_str("<language>\n<name>ADQL</name>\n");
-    out.push_str(
-        "<version ivo-id=\"ivo://ivoa.net/std/ADQL#v2.1\">2.1</version>\n\
-         <description>ADQL 2.1. Geometry is CIRCLE, POINT, CONTAINS, INTERSECTS, DISTANCE \
-         and MOC; BOX, POLYGON, REGION, AREA, CENTROID, COORD1, COORD2 and COORDSYS are \
-         refused by name.</description>\n",
+    let _ = write!(
+        out,
+        "<version ivo-id=\"ivo://ivoa.net/std/ADQL#v{version}\">{version}</version>\n\
+         <version ivo-id=\"ivo://ivoa.net/std/ADQL#v{earlier}\">{earlier}</version>\n",
+        version = language::VERSION,
+        earlier = language::EARLIER_VERSION,
     );
+    out.push_str("<description>ADQL 2.1, reading 2.0 as well.</description>\n");
+    for (feature, forms) in LANGUAGE_FEATURES {
+        let _ = writeln!(out, "<languageFeatures type=\"{feature}\">");
+        for form in *forms {
+            let _ = write!(out, "<feature>\n<form>{form}</form>\n</feature>\n");
+        }
+        out.push_str("</languageFeatures>\n");
+    }
+    let _ = writeln!(out, "<languageFeatures type=\"{UDF_FEATURE}\">");
+    for (signature, description) in UDFS {
+        let _ = write!(
+            out,
+            "<feature>\n<form>{}</form>\n<description>{}</description>\n</feature>\n",
+            escape(signature),
+            escape(description)
+        );
+    }
+    out.push_str("</languageFeatures>\n");
     out.push_str("</language>\n");
     // Derived from the one list the query resource reads, so the document cannot offer a
     // format a request would then be refused for asking about.

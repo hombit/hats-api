@@ -14,7 +14,7 @@ Release dates are in the UTC time zone.
 - `{api.prefix}/tap/sync`, `GET` and `POST`, taking `QUERY`, `LANG`, `RESPONSEFORMAT`, `FORMAT`, `MAXREC`, `RUNID` and `REQUEST`. [#68](https://github.com/hombit/hats-api/pull/68)
 - `{api.prefix}/tap/capabilities`, `/tap/availability`, `/tap/tables` and `/tap/tables/{name}`. [#68](https://github.com/hombit/hats-api/pull/68)
 - `TAP_SCHEMA.schemas`, `.tables`, `.columns`, `.keys` and `.key_columns`, queryable through `/tap/sync`. [#68](https://github.com/hombit/hats-api/pull/68)
-- ADQL 2.0's coordinate system argument, `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
+- The optional coordinate system argument of an ADQL geometry, as in `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 

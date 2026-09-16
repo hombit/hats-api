@@ -401,7 +401,29 @@ async fn capabilities_declare_what_is_there_and_nothing_else() {
         );
     }
     assert!(body.contains("<name>ADQL</name>"), "{body}");
-    assert!(body.contains("2.1</version>"), "{body}");
+    // Both versions, because a LANG of either is answered.
+    assert!(body.contains(">2.1</version>"), "{body}");
+    assert!(body.contains(">2.0</version>"), "{body}");
+    // The optional features that answer, and only the forms of them that do.
+    for declared in [
+        "#features-adqlgeo",
+        "#features-adql-sets",
+        "<form>CONTAINS</form>",
+        "<form>OFFSET</form>",
+        "#features-udf",
+    ] {
+        assert!(
+            body.contains(declared),
+            "{declared} is not declared: {body}"
+        );
+    }
+    for absent in [
+        "<form>BOX</form>",
+        "<form>POLYGON</form>",
+        "#features-adql-unit",
+    ] {
+        assert!(!body.contains(absent), "{absent} is declared: {body}");
+    }
     // Every format the query resource answers, and no other.
     for mime in [
         "application/x-votable+xml",

@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::adql::language;
 use crate::error::ApiError;
 
 /// Every name this service reads.
@@ -38,14 +39,6 @@ const TAKEN: [&str; 7] = [
 /// somebody who did exactly what the standard describes. The capabilities document offers
 /// no upload method, so a client that read it does not send one.
 const NOT_IMPLEMENTED: [&str; 1] = ["UPLOAD"];
-
-/// The query languages `LANG` may name.
-///
-/// TAP §2.7.1 makes the parameter mandatory — "the client must provide a value" — and lets
-/// the client write a version after the name. ADQL 2.1 is what is implemented, and a
-/// request for 2.0 is answered by it: 2.1 is the later version of the one language, and
-/// the geometry 2.0 had that this service does not answer is refused by name either way.
-const LANGUAGES: [&str; 3] = ["ADQL", "ADQL-2.0", "ADQL-2.1"];
 
 /// The one value `REQUEST` may take.
 const DO_QUERY: &str = "doQuery";
@@ -115,28 +108,17 @@ impl Parameters {
 
 /// `LANG`, which is required and names the query language.
 ///
-/// Matched case-insensitively. DALI §3.1 makes only the *name* insensitive, so this is a
-/// choice: `adql` has exactly one reading, and refusing it would refuse a query every other
-/// service answers.
+/// Which values are taken is [`adql::language`]'s, so the `lang` of this service's own ADQL
+/// route and this parameter answer to the same three.
 fn language(asked: Option<&str>) -> Result<(), ApiError> {
-    let taken = || LANGUAGES.join(", ");
     let Some(asked) = asked else {
         return Err(ApiError::bad_request(format!(
             "LANG says which query language the statement is written in, and is required; \
              this service answers {}",
-            taken()
+            language::ACCEPTED.join(", ")
         )));
     };
-    match LANGUAGES
-        .iter()
-        .any(|known| known.eq_ignore_ascii_case(asked.trim()))
-    {
-        true => Ok(()),
-        false => Err(ApiError::bad_request(format!(
-            "LANG {asked:?} is not a language this service answers; it answers {}",
-            taken()
-        ))),
-    }
+    language::check("LANG", asked)
 }
 
 /// `REQUEST`, which TAP 1.1 removed (Appendix A.3) and a 1.0-era client still sends.

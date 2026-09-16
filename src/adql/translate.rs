@@ -37,46 +37,22 @@ use crate::error::ApiError;
 /// The field a statement arrives in, and what every refusal here names first.
 const FIELD: &str = "query";
 
-/// ADQL's geometry that this service does not answer, and why — said by name, since none of
-/// these is a function DataFusion has and its own account would be of an unknown function.
+/// Functions ADQL defines and this service does not implement.
 ///
-/// The geometry functions are an optional ADQL feature declared one form at a time, so
-/// refusing these costs the service nothing it claims.
-const REFUSED: &[(&str, &str)] = &[
-    (
-        "AREA",
-        "it takes a geometry as a value, and no column here holds one",
-    ),
-    (
-        "BOX",
-        "its edges are great circles, where the zone region's run along parallels; near a pole \
-         the two differ by degrees",
-    ),
-    (
-        "CENTROID",
-        "it takes a geometry as a value, and no column here holds one",
-    ),
-    (
-        "COORD1",
-        "a position is two columns of the file; name the column",
-    ),
-    (
-        "COORD2",
-        "a position is two columns of the file; name the column",
-    ),
-    (
-        "COORDSYS",
-        "positions here are degrees in one frame and nothing is converted between frames",
-    ),
-    (
-        "IVO_GEOM_TRANSFORM",
-        "positions here are degrees in one frame and nothing is converted between frames",
-    ),
-    ("POLYGON", "no polygon is tested here yet"),
-    (
-        "REGION",
-        "it takes an STC-S string, which ADQL 2.1 deprecated",
-    ),
+/// Refused by name so the caller reads that, rather than DataFusion's account of a function it
+/// has never heard of. Each belongs to an optional feature, which the capabilities document
+/// does not declare.
+const NOT_IMPLEMENTED: &[&str] = &[
+    "AREA",
+    "BOX",
+    "CENTROID",
+    "COORD1",
+    "COORD2",
+    "COORDSYS",
+    "IN_UNIT",
+    "IVO_GEOM_TRANSFORM",
+    "POLYGON",
+    "REGION",
 ];
 
 /// ADQL's names for functions DataFusion registers under another name.
@@ -119,21 +95,21 @@ pub fn translate(query: &str, limits: sql::Limits) -> Result<Translated, ApiErro
     Ok(Translated { statement, tables })
 }
 
-/// The geometry that carried a coordinate system in ADQL 2.0.
+/// The geometry that takes a coordinate system as its first argument.
 const WITH_COORDINATE_SYSTEM: [&str; 4] = ["POINT", "CIRCLE", "BOX", "POLYGON"];
 
-/// The coordinate systems this service answers in, as ADQL 2.0 spells them.
+/// The coordinate systems this service answers in, as ADQL spells them.
 ///
-/// The empty string and `UNKNOWN` are that standard's own words for "whatever the service
+/// The empty string and `UNKNOWN` are the standard's own words for "whatever the service
 /// works in", which here is ICRS — the frame HATS positions are written in.
 const SYSTEMS: [&str; 3] = ["", "ICRS", "UNKNOWN"];
 
 /// Take the coordinate system off a geometry, and refuse one this service cannot answer.
 ///
-/// ADQL 2.0 wrote the system as the first argument — `POINT('ICRS', ra, dec)` — and 2.1
-/// removed it. Both arrive: a query saved against an archive that has been answering since
-/// 2.0 carries one, which is most of the queries anybody has written down, and `LANG` may
-/// name either version.
+/// The argument is optional: ADQL 2.0 required it, and 2.1 §4.2.5 deprecated it and made it
+/// optional rather than removing it. So `POINT('ICRS', ra, dec)` and `POINT(ra, dec)` are
+/// both valid 2.1, and both arrive — an archive has been answering the first since 2.0, so
+/// it is what most saved queries carry.
 ///
 /// **A system this service does not work in is refused rather than dropped.** Reading
 /// `GALACTIC` as if it were ICRS would answer a region somewhere else on the sky with the
@@ -141,7 +117,7 @@ const SYSTEMS: [&str; 3] = ["", "ICRS", "UNKNOWN"];
 /// response would mark.
 ///
 /// A string literal is what says the first argument is a system: a coordinate never is one.
-/// ADQL 2.0 also let it be a column reference, which is left alone and fails to plan as an
+/// ADQL also lets it be a column reference, which is left alone and fails to plan as an
 /// argument of the wrong type — nothing here can know what such a column holds.
 fn drop_coordinate_systems(statement: &mut Statement) -> Result<(), ApiError> {
     let broke = visit_expressions_mut(statement, |node| {
@@ -251,9 +227,9 @@ impl VisitorMut for Translator {
         let Some(name) = adql_name(call) else {
             return ControlFlow::Continue(());
         };
-        if let Some((_, reason)) = REFUSED.iter().find(|(refused, _)| *refused == name) {
+        if NOT_IMPLEMENTED.contains(&name.as_str()) {
             return ControlFlow::Break(ApiError::bad_request(format!(
-                "{FIELD}: {name} is not answered here — {reason}"
+                "{FIELD}: {name} is not implemented"
             )));
         }
         match name.as_str() {
@@ -815,8 +791,8 @@ mod tests {
         );
     }
 
-    /// ADQL 2.0's spelling, which is what every query anyone has saved against an archive
-    /// carries — and the one case that must not be read as ICRS anyway.
+    /// The argument is optional, so both spellings answer — and a query may carry it on
+    /// one geometry and not the next.
     #[test]
     fn a_geometry_may_name_its_coordinate_system() {
         let expected =
@@ -826,8 +802,10 @@ mod tests {
             // The system on one side and not the other, which is what a hand-edited query
             // ends up as.
             "1 = CONTAINS(POINT('icrs', ra, dec), CIRCLE(45.0, -20.0, 0.1))",
-            // ADQL 2.0's own words for "whatever the service works in".
+            // The standard's own words for "whatever the service works in".
             "1 = CONTAINS(POINT('', ra, dec), CIRCLE('UNKNOWN', 45.0, -20.0, 0.1))",
+            // And omitted entirely, which is what 2.1 recommends.
+            "1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))",
         ] {
             assert_eq!(
                 translated(&format!("SELECT ra FROM gaia WHERE {predicate}")),
@@ -856,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn a_geometry_this_service_does_not_answer_is_refused_by_name() {
+    fn a_function_this_service_does_not_implement_is_refused_by_name() {
         for (name, adql) in [
             (
                 "BOX",
@@ -867,10 +845,11 @@ mod tests {
                 "SELECT ra FROM t WHERE 1 = CONTAINS(POINT(ra, dec), POLYGON(1, 2, 3, 4, 5, 6))",
             ),
             ("AREA", "SELECT AREA(CIRCLE(1, 2, 3)) FROM t"),
+            ("IN_UNIT", "SELECT IN_UNIT(ra, 'rad') FROM t"),
         ] {
             let refusal = refusal(adql);
             assert!(
-                refusal.contains(name) && refusal.contains("not answered"),
+                refusal.contains(name) && refusal.contains("not implemented"),
                 "{refusal}"
             );
         }
