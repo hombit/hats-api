@@ -41,38 +41,6 @@ AREAS = {
 }
 
 
-def pytest_addoption(parser):
-    group = parser.getgroup("tap-conformance")
-    group.addoption(
-        "--base-url",
-        default=None,
-        help="a TAP service that is already running; nothing is started",
-    )
-    group.addoption(
-        "--server-binary",
-        default=str(REPOSITORY / "target" / "debug" / "hats-api"),
-        help="the service to start when --base-url is not given",
-    )
-    group.addoption(
-        "--data", default=str(HERE / "data"), help="what fetch.py downloaded"
-    )
-    group.addoption(
-        "--report-dir",
-        default=str(HERE / "report"),
-        help="where the report and the tools' own output go",
-    )
-    group.addoption("--stilts", default=None, help="the stilts command")
-    group.addoption("--stilts-jar", default=None, help="stilts.jar, run through java")
-    group.addoption(
-        "--skip-taplint", action="store_true", help="do not run the STILTS validator"
-    )
-    group.addoption(
-        "--strict-conformance",
-        action="store_true",
-        help="exit non-zero when a check fails, rather than reporting it",
-    )
-
-
 @pytest.fixture(scope="session")
 def report_dir(pytestconfig) -> Path:
     directory = Path(pytestconfig.getoption("--report-dir"))
@@ -123,6 +91,14 @@ def service(pytestconfig, data, manifest, report_dir):
         binary, catalogs if catalogs.is_dir() else None, tables, report_dir
     )
     yield started
+    # Before stopping it: a service that is already gone went on its own, which is a
+    # crash. Every check after that point answered nothing, so the report is not one to
+    # read as a score — and the run says so by exiting non-zero.
+    if started.process is not None and started.process.poll() is not None:
+        BROKEN.append(
+            f"the service exited during the run with status {started.process.returncode}; "
+            f"its output is in {started.log}"
+        )
     started.stop()
 
 
@@ -229,6 +205,13 @@ def rows_query(queryable):
 
 
 @pytest.fixture(scope="session")
+def stilts_command(pytestconfig) -> list[str] | None:
+    """How to invoke STILTS here, for the checks that use it as a user would."""
+    jar = pytestconfig.getoption("--stilts-jar")
+    return validator.command(pytestconfig.getoption("--stilts"), Path(jar) if jar else None)
+
+
+@pytest.fixture(scope="session")
 def taplint_run(pytestconfig, service, report_dir) -> validator.Run:
     """The validator, run once for the whole session."""
     if pytestconfig.getoption("--skip-taplint"):
@@ -263,6 +246,15 @@ COLLECTED: dict[str, reporting.Result] = {}
 AREA_OF: dict[str, str] = {}
 ASKS_OF: dict[str, list[str]] = {}
 DESCRIPTION_OF: dict[str, str] = {}
+
+#: Why this run cannot be believed, if it cannot.
+#:
+#: A check that fails is the output of this suite and never a reason to go red — a
+#: service is expected to be some way short of the whole of TAP. Two things are not
+#: that, and both have to be loud: the service under test falling over, and the suite
+#: itself failing to run. Either leaves a report that reads like a service missing
+#: features when what happened is that nobody asked it anything.
+BROKEN: list[str] = []
 
 
 def asked_by(item) -> list[str]:
@@ -342,6 +334,16 @@ def pytest_runtest_logreport(report):
     outcome = outcome_of(report)
     if outcome is None:
         return
+    # An exception in a fixture rather than in a check. The suite could not put its
+    # question, which says nothing about the service's conformance and everything about
+    # something being broken — so it is kept apart from the failures and is what makes
+    # the run exit non-zero.
+    if report.when in ("setup", "teardown") and report.outcome == "failed":
+        # By cause rather than by test: one fixture that raises errors every check that
+        # wanted it, and ninety lines saying so is one fact written ninety times.
+        reason = f"a fixture raised in {report.when}: {detail_of(report)}"[:400]
+        if reason not in BROKEN:
+            BROKEN.append(reason)
     existing = COLLECTED.get(report.nodeid)
     # A test that failed in its call and again in teardown keeps the first word on it.
     if existing and existing.outcome == "fail":
@@ -363,9 +365,17 @@ def short(nodeid: str) -> str:
     return f"{file}/{name.removeprefix('test_')}"
 
 
+#: pytest's own statuses for a session that did not get to ask its questions:
+#: interrupted, an internal error, and a command line it could not use.
+COULD_NOT_RUN = {2, 3, 4}
+
+
 def pytest_sessionfinish(session, exitstatus):
     config = session.config
     if not COLLECTED:
+        # Nothing was recorded at all, which is never a conformance result: either the
+        # suite could not start or it was interrupted. Whatever pytest made of that
+        # stands.
         return
     tools = {}
     try:
@@ -387,11 +397,22 @@ def pytest_sessionfinish(session, exitstatus):
         tools=tools,
         provenance=getattr(config, "_provenance", ""),
         results=[COLLECTED[key] for key in sorted(COLLECTED)],
+        broken=list(BROKEN),
     )
     written = reporting.write(built, Path(config.getoption("--report-dir")))
     config._report_summary = (built.summary(), written)
+    config._broken = list(BROKEN)
 
-    if not config.getoption("--strict-conformance"):
+    # A failing check is this suite's output, so the run is green however many of them
+    # there are — nobody expects the whole of TAP, and a red mark that is always there
+    # is one everybody learns to scroll past. What must go red is a run whose report
+    # cannot be believed: the service fell over, a fixture raised, or pytest never got
+    # to the questions at all. Those look identical to "implements nothing" in the
+    # report, and telling them apart is the whole reason this is not just `|| true` in
+    # the workflow.
+    if BROKEN or exitstatus in COULD_NOT_RUN:
+        session.exitstatus = 1
+    elif not config.getoption("--strict-conformance"):
         session.exitstatus = 0
 
 
@@ -422,3 +443,5 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         terminalreporter.write_sep("=", "TAP conformance")
         terminalreporter.write_line(summary[0])
         terminalreporter.write_line(f"report: {summary[1]}")
+    for broken in getattr(config, "_broken", []):
+        terminalreporter.write_line(f"NOT A CONFORMANCE RESULT: {broken}", red=True)

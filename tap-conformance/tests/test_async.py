@@ -1,13 +1,12 @@
 """The asynchronous query resource — TAP 1.1 section 2.2, UWS 1.1.
 
-TAP requires it, and this service does not have it: a query too slow to answer inside
-one request has nowhere to go here, and the answer is to make the query smaller. These
-tests are marked as expected failures so that a report says so in as many words rather
-than losing it among the things nobody decided.
+TAP requires it. A service that has no `/async` fails these, and that is all this file
+says: whether some particular service has decided not to implement it is a fact about
+that service's plans, and writing it down here would make the suite agree with whatever
+was built — which is the one thing it is for not doing.
 
-They are not skipped, which is the difference that matters. A skip says nothing was
-asked; an expected failure says it was asked and came back the way it was meant to —
-and if async ever answers, the report says that instead.
+What is worth asking either way is the last test: a feature that is absent has one
+correct way to be absent, and hanging or a 500 is not it.
 """
 
 from __future__ import annotations
@@ -19,10 +18,7 @@ import pytest
 
 from tap_conformance.taplint import assert_clean
 
-ABSENT = "this service answers synchronously only"
 
-
-@pytest.mark.xfail(reason=ABSENT, strict=False)
 def test_job_submission(tap, rows_query, record_property):
     """A query submitted as a job runs and its rows can be collected."""
     found = tap.run_async(rows_query(2)).to_table()
@@ -52,7 +48,6 @@ def test_the_resource_is_cleanly_absent(service, record_property):
 
 
 @pytest.mark.taplint("QAS")
-@pytest.mark.xfail(reason=ABSENT, strict=False)
 def test_queries(stage, record_property):
     """Queries made in async mode are answered."""
     record_property("detail", stage.summarize())
@@ -60,7 +55,6 @@ def test_queries(stage, record_property):
 
 
 @pytest.mark.taplint("UWS")
-@pytest.mark.xfail(reason=ABSENT, strict=False)
 def test_uws_job_model(stage, record_property):
     """The job's phases, its polling and its destruction are UWS's."""
     record_property("detail", stage.summarize())

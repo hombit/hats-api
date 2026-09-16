@@ -39,7 +39,7 @@ from astropy.table import Table
 
 # Bumped whenever the shape of what this writes changes, so a stale cached copy is
 # refetched rather than read as the current one.
-MANIFEST_VERSION = 4
+MANIFEST_VERSION = 5
 
 # The reference service: the golden standard every answer here is read against.
 # Chosen for answering this catalog correctly for a decade, not for holding it.
@@ -112,19 +112,23 @@ TABLES = [
         "note": "the whole of Gaia DR3 as HATS, public on AWS",
     },
     {
-        "key": "ztf_dr24",
-        "name": "ztf.dr24_object",
+        "key": "ztf_dr24_lc",
+        "name": "ztf.dr24_lc",
         "kind": "real",
-        "url": "s3://irsa-fornax-testdata/ZTF/dr24/object",
-        "ra_column": "ra",
-        "dec_column": "dec",
+        # The light-curve catalog, not the object one: the objects carry a position and
+        # a few counts, and the light curves are what makes this table worth publishing
+        # here. It is also the narrower of the two at fourteen columns, and public —
+        # the object catalog's bucket refuses an anonymous read.
+        "url": "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats/ztf_dr24_lc-hats",
+        "ra_column": "objra",
+        "dec_column": "objdec",
         "id_column": "objectid",
         # No reference service answers this one: its light curves are a nested column,
         # which is a shape TAP has no reference implementation of. What it is published
         # for is what a client makes of the metadata of such a table.
         "compare": False,
         "nested": True,
-        "note": "ZTF DR24 objects, whose light curves are a nested column",
+        "note": "ZTF DR24 light curves, which are a nested column",
     },
 ]
 

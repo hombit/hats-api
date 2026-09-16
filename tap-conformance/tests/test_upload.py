@@ -5,7 +5,9 @@ optional feature: a service declares in its capabilities whether it has one, and
 that declares none is conforming without it.
 
 So there are two questions here, and only the second is a conformance question: does
-upload work, and does the service's answer about upload match what it declared.
+upload work, and does the service's answer about upload match what it declared. The
+first is reported as it comes — a service that has no upload fails it, which is a fact
+about what a client can do here rather than a verdict on anyone.
 """
 
 from __future__ import annotations
@@ -16,14 +18,11 @@ from astropy.table import Table
 
 from tap_conformance.taplint import assert_clean
 
-ABSENT = "this service declares no upload method"
-
 
 def declared(tap) -> list[str]:
     return [str(method) for method in (tap.upload_methods or [])]
 
 
-@pytest.mark.xfail(reason=ABSENT, strict=False)
 def test_inline_upload(tap, record_property):
     """A table uploaded with the query is queryable as TAP_UPLOAD."""
     uploaded = Table({"id": np.arange(3), "x": np.arange(3) * 1.5})
@@ -55,7 +54,6 @@ def test_capabilities_agree_with_behaviour(tap, record_property):
 
 
 @pytest.mark.taplint("UPL")
-@pytest.mark.xfail(reason=ABSENT, strict=False)
 def test_queries_with_uploads(stage, record_property):
     """Queries carrying an uploaded table are answered."""
     record_property("detail", stage.summarize())

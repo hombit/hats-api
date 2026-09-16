@@ -42,7 +42,9 @@ testpaths = ["tests"]
 # A conformance run is a report rather than a gate, so a failure is data: the short
 # traceback keeps a failure to the assertion that carries it, and no cache is left
 # behind by a run whose whole output is written somewhere else.
-addopts = "-ra --tb=short -p no:cacheprovider"
+# `-p tap_conformance.plugin` is what registers this suite's own options, and it has to
+# be here rather than in a conftest — see that module for why a conftest is too late.
+addopts = "-ra --tb=short -p no:cacheprovider -p tap_conformance.plugin"
 markers = [
     "area(name): the part of the standards a test is about, as the report groups them",
     "taplint(stage): the STILTS taplint stage a test reads, run once per session",

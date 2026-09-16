@@ -13,18 +13,24 @@ from pathlib import Path
 
 #: The outcomes, in the order a summary line reads them.
 #:
-#: `xfail` is the one that needs saying out loud: a check of something this service is
-#: known not to offer, which failed the way it was expected to. It is not a pass — the
-#: standard still asks for the thing — and it is not a failure anyone has to act on.
-#: Counting the two together would hide whichever is the smaller number. `xpass` is its
-#: opposite and is news: something documented as absent has started answering.
+#: There is no "expected failure" among them, and there is no marking a check as one.
+#: Whether a service has decided not to implement something is a fact about that
+#: service's plans; a suite that knew about those decisions would be one written against
+#: an implementation, which is the single thing this is for not being. A MUST that goes
+#: unanswered is a failure here whoever is asked and whyever it is missing. What to do
+#: about it — implement it, or write down that it is deliberate — is a decision made
+#: somewhere a measurement cannot reach.
+#:
+#: `xpass` and `xfail` stay in the vocabulary because pytest can still produce them if
+#: a check is ever marked, and a report that dropped them on the floor would be
+#: reporting less than it was told. Nothing here marks any.
 OUTCOMES = ["pass", "fail", "xpass", "xfail", "skip"]
 
 WORDS = {
     "pass": "pass",
     "fail": "fail",
-    "xpass": "unexpectedly answered",
-    "xfail": "expected fail",
+    "xpass": "answered despite being marked absent",
+    "xfail": "marked absent",
     "skip": "skip",
 }
 
@@ -57,6 +63,10 @@ class Report:
     tools: dict[str, str] = field(default_factory=dict)
     provenance: str = ""
     results: list[Result] = field(default_factory=list)
+    #: Why this run cannot be read as a score, if it cannot: the service fell over, or
+    #: the suite did. Counts of failures mean nothing then, and the report has to say so
+    #: before the numbers rather than after them.
+    broken: list[str] = field(default_factory=list)
     generated: str = field(
         default_factory=lambda: dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     )
@@ -101,6 +111,7 @@ class Report:
                     "target": self.target,
                     "tools": self.tools,
                     "provenance": self.provenance,
+                    "broken": self.broken,
                     "totals": {
                         outcome: self.count(outcome) for outcome in OUTCOMES
                     },
@@ -125,34 +136,40 @@ class Report:
         it would reach it, so the comment drops that table and points at the artifact.
         """
         tools = " · ".join(f"{name} {version}" for name, version in sorted(self.tools.items()))
-        out = [
-            "## TAP conformance",
-            "",
+        out = ["## TAP conformance", ""]
+        if self.broken:
+            out += [
+                "> [!WARNING]",
+                "> **This run is not a conformance result.** Something below did not "
+                "get as far as asking, so the counts say nothing about the service:",
+                ">",
+                *[f"> - {cell(reason, 400)}" for reason in self.broken],
+                "",
+            ]
+        out += [
             f"**{self.summary()}**",
             "",
             f"`{self.target}` · {tools} · {self.generated}",
         ]
         if self.provenance:
             out += ["", f"_{self.provenance}_"]
-        out += [
-            "",
-            "| | " + " | ".join(WORDS[outcome] for outcome in OUTCOMES) + " |",
-            "|---|" + "--:|" * len(OUTCOMES),
+        # Only the outcomes this run produced get a column. An empty one is a column
+        # every reader has to work out the meaning of to find it says nothing.
+        shown = [
+            outcome
+            for outcome in OUTCOMES
+            if outcome in ("pass", "fail", "skip") or self.count(outcome)
         ]
+        header = "| " + " | ".join(WORDS[outcome] for outcome in shown) + " |"
+        rule = "|---|" + "--:|" * len(shown)
+
+        out += ["", f"| |{header[1:]}", rule]
         for question, asked in QUESTIONS.items():
-            counts = " | ".join(
-                str(self.asking(question, outcome)) for outcome in OUTCOMES
-            )
+            counts = " | ".join(str(self.asking(question, outcome)) for outcome in shown)
             out.append(f"| {asked} | {counts} |")
-        out += [
-            "",
-            "| area | " + " | ".join(WORDS[outcome] for outcome in OUTCOMES) + " |",
-            "|---|" + "--:|" * len(OUTCOMES),
-        ]
+        out += ["", f"| area |{header[1:]}", rule]
         for area in self.areas():
-            counts = " | ".join(
-                str(self.count(outcome, area)) for outcome in OUTCOMES
-            )
+            counts = " | ".join(str(self.count(outcome, area)) for outcome in shown)
             out.append(f"| {area} | {counts} |")
 
         failures = [result for result in self.results if result.outcome == "fail"]

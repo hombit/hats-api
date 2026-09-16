@@ -82,13 +82,20 @@ pytest's own vocabulary, which is already the right one:
 
 - **pass** — the standard asks for it and the service does it.
 - **fail** — the standard asks for it and the service does not.
-- **expected fail** — something this service is documented as not offering, behaving
-  the way it is documented to. Not a pass, because the standard still asks for it, and
-  not something anyone has to act on. `/async` and table upload are these.
-- **unexpectedly answered** — an expected failure that passed. Something documented as
-  absent has started working, and the documentation is now wrong.
 - **skip** — the question could not be put. A table that is not published, a validator
   that is not installed, reference answers that were never downloaded.
+
+There is deliberately no "expected failure". Whether a service has decided not to
+implement something is a fact about that service's plans, and a suite that knew about
+those decisions would be one written against an implementation. A MUST that goes
+unanswered is a failure here whoever is asked — `/async` included — and what to do
+about it is a decision made somewhere a measurement cannot reach.
+
+A run exits zero however many checks fail, because that is the output. It exits
+non-zero for the two things that are not results: the service under test falling over,
+and the suite failing to run. Both leave a report that reads like a service missing
+every feature when what happened is that nobody asked it anything, so the report says so
+above the numbers and the run goes red.
 
 ## What is asked, and where
 
@@ -120,7 +127,7 @@ Three tables are published, and only one of them is downloaded.
 |---|---|
 | `gaia_dr3.gaia_source` | the whole of Gaia DR3 as HATS, public on AWS. What the comparisons are really about |
 | `sample.gaia_dr3` | a 0.5° cone of the same catalog, imported by `hats-import` from the reference service's own answer. It is what the validator works over — asking for whole rows of a 153-column catalog whose partitions are hundreds of megabytes is a slow way to find out whether a VOTable is well formed — and it keeps the suite runnable when S3 is having a bad morning |
-| `ztf.dr24_object` | ZTF DR24, whose light curves are a nested column. Published for what a client makes of the metadata of such a table; no reference service answers anything like it |
+| `ztf.dr24_lc` | ZTF DR24 light curves, which are a nested column. Published for what a client makes of the metadata of such a table; no reference service answers anything like it. The light-curve catalog rather than the object one — the objects carry a position and some counts, and the nesting is the point |
 
 `tap-conformance-fetch` downloads the reference answers — the same ADQL, put to the ESA
 Gaia Archive — and builds the sample out of the rows it fetched. Every reference query
