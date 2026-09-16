@@ -41,7 +41,7 @@ jobs:
           enable-cache: true
           cache-dependency-glob: tap-conformance/uv.lock
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -52,7 +52,7 @@ jobs:
         run: echo "key=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
 
       - name: cache stilts.jar
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/stilts/stilts.jar
           key: stilts-${{ runner.os }}-${{ steps.month.outputs.key }}
@@ -67,7 +67,7 @@ jobs:
 
       - name: cache the fetched data
         id: data-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tap-conformance/data
           key: tap-data-${{ hashFiles('tap-conformance/src/tap_conformance/fetch.py') }}
@@ -88,7 +88,7 @@ jobs:
 
       - name: upload the report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: tap-conformance
           path: tap-conformance/report/
@@ -100,7 +100,7 @@ jobs:
           always() && github.event_name == 'pull_request'
           && hashFiles('tap-conformance/report/comment.md') != ''
         continue-on-error: true
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs');
