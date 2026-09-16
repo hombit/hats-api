@@ -18,8 +18,16 @@ def test_document(tap, record_property):
     assert found, "the examples document is empty"
 
 
+#: How many examples are run. A service is free to publish a hundred, and each one is a
+#: query against a real catalog — so without a cap this single check decides how long a
+#: run takes, and a service with a long menu of slow examples stalls it for as long as
+#: it likes. The first few answer the question either way: an examples document that is
+#: broken is broken near the top of it.
+MOST = 10
+
+
 def test_examples_run(tap, record_property):
-    """Every published example is a query that runs.
+    """The published examples are queries that run.
 
     An example that fails is worse than no example: it is the first thing a new user
     tries, and what it teaches them is that the service is broken.
@@ -27,9 +35,10 @@ def test_examples_run(tap, record_property):
     pyvo hands back each example as a query ready to send, so what is run here is what
     a client would run from its menu rather than a reading of the markup.
     """
-    found = tap.examples
-    if not found:
+    published = tap.examples
+    if not published:
         pytest.skip("no examples to run")
+    found = published[:MOST]
     broken = []
     for number, example in enumerate(found, start=1):
         query = example.get("QUERY")

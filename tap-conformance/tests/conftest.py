@@ -311,6 +311,35 @@ def outcome_of(entry) -> str | None:
     return None
 
 
+#: Exceptions that are this suite being wrong rather than a service being wrong.
+#:
+#: A check reports what it found by failing an assertion, and it is allowed to fail by
+#: letting a client's own exception through — a `DALQueryError` is how pyvo says the
+#: service refused something, which is a finding. None of these is: a name that does not
+#: exist, a type that does not fit, a module that is not installed. They are bugs in the
+#: suite, they say nothing about the service, and a run carrying one is not a score.
+OUR_MISTAKES = (
+    "NameError",
+    "UnboundLocalError",
+    "AttributeError",
+    "TypeError",
+    "IndexError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "SyntaxError",
+    "IndentationError",
+    "RecursionError",
+    "NotImplementedError",
+)
+
+
+def wrote_this(entry) -> bool:
+    """Whether a failure is the suite's own fault rather than a finding."""
+    crash = getattr(entry.longrepr, "reprcrash", None)
+    message = getattr(crash, "message", "") or ""
+    return message.split(":", 1)[0].strip() in OUR_MISTAKES
+
+
 def detail_of(entry) -> str:
     """What the check found, which for a failure is the whole of why it failed."""
     recorded = [value for name, value in entry.user_properties if name == "detail"]
@@ -342,6 +371,10 @@ def pytest_runtest_logreport(report):
         # By cause rather than by test: one fixture that raises errors every check that
         # wanted it, and ninety lines saying so is one fact written ninety times.
         reason = f"a fixture raised in {report.when}: {detail_of(report)}"[:400]
+        if reason not in BROKEN:
+            BROKEN.append(reason)
+    if report.when == "call" and report.outcome == "failed" and wrote_this(report):
+        reason = f"{short(report.nodeid)} raised: {detail_of(report)}"[:400]
         if reason not in BROKEN:
             BROKEN.append(reason)
     existing = COLLECTED.get(report.nodeid)

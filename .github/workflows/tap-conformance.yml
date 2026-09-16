@@ -97,10 +97,15 @@ jobs:
       - name: build the service
         run: cargo build --bin hats-api
 
-      # `-c pyproject.toml` pins where pytest reads its configuration from. It works
-      # that out from the paths on the command line otherwise, and an option pointing
-      # outside this directory sends it looking in the repository root, where there is
-      # none — and then the suite's own options are unrecognised.
+      # This is the step that decides whether the job is green, and it is green for a
+      # service that answers very little: failing checks are the output. It goes red for
+      # the two things that are not results — the service under test falling over, and
+      # the suite failing to ask — which is also the only way the run finishes with no
+      # report to comment with.
+      #
+      # `-c pyproject.toml` names the configuration file rather than leaving pytest to
+      # find it from the paths on the command line, which it cannot do reliably here:
+      # every option this suite takes points outside the directory sooner or later.
       - name: run the suite
         working-directory: tap-conformance
         run: uv run pytest -c pyproject.toml --stilts-jar ~/stilts/stilts.jar
@@ -112,12 +117,23 @@ jobs:
           name: tap-conformance
           path: tap-conformance/report/
           retention-days: 30
+          # A run that wrote nothing has already failed the step above; a warning about
+          # an empty artifact on top of it says nothing further.
+          if-no-files-found: ignore
 
       # One comment per pull request, rewritten in place: a job that runs on every push
       # would otherwise leave a column of stale scores behind it. A fork's token cannot
       # write one, and that is not a failure of the run.
+      #
+      # `always()` so that a run whose checks failed still comments — that is the normal
+      # case and the whole output. What it must not do is comment when there is no
+      # report: a run that got that far did not measure anything, the step above has
+      # already failed the job, and a comment saying so would be a red job explaining
+      # itself twice in the place people read for the score.
       - name: comment on the pull request
-        if: always() && github.event_name == 'pull_request'
+        if: >-
+          always() && github.event_name == 'pull_request'
+          && hashFiles('tap-conformance/report/comment.md') != ''
         continue-on-error: true
         uses: actions/github-script@v8
         with:
@@ -125,9 +141,7 @@ jobs:
             const fs = require('fs');
             const marker = '<!-- tap-conformance -->';
             const path = 'tap-conformance/report/comment.md';
-            const body = marker + '\n' + (fs.existsSync(path)
-              ? fs.readFileSync(path, 'utf8')
-              : '## TAP conformance\n\nThe suite did not get as far as writing a report.');
+            const body = marker + '\n' + fs.readFileSync(path, 'utf8');
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
             const comments = await github.paginate(github.rest.issues.listComments,

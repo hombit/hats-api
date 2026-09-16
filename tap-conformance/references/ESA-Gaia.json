@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-16T09:53:08+00:00",
+  "generated": "2026-09-16T10:30:13+00:00",
   "target": "https://gea.esac.esa.int/tap-server/tap",
   "tools": {
     "pyvo": "1.9.1",
@@ -7,35 +7,36 @@
     "python": "3.14.0",
     "stilts": "skipped"
   },
-  "provenance": "reference answers from ESA Gaia Archive, fetched 2026-09-16T09:12:22+00:00",
+  "provenance": "reference answers from ESA Gaia Archive, fetched 2026-09-16T10:23:12+00:00",
+  "broken": [],
   "totals": {
-    "pass": 43,
+    "pass": 45,
     "fail": 5,
-    "xpass": 2,
+    "xpass": 0,
     "xfail": 0,
-    "skip": 41
+    "skip": 57
   },
   "questions": {
     "standard": {
-      "pass": 43,
+      "pass": 45,
       "fail": 5,
-      "xpass": 2,
+      "xpass": 0,
       "xfail": 0,
       "skip": 25
     },
     "clients": {
-      "pass": 42,
+      "pass": 44,
       "fail": 5,
-      "xpass": 2,
+      "xpass": 0,
       "xfail": 0,
-      "skip": 41
+      "skip": 57
     },
     "answers": {
       "pass": 0,
       "fail": 0,
       "xpass": 0,
       "xfail": 0,
-      "skip": 16
+      "skip": 32
     }
   },
   "checks": [
@@ -163,7 +164,7 @@
     {
       "id": "async/job_submission",
       "area": "async",
-      "outcome": "xpass",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
@@ -355,7 +356,7 @@
         "clients"
       ],
       "description": "pyvo turns the error document into an exception rather than an empty table.",
-      "detail": "DALQueryError: Cannot parse query 'SELECT FROM WHERE' for job '4d1cfbb0-b1b4-11f1-a4dd-bc97e148b76b-O': Encountered \" \"FROM\" \"FROM \"\" at line 1, column 8.\nWas expecting one of:\n    \"(\" ...\n    \"+\" ...\n    \"-\" ...\n  "
+      "detail": "DALQueryError: Cannot parse query 'SELECT FROM WHERE' for job '76170ca4-b1b9-11f1-a4dd-bc97e148b76b-O': Encountered \" \"FROM\" \"FROM \"\" at line 1, column 8.\nWas expecting one of:\n    \"(\" ...\n    \"+\" ...\n    \"-\" ...\n  "
     },
     {
       "id": "errors/the_message_says_something",
@@ -366,7 +367,7 @@
         "clients"
       ],
       "description": "The error names what was wrong with the query it was given.",
-      "detail": "<VOTABLE version=\"1.2\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.2\"> <RESOURCE type=\"results\"> <INFO name=\"QUERY_STATUS\" value=\"ERROR\"> Cannot parse query 'SELECT no_such_column FROM external.apassdr9' for job '4d7d4423-b1b4-11f1-a4dd-bc97e148b76b-O': 1 unresolved identifiers: no_such_column [l.1 c."
+      "detail": "<VOTABLE version=\"1.2\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.2\"> <RESOURCE type=\"results\"> <INFO name=\"QUERY_STATUS\" value=\"ERROR\"> Cannot parse query 'SELECT no_such_column FROM external.apassdr9' for job '767fb98c-b1b9-11f1-a4dd-bc97e148b76b-O': 1 unresolved identifiers: no_such_column [l.1 c."
     },
     {
       "id": "errors/unknown_column",
@@ -578,179 +579,355 @@
       "detail": "200, application/x-votable+xml"
     },
     {
-      "id": "reference_data/matches_the_reference[aggregate@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[aggregate@gaia_dr3.gaia_source:pyvo]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: gaia_dr3.gaia_source is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[aggregate@sample.gaia_dr3]",
+      "id": "reference_data/matches_the_reference[aggregate@gaia_dr3.gaia_source:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[aggregate@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[cone@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[aggregate@sample.gaia_dr3:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
-      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
-    },
-    {
-      "id": "reference_data/matches_the_reference[cone@sample.gaia_dr3]",
-      "area": "against a reference service",
-      "outcome": "skip",
-      "asks": [
-        "answers",
-        "clients"
-      ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[count@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[cone@gaia_dr3.gaia_source:pyvo]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: gaia_dr3.gaia_source is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[count@sample.gaia_dr3]",
+      "id": "reference_data/matches_the_reference[cone@gaia_dr3.gaia_source:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[cone@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[distance@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[cone@sample.gaia_dr3:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
-      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
-    },
-    {
-      "id": "reference_data/matches_the_reference[distance@sample.gaia_dr3]",
-      "area": "against a reference service",
-      "outcome": "skip",
-      "asks": [
-        "answers",
-        "clients"
-      ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[expression@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[count@gaia_dr3.gaia_source:pyvo]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: gaia_dr3.gaia_source is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[expression@sample.gaia_dr3]",
+      "id": "reference_data/matches_the_reference[count@gaia_dr3.gaia_source:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[count@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[filter@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[count@sample.gaia_dr3:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
-      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
-    },
-    {
-      "id": "reference_data/matches_the_reference[filter@sample.gaia_dr3]",
-      "area": "against a reference service",
-      "outcome": "skip",
-      "asks": [
-        "answers",
-        "clients"
-      ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[nulls@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[distance@gaia_dr3.gaia_source:pyvo]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: gaia_dr3.gaia_source is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[nulls@sample.gaia_dr3]",
+      "id": "reference_data/matches_the_reference[distance@gaia_dr3.gaia_source:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[distance@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[strings@gaia_dr3.gaia_source]",
+      "id": "reference_data/matches_the_reference[distance@sample.gaia_dr3:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: gaia_dr3.gaia_source is not published here"
     },
     {
-      "id": "reference_data/matches_the_reference[strings@sample.gaia_dr3]",
+      "id": "reference_data/matches_the_reference[expression@gaia_dr3.gaia_source:stilts]",
       "area": "against a reference service",
       "outcome": "skip",
       "asks": [
         "answers",
         "clients"
       ],
-      "description": "This service's answer says the same as the reference service's.",
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[expression@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[filter@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[nulls@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@gaia_dr3.gaia_source:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@gaia_dr3.gaia_source:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: gaia_dr3.gaia_source is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@sample.gaia_dr3:pyvo]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
+      "detail": "Skipped: sample.gaia_dr3 is not published here"
+    },
+    {
+      "id": "reference_data/matches_the_reference[strings@sample.gaia_dr3:stilts]",
+      "area": "against a reference service",
+      "outcome": "skip",
+      "asks": [
+        "answers",
+        "clients"
+      ],
+      "description": "This service's answer says what the reference service's answer says.",
       "detail": "Skipped: sample.gaia_dr3 is not published here"
     },
     {
@@ -905,7 +1082,7 @@
         "clients"
       ],
       "description": "A table holding a nested column declares it by names a query can write.",
-      "detail": "Skipped: ztf.dr24_object is not published here"
+      "detail": "Skipped: ztf.dr24_lc is not published here"
     },
     {
       "id": "tables_metadata/positional_ucds",
@@ -1020,7 +1197,7 @@
     {
       "id": "upload/inline_upload",
       "area": "uploads",
-      "outcome": "xpass",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
