@@ -73,6 +73,7 @@ Useful options:
 | `--data DIR` | what `tap-conformance-fetch` downloaded |
 | `--report-dir DIR` | where the report goes |
 | `--stilts CMD` / `--stilts-jar PATH` | STILTS, if it is not on the path as `stilts` |
+| `--scs-url URL` | where cone search answers. Cone search is not under the TAP base url and its url space is not this suite's to assume, so the checks skip until told |
 | `--skip-taplint` | the `pyvo` half alone, which is seconds rather than minutes |
 | `--strict-conformance` | exit non-zero when something fails. Off by default: a conformance run is a report |
 
@@ -117,6 +118,7 @@ rather than as two lists from two tools.
 | `test_examples.py` | DALI §2.3 — the examples a client offers in a menu, and whether they run |
 | `test_async.py` | TAP §2.2, UWS — expected failures, plus that the absence is legible |
 | `test_upload.py` | TAP §2.5 — expected failures, plus that capabilities and behaviour agree |
+| `test_cone_search.py` | Simple Cone Search 1.03 — a different protocol, inheriting nothing from DALI: UCD1 columns, its own error shape, no `MAXREC`. Version 2.0 is not here: no client implements it, and a check this suite composed itself would be measuring its own idea of the draft |
 | `test_reference_data.py` | not a standard: the same query, asked here through both clients and read against what a service that has been answering it for years said |
 
 ## The data

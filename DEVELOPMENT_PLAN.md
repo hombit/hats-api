@@ -54,7 +54,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.4 | `TAP_SCHEMA` | todo | tier 0. Names are strict here, the published spelling being what a client copies |
 | 11.5 | VOSI capabilities, availability, tables | todo | tier 0 |
 | 11.6 | `csv` and `tsv` | todo | tier 0 by cost rather than by demand — two writers over the `QueryResult` that exists. Two of the four reference services offer neither |
-| 11.7 | Simple Cone Search | todo | tier 0.5. Days on top of tier 0, which pays for all of it; its error document and UCDs are not DALI's, and nothing measures it yet |
+| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | tier 0.5. Days on top of tier 0, which pays for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
 | 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
 | 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
@@ -882,11 +882,24 @@ work beside a week's, and a day's work that makes a spreadsheet and a `curl` int
 by the writer rather than by anything written here. Both names and media types go in §11.3's
 one list.
 
-### 11.7 Simple Cone Search — tier 0.5
+### 11.7 Simple Cone Search, both versions — tier 0.5
 
 [Simple Cone Search 1.03](https://www.ivoa.net/documents/REC/DAL/ConeSearch-20080222.html):
 `RA`, `DEC` and `SR` in decimal degrees, ICRS, and a VOTable of the rows inside that cone.
 That is the whole protocol.
+
+[SCS 2.0](https://github.com/ivoa-std/SCS2) is built on DALI, so it inherits nearly all of
+tier 0 where 1.03 inherits none of it — `MAXREC`, `RESPONSEFORMAT`, DALI error documents,
+VOSI `/capabilities` and `/tables` beside the query endpoint, and UCD1+ on the columns. Its
+one genuinely new idea is `TABLE`, which breaks 1.03's identity of one service with one
+table and makes the url space look like TAP's rather than like 1.03's.
+
+It is a Working Draft, which is a fact about maintenance rather than a reason to wait: the
+checks for it each name the clause they came from, so when the draft moves, what has to
+move with it is findable.
+
+So the two are not one piece of work done twice. **1.03 is the odd one**, and the list below
+is what *it* does not inherit; SCS2 costs a parameter and a second set of capabilities.
 
 **It is here because tier 0 pays for it.** A cone predicate, HATS partitions pruned by it,
 a VOTable writer and a list of published tables with known coordinate columns are every
@@ -916,14 +929,37 @@ Four things it does *not* inherit from tier 0, because it predates DALI by a dec
   row bound does here therefore needs deciding rather than inheriting: silently truncating
   is the failure this repository keeps refusing.
 
-**One endpoint per table**, which is the other shape difference — a cone search service *is*
-a table, where TAP publishes many under one base url. So the url space needs a decision that
-TAP did not need.
+**One endpoint per table** in 1.03, which is the other shape difference — a cone search
+service *is* a table, where TAP and SCS2 publish many under one base url. So the url space
+needs a decision that TAP did not need.
 
-**The conformance suite does not cover this.** It is TAP-only and there is no `taplint`
-equivalent; `pyvo.dal.SCSService` and the IVOA cone-search validator are what would check
-it, as a small suite of its own. Whatever is built here is unmeasured until that exists,
-which is the same mistake §11.0 was written to avoid.
+**The file-server mode's circle should end up spelled the same way**, and that is the part
+of this step with a cost. A url there carries `ra`, `dec` and one of `radius_deg` or
+`radius_arcsec`; cone search carries `RA`, `DEC` and `SR` in degrees. One service answering
+a cone two ways in two url spaces is two things for a reader to learn and two places for the
+bound to be applied.
+
+It is not a rename, because the existing spelling is a rule with a reason behind it:
+positions are unsuffixed and an extent names its unit, precisely so that a bare radius
+cannot be read as degrees by one caller and arcseconds by another — and `SR` is a bare
+radius. Three things have to be settled together:
+
+- whether `RA`/`DEC`/`SR` are accepted as aliases beside the existing names, or replace them
+- what a request naming both spellings means, which is the case that has to be refused
+  rather than resolved
+- whether `max_query_radius_arcsec` bounds `SR` as well, and what a cone search does when it
+  is exceeded — 1.03 has no answer shape for a refusal beyond its `Error` INFO
+
+Aliases are the likely answer, since the file server's names are published and a cone search
+client cannot be asked to learn new ones. What must not happen is the two drifting: whatever
+is decided, one piece of code parses a circle from a url.
+
+**The conformance suite covers both already**, ten checks over the two, skipped until
+`--scs-url` and `--scs2-url` name an endpoint — they are given rather than guessed, so that
+nothing here encodes a url space this step has not decided. The 1.03 half goes through
+`pyvo.dal.SCSService` and is calibrated against VizieR's cone search; the 2.0 half asks over
+HTTP because no client implements a draft yet, and each of its checks names the clause it
+came from so that what has to move when the draft moves is findable.
 
 ### 11.8 `/async` and UWS — tier 1
 
