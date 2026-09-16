@@ -38,6 +38,7 @@ AREAS = {
     "test_async": "async",
     "test_upload": "uploads",
     "test_reference_data": "against a reference service",
+    "test_cone_search": "cone search",
 }
 
 

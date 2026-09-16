@@ -1,14 +1,16 @@
-"""Error documents — DALI 1.1 section 4.4, TAP 1.1 section 2.9.
+"""Error documents — TAP 1.1 section 3.3, DALI 1.1 sections 4.2 and 4.4.
 
-A failed query is answered with a VOTable carrying an INFO whose QUERY_STATUS is
-ERROR, and an HTTP status that says it failed. Both halves matter: a client reads the
-status to know it failed and the document to know why, and a service that answers 200
-with an error inside makes every client's success path the one that runs.
+A failed query is answered with a document saying so: an INFO whose QUERY_STATUS is
+ERROR, in the format the request asked for. The HTTP status is deliberately not part of
+these checks — TAP §3.3 lets a synchronous service answer with "an appropriate HTTP
+status code, including 200", so a 200 carrying a proper error document is conforming and
+a check demanding a 4xx would fail a service for doing it right.
 
 `taplint` sends deliberately broken queries too, and checks that they fail. These check
 what the failure *is*, which is the half that lets a client tell a user anything: run
-against the ESA archive, a query with an unclosed string literal comes back as a 500
-and an HTML page, and the validator passed it.
+against the ESA archive, a query with an unclosed string literal comes back as an HTML
+page, which is neither the requested format nor either of the two DALI §4.2 allows, and
+the validator passed it.
 """
 
 from __future__ import annotations
@@ -18,9 +20,22 @@ import pytest
 
 
 def is_error_document(response) -> str:
-    """What DALI 4.4 asks an error to look like."""
+    """What the error looks like, against what TAP 1.1 §3.3 asks it to look like.
+
+    The status is not part of it. §3.3 lets a synchronous service answer with "an
+    appropriate HTTP status code, including 200" — so a 200 carrying an error document
+    is conforming, and an earlier version of these checks that demanded a 4xx would have
+    failed a service doing it properly.
+
+    What §3.3 does ask is that an error document "should be in a format that matches the
+    requested format where possible". These queries ask for nothing, so the format is
+    VOTable by default, and a VOTable error is what matches.
+    """
     body = response.content[:8000]
-    assert b"<VOTABLE" in body.upper(), f"the error is not a VOTable: {body[:200]!r}"
+    assert b"<VOTABLE" in body.upper(), (
+        f"{response.status_code}, and the error is not a VOTable where a VOTable was "
+        f"the requested format: {body[:200]!r}"
+    )
     assert b'value="ERROR"' in body or b"value='ERROR'" in body, (
         'no INFO with QUERY_STATUS="ERROR"'
     )
@@ -37,12 +52,8 @@ def is_error_document(response) -> str:
     ids=["syntax", "unknown_table", "unclosed_string"],
 )
 def test_bad_query(raw, what, query, record_property):
-    """A query that cannot run comes back as an error document with a 4xx."""
-    response = raw(query)
-    assert response.status_code >= 400, (
-        f"a {what} error was answered with {response.status_code}"
-    )
-    record_property("detail", is_error_document(response))
+    """A query that cannot run comes back as an error document."""
+    record_property("detail", is_error_document(raw(query)))
 
 
 def test_unknown_column(raw, queryable, record_property):
@@ -51,9 +62,9 @@ def test_unknown_column(raw, queryable, record_property):
     Dropping it and answering anyway returns rows the client did not ask for, which
     it has no way to tell from the ones it did.
     """
-    response = raw(f"SELECT no_such_column FROM {queryable}")
-    assert response.status_code >= 400, f"answered with {response.status_code}"
-    record_property("detail", is_error_document(response))
+    record_property(
+        "detail", is_error_document(raw(f"SELECT no_such_column FROM {queryable}"))
+    )
 
 
 def test_the_client_raises(tap, record_property):

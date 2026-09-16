@@ -44,6 +44,15 @@ def pytest_addoption(parser):
         default=str(HERE / "report"),
         help="where the report and the tools' own output go",
     )
+    # Cone search is not under the TAP base url and its url space is not decided here.
+    # Given by hand rather than guessed, so that these checks never encode a shape this
+    # service has not committed to; absent, they skip and say so. 1.03 only, that being
+    # the version a client implements — the README says why 2.0 is not measured here.
+    group.addoption(
+        "--scs-url",
+        default=None,
+        help="a Simple Cone Search 1.03 endpoint, which is one table's",
+    )
     group.addoption("--stilts", default=None, help="the stilts command")
     group.addoption("--stilts-jar", default=None, help="stilts.jar, run through java")
     group.addoption(
