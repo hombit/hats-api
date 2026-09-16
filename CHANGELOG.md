@@ -8,13 +8,13 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `[server] user_agent`, the `User-Agent` on every request this service makes.
-- `[server] contact`, written after the name in `User-Agent`, in `Server` and at the foot of a generated listing.
-- A `Server` response header, under `[server] show_version`.
+- `[server] user_agent`, the `User-Agent` on every request this service makes. [#65](https://github.com/hombit/hats-api/pull/65)
+- `[server] contact`, written after the name in `User-Agent`, in `Server` and at the foot of a generated listing. [#65](https://github.com/hombit/hats-api/pull/65)
+- A `Server` response header, under `[server] show_version`. [#65](https://github.com/hombit/hats-api/pull/65)
 
 ### Changed
 
-- The `headers` storage option refuses `User-Agent`.
+- The `headers` storage option refuses `User-Agent`. [#65](https://github.com/hombit/hats-api/pull/65)
 
 ### Deprecated
 
