@@ -8,13 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `[server] user_agent`, the `User-Agent` on every request this service makes. [#65](https://github.com/hombit/hats-api/pull/65)
-- `[server] contact`, written after the name in `User-Agent`, in `Server`, at the foot of a generated listing, and as `info.contact` in the API description. [#65](https://github.com/hombit/hats-api/pull/65)
-- A `Server` response header, under `[server] show_version`. [#65](https://github.com/hombit/hats-api/pull/65)
+--
 
 ### Changed
 
-- The `headers` storage option refuses `User-Agent`. [#65](https://github.com/hombit/hats-api/pull/65)
+--
 
 ### Deprecated
 
@@ -22,7 +20,7 @@ Release dates are in the UTC time zone.
 
 ### Removed
 
-- **Breaking** `POST {api.prefix}/expr/parquet`, `/expr/hats` and `/expr/hats/plan`, with their `select` and `where` fields; use the `simple` routes or `POST {api.prefix}/adql`.
+--
 
 ### Fixed
 
@@ -31,6 +29,22 @@ Release dates are in the UTC time zone.
 ### Security
 
 --
+
+## [0.0.7] - 2026-09-16
+
+### Added
+
+- `[server] user_agent`, the `User-Agent` on every request this service makes. [#65](https://github.com/hombit/hats-api/pull/65)
+- `[server] contact`, written after the name in `User-Agent`, in `Server`, at the foot of a generated listing, and as `info.contact` in the API description. [#65](https://github.com/hombit/hats-api/pull/65)
+- A `Server` response header, under `[server] show_version`. [#65](https://github.com/hombit/hats-api/pull/65)
+
+### Changed
+
+- The `headers` storage option refuses `User-Agent`. [#65](https://github.com/hombit/hats-api/pull/65)
+
+### Removed
+
+- **Breaking** `POST {api.prefix}/expr/parquet`, `/expr/hats` and `/expr/hats/plan`, with their `select` and `where` fields; use the `simple` routes or `POST {api.prefix}/adql`. [#57](https://github.com/hombit/hats-api/pull/57)
 
 ## [0.0.6] - 2026-09-15
 
@@ -89,7 +103,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.6...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.7...HEAD
+[0.0.7]: https://github.com/hombit/hats-api/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/hombit/hats-api/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/hombit/hats-api/compare/v0.0.4...v0.0.5
 [0.0.4]: https://github.com/hombit/hats-api/compare/v0.0.3...v0.0.4
