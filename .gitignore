@@ -5,3 +5,7 @@
 /tap-conformance/data
 /tap-conformance/report
 /tap-conformance/.venv
+
+# Python bytecode from the conformance suite.
+__pycache__/
+*.pyc

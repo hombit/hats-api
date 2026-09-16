@@ -37,25 +37,26 @@ SNAPSHOTS = HERE / "references"
 
 #: The services the checks are put to besides this one.
 #:
-#: Five, and five different implementations on purpose: ESA's own stack, DaCHS —
-#: written by one of the people who wrote the standards — CDS's, IRSA's and MAST's. One
-#: service answering a check one way is an anecdote about that service; five agreeing is
-#: what the standard turned out to mean in practice, which is the only thing this list
-#: is for.
+#: Four different implementations on purpose: ESA's own stack, DaCHS — written by one of
+#: the people who wrote the standards — IRSA's and MAST's. One service answering a check
+#: one way is an anecdote about that service; four agreeing is what the standard turned
+#: out to mean in practice, which is the only thing this list is for.
 #:
-#: Three of them serve Gaia DR3, so a disagreement can be read against the same rows,
-#: and IRSA serves both of the catalogs published here — it is where the HATS copies
-#: come from — so it is the one that can be asked the same question about the same data.
+#: Two serve Gaia DR3, so a disagreement can be read against the same rows, and IRSA
+#: serves both of the catalogs published here — it is where the HATS copies come from —
+#: so it is the one that can be asked the same question about the same data.
 #:
 #: Each is asked a few dozen questions per refresh, which is why the list is short, why
 #: a run is kept rather than repeated, and why none of this happens in CI.
 #:
-#: Tried and not reachable from here: the GAVO data centre (`dc.g-vo.org`) and CADC.
-#: Both are worth another attempt from a network that can see them.
+#: Tried and left out: VizieR, whose table list runs to tens of thousands of entries —
+#: `pyvo` reads it before it can ask anything and does not come back in any time worth
+#: waiting, which is a fact about VOSI at that scale rather than about the service. The
+#: GAVO data centre and CADC do not resolve from here and are worth another attempt from
+#: a network that can see them.
 REFERENCES = {
     "ESA Gaia": "https://gea.esac.esa.int/tap-server/tap",
     "ARI-Gaia": "https://gaia.ari.uni-heidelberg.de/tap",
-    "VizieR": "https://tapvizier.cds.unistra.fr/TAPVizieR/tap",
     "IRSA": "https://irsa.ipac.caltech.edu/TAP",
     "MAST": "https://mast.stsci.edu/vo-tap/api/v0.1/caom/",
 }

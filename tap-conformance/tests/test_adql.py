@@ -71,7 +71,7 @@ def test_group_by(tap, queryable, coordinates, center, record_property):
     ra, dec = coordinates
     center_ra, center_dec = center
     found = tap.run_sync(
-        f"SELECT {ra} AS position, COUNT(*) AS n FROM {queryable} "
+        f"SELECT {ra} AS grouped, COUNT(*) AS n FROM {queryable} "
         f"WHERE 1=CONTAINS(POINT('ICRS', {ra}, {dec}), "
         f"CIRCLE('ICRS', {center_ra}, {center_dec}, 0.1)) "
         f"GROUP BY {ra}"
@@ -108,7 +108,13 @@ def test_delimited_identifier(tap, queryable, coordinates, record_property):
 
 @pytest.mark.parametrize("function", ["ABS(-1.5)", "CEILING(1.2)", "FLOOR(1.8)", "SQRT(4.0)"])
 def test_mandatory_functions(tap, queryable, function, record_property):
-    """The numeric functions ADQL 2.1 requires of every service."""
-    found = tap.run_sync(f"SELECT TOP 1 {function} AS value FROM {queryable}").to_table()
-    record_property("detail", f"{function} = {found['value'][0]}")
+    """The numeric functions ADQL 2.1 requires of every service.
+
+    The alias is not `value`: that is a reserved word, and three of the four services
+    this suite is calibrated against refuse the query over it while a fourth accepts it.
+    An alias is this check's own spelling rather than anything it is asking about, so it
+    uses one no parser can object to.
+    """
+    found = tap.run_sync(f"SELECT TOP 1 {function} AS computed FROM {queryable}").to_table()
+    record_property("detail", f"{function} = {found['computed'][0]}")
     assert len(found) == 1

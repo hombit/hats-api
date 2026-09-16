@@ -151,7 +151,7 @@ class Report:
             "",
             f"`{self.target}` · {tools} · {self.generated}",
         ]
-        if self.provenance:
+        if self.provenance and full:
             out += ["", f"_{self.provenance}_"]
         # Only the outcomes this run produced get a column. An empty one is a column
         # every reader has to work out the meaning of to find it says nothing.
@@ -174,11 +174,10 @@ class Report:
                 out.append(f"| {area} | {counts} |")
 
         if not full:
-            # What a comment on a pull request is for is the score and which parts of
-            # the standards moved. A hundred rows of detail under it is a page nobody
-            # scrolls, burying the two tables that are worth reading, and the run's
-            # artifact has all of it anyway.
-            out += ["", "_Every check, with what it found, is in the run's artifact._"]
+            # A comment is read for the score and for which of the three questions
+            # moved it. Everything else — every check with what it found, where the
+            # reference answers came from — is in the run's artifact, and putting it
+            # here buries the one table worth reading.
             return "\n".join(out) + "\n"
 
         failures = [result for result in self.results if result.outcome == "fail"]

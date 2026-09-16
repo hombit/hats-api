@@ -102,15 +102,42 @@ class Run:
         return self.sections.get(stage, Section(stage, STAGES.get(stage, stage), []))
 
 
+#: Codes the validator uses to say there was nothing there to look at.
+#:
+#: These come back as warnings, because `taplint` is lenient about resources TAP 1.0
+#: called optional — so a stage that validates a document reports "no document" and
+#: passes. That is a stage which checked nothing being counted as a stage which found
+#: nothing wrong, and it is how this suite came to score two points against a service
+#: with no TAP at all.
+NOTHING_THERE = {
+    "GONO",  # optional resource not present
+    "TBNF",  # /tables resource absent
+    "NOTM",  # no table metadata available, so later stages did not run
+    "GONE",  # table metadata absent
+}
+
+
 def assert_clean(section: Section) -> None:
-    """A stage passes when the validator found nothing to report against it.
+    """A stage passes when the validator looked at something and found it sound.
 
     A warning is not a failure — the validator says so itself, warnings being for
     behaviour that is questionable rather than wrong — but it is carried into the
-    report's detail, so a stage that passes with reservations says so.
+    report's detail, so a stage that passes with reservations says so. The exception is
+    a warning that says the thing was not there at all, which is not a pass in anybody's
+    reading.
     """
     if section.errors or section.failures:
         raise AssertionError(section.summarize())
+    absent = [
+        entry for entry in section.reports if entry.get("code") in NOTHING_THERE
+    ]
+    if absent:
+        raise AssertionError(
+            "nothing was there to validate — "
+            + "; ".join(
+                f"{entry.get('code')}: {entry.get('text', '')}"[:200] for entry in absent[:3]
+            )
+        )
 
 
 def command(stilts: str | None, jar: Path | None) -> list[str] | None:

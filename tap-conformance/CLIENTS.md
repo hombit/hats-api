@@ -15,6 +15,7 @@ publishing a TAP surface of our own.
 | **The two clients disagree about a column's name** | One query, one service, one VOTable: pyvo says `source_id`, `stilts tapquery` says `SOURCE_ID` | A query written in TOPCAT and pasted into a notebook raises `KeyError`. The comparison here folds case. Worth making `name` and `ID` agree on every `FIELD` we write |
 | **pyvo's `examples` are queries, not text** | `TAPService.examples` returns `TAPQuery` objects keyed `REQUEST`/`LANG`/`QUERY`, not dicts of the marked-up fields | An examples document is judged by whether its queries run, which is the right test anyway |
 | **`taplint` is a linter, `tapquery` is the client** | `taplint` composes its own queries from the metadata and is nobody's way of getting data; `stilts tapquery` is what TOPCAT runs underneath | Both are used here, for different questions. A service can pass the linter and hand the client something it cannot parse |
+| **A large table list stops pyvo dead** | `TAPService.tables` reads the whole VOSI document before anything else can be asked. Against VizieR, which publishes tens of thousands of tables, it did not return in forty minutes | A client's first act on meeting a service is to read this, so whatever we publish there is on the critical path of every session. VizieR is left out of the reference list for this reason |
 
 ## Versions
 
