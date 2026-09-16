@@ -894,7 +894,7 @@ pub(crate) mod tests {
             &DataConfig::default(),
         )
         .unwrap();
-        let policy = AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts)).unwrap();
+        let policy = AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts), None).unwrap();
         crate::storage::open_dir(
             &Url::parse(&format!("file://{MOUNT}/")).unwrap(),
             &StorageOptions::default(),

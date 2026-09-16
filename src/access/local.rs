@@ -401,6 +401,7 @@ mod tests {
                 )
                 .unwrap(),
             ),
+            None,
         )
         .unwrap();
         // The same name under each, and the mount decides.

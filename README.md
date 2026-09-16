@@ -673,6 +673,17 @@ source = "/mnt/data/gaia"
 serve = true
 ```
 
+### How it identifies itself
+
+`[server] contact` is who runs this deployment. It goes in three places:
+
+- `User-Agent`, on every request this service makes
+- `Server`, on every answer it gives, while `show_version` is on
+- `info.contact` in the API description, always
+
+`user_agent = false` sends no `User-Agent`; a string replaces the whole value, contact and
+all.
+
 ### Mounts
 
 ```toml

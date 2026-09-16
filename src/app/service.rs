@@ -12,12 +12,14 @@ use axum::{
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
+use http::{HeaderValue, header};
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::{
     And, DefaultPredicate, NotForContentType, Predicate as _,
 };
 use tower_http::decompression::RequestDecompressionLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use url::Url;
 
@@ -58,8 +60,12 @@ pub struct Service {
     request_timeout: Option<Duration>,
     /// How large a request body may be, in bytes; `None` where the operator set no bound.
     request_body_limit: Option<usize>,
-    /// Whether a generated listing says which software and version produced it.
-    pub(in crate::app) show_version: bool,
+    /// How the service signs what it answers — the `Server` header, and the foot of a
+    /// generated listing. `None` where `[server] show_version` says not to sign at all.
+    pub(in crate::app) signature: Option<HeaderValue>,
+    /// Who runs this deployment, for the API description's `info.contact`. Separate from
+    /// the signature above because it survives `show_version` being off.
+    pub(in crate::app) contact: Option<Arc<str>>,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
     pub(in crate::app) serve_index_html: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -128,7 +134,8 @@ impl Service {
                 0 => None,
                 bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
             },
-            show_version: server.show_version,
+            signature: server.signature()?,
+            contact: server.contact()?.map(Arc::from),
             serve_index_html: server.serve_index_html,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -162,6 +169,7 @@ impl Service {
 pub fn router(service: Service) -> Router {
     let timeout = service.request_timeout;
     let body_limit = service.request_body_limit;
+    let signature = service.signature.clone();
     let mut router = Router::new();
     if let Some(prefix) = service.api_prefix.clone() {
         router = router.route(&route(&prefix, "health"), get(health));
@@ -173,7 +181,7 @@ pub fn router(service: Service) -> Router {
         // projection, which is the pair the other three routes take from the url and the body
         // separately.
         router = router.route(&route(&prefix, "adql"), post(query_adql));
-        router = with_description(router, &prefix);
+        router = with_description(router, &prefix, service.contact.clone());
     }
     let mut router = router
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
@@ -191,7 +199,7 @@ pub fn router(service: Service) -> Router {
         Some(bytes) => DefaultBodyLimit::max(bytes),
         None => DefaultBodyLimit::disable(),
     });
-    router
+    let router = router
         .layer(decompression())
         // Method and path only. The default span carries the whole URI, including a
         // query string this service does not read but a caller may still have put
@@ -207,7 +215,14 @@ pub fn router(service: Service) -> Router {
                     path = request.uri().path()
                 )
             }),
-        )
+        );
+    // Outermost, so that it reaches the answers no handler produced: a `504` from the
+    // deadline, a body the limit refused, a path no route matched. Those are exactly the
+    // answers someone reporting that this deployment misbehaves has in front of them.
+    match signature {
+        Some(value) => router.layer(SetResponseHeaderLayer::overriding(header::SERVER, value)),
+        None => router,
+    }
 }
 
 /// Give up on a request that has run past `[limits] max_request_seconds`.
@@ -327,9 +342,13 @@ pub(in crate::app) fn with_queries(router: Router<Service>, prefix: &str) -> Rou
 /// The document is built per request rather than once, because it names the prefix and the
 /// prefix is the operator's. It is a few hundred microseconds of `serde_json` on a route
 /// nothing calls in a loop.
-fn with_description(router: Router<Service>, prefix: &str) -> Router<Service> {
+fn with_description(
+    router: Router<Service>,
+    prefix: &str,
+    contact: Option<Arc<str>>,
+) -> Router<Service> {
     let document = route(prefix, "openapi.json");
-    let page = openapi::page(&describe(prefix), &document);
+    let page = openapi::page(&describe(prefix, contact.as_deref()), &document);
     router
         .route(
             &document,
@@ -337,7 +356,8 @@ fn with_description(router: Router<Service>, prefix: &str) -> Router<Service> {
                 let prefix = prefix.to_owned();
                 move || {
                     let prefix = prefix.clone();
-                    async move { Json(describe(&prefix)) }
+                    let contact = contact.clone();
+                    async move { Json(describe(&prefix, contact.as_deref())) }
                 }
             }),
         )
@@ -386,6 +406,7 @@ mod tests {
 
     use crate::app::testing::{
         api_only, ask, ask_hats, get, mounted, respond, serving, with_limits, with_mount,
+        with_server,
     };
     use crate::engine::query;
 
@@ -482,6 +503,46 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_ENCODING], "gzip");
         assert_eq!(body[..2], GZIP_MAGIC);
+    }
+
+    /// The service signs what it answers, and the contact rides with it. Checked on a
+    /// path no route matched, because the layer is outermost for exactly that reason:
+    /// the answers a reporter has in front of them are as often a refusal as a body.
+    #[tokio::test]
+    async fn an_answer_says_what_produced_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let signed = ServerConfig {
+            contact: Some("ops@example.org".to_owned()),
+            ..Default::default()
+        };
+        let service = with_server(
+            serving(dir.path()),
+            &ApiConfig::default(),
+            &LimitsConfig::default(),
+            &signed,
+        );
+        let expected = format!("{} (ops@example.org)", crate::config::PRODUCT);
+        let (response, _) = fetch(service.clone(), "/", None).await;
+        assert_eq!(response.headers()[header::SERVER], expected);
+        let (missing, _) = fetch(service, "/nothing-here", None).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.headers()[header::SERVER], expected);
+
+        // And an operator who would rather not publish which version is running gets no
+        // header at all, rather than one with the version taken out of it.
+        let quiet = ServerConfig {
+            show_version: false,
+            contact: Some("ops@example.org".to_owned()),
+            ..Default::default()
+        };
+        let service = with_server(
+            serving(dir.path()),
+            &ApiConfig::default(),
+            &LimitsConfig::default(),
+            &quiet,
+        );
+        let (response, _) = fetch(service, "/", None).await;
+        assert!(!response.headers().contains_key(header::SERVER));
     }
 
     /// Parquet is the exclusion, and it is the response's content type that carries it —
@@ -724,9 +785,12 @@ mod tests {
         let service = || {
             let mounts =
                 Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
-            let policy =
-                AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
-                    .unwrap();
+            let policy = AccessPolicy::new(
+                &crate::config::AccessConfig::default(),
+                Arc::clone(&mounts),
+                None,
+            )
+            .unwrap();
             Service::new(
                 policy,
                 &tiny,

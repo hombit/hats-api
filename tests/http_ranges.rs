@@ -229,6 +229,7 @@ fn policy() -> AccessPolicy {
             ..Default::default()
         },
         Arc::default(),
+        None,
     )
     .expect("the policy should build")
 }

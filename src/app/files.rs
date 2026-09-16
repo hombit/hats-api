@@ -570,19 +570,24 @@ async fn list_directory(
         });
 
     Ok(match listing::wants_html(&request.headers) {
-        true => Html(listing.to_html(
-            mount.data_files(),
-            service.api_prefix.as_deref(),
-            &listing::Catalog {
-                url: catalog.as_deref(),
-                name: about.as_ref().and_then(|about| about.name.as_deref()),
-                rows: about.as_ref().and_then(|about| about.rows),
-                order: about.as_ref().and_then(|about| about.order),
-                schema_url: schema.as_deref(),
-                max_radius_arcsec: service.max_query_radius_arcsec,
-            },
-            service.show_version,
-        ))
+        true => Html(
+            listing.to_html(
+                mount.data_files(),
+                service.api_prefix.as_deref(),
+                &listing::Catalog {
+                    url: catalog.as_deref(),
+                    name: about.as_ref().and_then(|about| about.name.as_deref()),
+                    rows: about.as_ref().and_then(|about| about.rows),
+                    order: about.as_ref().and_then(|about| about.order),
+                    schema_url: schema.as_deref(),
+                    max_radius_arcsec: service.max_query_radius_arcsec,
+                },
+                service
+                    .signature
+                    .as_ref()
+                    .and_then(|value| value.to_str().ok()),
+            ),
+        )
         .into_response(),
         false => Json(listing).into_response(),
     })
@@ -1645,9 +1650,12 @@ mod tests {
             filenames: vec!["*.pq".to_owned()],
         };
         let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &data).unwrap());
-        let policy =
-            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
-                .unwrap();
+        let policy = AccessPolicy::new(
+            &crate::config::AccessConfig::default(),
+            Arc::clone(&mounts),
+            None,
+        )
+        .unwrap();
         let service = Service::new(
             policy,
             &LimitsConfig::default(),

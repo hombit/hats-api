@@ -13,7 +13,10 @@ const QUERY_SUMMARY: &str = "Names and a condition: `columns` is a list of colum
     `filters` one row condition. A computed column or an alias is written in ADQL.";
 
 /// The whole document: the health route, the three query routes, and ADQL.
-pub(in crate::app) fn describe(prefix: &str) -> utoipa::openapi::OpenApi {
+///
+/// `contact` is `[server] contact`, which is who runs this deployment rather than anything
+/// about its routes — so it reaches the document here rather than being built into it.
+pub(in crate::app) fn describe(prefix: &str, contact: Option<&str>) -> utoipa::openapi::OpenApi {
     let mut paths = utoipa::openapi::Paths::new();
     let mut schemas = Vec::new();
     openapi::health(&mut paths, &route(prefix, "health"));
@@ -22,7 +25,7 @@ pub(in crate::app) fn describe(prefix: &str) -> utoipa::openapi::OpenApi {
     let components = utoipa::openapi::ComponentsBuilder::new()
         .schemas_from_iter(schemas)
         .build();
-    openapi::document(paths, components)
+    openapi::document(paths, components, contact)
 }
 
 /// The three query operations, alongside
@@ -231,7 +234,7 @@ mod tests {
     /// contracts, so a field added to one type and meant for another fails here.
     #[test]
     fn each_route_describes_its_own_body() {
-        let document = serde_json::to_value(describe("/api/v1")).unwrap();
+        let document = serde_json::to_value(describe("/api/v1", None)).unwrap();
         let fields = |path: &str| {
             let reference = document["paths"][path]["post"]["requestBody"]["content"]
                 ["application/json"]["schema"]["$ref"]
@@ -277,6 +280,24 @@ mod tests {
         assert_eq!(CatalogPlanQuery::fields(), plan);
     }
 
+    /// Who runs the deployment, in the document and on the page it renders. A `name` and
+    /// never an `email` or a `url`: the operator writes one free string, and either typed
+    /// field would be this code guessing which of the two it was.
+    #[test]
+    fn the_description_says_who_runs_the_deployment() {
+        let described = describe("/api/v1", Some("ops@example.org"));
+        let document = serde_json::to_value(&described).unwrap();
+        assert_eq!(document["info"]["contact"]["name"], "ops@example.org");
+        assert!(document["info"]["contact"]["email"].is_null());
+        assert!(document["info"]["contact"]["url"].is_null());
+        assert!(openapi::page(&described, "/api/v1/openapi.json").contains("ops@example.org"));
+
+        // And a deployment that named nobody carries no contact at all, rather than an
+        // empty one a client generator would render as a blank line.
+        let anonymous = serde_json::to_value(describe("/api/v1", None)).unwrap();
+        assert!(anonymous["info"]["contact"].is_null());
+    }
+
     /// Every `$ref` in the description names a component the description carries.
     ///
     /// The page and any generated client both resolve these, and a dangling one is a
@@ -284,7 +305,7 @@ mod tests {
     /// pointed at it — which reads as a body with no fields rather than as an error.
     #[test]
     fn the_description_refers_to_nothing_it_does_not_carry() {
-        let document = serde_json::to_value(describe("/api/v1")).unwrap();
+        let document = serde_json::to_value(describe("/api/v1", None)).unwrap();
         let carried = document["components"]["schemas"].as_object().unwrap();
         let mut missing = Vec::new();
         let mut stack = vec![&document];

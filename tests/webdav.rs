@@ -281,6 +281,7 @@ fn policy(endpoints: &[&str]) -> AccessPolicy {
             ..Default::default()
         },
         Arc::default(),
+        None,
     )
     .expect("the policy should build")
 }

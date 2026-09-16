@@ -51,6 +51,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use http::HeaderValue;
 use url::{Host, Url};
 
 use crate::access::mount::Mounts;
@@ -254,7 +255,7 @@ impl Default for AccessPolicy {
                   no rule for `new` to reject; a panic here would be a bug in this file"
     )]
     fn default() -> Self {
-        Self::new(&AccessConfig::default(), Arc::default())
+        Self::new(&AccessConfig::default(), Arc::default(), None)
             .expect("the default access config is valid")
     }
 }
@@ -265,7 +266,16 @@ impl AccessPolicy {
     /// The mounts are the local half of the policy rather than an addition to it, so
     /// they are an argument: a policy that could be built without them would be one that
     /// reads no local files, and every caller would have to remember to say otherwise.
-    pub fn new(config: &AccessConfig, mounts: Arc<Mounts>) -> Result<Self, ConfigError> {
+    ///
+    /// `user_agent` is what the network policy's client names this deployment as, from
+    /// `[server]`. It is passed in rather than read here because `[api.access]` is about
+    /// what may be reached and this is about what the request looks like when it gets
+    /// there; `None` sends no such header.
+    pub fn new(
+        config: &AccessConfig,
+        mounts: Arc<Mounts>,
+        user_agent: Option<HeaderValue>,
+    ) -> Result<Self, ConfigError> {
         // Every host the operator named, collected as the rules are built rather than by
         // walking them again afterwards: a second pass would be a second list of
         // backends to keep in step, and a backend missing from it would have its own
@@ -286,7 +296,7 @@ impl AccessPolicy {
         let http = build(&config.http.endpoints, Backend::Http)?;
         let webdav = build(&config.webdav.endpoints, Backend::Webdav)?;
 
-        let network = NetworkPolicy::new(&config.network, &named)?;
+        let network = NetworkPolicy::new(&config.network, &named, user_agent)?;
         Ok(Self {
             s3,
             gcs,
@@ -585,7 +595,7 @@ pub(super) mod tests {
     use super::*;
 
     fn policy(config: &AccessConfig) -> AccessPolicy {
-        AccessPolicy::new(config, Arc::default()).unwrap()
+        AccessPolicy::new(config, Arc::default(), None).unwrap()
     }
 
     fn entries(entries: &[&str]) -> EndpointConfig {
@@ -668,7 +678,7 @@ pub(super) mod tests {
             })
             .collect();
         let mounts = Mounts::new(&configs, &DataConfig::default()).unwrap();
-        AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts)).unwrap()
+        AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts), None).unwrap()
     }
 
     pub(in crate::access) fn url(raw: &str) -> Url {
@@ -1009,7 +1019,7 @@ pub(super) mod tests {
                 ..Default::default()
             };
             assert!(
-                AccessPolicy::new(&config, Arc::default()).is_err(),
+                AccessPolicy::new(&config, Arc::default(), None).is_err(),
                 "{entry} was accepted as an s3 endpoint"
             );
         }
@@ -1022,7 +1032,8 @@ pub(super) mod tests {
                     gcs: entries(&["aws"]),
                     ..Default::default()
                 },
-                Arc::default()
+                Arc::default(),
+                None
             )
             .is_err(),
             "the gcs section accepted \"aws\""
@@ -1033,7 +1044,8 @@ pub(super) mod tests {
                     azure: entries(&["gcp"]),
                     ..Default::default()
                 },
-                Arc::default()
+                Arc::default(),
+                None
             )
             .is_err(),
             "the azure section accepted \"gcp\""
