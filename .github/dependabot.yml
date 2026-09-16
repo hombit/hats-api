@@ -9,21 +9,17 @@ updates:
     groups:
       patch-updates:
         update-types: [patch]
-      # These move together or not at all. `reqwest` and the transport adapter are in
-      # here for the same reason `object_store` is: `network` builds the client that
-      # OpenDAL then uses.
-      datafusion-stack:
-        patterns:
-          - datafusion
-          - object_store
-          - object_store_opendal
-          - opendal
-          - opendal-http-transport-reqwest
-          - reqwest
       test-only:
         dependency-type: development
         patterns:
           - "*"
+    # Bumped by hand with DataFusion: raised alone, any of these doubles `object_store`.
+    ignore:
+      - dependency-name: object_store
+      - dependency-name: object_store_opendal
+      - dependency-name: opendal
+      - dependency-name: opendal-http-transport-reqwest
+      - dependency-name: reqwest
     labels: [dependencies]
 
   - package-ecosystem: uv
