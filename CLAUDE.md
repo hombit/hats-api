@@ -1128,6 +1128,55 @@ with no `endpoint` option, because virtual-host addressing turns a redirected en
 into `bucket.<host>`, which does not resolve. Every backend's equivalent guard shares
 it.
 
+## Measuring the TAP surface
+
+`tap-conformance/` drives `pyvo` and STILTS against a built service and reports which
+parts of TAP, DALI, VOSI and ADQL answer. It is a uv project with its own lock, run with
+`uv run pytest -c pyproject.toml` from that directory.
+
+- **It is written against the standards and the clients, never against this service.** A
+  check is argued from a specification or from what other TAP services do, and a check
+  that fails is a finding until shown otherwise — never a reason to loosen the check so
+  the number goes up. That is why it was written before the implementation, and it is the
+  one property the whole thing is worth nothing without.
+- **Nothing may pass against a service that implements none of it.** Six checks once did:
+  a missing resource answers 404, which reads as a refusal to anything that only looks at
+  the status, and a validator stage that finds no document to validate reports a warning
+  rather than an error. So a refusal has to *be* one — a VOTable carrying
+  `QUERY_STATUS="ERROR"`, which is what DALI §4.4 says — and a stage that looked at
+  nothing fails. Run the suite against a service with the feature ripped out; if the
+  number does not fall, the check is measuring nothing.
+- **`taplint` lints and `tapquery` is the client.** The validator composes its own queries
+  from the metadata and is nobody's way of getting data; `stilts tapquery` is what TOPCAT
+  runs underneath. Both are used, for different questions.
+- **A check that a `taplint` stage already covers does not get a hand-written twin.** The
+  validator is stronger wherever they overlap — it checks documents against schemas, every
+  UCD against the vocabulary, `/tables` against `TAP_SCHEMA` column by column. What belongs
+  beside it is what it structurally cannot do: whether an answer is *right*, whether the
+  other client can read it, and how a deliberate absence behaves.
+- **Three questions, counted apart** — does it follow the standard, do the clients work
+  against it, are the answers right. A document can carry everything the standard asks for
+  and still hand a client a byte it refuses to decode. Which question a check speaks to is
+  derived from how it asks, so it stays true as checks are added.
+- **There is no "expected failure" and nothing may be marked one.** Whether this service
+  has decided not to implement something is a fact about its plans, and a suite that knew
+  about those decisions would be one written against an implementation. A MUST that goes
+  unanswered is a failure whoever is asked.
+- **Green for a finding, red for a bug.** Failing checks are the output — nobody expects
+  the whole of TAP, and a mark that is always red is one everybody scrolls past. The run
+  exits non-zero for a crash of the service under test or of the suite, an exception in a
+  check included; both leave a report that reads exactly like a service implementing
+  nothing.
+- **Every check has a clock**, and it is `pytest-timeout` rather than a budget written into
+  each check. One slow service held a whole run four times before that was learned.
+- **CI never puts a question to another service.** The suite can be pointed anywhere with
+  `--base-url`, and `tap-conformance-survey` does exactly that across several reference
+  services — but by hand, with the results committed under `references/`. Putting somebody
+  else's service through a few dozen queries on every push is not ours to do.
+- **Reference snapshots are regenerated all together.** They are only comparable if every
+  column was produced by the same checks; a changed check makes a row mean different things
+  in different columns, and the disagreements are the entire value of having them.
+
 ## Before committing
 
 `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test
