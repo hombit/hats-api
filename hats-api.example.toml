@@ -8,12 +8,18 @@
 # Every interface; use "127.0.0.1" to listen locally only.
 address = "0.0.0.0"
 port = 80
-# Say which software and version produced a generated directory page, the way apache
-# and nginx sign theirs. Turn it off not to publish which version is running.
+# Sign what this service answers — the Server header, and the foot of a generated
+# directory page — the way apache and nginx do. Off publishes neither.
 show_version = true
 # Serve a directory's own index.html in place of a generated listing. Off publishes the
 # generated page everywhere, and the file still answers to its own name.
 serve_index_html = true
+# Who runs this deployment. Written after the name wherever the service identifies
+# itself, so an archive being read has someone to contact.
+# contact = "ops@example.org"
+# What this service calls itself to an origin it reads from. true sends
+# "hats-api/x.y.z (ops@example.org)"; a string is sent as written; false sends no header.
+user_agent = true
 
 [api]
 # API mode: the caller names the data in the request, and [api.access] decides what it

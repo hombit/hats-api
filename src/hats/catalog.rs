@@ -281,7 +281,7 @@ mod tests {
             &crate::config::DataConfig::default(),
         )
         .unwrap();
-        let policy = AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts)).unwrap();
+        let policy = AccessPolicy::new(&AccessConfig::default(), Arc::new(mounts), None).unwrap();
         let url = Url::parse(&format!("file://{MOUNT}/")).unwrap();
         let dir = crate::storage::open_dir(
             &url,

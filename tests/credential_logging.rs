@@ -413,6 +413,7 @@ async fn a_policy_refusal_logs_no_secret() {
             ..Default::default()
         },
         Arc::default(),
+        None,
     )
     .expect("policy");
 

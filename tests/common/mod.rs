@@ -228,6 +228,7 @@ pub fn permissive_policy() -> AccessPolicy {
             ..Default::default()
         },
         Arc::default(),
+        None,
     )
     .expect("permissive policy")
 }
@@ -243,6 +244,7 @@ pub fn policy_for_endpoints(endpoints: &[&str]) -> AccessPolicy {
             ..Default::default()
         },
         Arc::default(),
+        None,
     )
     .expect("endpoint policy")
 }

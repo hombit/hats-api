@@ -84,8 +84,12 @@ pub(in crate::app) fn with_server(
     server: &ServerConfig,
 ) -> Service {
     let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
-    let policy =
-        AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts)).unwrap();
+    let policy = AccessPolicy::new(
+        &crate::config::AccessConfig::default(),
+        Arc::clone(&mounts),
+        None,
+    )
+    .unwrap();
     Service::new(policy, limits, mounts, api, &DataConfig::default(), server).unwrap()
 }
 

@@ -8,11 +8,13 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[server] user_agent`, the `User-Agent` on every request this service makes.
+- `[server] contact`, written after the name in `User-Agent`, in `Server` and at the foot of a generated listing.
+- A `Server` response header, under `[server] show_version`.
 
 ### Changed
 
---
+- The `headers` storage option refuses `User-Agent`.
 
 ### Deprecated
 

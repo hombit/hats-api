@@ -673,6 +673,18 @@ source = "/mnt/data/gaia"
 serve = true
 ```
 
+### How it identifies itself
+
+`[server] contact` is who runs this deployment, written wherever the service names itself:
+`User-Agent` on every request it makes, under `user_agent`, and `Server` on every answer it
+gives, under `show_version`. The two directions are decided separately, and a `user_agent`
+string replaces the whole value rather than adding to it. Set `contact` to something an
+archive's operator can reach you at: through this service a whole deployment reads as one
+very heavy client.
+
+A caller cannot set `User-Agent` through the `headers` storage option, and nothing about
+the caller goes out either: their address appears in no header this service sends.
+
 ### Mounts
 
 ```toml

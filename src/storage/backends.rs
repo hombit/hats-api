@@ -603,7 +603,7 @@ mod tests {
         storage::open(
             url,
             options,
-            &AccessPolicy::new(&config, Arc::default()).unwrap(),
+            &AccessPolicy::new(&config, Arc::default(), None).unwrap(),
             &transfers(),
         )
     }
@@ -1044,6 +1044,7 @@ mod tests {
                 ..Default::default()
             },
             Arc::default(),
+            None,
         )
         .unwrap();
         assert!(storage::open(&url, &cleartext, &policy, &transfers()).is_ok());
@@ -1100,7 +1101,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let policy = AccessPolicy::new(&config, Arc::default()).unwrap();
+        let policy = AccessPolicy::new(&config, Arc::default(), None).unwrap();
         let url = parse_url(&format!("http://127.0.0.1:{port}/hats/part0.parquet")).unwrap();
         let file = storage::open(&url, &no_options(), &policy, &transfers()).unwrap();
         assert_eq!(store_key(&file), format!("http://127.0.0.1:{port}"));
@@ -1153,6 +1154,36 @@ mod tests {
         assert!(!heads.contains("x-api-key:"), "{heads}");
     }
 
+    /// What the deployment calls itself reaches both requests. The probe and the store's
+    /// own read get their headers by different routes, and a default on the client is
+    /// what covers both — a value put on the transport wrapper would reach the read
+    /// alone, and the origin's log would hold one named request and one anonymous one.
+    #[tokio::test]
+    async fn the_deployment_names_itself_on_every_request() {
+        let heads = http_request_heads_named(
+            serde_json::json!({"allow_http": true}),
+            Some("hats-api/9.9.9"),
+        )
+        .await;
+        let requests: Vec<&str> = heads.split("--- next request ---").collect();
+        assert_eq!(requests.len(), 2, "{heads}");
+        for request in &requests {
+            assert!(
+                request.contains("user-agent: hats-api/9.9.9"),
+                "a request went out unnamed: {request}"
+            );
+        }
+        assert!(heads.contains("range: bytes=-8"), "{heads}");
+    }
+
+    /// And with `[server] user_agent = false` there is no such header at all, which is
+    /// what a deployment that has not been told who it is sends rather than a guess.
+    #[tokio::test]
+    async fn an_unnamed_deployment_sends_no_user_agent() {
+        let heads = http_request_heads(serde_json::json!({"allow_http": true})).await;
+        assert!(!heads.contains("user-agent:"), "{heads}");
+    }
+
     /// The headers are one caller's credentials, so they must not reach a store built
     /// for another. The wrapper is per operator; this is what says so.
     #[tokio::test]
@@ -1203,6 +1234,15 @@ mod tests {
     /// A policy that allows the loopback interface and cleartext, which is what a test
     /// server on `127.0.0.1` needs.
     fn policy_allowing_plain_http() -> AccessPolicy {
+        policy_allowing_plain_http_as(None)
+    }
+
+    /// The same, naming the deployment the way `[server] user_agent` does.
+    fn policy_allowing_plain_http_named(user_agent: HeaderValue) -> AccessPolicy {
+        policy_allowing_plain_http_as(Some(user_agent))
+    }
+
+    fn policy_allowing_plain_http_as(user_agent: Option<HeaderValue>) -> AccessPolicy {
         AccessPolicy::new(
             &crate::config::AccessConfig {
                 network: crate::config::NetworkConfig {
@@ -1216,6 +1256,7 @@ mod tests {
                 ..Default::default()
             },
             Arc::default(),
+            user_agent,
         )
         .unwrap()
     }
@@ -1228,19 +1269,25 @@ mod tests {
     /// routes — the probe from the client call, the store's from the transport wrapped
     /// around its operator. Capturing only the first would pass with the wrapper missing
     /// entirely.
-    async fn http_request_heads(mut option: serde_json::Value) -> String {
+    async fn http_request_heads(option: serde_json::Value) -> String {
+        http_request_heads_named(option, None).await
+    }
+
+    /// The same, with `[server] user_agent` set to `user_agent`.
+    async fn http_request_heads_named(
+        mut option: serde_json::Value,
+        user_agent: Option<&str>,
+    ) -> String {
         let (port, receiver) = capture_requests(2);
         let url = parse_url(&format!("http://127.0.0.1:{port}/key.parquet")).unwrap();
         if option.get("allow_http").is_none() {
             option["allow_http"] = serde_json::json!(true);
         }
-        let file = storage::open(
-            &url,
-            &options(option),
-            &policy_allowing_plain_http(),
-            &transfers(),
-        )
-        .unwrap();
+        let policy = match user_agent {
+            None => policy_allowing_plain_http(),
+            Some(text) => policy_allowing_plain_http_named(HeaderValue::from_str(text).unwrap()),
+        };
+        let file = storage::open(&url, &options(option), &policy, &transfers()).unwrap();
 
         use object_store::ObjectStoreExt;
         let _ = file

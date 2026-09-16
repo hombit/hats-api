@@ -234,7 +234,7 @@ impl Listing {
         data_files: &DataFiles,
         api_prefix: Option<&str>,
         catalog: &Catalog<'_>,
-        show_version: bool,
+        signature: Option<&str>,
     ) -> String {
         let title = html_escape::encode_text(&self.path);
         let mut html = format!(
@@ -349,8 +349,16 @@ impl Listing {
                 html.push_str(&api_note(prefix));
             }
         }
-        if show_version {
-            let _ = writeln!(html, "<p class=\"footer\">{SERVER}</p>");
+        // The way `apache` and `nginx` sign a listing they generated: what someone
+        // reporting that a page looks wrong has to be able to say. Escaped because the
+        // operator's contact is in it, and nothing about the machine is: the host is the
+        // caller's own url.
+        if let Some(signature) = signature {
+            let _ = writeln!(
+                html,
+                "<p class=\"footer\">{}</p>",
+                html_escape::encode_text(signature)
+            );
         }
         let _ = write!(html, "<script>\n{SCRIPT}</script>\n");
         html.push_str("</body>\n</html>\n");
@@ -410,13 +418,6 @@ impl Listing {
 /// request, so both are constants from this side.
 const STYLE: &str = include_str!("listing/page.css");
 const SCRIPT: &str = include_str!("listing/page.js");
-
-/// What answered, at the foot of the page, the way `apache` and `nginx` sign a listing
-/// they generated. It says which software and which version a page came from, which is
-/// what someone reporting that a listing looks wrong has to be able to say. Nothing about
-/// the machine: the name and the version are this build's, and the host is the caller's
-/// own url.
-const SERVER: &str = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
 
 /// What a caller browsing to a partition has no other way to find out. Written once
 /// below the table rather than per row: a `Norder=` level is thousands of entries, and
@@ -640,6 +641,10 @@ mod tests {
     /// The API's own subtree, as `[api] prefix` defaults to it.
     const API: &str = "/api/v1";
 
+    /// What `[server] show_version` left on by itself comes to, which is what most of
+    /// these pass. `None` is the operator who turned it off.
+    const SIGNED: Option<&str> = Some(crate::config::PRODUCT);
+
     /// A directory with no catalog over it, which is what most of these are.
     const NO_CATALOG: Catalog<'static> = Catalog {
         url: None,
@@ -729,7 +734,7 @@ mod tests {
         // A time is UTC in the answer and UTC on the page, and the page says which:
         // a local time is a different instant for every reader and the same text for
         // all of them.
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         assert!(html.contains(" UTC</time>"), "{html}");
         assert!(!html.contains("toLocaleString"), "{html}");
 
@@ -815,11 +820,11 @@ mod tests {
         // The note itself, not a substring of it: the script is inlined into every page and
         // writes query strings of its own, so a bare `columns=` is on any page at all.
         const NOTE: &str = "?columns=ra,dec";
-        let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let plain = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         assert!(!plain.contains(NOTE), "{plain}");
 
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         assert!(html.contains(NOTE), "{html}");
         assert!(
             html.contains("<a class=\"data\" href=\"/part0.parquet\""),
@@ -831,7 +836,7 @@ mod tests {
         assert_eq!(html.matches("class=\"ask\"").count(), 1, "{html}");
         // The page says what generated it, unless the operator would rather it did not.
         assert!(html.contains(env!("CARGO_PKG_VERSION")), "{html}");
-        let unsigned = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, false);
+        let unsigned = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, None);
         assert!(!unsigned.contains(env!("CARGO_PKG_VERSION")), "{unsigned}");
         assert!(
             html.contains("<button class=\"ask\" data-url=\"/part0.parquet\">"),
@@ -846,7 +851,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1/dataset", false).unwrap();
-        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), true);
+        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), SIGNED);
 
         // The url the search goes to, for the script and for the reader, and the bound the
         // form must not offer past.
@@ -882,7 +887,7 @@ mod tests {
                 url: Some("/hats/dr1"),
                 ..Catalog::default()
             },
-            true,
+            SIGNED,
         );
         assert!(bare.contains("Query HATS catalog</h2>"), "{bare}");
         // The url alone, no count and no order: a line the catalog gave nothing for is a
@@ -891,7 +896,7 @@ mod tests {
         assert!(!bare.contains("data-schema"), "{bare}");
 
         // A directory with no catalog over it says none of it.
-        let plain = listing.to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let plain = listing.to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         assert!(!plain.contains("data-catalog"), "{plain}");
         assert!(!plain.contains("HATS catalog"), "{plain}");
     }
@@ -909,7 +914,7 @@ mod tests {
         fs::create_dir(dir.path().join("Norder=5")).unwrap();
         let listing = Listing::read(dir.path(), "/hats", "/hats/dr1", false).unwrap();
 
-        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), true);
+        let html = listing.to_html(&DataFiles::default(), Some(API), &a_catalog(), SIGNED);
         let scraped: Vec<&str> = html
             .split("<a")
             .skip(1)
@@ -930,7 +935,7 @@ mod tests {
         fs::write(dir.path().join("<script>alert(1)<script>"), b"x").unwrap();
         fs::write(dir.path().join("a\"b.parquet"), b"x").unwrap();
 
-        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         // The page has a `<script>` of its own, so what says the name did not become
         // markup is that no tag opened where the name is.
         assert!(!html.contains("<script>alert"), "{html}");
@@ -947,11 +952,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
 
-        let on = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, true);
+        let on = listing(&dir).to_html(&DataFiles::default(), Some(API), &NO_CATALOG, SIGNED);
         assert!(on.contains("data-api=\"/api/v1\""), "{on}");
         assert!(on.contains("POST /api/v1/simple/parquet"), "{on}");
 
-        let off = listing(&dir).to_html(&DataFiles::default(), None, &NO_CATALOG, true);
+        let off = listing(&dir).to_html(&DataFiles::default(), None, &NO_CATALOG, SIGNED);
         assert!(!off.contains("data-api"), "{off}");
         assert!(!off.contains("/parquet</code>"), "{off}");
         // The file server's own query surface is not the API's, and is described either
@@ -968,7 +973,7 @@ mod tests {
     fn the_root_api_prefix_does_not_double_its_separator() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
-        let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), &NO_CATALOG, true);
+        let html = listing(&dir).to_html(&DataFiles::default(), Some("/"), &NO_CATALOG, SIGNED);
         assert!(html.contains("POST /simple/parquet"), "{html}");
         assert!(!html.contains("//simple"), "{html}");
     }

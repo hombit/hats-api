@@ -202,10 +202,12 @@ impl Headers {
     }
 }
 
-/// Headers a caller may not set, and why. Two kinds: the ones that decide where the
-/// request goes or how much of it to read, which are this service's to set, and the
+/// Headers a caller may not set, and why. Three kinds: the ones that decide where the
+/// request goes or how much of it to read, which are this service's to set; the
 /// hop-by-hop ones, which describe a connection rather than a request and would be a way
-/// to confuse the client rather than to authenticate to the server.
+/// to confuse the client rather than to authenticate to the server; and the one that says
+/// who is asking, which the operator answers for and a caller must not be able to forge
+/// or erase.
 fn refused_header(name: &HeaderName) -> Option<&'static str> {
     let hop_by_hop = [
         http::header::CONNECTION,
@@ -245,6 +247,12 @@ fn refused_header(name: &HeaderName) -> Option<&'static str> {
         return Some(
             "a compressed body has different offsets from the object, so a ranged read \
              of it returns the wrong bytes",
+        );
+    }
+    if *name == http::header::USER_AGENT {
+        return Some(
+            "the deployment names itself, and [server] user_agent is where that is \
+             decided",
         );
     }
     if hop_by_hop.contains(name) || name.as_str().eq_ignore_ascii_case("keep-alive") {
@@ -869,6 +877,8 @@ mod tests {
             ("If-Unmodified-Since", "304"),
             // A gzipped body has different offsets from the object it encodes.
             ("Accept-Encoding", "wrong bytes"),
+            // The deployment names itself to an origin, so a caller cannot rename it.
+            ("User-Agent", "names itself"),
             ("Content-Length", "describes the connection"),
             ("Transfer-Encoding", "describes the connection"),
             ("Connection", "describes the connection"),

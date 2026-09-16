@@ -1062,9 +1062,12 @@ mod tests {
             ..LimitsConfig::default()
         };
         let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
-        let policy =
-            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
-                .unwrap();
+        let policy = AccessPolicy::new(
+            &crate::config::AccessConfig::default(),
+            Arc::clone(&mounts),
+            None,
+        )
+        .unwrap();
         let service = Service::new(
             policy,
             &limits,
@@ -1122,9 +1125,12 @@ mod tests {
             ..LimitsConfig::default()
         };
         let mounts = Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
-        let policy =
-            AccessPolicy::new(&crate::config::AccessConfig::default(), Arc::clone(&mounts))
-                .unwrap();
+        let policy = AccessPolicy::new(
+            &crate::config::AccessConfig::default(),
+            Arc::clone(&mounts),
+            None,
+        )
+        .unwrap();
         let service = Service::new(
             policy,
             &limits,

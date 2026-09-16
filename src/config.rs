@@ -11,10 +11,17 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use bytesize::ByteSize;
+use http::HeaderValue;
 use serde::Deserialize;
 
 /// Where to look for the file when `--config` is not given.
 pub const CONFIG_ENV_VAR: &str = "HATS_API_CONFIG";
+
+/// What this service calls itself, in the form a `User-Agent` or a `Server` header takes.
+///
+/// One string for both directions and for the foot of a generated page, so that what an
+/// operator reads on a listing is what an origin's log will hold.
+pub const PRODUCT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -290,14 +297,14 @@ pub struct ServerConfig {
     /// needs; `127.0.0.1` keeps it on the machine.
     pub address: IpAddr,
     pub port: u16,
-    /// Whether a generated directory page says which software and version produced it,
-    /// the way `apache` and `nginx` sign theirs.
+    /// Whether this service signs what it answers — the `Server` header, and the foot of
+    /// a generated directory page — the way `apache` and `nginx` do.
     ///
-    /// On by default, because it is what someone reporting that a page looks wrong needs
-    /// to be able to say. An operator who would rather not publish which version is
-    /// running turns it off — the same call as nginx's `server_tokens`, and worth as
-    /// much: it hides the number from a reader, not from anyone fingerprinting the
-    /// service.
+    /// On by default, because it is what someone reporting that an answer looks wrong
+    /// needs to be able to say, and a caller of the API never sees the page. An operator
+    /// who would rather not publish which version is running turns it off — the same call
+    /// as nginx's `server_tokens`, and worth as much: it hides the number from a reader,
+    /// not from anyone fingerprinting the service.
     pub show_version: bool,
     /// Whether a directory holding an `index.html` is served that file in place of a
     /// generated listing.
@@ -307,6 +314,30 @@ pub struct ServerConfig {
     /// that answers to its own name — so a tree carrying pages written for some other
     /// reader is browsable here as data, which is what a HATS catalog under one is.
     pub serve_index_html: bool,
+    /// Who runs this deployment, written after the name wherever the service identifies
+    /// itself.
+    ///
+    /// No default. An origin's operator needs to reach whoever installed the service,
+    /// and the project's own url would point them at whoever wrote it.
+    pub contact: Option<String>,
+    /// What this service calls itself to an origin it reads from.
+    pub user_agent: UserAgent,
+}
+
+/// `[server] user_agent`, where each of the three values means something.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum UserAgent {
+    /// `true` for `hats-api/x.y.z (contact)`, `false` for no header at all.
+    Product(bool),
+    /// Sent as written, with neither the name nor the contact added to it.
+    Named(String),
+}
+
+impl Default for UserAgent {
+    fn default() -> Self {
+        Self::Product(true)
+    }
 }
 
 impl Default for ServerConfig {
@@ -316,6 +347,8 @@ impl Default for ServerConfig {
             port: 80,
             show_version: true,
             serve_index_html: true,
+            contact: None,
+            user_agent: UserAgent::default(),
         }
     }
 }
@@ -324,6 +357,64 @@ impl ServerConfig {
     pub fn listen_addr(&self) -> SocketAddr {
         SocketAddr::new(self.address, self.port)
     }
+
+    /// The `User-Agent` every request this service makes carries, or `None` where the
+    /// operator asked for none.
+    ///
+    /// Read once, at startup, so a string a header cannot carry is a service that does
+    /// not start rather than one that fails on its first read.
+    pub fn user_agent(&self) -> Result<Option<HeaderValue>, ConfigError> {
+        let text = match &self.user_agent {
+            UserAgent::Product(false) => return Ok(None),
+            UserAgent::Product(true) => self.signed()?,
+            UserAgent::Named(text) => text.clone(),
+        };
+        header_value("user_agent", &text).map(Some)
+    }
+
+    /// How the service signs what it answers: the `Server` header and the foot of a
+    /// generated page. `None` where `show_version` says not to sign at all.
+    ///
+    /// Separate from [`ServerConfig::user_agent`] because the two face different readers.
+    /// An operator may want an archive to know exactly who is reading it while telling
+    /// the public internet nothing about which version is running, or the reverse.
+    pub fn signature(&self) -> Result<Option<HeaderValue>, ConfigError> {
+        match self.show_version {
+            false => Ok(None),
+            true => header_value("contact", &self.signed()?).map(Some),
+        }
+    }
+
+    /// The product token with the operator's contact after it, where there is one.
+    fn signed(&self) -> Result<String, ConfigError> {
+        let Some(contact) = &self.contact else {
+            return Ok(PRODUCT.to_owned());
+        };
+        let contact = contact.trim();
+        // It goes inside a header comment, where a parenthesis of the operator's own
+        // would close the comment early and leave the rest of what they wrote reading as
+        // a second product token.
+        let printable = |c: char| c.is_ascii_graphic() || c == ' ';
+        if contact.is_empty() || contact.contains(['(', ')']) || !contact.chars().all(printable) {
+            return Err(ConfigError::Rule(
+                contact.to_owned(),
+                "expected printable ASCII with no parentheses, such as \"ops@example.org\" \
+                 or \"+https://data.example.org/\""
+                    .to_owned(),
+            ));
+        }
+        Ok(format!("{PRODUCT} ({contact})"))
+    }
+}
+
+/// A configured string as something that can go on the wire, or the key to fix.
+fn header_value(key: &str, text: &str) -> Result<HeaderValue, ConfigError> {
+    HeaderValue::from_str(text).map_err(|_| {
+        ConfigError::Rule(
+            text.to_owned(),
+            format!("is not a value a header can carry, so [server] {key} cannot be it"),
+        )
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -481,6 +572,79 @@ mod tests {
 
     fn parse(toml: &str) -> Result<Config, toml::de::Error> {
         toml::from_str(toml)
+    }
+
+    fn server(toml: &str) -> ServerConfig {
+        parse(toml).unwrap().server
+    }
+
+    /// The three values `user_agent` takes, and the one composed form the contact makes.
+    /// Each of the three has to mean something different, or a config that means "say
+    /// nothing" and one that means "say the usual thing" are the same config.
+    #[test]
+    fn a_deployment_names_itself_three_ways() {
+        // Nothing configured: the product token, and no contact to write after it.
+        let bare = server("").user_agent().unwrap().unwrap();
+        assert_eq!(bare, PRODUCT);
+
+        let signed = server("[server]\ncontact = \"ops@example.org\"")
+            .user_agent()
+            .unwrap()
+            .unwrap();
+        assert_eq!(signed, format!("{PRODUCT} (ops@example.org)"));
+
+        // A string is the whole header: neither the token nor the contact is added, so
+        // an operator who wrote one knows what goes out.
+        let named =
+            server("[server]\ncontact = \"ops@example.org\"\nuser_agent = \"archive-mirror/2\"")
+                .user_agent()
+                .unwrap()
+                .unwrap();
+        assert_eq!(named, "archive-mirror/2");
+
+        assert_eq!(
+            server("[server]\nuser_agent = false").user_agent().unwrap(),
+            None
+        );
+    }
+
+    /// `user_agent = false` silences the outbound header and nothing else: the contact
+    /// still signs what this service answers, so an operator who configured one has not
+    /// had it quietly dropped.
+    #[test]
+    fn the_two_directions_are_configured_apart() {
+        let config = server("[server]\ncontact = \"ops@example.org\"\nuser_agent = false");
+        assert_eq!(config.user_agent().unwrap(), None);
+        assert_eq!(
+            config.signature().unwrap().unwrap(),
+            format!("{PRODUCT} (ops@example.org)")
+        );
+
+        // And the other way: named to an origin, silent to a caller.
+        let config = server("[server]\nshow_version = false");
+        assert_eq!(config.user_agent().unwrap().unwrap(), PRODUCT);
+        assert_eq!(config.signature().unwrap(), None);
+    }
+
+    /// A contact that would not survive the header it goes in is refused at startup
+    /// rather than truncating the operator's own text on every request.
+    #[test]
+    fn a_contact_a_header_cannot_carry_is_refused() {
+        for contact in [
+            // Would close the comment early and leave the rest reading as a product token.
+            "ops@example.org (daytime)",
+            "ops@example.org\nX-Evil: 1",
+            // Not ASCII, which a header value is not.
+            "ops@examplé.org",
+            "   ",
+        ] {
+            let config = ServerConfig {
+                contact: Some(contact.to_owned()),
+                ..Default::default()
+            };
+            assert!(config.user_agent().is_err(), "{contact:?} was accepted");
+            assert!(config.signature().is_err(), "{contact:?} was accepted");
+        }
     }
 
     #[test]

@@ -43,6 +43,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
+use http::HeaderValue;
 use ipnet::IpNet;
 use opendal::HttpTransporter;
 use url::Host;
@@ -130,7 +131,14 @@ impl NetworkPolicy {
     /// `named` is every host the operator named in an endpoint list. Naming an endpoint
     /// is permission to reach it: these rules govern what a *caller* may point the
     /// service at, not what the deployment was configured for.
-    pub fn new(config: &NetworkConfig, named: &[Host<String>]) -> Result<Self, ConfigError> {
+    ///
+    /// `user_agent` is `[server] user_agent`, already resolved: it belongs to the client
+    /// rather than to the rules, and this is where the client is built.
+    pub fn new(
+        config: &NetworkConfig,
+        named: &[Host<String>],
+        user_agent: Option<HeaderValue>,
+    ) -> Result<Self, ConfigError> {
         let mut allow_hosts: HashSet<String> = config
             .allow_hosts
             .iter()
@@ -175,7 +183,7 @@ impl NetworkPolicy {
                 .chain(parse_nets(PRIVATE_V6))
                 .collect(),
         });
-        let client = build_client(Arc::clone(&rules))?;
+        let client = build_client(Arc::clone(&rules), user_agent)?;
         let transport = HttpTransporter::new(
             opendal_http_transport_reqwest::ReqwestTransport::new(client.clone()),
         );
@@ -381,18 +389,30 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// through [`NetworkPolicy::transport`], and the requests this crate makes directly —
 /// the range probe in [`crate::storage::materialize`] — go through [`NetworkPolicy::client`], so
 /// there is one resolver and one redirect policy rather than one per caller.
-fn build_client(rules: Arc<Rules>) -> Result<reqwest::Client, ConfigError> {
+fn build_client(
+    rules: Arc<Rules>,
+    user_agent: Option<HeaderValue>,
+) -> Result<reqwest::Client, ConfigError> {
     #[expect(
         clippy::disallowed_methods,
         reason = "the one permitted call; the lint exists to send every other one here"
     )]
-    let client = reqwest::Client::builder()
+    let mut builder = reqwest::Client::builder()
         .dns_resolver(Arc::new(PolicyResolver { rules }))
         // A redirect is the origin choosing the next destination, which is the one
         // decision this service does not let anything but its own config make: the hop
         // would carry the caller's credentials to a host no endpoint rule named. A 3xx
         // therefore comes back as the response it is.
-        .redirect(reqwest::redirect::Policy::none())
+        .redirect(reqwest::redirect::Policy::none());
+    // A default on the client rather than a header set per request. reqwest fills a
+    // default only into a name the request has not already got, which is what makes one
+    // line cover both callers above — OpenDAL builds its own request and the probe
+    // builds this crate's. It is also why `storage::options` refuses the name to a
+    // caller: theirs would take the vacancy first and the deployment would go unnamed.
+    if let Some(value) = user_agent {
+        builder = builder.user_agent(value);
+    }
+    let client = builder
         .build()
         .map_err(|error| ConfigError::Rule("access.network".to_owned(), error.to_string()))?;
     Ok(client)
@@ -403,7 +423,7 @@ mod tests {
     use super::*;
 
     fn rules(config: &NetworkConfig) -> Arc<Rules> {
-        Arc::clone(&NetworkPolicy::new(config, &[]).unwrap().rules)
+        Arc::clone(&NetworkPolicy::new(config, &[], None).unwrap().rules)
     }
 
     fn default_rules() -> Arc<Rules> {
@@ -503,7 +523,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                NetworkPolicy::new(&config, &[]).is_err(),
+                NetworkPolicy::new(&config, &[], None).is_err(),
                 "{entry} was accepted"
             );
         }
@@ -625,6 +645,7 @@ mod tests {
                 Host::Domain("minio.internal".to_owned()),
                 Host::Ipv4("10.4.5.6".parse().unwrap()),
             ],
+            None,
         )
         .unwrap();
         assert!(
