@@ -54,11 +54,12 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.4 | `TAP_SCHEMA` | todo | tier 0. Names are strict here, the published spelling being what a client copies |
 | 11.5 | VOSI capabilities, availability, tables | todo | tier 0 |
 | 11.6 | `csv` and `tsv` | todo | tier 0 by cost rather than by demand — two writers over the `QueryResult` that exists. Two of the four reference services offer neither |
-| 11.7 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
-| 11.8 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
-| 11.9 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
-| 11.10 | table upload | todo | later. The one capability the four reference services do not share — IRSA has none, MAST half |
-| 11.11 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
+| 11.7 | Simple Cone Search | todo | tier 0.5. Days on top of tier 0, which pays for all of it; its error document and UCDs are not DALI's, and nothing measures it yet |
+| 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
+| 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
+| 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
+| 11.11 | table upload | todo | later. The one capability the four reference services do not share — IRSA has none, MAST half |
+| 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
 what is deferred.
@@ -307,7 +308,7 @@ underneath either way.
 
 ### 7.2 Long requests
 
-**No async job interface in this plan.** TAP's `/async` (§11.7) is what forces one and UWS
+**No async job interface in this plan.** TAP's `/async` (§11.8) is what forces one and UWS
 specifies its shape, so it gets built once rather than invented and then reconciled. A job
 system would also break §0's statelessness and add job ids as an authorization surface.
 
@@ -572,17 +573,38 @@ someone will look, not here, since this file is deleted when the work in it is d
    set conforms — but every other route promises more than that, and a reader will carry the
    stronger assumption across unless it is written down.
 
-## 11. Phase 8 — TAP
+## 11. Phase 8 — the IVOA interfaces
 
 IVOA's Table Access Protocol over §10's ADQL layer, so that TOPCAT, `pyvo` and `astroquery`
 reach these catalogs with no client written for this service. The resources are siblings
 under one base url, `{api.prefix}/tap`, which is what the specification requires of every
 resource but `/availability` and what a client builds its urls from by appending fixed names.
 
+Simple Cone Search (§11.7) rides along on the same plumbing, which is the only reason it is
+in this phase rather than a phase of its own: it is a different protocol from a different
+decade and shares no document with TAP but the VOTable.
+
 References: [TAP 1.1](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.html),
 [DALI 1.1](https://www.ivoa.net/documents/DALI/20170517/REC-DALI-1.1.html),
 [VOSI 1.1](https://www.ivoa.net/documents/VOSI/20170524/REC-VOSI-1.1.html),
 [TAPRegExt 1.0](https://www.ivoa.net/documents/TAPRegExt/20120827/REC-TAPRegExt-1.0.html).
+
+**These are not four things to build; TAP is written on top of the others and defers to
+them constantly.** Most of what tier 0 implements is DALI, and reading TAP alone leaves
+the actual requirement unread. `RESPONSEFORMAT` is "fully described in DALI" (TAP §2.7.3),
+and it is DALI §3.4.3 that says a service *should fail* where the format asked for is one
+it does not support. The error document is TAP §3.3 saying "see DALI for details", which
+is DALI §4.2 — and §4.4 is where `QUERY_STATUS` lives and where the `OVERFLOW` marker is
+put after the table. `MAXREC`, `RUNID`, case-insensitive parameter names and repeated
+parameters are all DALI §3. What `/sync` is, as a resource, is DALI's DALI-sync pattern.
+
+The one part of DALI that is async's alone is the DALI-async pattern, which is what hands
+off to UWS — so it arrives with §11.7 and nothing before it.
+
+**Follow the reference before writing the check or the code.** Four established services
+ignore DALI §3.4.3 and answer an unsupported `RESPONSEFORMAT` with a VOTable, which read
+as "the check is too strict" until the sentence was actually looked up; and two checks
+here demanded a 4xx where TAP §3.3 explicitly permits a 200 carrying an error document.
 
 **Each step below is measured rather than argued about.** `tap-conformance/` puts `pyvo`
 and STILTS `taplint` to a built service and reports which parts of the standards answer.
@@ -860,7 +882,50 @@ work beside a week's, and a day's work that makes a spreadsheet and a `curl` int
 by the writer rather than by anything written here. Both names and media types go in §11.3's
 one list.
 
-### 11.7 `/async` and UWS — tier 1
+### 11.7 Simple Cone Search — tier 0.5
+
+[Simple Cone Search 1.03](https://www.ivoa.net/documents/REC/DAL/ConeSearch-20080222.html):
+`RA`, `DEC` and `SR` in decimal degrees, ICRS, and a VOTable of the rows inside that cone.
+That is the whole protocol.
+
+**It is here because tier 0 pays for it.** A cone predicate, HATS partitions pruned by it,
+a VOTable writer and a list of published tables with known coordinate columns are every
+part of it, and tier 0 builds all four for other reasons. On its own it would be a thin
+slice of the same plumbing; after tier 0 it is a route that parses three numbers. It also
+answers for more clients than TAP does, being what everything speaks.
+
+**What it cannot do is why it is not tier 0.** One cone, one table, no predicate, no
+projection, no join. `phot_g_mean_mag < 18` is not expressible. The reason this service
+exists is ADQL over HATS and TAP is what exposes that; this is the smaller door.
+
+Four things it does *not* inherit from tier 0, because it predates DALI by a decade:
+
+- **The error document is not DALI's.** A cone search reports failure as a stubbed VOTable
+  carrying an `INFO` (or `PARAM`) with `name="Error"` — not `QUERY_STATUS="ERROR"`. So
+  §11.3's renderer does not carry over; this needs its own, which is small and must not be
+  unified with the other one on the grounds that both are errors in VOTables.
+- **The UCDs are UCD1, not UCD1+.** The three required columns are marked `ID_MAIN`,
+  `POS_EQ_RA_MAIN` and `POS_EQ_DEC_MAIN`, where the rest of this phase writes
+  `meta.id;meta.main` and `pos.eq.ra;meta.main`. Whether to publish both spellings is the
+  one decision here worth making deliberately: clients of this protocol are old.
+- **An ID column is mandatory**, and a HATS catalog does not promise one. Which column it
+  is has to come from somewhere — the catalog's own metadata or the published-table entry —
+  and a catalog with no such column cannot be published over this protocol at all.
+- **There is no `MAXREC`.** `MaxRecords` is a registry property describing the service, not
+  a request parameter, and the protocol says nothing about truncating. What this service's
+  row bound does here therefore needs deciding rather than inheriting: silently truncating
+  is the failure this repository keeps refusing.
+
+**One endpoint per table**, which is the other shape difference — a cone search service *is*
+a table, where TAP publishes many under one base url. So the url space needs a decision that
+TAP did not need.
+
+**The conformance suite does not cover this.** It is TAP-only and there is no `taplint`
+equivalent; `pyvo.dal.SCSService` and the IVOA cone-search validator are what would check
+it, as a small suite of its own. Whatever is built here is unmeasured until that exists,
+which is the same mistake §11.0 was written to avoid.
+
+### 11.8 `/async` and UWS — tier 1
 
 The one MUST tier 0 does not answer, and the whole of tier 1. Every reference service
 implements it, so there is no reading of the evidence in which it is optional; what holds it
@@ -878,7 +943,7 @@ Two things stop being true when it lands, and both are written down elsewhere as
 `/capabilities` starts advertising an async interface, and `{api.prefix}/tap/async` stops
 answering `404`.
 
-### 11.8 `/examples`
+### 11.9 `/examples`
 
 A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. Later
 rather than tier 0 — all four reference services publish one, but a client works without it,
@@ -888,14 +953,14 @@ The rules `app/openapi/` already follows apply unchanged — an example is a que
 is judged on what it costs, so each names a few columns and a catalog example carries a
 circle. It is a page this service serves, so: no CDN, complete without JavaScript.
 
-### 11.9 What a caller gets told
+### 11.10 What a caller gets told
 
 `/docs` describes JSON bodies and TAP takes form parameters, so the TAP surface is described
 in its own page rather than bent into the OpenAPI document. What it has to say, once, and in
 the README as well: the base url to paste into TOPCAT, the table names, whether `/async` is
 there yet and what to do instead while it is not, and which formats carry a nested column.
 
-### 11.10 Table upload
+### 11.11 Table upload
 
 `TAP_UPLOAD`, and the one capability the four reference services do not share — IRSA offers
 none, MAST half. So the ecosystem has not settled it, which is what puts it here rather than
@@ -905,7 +970,7 @@ in tier 0, and it is the case that shows what they *do* agree on: each of them d
 It also reopens what a request may spend, an uploaded table being caller-supplied bytes that
 a query then joins against.
 
-### 11.11 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
+### 11.12 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
 
 The formats this service has of its own, advertised in `/capabilities` as what they are, and
 the only way a nested column can be answered at all — `votable`, `csv` and `tsv` each refuse

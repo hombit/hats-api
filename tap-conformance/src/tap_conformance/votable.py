@@ -59,27 +59,34 @@ def overflow(body: str | bytes) -> Status | None:
 
 
 def refusal(response) -> str:
-    """Raise unless this is a service refusing something, rather than a missing route.
+    """Raise unless the service refused, in either of the two ways it is allowed to.
 
-    The difference matters more than it looks. A check that a bad parameter is refused
-    is satisfied by any 4xx if it only reads the status — and a service with no TAP at
-    all answers 404 to everything, so every such check passes against nothing. Which is
-    how this was found: the suite scored points against a service that implements none
-    of the protocol.
+    A refusal is legible one of two ways, and TAP 1.1 §3.3 permits both: an HTTP error
+    status, or a document that says `QUERY_STATUS="ERROR"`. It is explicit that a
+    synchronous service "may use an appropriate HTTP status code, including 200" — so
+    demanding a 4xx would fail a service that answers 200 with a proper error document,
+    which is conforming. An earlier version of this did exactly that.
 
-    DALI §4.4 says what a refusal is — a VOTable carrying `QUERY_STATUS="ERROR"` — so
-    requiring it is both the stricter check and the correct one.
+    What both shapes exclude is the answer that matters: `200` carrying an ordinary
+    successful result, which is a parameter read and thrown away. That is what the four
+    reference services do with an unsupported `RESPONSEFORMAT`, against DALI 1.1 §3.4.3
+    telling them to fail.
+
+    The status alone is not enough either, or a service with no TAP in it passes every
+    such check on its blanket 404s — which is how the vacuous passes were found. So a
+    404 with no error document is read as a missing resource rather than a refusal.
     """
     body = response.content[:8000]
-    if response.status_code < 400:
-        raise AssertionError(f"answered {response.status_code} rather than refusing")
-    if b"<VOTABLE" not in body.upper():
+    said = [status.value for status in statuses(body)]
+    if "ERROR" in said:
+        return f"refused with {response.status_code} and QUERY_STATUS=ERROR"
+    if response.status_code == 404:
         raise AssertionError(
-            f"refused with {response.status_code} but not as a VOTable, so this is a "
-            f"resource that is missing rather than a parameter that was read: "
-            f"{body[:160]!r}"
+            f"404 with no error document, so nothing read the parameter: {body[:160]!r}"
         )
-    found = [status.value for status in statuses(body)]
-    if "ERROR" not in found:
-        raise AssertionError(f'no QUERY_STATUS="ERROR"; found {found or "none"}')
-    return f"refused with {response.status_code}, VOTable with QUERY_STATUS=ERROR"
+    if response.status_code >= 400:
+        return f"refused with {response.status_code}, no error document in the body"
+    raise AssertionError(
+        f"answered {response.status_code} with no error marker, so the parameter was "
+        f"dropped rather than refused"
+    )
