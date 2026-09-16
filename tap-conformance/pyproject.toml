@@ -12,6 +12,10 @@ dependencies = [
     "astropy>=8.0",
     "numpy>=2.5",
     "pytest>=9.0",
+    # A clock on every check. Without one, a single service that stops answering holds
+    # the whole run — which happened four times before this was added, for forty minutes
+    # apiece, each time in a different check.
+    "pytest-timeout>=2.4",
 ]
 
 [project.scripts]
@@ -45,6 +49,11 @@ testpaths = ["tests"]
 # `-p tap_conformance.plugin` is what registers this suite's own options, and it has to
 # be here rather than in a conftest — see that module for why a conftest is too late.
 addopts = "-ra --tb=short -p no:cacheprovider -p tap_conformance.plugin"
+# Long enough for a cone over a real catalog on S3, short enough that a service which
+# stops answering costs one check rather than the run. A check that hits it fails, which
+# is the right answer: a client waiting three minutes for a reply has not been served.
+timeout = 180
+timeout_method = "thread"
 markers = [
     "area(name): the part of the standards a test is about, as the report groups them",
     "taplint(stage): the STILTS taplint stage a test reads, run once per session",

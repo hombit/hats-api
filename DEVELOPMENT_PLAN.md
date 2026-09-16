@@ -48,13 +48,17 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
 | 11.0 | the conformance suite | done | `pyvo` and STILTS `taplint` against a built service, in CI as a report rather than a gate. Written before any of §11, so none of it is tuned to what was built |
-| 11.1 | the tables the service publishes | todo | a name and a url, no storage options; temporary until §9.5, and §0.2 holds only while the list is config |
-| 11.2 | `/sync` and the parameters | todo | form-encoded is a carrier no route takes today |
-| 11.3 | formats, `MAXREC`, `OVERFLOW`, errors | todo | csv and tsv are new writers; `output::votable::encode` needs a trailer |
-| 11.4 | `TAP_SCHEMA` | todo | names are strict here, the published spelling being what a client copies; a nested column is declared by its leaves and answered only by `json` and `parquet` |
-| 11.5 | VOSI capabilities, availability, tables | todo | |
-| 11.6 | `/examples` | todo | |
-| 11.7 | what a caller gets told | todo | its own page; TAP takes form parameters and `/docs` describes JSON bodies |
+| 11.1 | the tables the service publishes | todo | tier 0. A name and a url, no storage options; temporary until §9.4, and §0.2 holds only while the list is config |
+| 11.2 | `/sync` and the parameters | todo | tier 0. Form-encoded is a carrier no route takes today |
+| 11.3 | VOTable, `MAXREC`, `OVERFLOW`, errors | todo | tier 0. `output::votable::encode` needs a trailer; the overflow marker goes after the table |
+| 11.4 | `TAP_SCHEMA` | todo | tier 0. Names are strict here, the published spelling being what a client copies |
+| 11.5 | VOSI capabilities, availability, tables | todo | tier 0 |
+| 11.6 | `csv` and `tsv` | todo | tier 0 by cost rather than by demand — two writers over the `QueryResult` that exists. Two of the four reference services offer neither |
+| 11.7 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
+| 11.8 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
+| 11.9 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
+| 11.10 | table upload | todo | later. The one capability the four reference services do not share — IRSA has none, MAST half |
+| 11.11 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
 what is deferred.
@@ -303,7 +307,7 @@ underneath either way.
 
 ### 7.2 Long requests
 
-**No async job interface in this plan.** TAP's `/async` (§9.4) is what forces one and UWS
+**No async job interface in this plan.** TAP's `/async` (§11.7) is what forces one and UWS
 specifies its shape, so it gets built once rather than invented and then reconciled. A job
 system would also break §0's statelessness and add job ids as an authorization surface.
 
@@ -507,7 +511,7 @@ Three things to measure before building it, none of which affects correctness:
 3. **Whether building the list column needs `nested_expressions`.** It is off, and
    `make_array` is behind it; a UDF returning a `ListArray` should sidestep that, `Unnest`
    being a plan node rather than an array function. Worth confirming, because turning the
-   feature on makes every array function callable at once — which is §9.7's decision and
+   feature on makes every array function callable at once — which is §9.6's decision and
    not this one's.
 
 It is a recognised query shape rather than general `JOIN` support. Anything outside it is
@@ -597,24 +601,52 @@ the code reads right. Three things about it constrain what follows:
   because a document can carry everything the standard asks for and still be one a client
   cannot parse.
 
-**This phase is deliberately not a conforming TAP service, in exactly one place.** `/async`
-is a MUST (TAP §2.2) and is §9.4. Everything else a conforming service needs is here. What
-that costs is a real thing and belongs in the README rather than being discovered from a
-validator: a query too slow for `max_request_seconds` has nowhere to go, because the resource
-a client would be sent to does not exist. `taplint` will say so, and the answer is that the
-query has to be made smaller until §9.4 lands.
+### The order, and what decided it
 
-Two things follow from being sync-only, and both are refusals rather than silence:
-`/capabilities` advertises no async interface, and `{api.prefix}/tap/async` answers `404`.
-Advertising one and failing the job submission is worse than not offering it — a client
-chooses the interface off the capabilities document and has no way back.
+The suite was run against four separate TAP implementations — ESA Gaia, ARI-Gaia, IRSA and
+MAST — before any of this was written, and what they have in common is what sets the order
+here. A specification marks everything MUST or SHOULD and cannot say which of it a client
+actually needs; four independent services agreeing does say so.
+
+**Tier 0 is what every one of those four implements, and what is cheap here.** Availability,
+capabilities, table metadata, `TAP_SCHEMA`, synchronous queries, ADQL, VOTable, `MAXREC`
+with its overflow marker, and error documents: all four have all of it, so there is no part
+of it a client can be expected to work around. Nothing in Tier 0 is optional in practice
+whatever the standard calls it. `csv` and `tsv` join it for the opposite reason — the four
+disagree about them, so they are not required, but they are two writers over a `QueryResult`
+that already exists and cost about a day between them.
+
+**Tier 1 is `/async`, alone.** All four implement it, so it belongs in Tier 0 by the rule
+above and is held back by one thing only: it is a job model, which is state, against a
+service whose every answer today is collected inside one request future. It is the one
+piece of this phase that is a design question rather than a mapping, and mixing it into
+Tier 0 would stall everything that is a mapping.
+
+**Everything else is later, and named as such below.** Table upload is the clearest case:
+IRSA offers none and MAST half, so the ecosystem has not settled it, and the four agree
+only on *declaring* what they have. `/examples` is a menu TOPCAT offers rather than
+something a client needs to work. The formats this service has of its own — `parquet`,
+`json` — and how a nested column is declared are questions no reference service can be
+asked, because none of them has such a column.
+
+**Until Tier 1 lands this is deliberately not a conforming TAP service, in exactly one
+place.** `/async` is a MUST (TAP §2.2). What that costs is a real thing and belongs in the
+README rather than being discovered from a validator: a query too slow for
+`max_request_seconds` has nowhere to go, because the resource a client would be sent to does
+not exist. `taplint` will say so, and the answer is that the query has to be made smaller
+until Tier 1 lands.
+
+Two things follow from being sync-only in the meantime, and both are refusals rather than
+silence: `/capabilities` advertises no async interface, and `{api.prefix}/tap/async` answers
+`404`. Advertising one and failing the job submission is worse than not offering it — a
+client chooses the interface off the capabilities document and has no way back.
 
 ### 11.1 The tables the service publishes
 
 A TAP query names a table the service already knows: `TAP_SCHEMA` is service-side and has
 nowhere to put a name that arrived with the query, so the per-request `tables` of §10.1 has
 no equivalent here. **The list is config, and that is the temporary half of this phase** —
-§9.5 is where the tables come from somewhere else, and nothing built here may assume the
+§9.4 is where the tables come from somewhere else, and nothing built here may assume the
 list is written by hand.
 
 A table is a name and a url, local or remote, and nothing else:
@@ -631,7 +663,7 @@ url = "s3://irsa-fornax-testdata/ZTF/dr24/object"
 
 **§0.2 survives this and must keep surviving it.** A list read from the config at startup is
 config, not a registry accumulated across requests; nothing here caches a catalog between
-two requests. The moment tables are discovered rather than declared — §9.5 — that stops
+two requests. The moment tables are discovered rather than declared — §9.4 — that stops
 being true and §0.2 is what has to be reopened.
 
 Four things this shape settles:
@@ -643,7 +675,7 @@ Four things this shape settles:
   serves whatever it lists to anyone who can reach it.
 - **No storage options, so a published table is one that reads anonymously.** A url is the
   whole of what a table is: `[[tap.table]]` has no `storage`, and a catalog needing a
-  credential is not publishable over TAP until §9.5 decides where one would come from. What
+  credential is not publishable over TAP until §9.4 decides where one would come from. What
   that buys is that the question §8.1 would otherwise have to answer here — an operator's
   secret in a config file, on a surface whose answers are public — does not arise. Adding the
   field later is adding that question, not a convenience.
@@ -686,10 +718,15 @@ parameter is refused too (DALI §3.2).
 
 ### 11.3 What comes back
 
-**Formats.** `votable` is mandatory and the default. `csv` and `tsv` are a SHOULD (TAP
-§2.7.3) and are new writers over the same `QueryResult`; `parquet` and `json` are this
-service's own and are advertised in `/capabilities` as what they are. Each name and its
-media type come from one list, the way `Format` already holds the three it has.
+**One format here, and it is `votable`** — mandatory, the default, and the only one all
+four reference services agree on. `csv` and `tsv` are §11.6; `parquet` and `json` are
+§11.11. What this step owns is that each name and its media type come from one list, the
+way `Format` already holds the three it has, so the later two steps add entries rather
+than a second way of deciding.
+
+**A media type is part of the answer, not decoration.** One reference service labels its
+VOTable `text/xml`, and a client that picks its parser by content type picks wrong — which
+is the whole failure this list exists to avoid.
 
 **`MAXREC` is not `limit`.** Three of its rules are its own:
 
@@ -723,8 +760,13 @@ that — and does not arise, because **a nested column in a VOTable is refused**
 by there being no such answer. That refusal is this phase's behaviour and not a gap waiting
 on something: whatever form a nested column eventually takes here has to satisfy §3.2 as one
 of its conditions, which is a constraint on that decision rather than a reason to make it
-now. `json` and `parquet` nest what they are given, so the packing does show there — a
-divergence those two formats carry.
+now.
+
+**A `FIELD`'s `name` and its `ID` say the same thing.** The two clients disagree about which
+they read — one answer came back with `source_id` through `pyvo` and `SOURCE_ID` through
+STILTS, for one query against one service — so a query written in TOPCAT and pasted into a
+notebook raises `KeyError`. Nothing in the standards forces the two apart; making them agree
+costs nothing and removes the failure.
 
 ### 11.4 `TAP_SCHEMA`
 
@@ -807,19 +849,73 @@ quotes defensively breaks on it. Worth stating on §11.7's page, there being now
 - **`/tables`** — the same metadata as §11.4 in VOSI's own XML, with `?detail=min` returning
   table names without columns and `/tables/{name}` returning one table in full.
 
-### 11.6 `/examples`
+### 11.6 `csv` and `tsv`
 
-A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. The
-rules `app/openapi/` already follows apply unchanged — an example is a query that runs and is
-judged on what it costs, so each names a few columns and a catalog example carries a circle.
-It is a page this service serves, so: no CDN, complete without JavaScript.
+Two writers over the `QueryResult` that `votable` already answers from, and the last of
+tier 0. TAP §2.7.3 makes them a SHOULD and the reference services split two against two on
+them, so this is not here because anyone requires it — it is here because it is a day's
+work beside a week's, and a day's work that makes a spreadsheet and a `curl` into clients.
 
-### 11.7 What a caller gets told
+`arrow-csv`'s writer rejects any `is_nested()` type outright, so a nested column is refused
+by the writer rather than by anything written here. Both names and media types go in §11.3's
+one list.
+
+### 11.7 `/async` and UWS — tier 1
+
+The one MUST tier 0 does not answer, and the whole of tier 1. Every reference service
+implements it, so there is no reading of the evidence in which it is optional; what holds it
+back is that it is the only part of this phase that is a design question rather than a
+mapping.
+
+A job model is state — creation, phases, polling, results that outlive the request that
+asked for them, destruction times and their collection — against a service whose every
+answer today is collected inside one request future. It is where §5.3's and §7.2's
+no-job-queue decision is revisited, where §0.2 is reopened, and where a job id becomes an
+authorization surface. UWS specifies the shape, so it gets built once rather than invented
+and then reconciled.
+
+Two things stop being true when it lands, and both are written down elsewhere as temporary:
+`/capabilities` starts advertising an async interface, and `{api.prefix}/tap/async` stops
+answering `404`.
+
+### 11.8 `/examples`
+
+A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. Later
+rather than tier 0 — all four reference services publish one, but a client works without it,
+which is the difference between a capability and a convenience.
+
+The rules `app/openapi/` already follows apply unchanged — an example is a query that runs and
+is judged on what it costs, so each names a few columns and a catalog example carries a
+circle. It is a page this service serves, so: no CDN, complete without JavaScript.
+
+### 11.9 What a caller gets told
 
 `/docs` describes JSON bodies and TAP takes form parameters, so the TAP surface is described
 in its own page rather than bent into the OpenAPI document. What it has to say, once, and in
-the README as well: the base url to paste into TOPCAT, the table names, that `/async` is not
-there and what to do instead, and which formats carry a nested column.
+the README as well: the base url to paste into TOPCAT, the table names, whether `/async` is
+there yet and what to do instead while it is not, and which formats carry a nested column.
+
+### 11.10 Table upload
+
+`TAP_UPLOAD`, and the one capability the four reference services do not share — IRSA offers
+none, MAST half. So the ecosystem has not settled it, which is what puts it here rather than
+in tier 0, and it is the case that shows what they *do* agree on: each of them declares in
+`/capabilities` exactly what it has. That is the shape to copy for anything not implemented.
+
+It also reopens what a request may spend, an uploaded table being caller-supplied bytes that
+a query then joins against.
+
+### 11.11 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
+
+The formats this service has of its own, advertised in `/capabilities` as what they are, and
+the only way a nested column can be answered at all — `votable`, `csv` and `tsv` each refuse
+one.
+
+Both halves are here because no reference service can be asked about either. None of them
+publishes a nested column, so there is no practice to follow and no check that can be
+calibrated against anybody: what `TAP_SCHEMA.columns` should say about `lightcurve.mag` is a
+decision to make alone, and it waits on §7.5 deciding what a nested column is in a VOTable
+first.
 
 ## 8. Security requirements
 
@@ -947,22 +1043,15 @@ Nothing in it bounds what a `collect` returns.
    the work. §10 does not wait on it — ADQL's `POLYGON` is part of an optional feature, and
    the second and third points above are also what `BOX` turns on, which is why §10.7
    refuses that one rather than mapping it onto a shape with different edges.
-4. **TAP `/async` and UWS.** The one MUST §11 does not answer, and the reason it is not a
-   step of that phase: a job model is state — creation, phases, polling, results that
-   outlive the request that asked for them, destruction times and their collection — against
-   a service whose every answer today is collected inside one request future. It is where
-   §5.3's and §7.2's no-job-queue decision is revisited, and where a job id becomes an
-   authorization surface. UWS specifies the shape, so it gets built once rather than
-   invented and then reconciled.
-5. **Tables discovered rather than declared.** §11.1's list is written out per table and is
+4. **Tables discovered rather than declared.** §11.1's list is written out per table and is
    temporary; the HATS registry is where it comes from instead. It reopens two things at
    once. §0.2, because a set of tables fetched from elsewhere is a registry across requests,
    with a refresh, a staleness window and two requests that may disagree about what exists.
    And §11.1's url-only table, because a catalog the registry names may need a credential to
    read — which is §8.1's question on a surface whose answers are public, and the reason
    §11.1 declines to answer it early.
-6. **Filesystem-driven cache invalidation** (§6.6).
-7. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
+5. **Filesystem-driven cache invalidation** (§6.6).
+6. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today. The
    obstacle is not the expression rules — an operation over one row's list is a scalar
    function, which the allowlist admits — it is that `datafusion`'s `nested_expressions`
@@ -976,7 +1065,7 @@ Nothing in it bounds what a `collect` returns.
    `array_any_match` take lambdas, which the allowlist refuses as expression kinds — either
    they stay refused, which needs saying in the error rather than a bare "not supported", or
    the lambda arms are reconsidered, which is wider than this item.
-8. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap`. `hats` is the catalog itself rather than this service's use of it — the
    properties file, the partitioning, `Norder`/`Npix`/`Dir`, the MOC, `_metadata` and
    `partition_info.csv`, what the Python `hats` library covers, for anyone reading a catalog

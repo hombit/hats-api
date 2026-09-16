@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-16T10:39:38+00:00",
+  "generated": "2026-09-16T13:14:11+00:00",
   "target": "https://gaia.ari.uni-heidelberg.de/tap",
   "tools": {
     "pyvo": "1.9.1",
@@ -10,23 +10,23 @@
   "provenance": "reference answers from ESA Gaia Archive, fetched 2026-09-16T10:23:12+00:00",
   "broken": [],
   "totals": {
-    "pass": 40,
-    "fail": 10,
+    "pass": 44,
+    "fail": 6,
     "xpass": 0,
     "xfail": 0,
     "skip": 57
   },
   "questions": {
     "standard": {
-      "pass": 40,
-      "fail": 10,
+      "pass": 44,
+      "fail": 6,
       "xpass": 0,
       "xfail": 0,
       "skip": 25
     },
     "clients": {
-      "pass": 39,
-      "fail": 10,
+      "pass": 44,
+      "fail": 6,
       "xpass": 0,
       "xfail": 0,
       "skip": 57
@@ -98,46 +98,46 @@
     {
       "id": "adql/mandatory_functions[ABS(-1.5)]",
       "area": "ADQL",
-      "outcome": "fail",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The numeric functions ADQL 2.1 requires of every service.",
-      "detail": "E   pyvo.dal.exceptions.DALQueryError: Incorrect ADQL query:  Encountered \"value\". Was expecting one of: \"\\\"\" <REGULAR_IDENTIFIER_CANDIDATE> E   (HINT: \"value\" is not supported in ADQL, but is however a reserved word. To use it as a column/table/schema name/alias, write it between double quotes.)"
+      "detail": "ABS(-1.5) = 1.5"
     },
     {
       "id": "adql/mandatory_functions[CEILING(1.2)]",
       "area": "ADQL",
-      "outcome": "fail",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The numeric functions ADQL 2.1 requires of every service.",
-      "detail": "E   pyvo.dal.exceptions.DALQueryError: Incorrect ADQL query:  Encountered \"value\". Was expecting one of: \"\\\"\" <REGULAR_IDENTIFIER_CANDIDATE> E   (HINT: \"value\" is not supported in ADQL, but is however a reserved word. To use it as a column/table/schema name/alias, write it between double quotes.)"
+      "detail": "CEILING(1.2) = 2.0"
     },
     {
       "id": "adql/mandatory_functions[FLOOR(1.8)]",
       "area": "ADQL",
-      "outcome": "fail",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The numeric functions ADQL 2.1 requires of every service.",
-      "detail": "E   pyvo.dal.exceptions.DALQueryError: Incorrect ADQL query:  Encountered \"value\". Was expecting one of: \"\\\"\" <REGULAR_IDENTIFIER_CANDIDATE> E   (HINT: \"value\" is not supported in ADQL, but is however a reserved word. To use it as a column/table/schema name/alias, write it between double quotes.)"
+      "detail": "FLOOR(1.8) = 1.0"
     },
     {
       "id": "adql/mandatory_functions[SQRT(4.0)]",
       "area": "ADQL",
-      "outcome": "fail",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The numeric functions ADQL 2.1 requires of every service.",
-      "detail": "E   pyvo.dal.exceptions.DALQueryError: Incorrect ADQL query:  Encountered \"value\". Was expecting one of: \"\\\"\" <REGULAR_IDENTIFIER_CANDIDATE> E   (HINT: \"value\" is not supported in ADQL, but is however a reserved word. To use it as a column/table/schema name/alias, write it between double quotes.)"
+      "detail": "SQRT(4.0) = 2.0"
     },
     {
       "id": "adql/string_comparison",
@@ -188,7 +188,8 @@
       "area": "async",
       "outcome": "pass",
       "asks": [
-        "standard"
+        "standard",
+        "clients"
       ],
       "description": "Absent means 404, not a hang and not a 500.",
       "detail": "https://gaia.ari.uni-heidelberg.de/tap/async \u2192 200"
@@ -411,7 +412,7 @@
         "clients"
       ],
       "description": "The published examples are queries that run.",
-      "detail": "10 of 10 run"
+      "detail": "10 of 10 run, out of 22 published"
     },
     {
       "id": "maxrec/a_complete_answer_is_not_marked",
@@ -444,7 +445,7 @@
         "clients"
       ],
       "description": "A MAXREC that is not a row count is an error (DALI 3.4).",
-      "detail": "status 200"
+      "detail": "E   AssertionError: answered 200 rather than refusing"
     },
     {
       "id": "maxrec/overrides_top",
@@ -488,7 +489,7 @@
         "clients"
       ],
       "description": "Neither is a MAXREC that is not a number.",
-      "detail": "status 400"
+      "detail": "refused with 400, VOTable with QUERY_STATUS=ERROR"
     },
     {
       "id": "maxrec/zero",
@@ -565,7 +566,7 @@
         "clients"
       ],
       "description": "A format the service has not got is refused, not silently replaced.",
-      "detail": "status 200"
+      "detail": "E   AssertionError: answered 200 rather than refusing"
     },
     {
       "id": "output_formats/votable",
@@ -972,7 +973,7 @@
         "clients"
       ],
       "description": "A language the service does not implement is refused rather than guessed at.",
-      "detail": "status 200"
+      "detail": "E   AssertionError: answered 200 rather than refusing"
     },
     {
       "id": "sync_query/parameter_names_are_case_insensitive",

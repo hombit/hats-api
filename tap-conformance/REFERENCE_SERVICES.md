@@ -1,59 +1,81 @@
-# How other services read the standard
+# What four TAP services actually implement
 
-Where this suite's checks and a long-running TAP service disagree. Every row is a
-question about **the check**, not a verdict on the service: a clause read one way by
-people who had to ship something is a clause that has been decided in practice, and a
-check that no established service passes is more likely to be reading the standard too
-strictly than to have found five independent bugs.
+The suite run against four independent implementations. Not to grade them: to find out
+what the standard means in practice, which is the thing a specification cannot tell you.
+A capability all four have is one clients depend on and we will be measured against. A
+check none of them passes is almost certainly a check reading the standard more strictly
+than anyone implements it — and it is the check that should change, not four services.
 
-So each row is here to be settled one way or the other — the check is wrong and goes, or
-the check is right and this service should not follow the same reading. Neither has been
-decided yet. Findings about the clients are in `CLIENTS.md`.
+Four rather than one because a single reference cannot tell a service's mistake from a
+check's. They are four separate stacks, and two of them serve Gaia DR3, so a
+disagreement can be read against the same rows:
 
-**One source each, which is the first thing to fix.** Observed 2026-09-16 against the
-ESA Gaia Archive with pyvo 1.9.1 and STILTS 3.5-6.
-`tap-conformance-survey --refresh-references` asks five services, and `report/matrix.md`
-is where a check everybody fails can be told from one only this service fails. This file
-predates that and has not been re-read against it.
+| | |
+|---|---|
+| **ESA Gaia** | `https://gea.esac.esa.int/tap-server/tap` |
+| **ARI-Gaia** | `https://gaia.ari.uni-heidelberg.de/tap` |
+| **IRSA** | `https://irsa.ipac.caltech.edu/TAP` |
+| **MAST** | `https://mast.stsci.edu/vo-tap/api/v0.1/caom/` |
 
-| | what was observed | what the check reads it against | is the check right? |
-|---|---|---|---|
-| **Malformed query answered as HTML** | `… WHERE table_name = 'x` (unclosed literal) → **500**, `text/html`, a styled error page | DALI §4.4: a VOTable with `QUERY_STATUS="ERROR"`. Two other malformed queries do get one, so this is one path through a parser rather than a position | probably. DALI is explicit |
-| **`MAXREC=-1` answered** | **200** and the full result | DALI §3.4 defines MAXREC as a non-negative integer | unclear — what a service owes an out-of-range value is not spelled out in one sentence |
-| **`MAXREC=lots` answered** | **200** and the full result | The same, for a value that is not a number | more likely than the row above: there is no reading of `lots` as a row count |
-| **Unknown `RESPONSEFORMAT` answered** | `application/x-nonsense` → **200** and a VOTable | TAP §2.7.3 | needs the text. The argument for it is that a client which asked for one format and got another parses the wrong thing far from the cause |
-| **`SELECT *` from `TAP_SCHEMA` fails in the client** | `UnicodeDecodeError: 'ascii' codec can't decode byte 0xa0` — a non-breaking space in a document astropy decodes as ASCII; STILTS reads the same query | Not a clause at all. It may be a mis-declared encoding, a `Content-Type` with no charset, or astropy's default | the check is right that something is wrong; whose is open |
+VizieR (`https://tapvizier.cds.unistra.fr/TAPVizieR/tap`) was tried and left out: a
+client reads the whole VOSI table list before it can ask anything, and tens of thousands
+of tables do not arrive in any time worth waiting. The GAVO data centre and CADC do not
+resolve from here and are worth another attempt from a network that can see them.
 
-STILTS `taplint` adds these, from one run over two tables of a 248-table service. They
-are the validator's readings rather than this suite's:
+| capability | ESA Gaia | ARI-Gaia | IRSA | MAST |
+|---|---|---|---|---|
+| VOSI availability | yes | yes | yes | yes |
+| VOSI capabilities | yes | yes | 5/6 | yes |
+| VOSI tables | yes | yes | 1/2 | yes |
+| TAP_SCHEMA | 2/3 | 2/3 | yes | yes |
+| sync query | yes | 5/6 | 5/6 | yes |
+| ADQL | yes | yes | 4/5 | yes |
+| output formats | 6/7 | 4/7 | 6/7 | 3/7 |
+| MAXREC and overflow | 6/8 | 7/8 | 5/8 | yes |
+| error documents | 5/6 | yes | 1/6 | yes |
+| examples | yes | yes | 1/2 | 1/2 |
+| async | yes | yes | yes | yes |
+| upload | yes | yes | no | 1/2 |
 
-| stage | | |
+`n/m` is checks passed out of checks that ran. Totals: ESA 45 of 50, ARI-Gaia 44, MAST 44,
+IRSA 34. Observed 2026-09-16 with pyvo 1.9.1, astropy 8.0.1 and STILTS 3.5-6; regenerate
+with `tap-conformance-survey --refresh-references`.
+
+## What this settles
+
+**Everything core is universal.** Availability, capabilities, table metadata,
+`TAP_SCHEMA`, synchronous queries, ADQL, VOTable output, `MAXREC`, error documents and
+async are implemented by all four. There is no part of the mandatory surface that
+established services treat as optional, so there is nothing here to argue our way out
+of.
+
+**`/async` is implemented by all four.** It is the one thing this service plans not to
+have, and no reference service agrees. That is the cost of the decision stated in
+numbers rather than in prose.
+
+**Upload is genuinely optional.** IRSA has none and MAST half. It is declared in the
+capabilities document and clients read it there, which is the shape a feature takes when
+the ecosystem has not settled it — and the shape to copy for anything we do not
+implement.
+
+**CSV and TSV are not universal.** ESA and IRSA answer both; ARI-Gaia and MAST answer
+neither. A SHOULD in the standard is a SHOULD in practice.
+
+## Edge cases
+
+Observed directly and reproducible; each is a decision rather than a verdict.
+
+| service | what happens | why it matters |
 |---|---|---|
-| `TME`, `TMS` | 5 × `TNTN` | Table names whose schema part is a reserved word (`external.apassdr9` and four siblings), published undelimited |
-| `UUC` | 3 × `UCDX`, 10 × unit warnings | UCDs outside the vocabulary; units that do not parse as VOUnits |
-| `EXA` | 1 × `EXVC`, 7 warnings | The DALI examples markup |
-| `TMV`, `CAP` | 1 warning each | Table-metadata schema validation, server identification |
+| **all four** | an unknown `RESPONSEFORMAT` is answered in VOTable rather than refused | either TAP §2.7.3 does not require the refusal or nobody implements it. Asking it here would be stricter than the whole ecosystem, so that check should go or become a note |
+| **ESA** | an unclosed string literal returns 500 and an HTML page | DALI §4.4 asks for an error document, and its other malformed queries do get one — so this is one path through a parser |
+| **ESA** | `SELECT *` from `TAP_SCHEMA` breaks pyvo: a byte astropy decodes as ASCII | the only finding here that stops a session dead. STILTS reads the same query |
+| **IRSA** | one of six error checks passes — most failures do not come back as DALI error documents | a client cannot read the reason a query failed |
+| **MAST** | a VOTable is labelled `text/xml`, not `application/x-votable+xml` | a client choosing its parser by content type picks wrong |
 
-## What the same run settles
+One more, about this suite rather than anyone's service: `ABS`, `CEILING`, `FLOOR` and
+`SQRT` failed against three of four services until the alias in the check was changed
+from `value`, which is a reserved word. That is the clearest argument for asking several
+services — with one reference the reading would have been "three services are broken".
 
-Checks that passed are worth as much as the ones that did not: a reading confirmed by a
-service with a decade of clients is a reading to follow here.
-
-- `OVERFLOW` is written, and written **after** the `TABLE`, which is where DALI §4.4 puts
-  it — so that is what this service should do.
-- All three VOSI documents validate against their schemas, and `/tables` and
-  `TAP_SCHEMA` agree with each other.
-- `TMC`, both capability stages and availability pass clean.
-
-## Reproducing
-
-```sh
-cd tap-conformance
-uv run pytest -c pyproject.toml --base-url https://gea.esac.esa.int/tap-server/tap \
-    --skip-taplint --report-dir /tmp/esa        # the client checks, minutes
-uv run pytest -c pyproject.toml --base-url https://gea.esac.esa.int/tap-server/tap \
-    -k stage --report-dir /tmp/esa-taplint      # the validator, about two
-```
-
-The second writes `taplint.json` beside its report — the validator's own output, holding
-every message the counts above summarize.
+Findings about the clients rather than the services are in `CLIENTS.md`.

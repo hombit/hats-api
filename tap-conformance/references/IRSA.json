@@ -1,6 +1,6 @@
 {
-  "generated": "2026-09-16T13:13:47+00:00",
-  "target": "https://gea.esac.esa.int/tap-server/tap",
+  "generated": "2026-09-16T13:19:22+00:00",
+  "target": "https://irsa.ipac.caltech.edu/TAP",
   "tools": {
     "pyvo": "1.9.1",
     "astropy": "8.0.1",
@@ -8,25 +8,27 @@
     "stilts": "skipped"
   },
   "provenance": "reference answers from ESA Gaia Archive, fetched 2026-09-16T10:23:12+00:00",
-  "broken": [],
+  "broken": [
+    "tables_metadata/columns_are_readable_by_the_client raised: E   AttributeError: 'ContentMixin' object has no attribute 'schemas'"
+  ],
   "totals": {
-    "pass": 45,
-    "fail": 5,
+    "pass": 34,
+    "fail": 16,
     "xpass": 0,
     "xfail": 0,
     "skip": 57
   },
   "questions": {
     "standard": {
-      "pass": 45,
-      "fail": 5,
+      "pass": 34,
+      "fail": 16,
       "xpass": 0,
       "xfail": 0,
       "skip": 25
     },
     "clients": {
-      "pass": 45,
-      "fail": 5,
+      "pass": 34,
+      "fail": 16,
       "xpass": 0,
       "xfail": 0,
       "skip": 57
@@ -49,7 +51,7 @@
         "clients"
       ],
       "description": "An expression over columns is a column, and AS names it.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "adql/contains_a_circle",
@@ -60,7 +62,7 @@
         "clients"
       ],
       "description": "A cone written as CONTAINS(POINT, CIRCLE) is answered.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "adql/delimited_identifier",
@@ -71,7 +73,7 @@
         "clients"
       ],
       "description": "A name in double quotes is a delimited identifier, matched as written.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "adql/distance",
@@ -82,7 +84,7 @@
         "clients"
       ],
       "description": "DISTANCE between two points is a value a query can select and order by.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "adql/group_by",
@@ -93,7 +95,7 @@
         "clients"
       ],
       "description": "An aggregate with a grouping, which ADQL makes mandatory.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "adql/mandatory_functions[ABS(-1.5)]",
@@ -109,13 +111,13 @@
     {
       "id": "adql/mandatory_functions[CEILING(1.2)]",
       "area": "ADQL",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The numeric functions ADQL 2.1 requires of every service.",
-      "detail": "CEILING(1.2) = 2.0"
+      "detail": "E   pyvo.dal.exceptions.DALQueryError: UsageFault: BAD_REQUEST: ORA-00904: \"CEILING\": invalid identifier"
     },
     {
       "id": "adql/mandatory_functions[FLOOR(1.8)]",
@@ -159,7 +161,7 @@
         "clients"
       ],
       "description": "A predicate and an ordering, which is most of what a client writes.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "async/job_submission",
@@ -192,7 +194,7 @@
         "clients"
       ],
       "description": "Absent means 404, not a hang and not a 500.",
-      "detail": "https://gea.esac.esa.int/tap-server/tap/async \u2192 200"
+      "detail": "https://irsa.ipac.caltech.edu/TAP/async \u2192 200"
     },
     {
       "id": "async/uws_job_model",
@@ -247,7 +249,7 @@
         "clients"
       ],
       "description": "Nothing is advertised that is not there.",
-      "detail": "<AccessURL use=base>https://gea.esac.esa.int/tap-server/tap</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/availability</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/tables</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/examples/</AccessURL>, <AccessURL use=full>https://gea.esac.esa.int/tap-server/tap/capabilities</AccessURL>"
+      "detail": "<AccessURL use=full>https://irsa.ipac.caltech.edu/TAP/capabilities</AccessURL>, <AccessURL use=full>https://irsa.ipac.caltech.edu/TAP/availability</AccessURL>, <AccessURL use=full>https://irsa.ipac.caltech.edu/TAP/tables</AccessURL>, <AccessURL use=full>https://irsa.ipac.caltech.edu/TAP/examples</AccessURL>, <AccessURL use=base>https://irsa.ipac.caltech.edu/TAP</AccessURL>"
     },
     {
       "id": "capabilities/output_formats",
@@ -258,18 +260,18 @@
         "clients"
       ],
       "description": "Every format the service will answer in is declared, VOTable among them.",
-      "detail": "formats=['application/x-votable+xml', 'application/x-votable+xml', 'application/x-votable+xml', 'text/csv', 'text/ecsv', 'text/tab-separated-values', 'application/json', 'application/fits', 'text/xml']"
+      "detail": "formats=['application/x-votable+xml;serialization=tabledata', 'text/csv', 'text/tab-separated-values', 'text/plain', 'application/fits', 'application/x-hdf', 'application/json', 'application/json5']"
     },
     {
       "id": "capabilities/output_limits",
       "area": "VOSI capabilities",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The row limits are declared, which is what a client reads MAXREC against.",
-      "detail": "default=3000000 hard=3000000"
+      "detail": "E   pyvo.dal.exceptions.DALServiceError: Default limit not exposed by the service"
     },
     {
       "id": "capabilities/query_language",
@@ -302,7 +304,7 @@
         "clients"
       ],
       "description": "The TAP standard id is among the declared capabilities.",
-      "detail": "ivo://ivoa.net/std/tap, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables-1.1, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/vosi#capabilities"
+      "detail": "ivo://ivoa.net/std/vosi#capabilities, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/tap"
     },
     {
       "id": "capabilities/vosi_capabilities",
@@ -313,18 +315,18 @@
         "clients"
       ],
       "description": "The three VOSI resources are declared alongside it.",
-      "detail": "declared: ivo://ivoa.net/std/tap, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables-1.1, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/vosi#capabilities"
+      "detail": "declared: ivo://ivoa.net/std/vosi#capabilities, ivo://ivoa.net/std/vosi#availability, ivo://ivoa.net/std/vosi#tables, ivo://ivoa.net/std/dali#examples, ivo://ivoa.net/std/tap"
     },
     {
       "id": "errors/bad_query[syntax]",
       "area": "errors",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "A query that cannot run comes back as an error document with a 4xx.",
-      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+      "detail": "E   AssertionError: a syntax error was answered with 200 E   assert 200 >= 400 E    +  where 200 = <Response [200]>.status_code"
     },
     {
       "id": "errors/bad_query[unclosed_string]",
@@ -335,18 +337,18 @@
         "clients"
       ],
       "description": "A query that cannot run comes back as an error document with a 4xx.",
-      "detail": "E   AssertionError: the error is not a VOTable: b'<html>\\n<head>\\n<meta http-equiv=\"Content-Type\" content=\"text/html; charset=UTF-8\" />\\n<style type=\"text/css\">\\nbody { background-color: white; color: black; }\\nh2 { font-weight: bold; font-variant: small-' E   assert b'<VOTABLE' in b'<HTML>\\n<HEAD>\\n<META HTTP-EQUIV=\"CONTENT-TYPE\" CONTENT=\"TEXT/HTML; CHARSET=UTF-8\" />\\n<STYLE TYPE=\"TEXT/CSS\">\\nBODY...TOKENMGRERROR: LEXICAL ERROR AT LINE 1, COLUMN 54.  ENCOUNTERED: <EOF> AFTER : \"\\\\\\'X\"</LI>\\n</UL>\\n</BODY>\\n</HTML>\\n' E    +  where b'<HTML>\\n<HEAD>\\n<META HTTP-EQUIV=\"CONTENT-TYPE\" CONTENT=\"TEX"
+      "detail": "E   AssertionError: a unclosed-string error was answered with 200 E   assert 200 >= 400 E    +  where 200 = <Response [200]>.status_code"
     },
     {
       "id": "errors/bad_query[unknown_table]",
       "area": "errors",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "A query that cannot run comes back as an error document with a 4xx.",
-      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+      "detail": "E   AssertionError: a unknown-table error was answered with 200 E   assert 200 >= 400 E    +  where 200 = <Response [200]>.status_code"
     },
     {
       "id": "errors/the_client_raises",
@@ -357,29 +359,29 @@
         "clients"
       ],
       "description": "pyvo turns the error document into an exception rather than an empty table.",
-      "detail": "DALQueryError: Cannot parse query 'SELECT FROM WHERE' for job '5614ce5d-b1d0-11f1-a4dd-bc97e148b76b-O': Encountered \" \"FROM\" \"FROM \"\" at line 1, column 8.\nWas expecting one of:\n    \"(\" ...\n    \"+\" ...\n    \"-\" ...\n  "
+      "detail": "DALQueryError: UsageFault: BAD_REQUEST: Invalid or unsupported ADQL query string. See TAP documentation here: https://irsa.ipac.caltech.edu/docs/program_interface/TAP.html"
     },
     {
       "id": "errors/the_message_says_something",
       "area": "errors",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The error names what was wrong with the query it was given.",
-      "detail": "<VOTABLE version=\"1.2\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.2\"> <RESOURCE type=\"results\"> <INFO name=\"QUERY_STATUS\" value=\"ERROR\"> Cannot parse query 'SELECT no_such_column FROM external.apassdr9' for job '56711f31-b1d0-11f1-a4dd-bc97e148b76b-O': 1 unresolved identifiers: no_such_column [l.1 c."
+      "detail": "<?xml version=\"1.0\" encoding=\"utf-8\"?> <VOTABLE version=\"1.3\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xmlns=\"http://www.ivoa.net/xml/VOTable/v1.3\" xsi:schemaLocation=\"http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3\"> <DESCRIPTION>Caltech/IPAC-IRSA IVOA Table A"
     },
     {
       "id": "errors/unknown_column",
       "area": "errors",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "A column the table has not got is an error rather than an empty answer.",
-      "detail": "400, VOTable with QUERY_STATUS=ERROR"
+      "detail": "E   AssertionError: answered with 200 E   assert 200 >= 400 E    +  where 200 = <Response [200]>.status_code"
     },
     {
       "id": "examples/content",
@@ -401,18 +403,18 @@
         "clients"
       ],
       "description": "The examples endpoint answers, and has examples in it.",
-      "detail": "10 examples"
+      "detail": "6 examples"
     },
     {
       "id": "examples/examples_run",
       "area": "examples",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "The published examples are queries that run.",
-      "detail": "10 of 10 run, out of 10 published"
+      "detail": "5 of 6 run, out of 6 published"
     },
     {
       "id": "maxrec/a_complete_answer_is_not_marked",
@@ -461,13 +463,13 @@
     {
       "id": "maxrec/the_marker_follows_the_table",
       "area": "MAXREC and overflow",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "DALI 4.4 puts OVERFLOW after the TABLE, where OK goes before it.",
-      "detail": "OVERFLOW (after the table)"
+      "detail": "OVERFLOW (before the table)"
     },
     {
       "id": "maxrec/truncation_is_marked",
@@ -478,7 +480,7 @@
         "clients"
       ],
       "description": "A truncated answer says so, with an OVERFLOW marker after the table.",
-      "detail": "200, statuses: ['OK (before the table)', 'OVERFLOW (after the table)']"
+      "detail": "200, statuses: ['OVERFLOW (before the table)']"
     },
     {
       "id": "maxrec/unparsable_maxrec_is_refused",
@@ -500,7 +502,7 @@
         "clients"
       ],
       "description": "MAXREC=0 returns the columns and no rows.",
-      "detail": "0 rows, 25 columns"
+      "detail": "0 rows, 59 columns"
     },
     {
       "id": "output_formats/csv",
@@ -522,7 +524,7 @@
         "clients"
       ],
       "description": "Every format the capabilities document declares can actually be asked for.",
-      "detail": "9 declared: application/x-votable+xml, application/x-votable+xml, application/x-votable+xml, text/csv, text/ecsv, text/tab-separated-values, application/json, application/fits, text/xml"
+      "detail": "8 declared: application/x-votable+xml;serialization=tabledata, text/csv, text/tab-separated-values, text/plain, application/fits, application/x-hdf, application/json, application/json5"
     },
     {
       "id": "output_formats/default_is_votable",
@@ -940,7 +942,7 @@
         "clients"
       ],
       "description": "A query matching nothing is an empty table, not an error and not no table.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "sync_query/get_mode",
@@ -967,13 +969,13 @@
     {
       "id": "sync_query/lang_unknown_is_refused",
       "area": "sync query",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "A language the service does not implement is refused rather than guessed at.",
-      "detail": "refused with 400, VOTable with QUERY_STATUS=ERROR"
+      "detail": "E   AssertionError: answered 200 rather than refusing"
     },
     {
       "id": "sync_query/parameter_names_are_case_insensitive",
@@ -1039,7 +1041,7 @@
         "clients"
       ],
       "description": "The columns come back in the number, order and name the SELECT wrote.",
-      "detail": "Skipped: nothing here knows which columns of external.apassdr9 are a position"
+      "detail": "Skipped: nothing here knows which columns of cf_info are a position"
     },
     {
       "id": "sync_query/select_top",
@@ -1050,18 +1052,18 @@
         "clients"
       ],
       "description": "A sync query returns the rows TOP asked for.",
-      "detail": "5 rows, 25 columns"
+      "detail": "5 rows, 59 columns"
     },
     {
       "id": "tables_metadata/columns_are_readable_by_the_client",
       "area": "VOSI tables",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "pyvo can read the column list of every table, and each column has a datatype.",
-      "detail": "6614 columns over 248 tables"
+      "detail": "E   AttributeError: 'ContentMixin' object has no attribute 'schemas'"
     },
     {
       "id": "tables_metadata/content",
@@ -1116,7 +1118,7 @@
         "clients"
       ],
       "description": "/tables lists the published tables.",
-      "detail": "248 tables: external.apassdr9, external.catwise2020, external.gaia_eso_survey, external.gaiadr2_astrophysical_parameters, external.gaiadr2_geometric_distance, external.gaiaedr3_distance, external.gaiaedr3_gcns_main_1, external.gaiaedr3_gcns_rejected_1"
+      "detail": "991 tables: TAP_SCHEMA.columns, TAP_SCHEMA.key_columns, TAP_SCHEMA.keys, TAP_SCHEMA.schemas, TAP_SCHEMA.tables, a1763t2, a1763t3, acmccat"
     },
     {
       "id": "tables_metadata/units_and_ucds",
@@ -1138,7 +1140,7 @@
         "clients"
       ],
       "description": "TAP_SCHEMA's own name resolves however a client spells it.",
-      "detail": "the lowercase spelling answered with 247 rows"
+      "detail": "the lowercase spelling answered with 991 rows"
     },
     {
       "id": "tap_schema/consistent_with_tables_resource",
@@ -1171,40 +1173,40 @@
         "clients"
       ],
       "description": "A name TAP_SCHEMA publishes is a name a query can be built out of.",
-      "detail": "selected raj2000, dej2000, e_ra, e_dec, nobs, mobs, b_v, e_b_v"
+      "detail": "selected gcntr, napp, gcnf, sdet, ra, dec, emj_mrg, emn_mrg"
     },
     {
       "id": "tap_schema/the_five_tables_answer",
       "area": "TAP_SCHEMA",
-      "outcome": "fail",
+      "outcome": "pass",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "All five tables of TAP 4 can be queried, an empty one being a legal answer.",
-      "detail": "E   UnicodeDecodeError: 'ascii' codec can't decode byte 0xa0 in position 404: ordinal not in range(128) E   pyvo.dal.exceptions.DALFormatError: UnicodeDecodeError: 'ascii' codec can't decode byte 0xa0 in position 404: ordinal not in range(128)"
+      "detail": "schemas=35, tables=991, columns=51706, keys=14, key_columns=14"
     },
     {
       "id": "upload/capabilities_agree_with_behaviour",
       "area": "uploads",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "What the service says about upload is what it does.",
-      "detail": "declared: <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-inline\"/>, <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-http\"/>, <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-ftp\"/>"
+      "detail": "declared: <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-inline\"/>, <UploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#upload-http\"/>"
     },
     {
       "id": "upload/inline_upload",
       "area": "uploads",
-      "outcome": "pass",
+      "outcome": "fail",
       "asks": [
         "standard",
         "clients"
       ],
       "description": "A table uploaded with the query is queryable as TAP_UPLOAD.",
-      "detail": "3 rows came back from an upload"
+      "detail": "E   pyvo.dal.exceptions.DALQueryError: TransientFault: INTERNAL_SERVER_ERROR: vector::_M_range_check: __n (which is 0) >= this->size() (which is 0)"
     },
     {
       "id": "upload/queries_with_uploads",

@@ -146,11 +146,13 @@ class Report:
                 *[f"> - {cell(reason, 400)}" for reason in self.broken],
                 "",
             ]
-        out += [
-            f"**{self.summary()}**",
-            "",
-            f"`{self.target}` · {tools} · {self.generated}",
-        ]
+        out += [f"**{self.summary()}**", ""]
+        # The target is worth naming when it is somebody's service and worth nothing
+        # when it is a port this run opened and closed. What always belongs here is
+        # which clients produced the numbers, a suite run a year from now against newer
+        # ones being a different measurement.
+        where = f"`{self.target}` · " if full else ""
+        out.append(f"{where}{tools} · {self.generated}")
         if self.provenance and full:
             out += ["", f"_{self.provenance}_"]
         # Only the outcomes this run produced get a column. An empty one is a column
