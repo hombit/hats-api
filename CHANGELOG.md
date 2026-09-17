@@ -8,17 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
-- `hf://` urls, with the `token` storage option and `[api.access.hf]`.
-- TAP sync queries at `{api.prefix}/tap`, over catalogs listed as `[[tap.table]]`. [#68](https://github.com/hombit/hats-api/pull/68)
-- `lang` in the `/api/v1/adql` body, and `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
-- ADQL `TOP` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
+--
 
 ### Changed
 
-- **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
-- ADQL names are matched case-insensitively unless quoted. [#68](https://github.com/hombit/hats-api/pull/68)
-- `[limits] max_partitions` defaults to 128, from 16. [#68](https://github.com/hombit/hats-api/pull/68)
+--
 
 ### Deprecated
 
@@ -30,11 +24,31 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- ADQL regions outside a catalog or over `Float32` coordinates, and `TOP` with `OFFSET`. [#68](https://github.com/hombit/hats-api/pull/68)
+--
 
 ### Security
 
 --
+
+## [0.0.8] - 2026-09-17
+
+### Added
+
+- `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead. [#71](https://github.com/hombit/hats-api/pull/71)
+- `hf://` urls, with the `token` storage option and `[api.access.hf]`. [#70](https://github.com/hombit/hats-api/pull/70)
+- TAP sync queries at `{api.prefix}/tap`, over catalogs listed as `[[tap.table]]`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `lang` in the `/api/v1/adql` body, and `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL `TOP` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
+
+### Changed
+
+- **Breaking** `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`. [#71](https://github.com/hombit/hats-api/pull/71)
+- ADQL names are matched case-insensitively unless quoted. [#68](https://github.com/hombit/hats-api/pull/68)
+- `[limits] max_partitions` defaults to 128, from 16. [#68](https://github.com/hombit/hats-api/pull/68)
+
+### Fixed
+
+- ADQL regions outside a catalog or over `Float32` coordinates, and `TOP` with `OFFSET`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ## [0.0.7] - 2026-09-16
 
@@ -109,7 +123,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.7...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.8...HEAD
+[0.0.8]: https://github.com/hombit/hats-api/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/hombit/hats-api/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/hombit/hats-api/compare/v0.0.5...v0.0.6
 [0.0.5]: https://github.com/hombit/hats-api/compare/v0.0.4...v0.0.5
