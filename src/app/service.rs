@@ -67,7 +67,9 @@ pub struct Service {
     /// the signature above because it survives `show_version` being off.
     pub(in crate::app) contact: Option<Arc<str>>,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
-    pub(in crate::app) serve_index_html: bool,
+    pub(in crate::app) serve_mounted_index_html: bool,
+    /// Whether a mounted `robots.txt` is served in place of the generated default.
+    pub(in crate::app) serve_mounted_robots_txt: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     pub(in crate::app) api_prefix: Option<Arc<str>>,
 }
@@ -136,7 +138,8 @@ impl Service {
             },
             signature: server.signature()?,
             contact: server.contact()?.map(Arc::from),
-            serve_index_html: server.serve_index_html,
+            serve_mounted_index_html: server.serve_mounted_index_html,
+            serve_mounted_robots_txt: server.serve_mounted_robots_txt,
             api_prefix: api_prefix.map(Arc::from),
         })
     }
@@ -170,7 +173,10 @@ pub fn router(service: Service) -> Router {
     let timeout = service.request_timeout;
     let body_limit = service.request_body_limit;
     let signature = service.signature.clone();
-    let mut router = Router::new();
+    // Ahead of both modes and gated on neither: a crawler asks for this at the root
+    // whether the deployment is an API, a file server, or both, and it is one answer
+    // rather than one per mount.
+    let mut router = Router::new().route(ROBOTS_TXT_PATH, get(robots_txt));
     if let Some(prefix) = service.api_prefix.clone() {
         router = router.route(&route(&prefix, "health"), get(health));
         // What the url names is a segment of its own. The spatial constraint is not — it is
@@ -397,6 +403,51 @@ async fn health() -> (StatusCode, Json<HealthResponse>) {
     (StatusCode::OK, Json(HealthResponse { status: "ok" }))
 }
 
+/// Where a crawler asks for the policy, whichever mode answers it.
+const ROBOTS_TXT_PATH: &str = "/robots.txt";
+
+/// The default: every path refused, except the three routes that describe the API rather
+/// than serve data — a crawler that could not even read those could not say what it was
+/// refused. `None` where the API is off, since there is then nothing to allow.
+fn default_robots_txt(api_prefix: Option<&str>) -> String {
+    let mut body = String::from("User-agent: *\nDisallow: /\n");
+    if let Some(prefix) = api_prefix {
+        for name in ["docs", "health", "openapi.json"] {
+            body.push_str("Allow: ");
+            body.push_str(&route(prefix, name));
+            body.push('\n');
+        }
+    }
+    body
+}
+
+/// `text/plain`, the way every `robots.txt` on the web is served.
+fn robots_response(body: Vec<u8>) -> Response {
+    ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response()
+}
+
+/// `/robots.txt`, answered by a mounted file where the operator opted in and one is
+/// there, and by the generated default otherwise — the same fallback `index.html` gets.
+///
+/// Read fresh on every request rather than cached at startup, the way `index.html` is:
+/// an operator publishing one expects editing it to take effect without a restart.
+async fn robots_txt(State(service): State<Service>) -> Response {
+    if service.serve_mounted_robots_txt
+        && let Some((mount, relative)) = service.mounts.published(ROBOTS_TXT_PATH)
+        && let Ok(segments) = mount::path_segments(relative)
+    {
+        let mut requested = mount.source().to_owned();
+        requested.extend(&segments);
+        if let Ok(file) = access::local::authorize_mounted(mount, &requested)
+            && file.is_file()
+            && let Ok(contents) = tokio::fs::read(&file).await
+        {
+            return robots_response(contents);
+        }
+    }
+    robots_response(default_robots_txt(service.api_prefix.as_deref()).into_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
@@ -405,12 +456,116 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::app::testing::{
-        api_only, ask, ask_hats, get, mounted, respond, serving, with_limits, with_mount,
+        api_only, ask, ask_hats, body_of, get, mounted, respond, serving, with_limits, with_mount,
         with_server,
     };
     use crate::engine::query;
 
     use super::*;
+
+    /// Everything is disallowed, except the three routes that describe the API rather than
+    /// serve data — a crawler could not even say what it was refused without those.
+    #[tokio::test]
+    async fn robots_txt_disallows_everything_but_the_api_description() {
+        let (status, body) = get("/robots.txt").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Disallow: /\n"), "{body}");
+        for path in ["/api/v1/docs", "/api/v1/health", "/api/v1/openapi.json"] {
+            assert!(body.contains(&format!("Allow: {path}\n")), "{body}");
+        }
+    }
+
+    /// The API off leaves nothing to allow, so the default is the bare refusal.
+    #[tokio::test]
+    async fn robots_txt_allows_nothing_where_the_api_is_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), b"x").unwrap();
+        let service = mounted(
+            dir.path(),
+            &ApiConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        let response = respond(service, Request::builder().uri("/robots.txt")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_of(response).await;
+        assert!(body.contains("Disallow: /\n"), "{body}");
+        assert!(!body.contains("Allow:"), "{body}");
+    }
+
+    /// A mounted file wins by default — the same rule `serve_mounted_index_html` applies to
+    /// `index.html` — and only where one is actually there: a mount with none still gets
+    /// the generated default rather than an empty answer.
+    #[tokio::test]
+    async fn a_mounted_robots_txt_wins_by_default_where_it_is_there() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("robots.txt"), b"User-agent: *\nAllow: /\n").unwrap();
+
+        // Present, and taken by default: the mount's own text, verbatim.
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/robots.txt"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_of(response).await, "User-agent: *\nAllow: /\n");
+
+        // Absent: the generated default, not an empty answer.
+        std::fs::remove_file(dir.path().join("robots.txt")).unwrap();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder().uri("/robots.txt"),
+        )
+        .await;
+        assert!(body_of(response).await.contains("Disallow: /\n"));
+    }
+
+    /// `serve_mounted_robots_txt = false` turns that around, the way
+    /// `serve_mounted_index_html = false` does for the directory page: the mount's file
+    /// stays there under its own name, and the root answers with the generated default
+    /// regardless.
+    #[tokio::test]
+    async fn turning_it_off_ignores_a_mounted_robots_txt() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("robots.txt"), b"User-agent: *\nAllow: /\n").unwrap();
+        let service = with_server(
+            serving(dir.path()),
+            &ApiConfig::default(),
+            &LimitsConfig::default(),
+            &ServerConfig {
+                serve_mounted_robots_txt: false,
+                ..ServerConfig::default()
+            },
+        );
+
+        let response = respond(service.clone(), Request::builder().uri("/robots.txt")).await;
+        assert!(body_of(response).await.contains("Disallow: /\n"));
+
+        // Still there under its own name.
+        let file = respond(service, Request::builder().uri("/robots.txt")).await;
+        assert_eq!(file.status(), StatusCode::OK);
+    }
+
+    /// An unserved mount at `/` — API-only — offers nothing at the root for `robots.txt`
+    /// to be read from, so the generated default is what answers even with a file there.
+    #[tokio::test]
+    async fn an_unserved_mount_offers_no_robots_txt_to_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("robots.txt"), b"User-agent: *\nAllow: /\n").unwrap();
+        let service = with_server(
+            crate::config::MountConfig {
+                serve: false,
+                ..serving(dir.path())
+            },
+            &ApiConfig::default(),
+            &LimitsConfig::default(),
+            &ServerConfig::default(),
+        );
+        let response = respond(service, Request::builder().uri("/robots.txt")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_of(response).await.contains("Disallow: /\n"));
+    }
 
     #[tokio::test]
     async fn health_is_ok() {

@@ -123,7 +123,7 @@ of every entry ordered by name. Which form it takes depends on `Accept`: a brows
 for `text/html` and gets a page, while most of the API clients send `*/*` by default and
 get a JSON.
 
-`[server] serve_index_html = false` turns the first half off: every directory answers with
+`[server] serve_mounted_index_html = false` turns the first half off: every directory answers with
 the generated page, and an `index.html` stays an ordinary file under its own name. It is
 for a tree whose pages were written for some other reader — they say nothing about the
 data underneath, and the generated page carries the query panel.

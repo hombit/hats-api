@@ -8,11 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
 
 ### Changed
 
---
+- **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
 
 ### Deprecated
 

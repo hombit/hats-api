@@ -73,7 +73,7 @@ pub(in crate::app) async fn serve_mounted(
         }
         // A directory that publishes its own page says what it wants said about itself,
         // and the generated listing is only the fallback — unless the operator turned
-        // that around with `serve_index_html`, which is for a tree whose pages were
+        // that around with `serve_mounted_index_html`, which is for a tree whose pages were
         // written for some other reader and say nothing about the data under them.
         // Through `authorize_mounted` like any other file, so a link the mount does not
         // follow is not followed here either.
@@ -81,7 +81,7 @@ pub(in crate::app) async fn serve_mounted(
         // The file itself stays served under its own name either way: what the setting
         // decides is what a request for the *directory* answers with, not whether an
         // `index.html` exists.
-        let index = match service.serve_index_html {
+        let index = match service.serve_mounted_index_html {
             true => access::local::authorize_mounted(mount, &file.join(DIRECTORY_INDEX)).ok(),
             false => None,
         };
@@ -831,7 +831,7 @@ mod tests {
         assert_eq!(body_of(response).await, "<p>the catalog</p>");
     }
 
-    /// `serve_index_html = false` turns that around: the directory answers with the
+    /// `serve_mounted_index_html = false` turns that around: the directory answers with the
     /// generated listing, and the file is still there under its own name — which is what
     /// makes this a choice about the directory rather than about hiding a file.
     #[tokio::test]
@@ -844,7 +844,7 @@ mod tests {
                 &ApiConfig::default(),
                 &LimitsConfig::default(),
                 &ServerConfig {
-                    serve_index_html: false,
+                    serve_mounted_index_html: false,
                     ..ServerConfig::default()
                 },
             )
