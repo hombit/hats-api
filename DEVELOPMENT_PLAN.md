@@ -61,6 +61,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
 | 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
+| 11.14 | a DALI parameter value, read once and typed | todo | after §11.11: a tokenizer and a `serde` data format over it, in place of the string splitting each parameter does for itself. §11.7's shapes are the same grammar with numbers |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
 what is deferred.
@@ -777,6 +778,34 @@ publishes a nested column, so there is no practice to follow and no check that c
 calibrated against anybody: what `TAP_SCHEMA.columns` should say about `lightcurve.mag` is a
 decision to make alone, and it waits on §7.5 deciding what a nested column is in a VOTable
 first.
+
+### 11.14 A DALI parameter value, read once and typed
+
+**A DALI parameter's value is a small grammar, and it is read today by splitting strings.**
+`UPLOAD` is `name,uri`; `UPLOAD_STORAGE_OPTION` is an upload, an option and a value, with
+`header` naming one more field than the rest; DALI's own shapes are a keyword and then as
+many numbers as that keyword takes — `CIRCLE` three, `RANGE` four, `POLYGON` a pair per
+vertex — and an interval is two numbers or an infinity. Every one of those is arity decided
+by a leading token, which is the same rule written out by hand each time.
+
+What is wanted is one reader: a tokenizer over a value's fields, and a **`serde` data format
+above it**, so a parameter deserializes into a type and the arity, the keyword and the
+numbers are the type's to state rather than a chain of `split_once` and `if`. A shape becomes
+an `enum` whose variants are `CIRCLE`, `RANGE` and `POLYGON`; a storage option becomes an
+`enum` with a `Header` variant carrying two fields and the rest carrying one; and what a
+refusal says comes from one place instead of being spelled out per call site.
+
+Two things the format has to get right, and both are why a stock `serde` format will not do:
+
+- **A verbatim tail.** The last field of a storage option runs to the end of the value,
+  punctuation and all, because a separator inside it truncates a credential. That is a type
+  of its own — the deserializer hands it whatever is left rather than the next token.
+- **The delimiter belongs to the parameter, not the format.** DALI separates a shape's
+  numbers with spaces and TAP separates `UPLOAD`'s two fields with a comma. One format, told
+  which.
+
+`sky::region`'s own parsing stays where it is: a `Region` is a structured field in a JSON
+body, which `serde` already reads. This is about parameters, which arrive as text.
 
 ## 8. Security requirements
 
