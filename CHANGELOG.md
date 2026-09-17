@@ -24,7 +24,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- A query's own answer now sends `Accept-Ranges: none` instead of silently ignoring `Range`.
 
 ### Security
 
