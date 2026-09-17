@@ -33,9 +33,10 @@ use url::Url;
 use crate::access::{AccessPolicy, BACKENDS, Backend, LOCAL_SCHEME, Target};
 use crate::error::ApiError;
 use crate::storage::backends::{
-    Reach, azblob_builder, gcs_builder, http_builder, origin, remote_store, s3_builder,
-    webdav_builder, webdav_endpoint, webdav_headers,
+    Reach, Redirects, azblob_builder, gcs_builder, hf_builder, http_builder, origin, remote_store,
+    s3_builder, webdav_builder, webdav_endpoint, webdav_headers,
 };
+use crate::storage::huggingface::{HfRepo, HfStore, hf_headers};
 use crate::storage::materialize::{MaterializingStore, Transfers};
 use crate::storage::options::{Credentials, StorageOptions, options_clause};
 
@@ -295,27 +296,68 @@ fn build(
             let headers = match credentials {
                 Credentials::Webdav(webdav) => webdav_headers(webdav)?,
                 Credentials::Http(http) => http.headers.to_header_map()?,
+                Credentials::Hf(hf) => hf_headers(hf)?,
                 _ => HeaderMap::new(),
             };
             let reach = Reach::of(options, policy);
             let store: Arc<dyn ObjectStore> = match credentials {
-                Credentials::S3(s3) => {
-                    Arc::new(remote_store(s3_builder(url, s3, reach)?, policy, &headers)?)
-                }
+                Credentials::S3(s3) => Arc::new(remote_store(
+                    s3_builder(url, s3, reach)?,
+                    policy,
+                    &headers,
+                    Redirects::Refused,
+                )?),
                 Credentials::Gcs(gcs) => Arc::new(remote_store(
                     gcs_builder(url, gcs, reach)?,
                     policy,
                     &headers,
+                    Redirects::Refused,
                 )?),
                 Credentials::Azure(azure) => Arc::new(remote_store(
                     azblob_builder(url, azure, reach)?,
                     policy,
                     &headers,
+                    Redirects::Refused,
                 )?),
+                // The one backend whose origin hands a file over by redirecting: the Hub
+                // answers a `resolve` with a `307` to a presigned url on a CDN for anything
+                // in LFS, which is every parquet file in a dataset. What makes following it
+                // acceptable is in `storage::redirect`.
+                //
+                // No `MaterializingStore`: the server is the provider rather than one the
+                // caller chose, and it answers a ranged read with a `206`.
+                Credentials::Hf(_) => {
+                    // Parsed here and thrown away: the store reads the repository back out of
+                    // each key, and what this call is for is the refusal a caller sees — a url
+                    // naming no repository is a 400 from this service rather than whatever the
+                    // Hub says about a path it has never heard of.
+                    HfRepo::parse(url)?;
+                    let (builder, hub) = hf_builder(reach)?;
+                    Arc::new(HfStore::new(
+                        Arc::new(remote_store(
+                            builder,
+                            policy,
+                            &headers,
+                            Redirects::Followed,
+                        )?),
+                        HfRepo::kind_of(url)?,
+                        hub,
+                        // The listing is this crate's own request rather than the store's, so
+                        // it goes on the policy's client — the same one the transport wraps,
+                        // with the same resolver behind it.
+                        policy.network().client(),
+                        headers.clone(),
+                    ))
+                }
                 // The one backend whose server may refuse to serve byte ranges, since it
                 // is the one whose server the caller chose rather than the operator.
                 Credentials::Http(_) => Arc::new(MaterializingStore::new(
-                    Arc::new(remote_store(http_builder(url, reach)?, policy, &headers)?),
+                    Arc::new(remote_store(
+                        http_builder(url, reach)?,
+                        policy,
+                        &headers,
+                        Redirects::Refused,
+                    )?),
                     origin(url)?,
                     policy.network().client(),
                     // The probe is a request of this service's own, made outside the
@@ -330,6 +372,7 @@ fn build(
                         webdav_builder(url, webdav, reach)?,
                         policy,
                         &headers,
+                        Redirects::Refused,
                     )?),
                     webdav_endpoint(url, webdav)?,
                     policy.network().client(),

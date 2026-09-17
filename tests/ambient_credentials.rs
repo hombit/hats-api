@@ -32,11 +32,29 @@ const AMBIENT_SECRET: &str = "ambientSecretThatMustNeverBeUsed12345678";
 /// Azure signs with an HMAC of this, so it has to be real base64 or the signer would
 /// fail for a reason that has nothing to do with what is being tested.
 const AMBIENT_AZURE_KEY: &str = "YW1iaWVudEF6dXJlS2V5VGhhdE11c3ROZXZlckJlVXNlZA==";
+/// A Hugging Face token in the environment, and one in the file on disk that
+/// `huggingface-cli login` writes. Both are part of the chain a Hub client walks.
+const AMBIENT_HF_TOKEN: &str = "hf_ambientTokenThatMustNeverBeUsed";
+const AMBIENT_HF_FILE_TOKEN: &str = "hf_ambientFileTokenThatMustNeverBeUsed";
 
 /// One `GET` through a store built from `options`, and the request head it put on the
 /// wire. The endpoint is this test's own one-shot server, so the request is observable
 /// without anything being reachable.
 async fn request_head(raw: &str, endpoint_to: impl FnOnce(String) -> StorageOptions) -> String {
+    request_head_for(raw, "key.parquet", endpoint_to).await
+}
+
+/// The same, for a backend whose keys are not bare object names.
+///
+/// A key is the url's own path, and for most backends here that is one segment below the
+/// bucket. `hf://` is the exception — a key begins with the repository — and a key that does
+/// not is refused by the store before it makes a request, which arrives as a timeout waiting
+/// for a request that was never going to be made.
+async fn request_head_for(
+    raw: &str,
+    key: &str,
+    endpoint_to: impl FnOnce(String) -> StorageOptions,
+) -> String {
     let (port, receiver) = capture_one_request();
     let url = storage::parse_url(raw).expect("a valid url");
     let options = endpoint_to(format!("http://127.0.0.1:{port}"));
@@ -44,10 +62,7 @@ async fn request_head(raw: &str, endpoint_to: impl FnOnce(String) -> StorageOpti
         .expect("the policy allows loopback");
 
     use object_store::ObjectStoreExt;
-    let _ = file
-        .store
-        .get(&object_store::path::Path::from("key.parquet"))
-        .await;
+    let _ = file.store.get(&object_store::path::Path::from(key)).await;
 
     receiver
         .recv_timeout(std::time::Duration::from_secs(10))
@@ -71,6 +86,8 @@ fn assert_unsigned(head: &str, backend: &str) {
         AMBIENT_SECRET,
         AMBIENT_AZURE_KEY,
         "ambient-sas-token",
+        AMBIENT_HF_TOKEN,
+        AMBIENT_HF_FILE_TOKEN,
     ] {
         assert!(
             !head.contains(ambient),
@@ -117,6 +134,14 @@ async fn a_request_with_no_credentials_ignores_the_environment() {
         std::env::set_var("AZURE_STORAGE_ACCOUNT_NAME", "ambientaccount");
         std::env::set_var("AZURE_STORAGE_ACCOUNT_KEY", AMBIENT_AZURE_KEY);
         std::env::set_var("AZURE_STORAGE_SAS_TOKEN", "ambient-sas-token");
+
+        // Hugging Face: a token in the environment, one in a file the environment points
+        // at, and an endpoint that would send the request somewhere else. `huggingface_hub`
+        // and OpenDAL's own `services-hf` read all four; this service reads none of them.
+        std::env::set_var("HF_TOKEN", AMBIENT_HF_TOKEN);
+        std::env::set_var("HF_TOKEN_PATH", ambient_token_file().as_os_str());
+        std::env::set_var("HF_HOME", "/nonexistent/ambient-huggingface");
+        std::env::set_var("HF_ENDPOINT", "https://ambient.example.com");
     }
 
     // The request carries no credentials at all, which is the whole point: whatever
@@ -156,6 +181,43 @@ async fn a_request_with_no_credentials_ignores_the_environment() {
         "the ambient account name reached the wire:\n{head}"
     );
     assert_unsigned(&head, "azure");
+
+    // Hugging Face is the one where the ambient chain is a *file* as much as a variable —
+    // `~/.cache/huggingface/token` is what `huggingface-cli login` writes, so a deployment
+    // that has ever logged in has a token on disk. A caller's anonymous request must stay
+    // anonymous over it.
+    let head = request_head_for(
+        "hf://datasets/owner/name/x.parquet",
+        "owner/name/x.parquet",
+        |endpoint| StorageOptions {
+            endpoint: Some(endpoint),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("get /datasets/owner/name/resolve/main/x.parquet"),
+        "the request did not go to the url's endpoint:\n{head}"
+    );
+    assert!(
+        !head.contains(AMBIENT_HF_TOKEN),
+        "an environment token reached the Hub:\n{head}"
+    );
+    assert!(
+        !head.contains(AMBIENT_HF_FILE_TOKEN),
+        "a token from a file on disk reached the Hub:\n{head}"
+    );
+    assert_unsigned(&head, "hf");
+}
+
+/// A token file for `HF_TOKEN_PATH` to point at, written the way `huggingface-cli login`
+/// writes one. It has to exist: a path that reads back nothing would make this half of the
+/// test pass without the guarantee.
+fn ambient_token_file() -> std::path::PathBuf {
+    let path = std::env::temp_dir().join("hats-api-ambient-hf-token");
+    std::fs::write(&path, format!("{AMBIENT_HF_FILE_TOKEN}\n")).expect("write the token file");
+    path
 }
 
 // What this test does and does not pin, so the next person does not assume more:

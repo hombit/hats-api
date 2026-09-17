@@ -80,6 +80,11 @@ allow_plain_http = false
 # naming the "http://" server.
 # endpoints = ["https://dav.example.com"]
 
+[api.access.hf]
+# "hf" is the Hugging Face Hub itself — a url with no `endpoint` option. A named endpoint
+# is a private Hub.
+# endpoints = ["hf"]
+
 # There is no [api.access] section for local files: a [[mount]] is what makes a
 # directory readable.
 

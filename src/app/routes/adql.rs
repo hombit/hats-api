@@ -62,7 +62,7 @@ pub(in crate::app) struct AdqlQuery {
 struct AdqlTable {
     /// `parquet` for one file the url names outright, `hats` for a whole catalog.
     r#type: TableKind,
-    /// The object to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`, `webdav`
+    /// The object to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`, `webdav`, `hf`
     /// or `file` — and which of those a deployment answers for is the operator's to configure.
     #[schema(value_type = String)]
     url: SourceUrl,

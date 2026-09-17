@@ -46,6 +46,8 @@ pub struct StorageOptions {
     pub http: HttpOptions,
     #[serde(flatten)]
     pub webdav: WebdavOptions,
+    #[serde(flatten)]
+    pub hf: HfOptions,
     /// Every key the body carried that no backend has a field for.
     ///
     /// Filled by deserialization, and refused when the options are checked against the url's
@@ -128,6 +130,14 @@ pub struct WebdavOptions {
     /// The WebDAV password, alongside `username`.
     #[schema(value_type = Option<String>)]
     pub password: Option<SecretString>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, utoipa::ToSchema)]
+pub struct HfOptions {
+    /// A Hugging Face access token. Needed for a repository that is private or gated, and
+    /// recommended for a public one: the Hub rate-limits an anonymous caller more tightly.
+    #[schema(value_type = Option<String>)]
+    pub token: Option<SecretString>,
 }
 
 /// The transport a WebDAV server speaks. An HTTP transport must be named exactly in
@@ -356,6 +366,7 @@ pub(super) enum Credentials<'a> {
     Azure(&'a AzureOptions),
     Http(&'a HttpOptions),
     Webdav(&'a WebdavOptions),
+    Hf(&'a HfOptions),
 }
 
 /// One backend's options, and the two things everything else needs of them.
@@ -518,6 +529,18 @@ impl Group for WebdavOptions {
     }
 }
 
+impl Group for HfOptions {
+    fn named(&self) -> Vec<Named> {
+        let Self { token } = self;
+        vec![Named::credential("token", token)]
+    }
+
+    fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
+        let Self { token } = self;
+        echo_secret(out, "token", token);
+    }
+}
+
 impl StorageOptions {
     /// Every backend's group, so that anything needing the whole set walks them rather than
     /// listing the fields again.
@@ -525,7 +548,7 @@ impl StorageOptions {
     /// Destructured, which is what makes a field added to this struct a compile error until it
     /// is placed: a new group has to be listed here, and a new bare field beside `endpoint` has
     /// to be named in the arms of [`Self::named`] and [`Self::echo`] below.
-    fn groups(&self) -> [&dyn Group; 5] {
+    fn groups(&self) -> [&dyn Group; 6] {
         let Self {
             endpoint: _,
             allow_http: _,
@@ -534,9 +557,10 @@ impl StorageOptions {
             azure,
             http,
             webdav,
+            hf,
             unknown: _,
         } = self;
-        [s3, gcs, azure, http, webdav]
+        [s3, gcs, azure, http, webdav, hf]
     }
 
     /// Every option, under the name a request spells it, whether it is set, and whether
@@ -621,6 +645,7 @@ impl StorageOptions {
             Backend::Azure => Credentials::Azure(&self.azure),
             Backend::Http => Credentials::Http(&self.http),
             Backend::Webdav => Credentials::Webdav(&self.webdav),
+            Backend::Hf => Credentials::Hf(&self.hf),
         }))
     }
 
@@ -677,6 +702,7 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
         Backend::Azure => names_of::<AzureOptions>(),
         Backend::Http => names_of::<HttpOptions>(),
         Backend::Webdav => names_of::<WebdavOptions>(),
+        Backend::Hf => names_of::<HfOptions>(),
     };
     // A url that is its own address has nothing for `endpoint` to point elsewhere at, so it
     // joins the list only for a backend addressed by bucket. `allow_http` is a different

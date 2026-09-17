@@ -20,7 +20,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 8.3 | network policy | done | |
 | 2.3 | HTTP/HTTPS, range probe, materialization | done | |
 | 2.4 | WebDAV | done | |
-| 2.5 | Hugging Face | deferred | until the redirect hop is decided. Still droppable |
+| 2.5 | Hugging Face | done | the redirect hop is `storage/redirect.rs` and is one backend's; OpenDAL's `services-hf` is not used |
 | 3.1 | two-mode configuration | done | |
 | 3.2 | routing | done | |
 | 3.3 | API request shape (`columns`/`filters`, `region`) | done | what `region` may still gain is §5.2 |
@@ -73,49 +73,6 @@ what is deferred.
 3. **Nothing reaches an object store without passing its mode's policy.**
    `AccessPolicy::authorize` in `storage::open` is the only route to a store, and a
    `file://` url reaches a mount's `path` and nothing else.
-
-## 2. Phase 1 — more storage backends
-
-### 2.5 Hugging Face
-
-`opendal`'s `services-hf`, as `hf://datasets/<owner>/<repo>[@revision]/<path>` — the
-spelling DuckDB and `fsspec` use, so the repo type is written rather than defaulted to
-`model`. Listing is the repo tree API, so the directory pages and §5.1's discovery work
-whatever else is decided.
-
-**One thing decides it: the redirect.** Checked against `services-hf` 0.58.2 and `hf-xet`
-1.6.0. Reads go one of two ways, per store:
-
-- **`xet`, the default.** The object comes over `hf-xet`'s own session — its own `reqwest`
-  client, thread pool and disk cache — so the resolver would not see the addresses the
-  bytes come from and `storage::materialize::Transfers` would not see the bytes. The session is
-  built unconditionally, so choosing the other mode avoids using it but not building it.
-  Reads are said to be several times faster this way: revisit if the session ever takes an
-  `HttpTransport`. The `xet-*` crates also read `HF_TOKEN` and `HF_ENDPOINT` themselves,
-  below opendal, which reopens the ambient-credential question by a different door.
-- **`http`.** Everything is on the operator's transport, except that
-  `GET …/resolve/<rev>/<path>` answers `302` towards a CDN for anything LFS-backed — every
-  parquet file in a dataset — and `redirect::Policy::none()` is deliberate.
-
-So `http` mode needs a redirect hop that does not exist: re-authorize the target through
-the same resolver, and drop the caller's credentials before following, as
-`huggingface_hub` does. **That hop is its own piece of work** — it is equally what a
-`https://huggingface.co/datasets/…` url needs through the http backend, and what any
-CDN-fronted origin needs.
-
-**The anonymous request is settled, and not by an environment variable.** A configured
-*empty* token short-circuits the builder's whole ambient chain (`HF_TOKEN`,
-`$HF_TOKEN_PATH`, `$HF_HOME/token`, `~/.cache/huggingface/token`): the header builder
-errors on an empty token and the call site drops the header rather than failing. Verified
-on the wire. Three costs: it has to be set through serde, because `HfBuilder::token("")` is
-ignored and `HfConfig`'s fields use unexported types — and that config is `#[serde(default)]`
-with no `deny_unknown_fields`, so an upstream rename would silently put the ambient token
-back on the wire, which makes the `tests/ambient_credentials.rs` case the guarantee itself.
-It is safe only in `http` mode, `xet`'s token refresh having no empty check. And it makes
-`Capability::write` read `true`, harmless under §0 but no longer descriptive.
-
-**Drop this backend** if the redirect hop is not wanted: it has the least astronomy data
-behind it and its absence costs nothing structural.
 
 ## 5. Phase 4 — the HATS interface
 
@@ -1052,8 +1009,9 @@ predicate, and the service makes network and filesystem requests on their behalf
 - **The check runs inside the HTTP client's own resolver**, whose return value *is* the set
   of addresses the connection is attempted against. Anywhere earlier is a check against an
   answer that can be replaced.
-- A redirect hop (§2.5) is the one thing that would add a destination the resolver has not
-  judged, which is why it is a piece of work rather than a flag.
+- The one hop that is followed is judged by the resolver like any other, the follow-up
+  request being made through the same client. What a later backend must not do is reach a
+  destination by any route that is not that client.
 
 ### 8.4 Bounded work per request
 

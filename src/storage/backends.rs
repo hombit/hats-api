@@ -15,9 +15,11 @@ use url::Url;
 
 use crate::access::{AccessPolicy, Backend, EndpointScheme, describe_endpoint_schemes};
 use crate::error::ApiError;
+use crate::storage::huggingface::hub_url;
 use crate::storage::options::{
     AzureOptions, GcsOptions, S3Options, StorageOptions, WebdavOptions, WebdavTransport,
 };
+use crate::storage::redirect::FollowingRedirects;
 use crate::storage::store::file_url;
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
@@ -188,6 +190,9 @@ fn allow_cleartext(
 /// addresses may be connected to, and the retries. OpenDAL would otherwise reach for the
 /// process-wide default transport — a plain `reqwest::Client` that resolves and connects
 /// to whatever it is given, which is the whole of what [`crate::access::network`] exists to stop.
+///
+/// `redirects` is each backend's own answer, and it is an argument rather than a default so
+/// that a backend added later has to give one. See [`Redirects`].
 #[expect(
     clippy::disallowed_methods,
     reason = "the one permitted call; the lint exists to send every other one here"
@@ -196,11 +201,26 @@ pub(super) fn remote_store(
     builder: impl opendal::Builder,
     policy: &AccessPolicy,
     headers: &HeaderMap,
+    redirects: Redirects,
 ) -> Result<OpendalStore, ApiError> {
     let operator = Operator::new(builder)?
-        .with_context(OperationContext::new().with_http_transport(transport(policy, headers)))
+        .with_context(
+            OperationContext::new().with_http_transport(transport(policy, headers, redirects)),
+        )
         .layer(retries());
     Ok(OpendalStore::new(operator))
+}
+
+/// What a store does with a 3xx.
+///
+/// [`Refused`](Self::Refused) is the rule and every backend but one keeps it: a redirect is the
+/// origin choosing the next destination, and where a request goes is the config's decision. The
+/// exception is a backend whose origin hands a file over *by* redirecting, and what makes it
+/// acceptable there is a set of conditions written down in [`crate::storage::redirect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Redirects {
+    Refused,
+    Followed,
 }
 
 /// The policy's transport, with the caller's headers on it if they gave any.
@@ -209,8 +229,14 @@ pub(super) fn remote_store(
 /// credentials, and the transport underneath is shared by every store in the process.
 /// Putting them on the shared one would send one caller's token to every other caller's
 /// server.
-fn transport(policy: &AccessPolicy, headers: &HeaderMap) -> HttpTransporter {
+fn transport(policy: &AccessPolicy, headers: &HeaderMap, redirects: Redirects) -> HttpTransporter {
     let inner = policy.network().transport();
+    // Below the headers, so that the first request carries the caller's token and the hop is
+    // what decides whether the second one does.
+    let inner = match redirects {
+        Redirects::Refused => inner,
+        Redirects::Followed => HttpTransporter::new(FollowingRedirects::new(inner)),
+    };
     match headers.is_empty() {
         true => inner,
         false => HttpTransporter::new(WithHeaders {
@@ -525,6 +551,37 @@ pub(super) fn webdav_builder(
     )?;
     // As in `http_builder`: OpenDAL joins this to a key that already starts with `/`.
     Ok(services::Webdav::default().endpoint(endpoint.as_str().trim_end_matches('/')))
+}
+
+/// A Hugging Face repository, reached over the Hub's `resolve` route.
+///
+/// The Hub is an HTTP server and this is the HTTP backend pointed at one route of it, so the
+/// endpoint carries the repository and the revision: what corresponds to a bucket here is a
+/// repository at a revision, and a store built from one url reads exactly that.
+///
+/// OpenDAL's own `services-hf` is not used, and the reasons are in
+/// [`crate::storage::huggingface`]. The one that decides it is that the crate depends on
+/// `hf-xet`, which reads `HF_TOKEN` and `HF_ENDPOINT` below OpenDAL — so a deployment with a
+/// Hugging Face login on it would answer an anonymous request with that identity, and nothing
+/// on this side could stop it. Here there is no ambient chain to disable: the token is a
+/// header this crate puts on the request, or there is none.
+/// Hands back the Hub beside the builder, because the listing route is on the same server and
+/// is this crate's own request rather than the store's.
+///
+/// The endpoint is the Hub and nothing below it: the repository is part of what a key says, so
+/// one store answers for every repository of its type. [`crate::storage::huggingface::HfRepo`]
+/// has why.
+pub(super) fn hf_builder(reach: Reach<'_>) -> Result<(services::Http, Url), ApiError> {
+    // The same gate the bucket-addressed backends reach through their `endpoint` option, asked
+    // about the Hub rather than about the repository: the repository is what is read and the
+    // Hub is who is spoken to. `None` is a request naming no endpoint, which here means
+    // huggingface.co — and is a choice the policy gets to refuse like any other.
+    let hub = hub_url(resolve_endpoint(Backend::Hf, reach)?.as_ref())?;
+    // As in `http_builder`: OpenDAL joins this to a key that already starts with `/`.
+    Ok((
+        services::Http::default().endpoint(hub.as_str().trim_end_matches('/')),
+        hub,
+    ))
 }
 
 /// The server a `webdav://` url names, under the transport the request chose.
