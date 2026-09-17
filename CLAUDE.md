@@ -933,6 +933,20 @@ request in front of it.
   context**: a `RepartitionExec` above the scan drains it in a task of its own, so
   `TOP 10 … WHERE mag < 10` reads to the bound. `a_limit_is_answered_from_the_partitions_it_needs`
   holds both.
+
+  **`ORDER BY` the index column is the same walk, from either end.** A partition's index values
+  are a range fixed by its cell, and no two overlap, so sorting each partition's rows and walking
+  the list forwards or backwards sorts them all. `hats::OrderByIndex` swaps the ordered scan in
+  under a `SortExec` and removes the sort only where DataFusion's equivalence analysis says the
+  new input satisfies it — never on a match of its own over names or aliases. A `TOP` sort whose
+  first key is the index and whose later keys are not keeps its `SortExec`, rebuilt over the
+  ordered scan: DataFusion's TopK stops pulling once a batch's last row is past its heap on the
+  shared prefix. Without an explicit
+  `ORDER BY` nothing is sorted within a partition: the catalog order is a property of the walk,
+  not a promise about rows. Two traps: `try_pushdown_sort` is the built-in hook and a
+  `FilterExec` does not pass it down; and the fetch the sort carried has to be pushed down again
+  after the swap, since a filter without one gathers a whole batch and reads to the bound.
+  `an_order_by_the_index_reads_from_that_end_of_the_catalog` holds all of it.
 - **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
   a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
   bound and its two numbers, and the route renders the work list with `reason` set.

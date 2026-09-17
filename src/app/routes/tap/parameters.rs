@@ -108,7 +108,7 @@ impl Parameters {
 
 /// `LANG`, which is required and names the query language.
 ///
-/// Which values are taken is [`adql::language`]'s, so the `lang` of this service's own ADQL
+/// Which values are taken is [`crate::adql::language`]'s, so the `lang` of this service's own ADQL
 /// route and this parameter answer to the same three.
 fn language(asked: Option<&str>) -> Result<(), ApiError> {
     let Some(asked) = asked else {

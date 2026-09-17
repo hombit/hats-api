@@ -743,6 +743,11 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// How many rows [`fixture`] holds, its ids running from one to this.
+    pub(crate) fn fixture_rows() -> usize {
+        points().iter().map(|(_, rows)| rows.len()).sum()
+    }
+
     /// A catalog on disk, with a `partition_info.csv` and one parquet file per partition.
     ///
     /// `healpix` is whether the files carry a `_healpix_29` column. Both shapes are real —

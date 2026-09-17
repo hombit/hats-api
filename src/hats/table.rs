@@ -255,6 +255,7 @@ impl TableProvider for HatsTable {
             max_partitions: self.limits.max_partitions,
             concurrency: self.limits.max_concurrent_partitions,
             state,
+            index: self.index.clone(),
         })?;
         Ok(Arc::new(exec))
     }

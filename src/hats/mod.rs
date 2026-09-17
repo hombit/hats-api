@@ -30,3 +30,4 @@ pub mod table;
 pub use catalog::{Catalog, Columns, Partitioned};
 pub use partitions::{HatsPartition, HatsPartitionList};
 pub use properties::Properties;
+pub use scan::OrderByIndex;

@@ -16,6 +16,7 @@ Release dates are in the UTC time zone.
 - `TAP_SCHEMA.schemas`, `.tables`, `.columns`, `.keys` and `.key_columns`, queryable through `/tap/sync`. [#68](https://github.com/hombit/hats-api/pull/68)
 - The optional coordinate system argument of an ADQL geometry, as in `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
 - `lang` in the `/api/v1/adql` body: `ADQL`, `ADQL-2.0` or `ADQL-2.1`. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL `TOP` with `ORDER BY _healpix_29` or `ORDER BY _healpix_29 DESC` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 

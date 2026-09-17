@@ -608,6 +608,12 @@ a few at a time, until the query has its rows: `SELECT TOP 1000 * FROM ztf.dr24_
 the first few of its 12,485. A query that keeps reading past `max_partitions` — an aggregate
 over a whole catalog, say — is refused when it gets there.
 
+Rows come out partition by partition, but within a partition they are in whatever order its
+file holds them. `ORDER BY _healpix_29` sorts them, and reads the partitions from that end of
+the sky, so `SELECT TOP 1000 * FROM gaia ORDER BY _healpix_29 DESC` reads the last few
+partitions. Further keys may follow it, as in `ORDER BY _healpix_29 DESC, phot_g_mean_mag`;
+the index column has to come first.
+
 A crossmatch is ADQL's own spelling — a circle around each row of one side — here matching
 Gaia DR3 against Euclid Q1 within an arcsecond:
 

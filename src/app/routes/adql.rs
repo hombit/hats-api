@@ -676,6 +676,71 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
+    /// `ORDER BY` the index is answered by the order partitions are read in, so a `TOP` over
+    /// it reads the partitions at that end of the catalog and no others. With one partition
+    /// allowed, a sort that consumed its whole input would be refused.
+    ///
+    /// The fixture's ids ascend with the index across the catalog and within each partition,
+    /// so the ids say both which partition was read and that its rows were sorted: the
+    /// descending answer has to reverse the order the file holds them in.
+    #[tokio::test]
+    async fn an_order_by_the_index_reads_from_that_end_of_the_catalog() {
+        let dir = hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let ask = async |query: &str| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await
+        };
+        let ids = |body: &str| -> Vec<i64> {
+            let answer: serde_json::Value = serde_json::from_str(body).unwrap();
+            answer["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_i64().unwrap())
+                .collect()
+        };
+        let total = i64::try_from(hats::query::tests::fixture_rows()).unwrap();
+
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1, total - 2], "{body}");
+
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 ASC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [1, 2, 3], "{body}");
+
+        // Through a filter and under an alias for the column, which is the planner's to see.
+        let (status, body) =
+            ask("SELECT TOP 2 id, _healpix_29 AS h FROM c WHERE id > 0 ORDER BY h DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1], "{body}");
+
+        // A second key keeps the sort, over rows already in order by the first, and the sort
+        // stops once the first partition's rows are past the ones it holds.
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 DESC, id DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1, total - 2], "{body}");
+
+        // A first key that is not the index gives the walk nothing to go by, so the sort reads
+        // every partition.
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY id DESC, _healpix_29").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("partitions"), "{body}");
+    }
+
     /// **That the pruning has teeth**, which the tests above cannot show: they would pass
     /// whether or not a partition was skipped, since skipping one changes what a query costs
     /// and not what it answers.

@@ -21,6 +21,7 @@ use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{MemorySchemaProvider, TableProvider};
 use datafusion::common::TableReference;
 use datafusion::error::DataFusionError;
+use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execute_stream;
@@ -364,7 +365,13 @@ fn context(limits: Limits) -> Result<SessionContext, ApiError> {
         .options_mut()
         .optimizer
         .enable_round_robin_repartition = false;
-    Ok(SessionContext::new_with_config_rt(config, runtime))
+    let state = SessionStateBuilder::new()
+        .with_config(config)
+        .with_runtime_env(runtime)
+        .with_default_features()
+        .with_physical_optimizer_rule(Arc::new(hats::OrderByIndex))
+        .build();
+    Ok(SessionContext::new_with_state(state))
 }
 
 /// Rewrite the names a caller wrote into the names their files actually use.
