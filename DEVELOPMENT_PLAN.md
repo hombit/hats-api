@@ -55,11 +55,11 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.5 | VOSI capabilities, availability, tables | done | |
 | 11.6 | `csv` and `tsv` | done | |
 | 11.13 | a region over `Float32` coordinates | done | |
-| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | next. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
+| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
 | 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
 | 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
-| 11.11 | table upload | todo | later. The one capability the four reference services do not share — IRSA has none, MAST half |
+| 11.11 | table upload | todo | next: a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTIONS` and `UPLOAD_TYPE`. Inline VOTable upload stays later — the one capability the four reference services do not share |
 | 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -589,9 +589,11 @@ everything already built and is held back by one thing only: it is a job model, 
 state, against a service whose every answer today is collected inside one request future.
 It is the one piece of this phase that is a design question rather than a mapping.
 
-**Everything else is later.** Table upload is the clearest case: IRSA offers none and MAST
-half, so the ecosystem has not settled it, and the four agree only on *declaring* what they
-have. `/examples` is a menu TOPCAT offers rather than something a client needs to work. The
+**Everything else is later**, with one piece taken out of it and moved ahead of tier 1:
+naming a catalog by url as `UPLOAD` (§11.11), which is the only way a TAP client can ask
+about a catalog this service does not publish, and which `/adql` already answers in its own
+body. Inline upload stays later, IRSA offering none and MAST half, so the ecosystem has not
+settled it and the four agree only on *declaring* what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to work. The
 formats this service has of its own — `parquet`, `json` — and how a nested column is
 declared are questions no reference service can be asked, because none of them has such a
 column.
@@ -719,13 +721,39 @@ there yet and what to do instead while it is not, and which formats carry a nest
 
 ### 11.11 Table upload
 
-`TAP_UPLOAD`, and the one capability the four reference services do not share — IRSA offers
-none, MAST half. So the ecosystem has not settled it, which is what puts it here rather than
-in tier 0, and it is the case that shows what they *do* agree on: each of them declares in
-`/capabilities` exactly what it has. That is the shape to copy for anything not implemented.
+Two halves, and only the first is planned. **A caller names a catalog by url and queries it
+as `TAP_UPLOAD.name`**, which is what `POST /adql` already does with its `tables` and what a
+TAP client has no other way to ask for. **Inline upload** — a VOTable sent in the request —
+is the second half and stays later: it is the one capability the four reference services do
+not share (IRSA offers none, MAST half), so the ecosystem has not settled it, and it is
+caller-supplied bytes rather than a url, which reopens what a request may spend.
 
-It also reopens what a request may spend, an uploaded table being caller-supplied bytes that
-a query then joins against.
+`UPLOAD=name,uri` and the `TAP_UPLOAD` schema are TAP §2.5.2's own, and so is a uri that is
+an `http(s)` url rather than `param:`. What is this service's is what the url may point at —
+a HATS catalog or a parquet file, neither of them the VOTable the standard means — and the
+storage options such a url needs. So a client can write the parameter and nothing else about
+it is borrowed.
+
+- **`UPLOAD_STORAGE_OPTIONS`**, a JSON object keyed by upload name, holding per upload what
+  `/adql`'s `storage` holds. One spelling of storage options in the service, or the two drift.
+  It is accepted on `GET` as on `POST`: TAP gives the two carriers one syntax, and a
+  credential in a url is already spent by the time this service could refuse it. What the
+  service can do is not make it worse — the log records a path and never a query string, and
+  that has to stay true.
+- **`UPLOAD_TYPE`**, optional, `name,hats;other,parquet`. Absent, the type is worked out: a
+  name matching the data-file globs is a parquet file, and a directory holding
+  `hats.properties`, `properties` or `collection.properties` is a catalog. Guessing costs a
+  request or two and must fail as a refusal naming what was looked for, never as a broken
+  catalog.
+- **Nothing is declared in `/capabilities`.** A `uploadMethod` tells a client it may send a
+  VOTable, which this half refuses, so it waits for the inline half. Which means the feature
+  is found by reading the README rather than by a client discovering it, and that is the
+  price of not advertising what is not there.
+
+Every url goes through the access policy exactly as `/adql`'s tables do, and a catalog reached
+this way is bounded by the same three bounds; `[[tap.table]]` stays credential-free, an
+operator's secret having no place in a published surface. The two reserved schemas are already
+reserved. The suite's upload checks are inline VOTable and stay red.
 
 ### 11.12 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
 
