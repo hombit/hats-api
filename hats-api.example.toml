@@ -14,6 +14,10 @@ show_version = true
 # Serve a directory's own index.html in place of a generated listing. Off publishes the
 # generated page everywhere, and the file still answers to its own name.
 serve_index_html = true
+# Serve a mounted robots.txt in place of the generated default, where a mount has one.
+# Off publishes the generated default everywhere: Disallow: / for every path, and Allow
+# for the API's own docs, health check and openapi.json where the API is on.
+serve_mounted_robots_txt = true
 # Who runs this deployment, written wherever the service identifies itself.
 # contact = "ops@example.org"
 # true sends "hats-api/x.y.z (ops@example.org)"; a string as written; false no header.

@@ -8,7 +8,10 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `GET /robots.txt`, disallowing every data path and, where the API is on, allowing its
+  docs page, health check and `openapi.json`.
+- `[server] serve_mounted_robots_txt`, on by default, to answer with a mounted
+  `robots.txt` in place of the generated default.
 
 ### Changed
 
