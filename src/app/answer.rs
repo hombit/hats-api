@@ -105,11 +105,11 @@ pub(in crate::app) async fn hats_answer(
     started: Instant,
 ) -> Result<Response, ApiError> {
     let num_rows = result.rows.num_rows();
-    match output.format {
+    let response = match output.format {
         Format::Json => {
             let rows = json::to_json(&result.rows)?;
             let schema = columns_of(&result.rows);
-            Ok(Json(HatsResponse {
+            Json(HatsResponse {
                 num_rows: rows.len(),
                 num_partitions: result.partitions_read,
                 schema,
@@ -117,7 +117,7 @@ pub(in crate::app) async fn hats_answer(
                 elapsed_ms: started.elapsed().as_millis(),
                 rows,
             })
-            .into_response())
+            .into_response()
         }
         Format::Parquet => {
             let layout = match &result.source {
@@ -125,26 +125,46 @@ pub(in crate::app) async fn hats_answer(
                 None => parquet::SourceLayout::default(),
             };
             let body = parquet::encode(&result.rows, &layout)?;
-            Ok((
+            (
                 attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
                 hats_counters(result, num_rows, started),
                 body,
             )
-                .into_response())
+                .into_response()
         }
-        Format::Votable => Ok((
+        Format::Votable => (
             attachment(votable::CONTENT_TYPE, "selection.vot"),
             hats_counters(result, num_rows, started),
             votable::encode(&result.rows)?,
         )
-            .into_response()),
-        Format::Dsv(kind) => Ok((
+            .into_response(),
+        Format::Dsv(kind) => (
             attachment(kind.content_type(), &format!("selection.{}", kind.name())),
             hats_counters(result, num_rows, started),
             dsv::encode(&result.rows, kind, &output.dsv_null)?,
         )
-            .into_response()),
-    }
+            .into_response(),
+    };
+    Ok(without_ranges(response))
+}
+
+/// A query's answer is generated once for this request and sent whole; there is no seekable
+/// resource behind it to serve a slice of, so this says so rather than leaving a Range-aware
+/// client to find out the hard way. Without it, a client that sends `Range` and gets a plain
+/// `200` back — legal under RFC 7233 for a server that does not support ranges — may still
+/// trust the byte count it asked for and read that many bytes off the front of the whole
+/// body, taking the head of the file for whatever slice it actually wanted. `fsspec`'s HTTP
+/// filesystem, which is what `lsdb` and `nested-pandas` read a HATS catalog over `http(s)`
+/// through, does exactly this: it pushes `columns`/`filters` onto the url and then asks for
+/// the footer with a suffix range, and a `200` there hands it back the front of the file
+/// instead — which fails far downstream, as a parquet page thrift decode error, with nothing
+/// here to say the request was ever answered wrong.
+fn without_ranges(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::ACCEPT_RANGES,
+        header::HeaderValue::from_static("none"),
+    );
+    response
 }
 
 /// What a body that is not JSON is served as, and what to call it once it is saved. The
@@ -218,22 +238,23 @@ pub(in crate::app) async fn answer(
     output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    match output.format {
-        Format::Json => json_response(result, started),
-        Format::Parquet => parquet_response(result, file, result.num_rows(), started).await,
-        Format::Votable => Ok((
+    let response = match output.format {
+        Format::Json => json_response(result, started)?,
+        Format::Parquet => parquet_response(result, file, result.num_rows(), started).await?,
+        Format::Votable => (
             attachment(votable::CONTENT_TYPE, &download_name(file, "vot")),
             counters(result, result.num_rows(), started),
             votable::encode(result)?,
         )
-            .into_response()),
-        Format::Dsv(kind) => Ok((
+            .into_response(),
+        Format::Dsv(kind) => (
             attachment(kind.content_type(), &download_name(file, kind.name())),
             counters(result, result.num_rows(), started),
             dsv::encode(result, kind, &output.dsv_null)?,
         )
-            .into_response()),
-    }
+            .into_response(),
+    };
+    Ok(without_ranges(response))
 }
 
 /// What a single-file request reports beside its rows, whichever encoding carries them.

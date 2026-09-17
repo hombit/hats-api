@@ -940,6 +940,23 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
+    /// A catalog's answer is generated once for this request too, so a `Range` against it
+    /// must be refused the same way a single file's query answer is.
+    #[tokio::test]
+    async fn a_catalog_query_answer_refuses_a_range_rather_than_mishonouring_it() {
+        let dir = hats::query::tests::fixture(true);
+        let response = respond(
+            catalog_server(dir.path(), 3600.0),
+            Request::builder()
+                .uri("/?limit=1&format=parquet")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
+        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+    }
+
     /// A url answers what fits in one answer, and says where a wider search goes.
     ///
     /// Checked on the request's own numbers rather than on what reading it costs: the other
@@ -1228,6 +1245,53 @@ mod tests {
         assert_eq!(body["num_rows"], 1);
         assert!(body["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
         assert_eq!(body["rows"][0]["objectid"], 1);
+    }
+
+    /// A query's answer is generated once for this request and sent whole, so a `Range`
+    /// against it must not be honoured — and must say so, rather than silently answering
+    /// `200` with the entire body under a `bytes` claim it cannot make good on. A client
+    /// that trusts a `Range` request was honoured without checking for `206` — `fsspec`'s
+    /// HTTP filesystem, which is what `lsdb` and `nested-pandas` read a HATS catalog
+    /// through, does exactly this — reads the front of the body for whatever slice it
+    /// asked for, which is corruption with nothing here to say the request went wrong.
+    ///
+    /// The plain file keeps real Range support: this is about the query answer only.
+    #[tokio::test]
+    async fn a_query_answer_refuses_a_range_rather_than_mishonouring_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fixture = query::tests::fixture();
+        std::fs::write(dir.path().join("part0.parquet"), &fixture).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let response = respond(
+            service(),
+            Request::builder()
+                .uri("/part0.parquet?columns=objectid")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "a range was answered as one rather than refused"
+        );
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
+        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        // The whole generated answer, not the last four bytes of it: a `200` here must
+        // carry the whole body it claims to, not a slice mislabelled as one.
+        assert!(body.len() > 4, "body was truncated to the range asked for");
+
+        // The plain file, with no query, still answers the same range for real.
+        let response = respond(
+            service(),
+            Request::builder()
+                .uri("/part0.parquet")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
     }
 
     /// A query that cannot run says so. Telling a caller their file is not parquet, when
