@@ -278,16 +278,32 @@ fn top_as_limit(query: &mut Query) -> Result<(), ApiError> {
             )));
         }
     };
-    if query.limit_clause.is_some() {
-        return Err(ApiError::bad_request(format!(
-            "{FIELD}: TOP and LIMIT both say how many rows; write one of them"
-        )));
-    }
-    query.limit_clause = Some(LimitClause::LimitOffset {
-        limit: Some(Expr::value(Value::Number(rows.to_string(), false))),
-        offset: None,
-        limit_by: Vec::new(),
-    });
+    let limit = Some(Expr::value(Value::Number(rows.to_string(), false)));
+    // `OFFSET` is ADQL 2.1's and lives in the same clause as a `LIMIT`, so a clause holding
+    // an offset alone is the statement's own and keeps it: `TOP 10 … OFFSET 20` is the
+    // eleven-to-twentieth rows. Only a clause that already says how many rows is two
+    // answers to one question.
+    query.limit_clause = match query.limit_clause.take() {
+        None => Some(LimitClause::LimitOffset {
+            limit,
+            offset: None,
+            limit_by: Vec::new(),
+        }),
+        Some(LimitClause::LimitOffset {
+            limit: None,
+            offset,
+            limit_by,
+        }) if limit_by.is_empty() => Some(LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        }),
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "{FIELD}: TOP and LIMIT both say how many rows; write one of them"
+            )));
+        }
+    };
     Ok(())
 }
 
@@ -635,6 +651,16 @@ mod tests {
         assert_eq!(
             translated("SELECT TOP 10 ra FROM gaia"),
             "SELECT ra FROM gaia LIMIT 10"
+        );
+    }
+
+    /// ADQL 2.1's `OFFSET` beside a `TOP`, which the parser keeps in the same clause a
+    /// `LIMIT` would be in — so it has to be told apart from one.
+    #[test]
+    fn top_keeps_an_offset() {
+        assert_eq!(
+            translated("SELECT TOP 10 ra FROM gaia ORDER BY ra OFFSET 20"),
+            "SELECT ra FROM gaia ORDER BY ra LIMIT 10 OFFSET 20"
         );
     }
 

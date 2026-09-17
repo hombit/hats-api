@@ -15,6 +15,7 @@ Release dates are in the UTC time zone.
 - `{api.prefix}/tap/capabilities`, `/tap/availability`, `/tap/tables` and `/tap/tables/{name}`. [#68](https://github.com/hombit/hats-api/pull/68)
 - `TAP_SCHEMA.schemas`, `.tables`, `.columns`, `.keys` and `.key_columns`, queryable through `/tap/sync`. [#68](https://github.com/hombit/hats-api/pull/68)
 - The optional coordinate system argument of an ADQL geometry, as in `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `lang` in the `/api/v1/adql` body: `ADQL`, `ADQL-2.0` or `ADQL-2.1`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 
@@ -32,7 +33,8 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- An ADQL region outside a catalog's coverage is an empty answer, not an internal error. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL `TOP` with `OFFSET` is answered, not refused. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Security
 
