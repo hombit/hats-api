@@ -10,10 +10,15 @@ Release dates are in the UTC time zone.
 
 - `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
 - `hf://` urls, with the `token` storage option and `[api.access.hf]`.
+- TAP sync queries at `{api.prefix}/tap`, over catalogs listed as `[[tap.table]]`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `lang` in the `/api/v1/adql` body, and `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL `TOP` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 
 - **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
+- ADQL names are matched case-insensitively unless quoted. [#68](https://github.com/hombit/hats-api/pull/68)
+- `[limits] max_partitions` defaults to 128, from 16. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Deprecated
 
@@ -25,7 +30,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- ADQL regions outside a catalog or over `Float32` coordinates, and `TOP` with `OFFSET`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Security
 

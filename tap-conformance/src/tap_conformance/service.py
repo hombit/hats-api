@@ -56,7 +56,6 @@ def configuration(port: int, catalogs: Path | None, tables: list[tuple[str, str]
         "",
         "[limits]",
         "max_request_seconds = 300",
-        "max_partitions = 64",
         'max_bytes_fetched = "20GiB"',
         "max_rows = 5000000",
         "",

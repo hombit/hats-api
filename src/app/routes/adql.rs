@@ -34,6 +34,11 @@ pub(in crate::app) struct AdqlQuery {
     /// The tables the statement may read, each under the name it is written as in the query.
     /// A name the statement reads and this does not declare is an error.
     tables: BTreeMap<String, AdqlTable>,
+    /// Which language the statement is written in: `ADQL`, or a version after the name —
+    /// `ADQL-2.0` or `ADQL-2.1`. Absent is `ADQL`. It is TAP's `LANG` under another carrier,
+    /// and answers to the same values.
+    #[schema(example = "ADQL")]
+    lang: Option<String>,
     /// `json`, the default; `parquet` for the answer as a parquet file; `votable` for a
     /// VOTable, `csv` for comma-separated text and `tsv` for tab-separated. The last three
     /// take flat columns only and refuse a nested one by name. Anything but `json` carries
@@ -88,7 +93,7 @@ enum TableKind {
 impl AdqlQuery {
     /// Every field this endpoint takes, in the order a body is written in.
     fn fields() -> Vec<&'static str> {
-        vec!["query", "tables", "format", "dsv_null_value"]
+        vec!["query", "tables", "lang", "format", "dsv_null_value"]
     }
 
     /// The same list, as the sentence a refusal ends with.
@@ -117,6 +122,9 @@ pub(in crate::app) async fn query_adql(
         params.dsv_null_value.as_deref(),
         Format::Json,
     )?;
+    if let Some(asked) = &params.lang {
+        adql::language::check("lang", asked)?;
+    }
     // Everything decidable from the request alone, before a store is built. The statement is
     // read first because it says which of the declared tables are even needed, and because a
     // statement this service will not answer costs nothing to refuse.
@@ -178,7 +186,8 @@ pub(in crate::app) async fn query_adql(
     // Whichever mount governs a catalog this request named, else the service's own list. A
     // request with no catalog never asks.
     let data_files = data_files.unwrap_or_else(|| service.data_files.as_ref().clone());
-    let result = adql::query::run(&translated, &tables, &data_files, service.adql_limits).await?;
+    let answer = adql::query::run(&translated, &tables, &data_files, service.adql_limits).await?;
+    let result = answer.result;
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     let response = adql_answer(&result, &output, started)?;
@@ -371,15 +380,15 @@ mod tests {
         assert_eq!(answer["rows"][0]["ra"], 45.0);
     }
 
-    /// A column answers to its own spelling and to its lowercase, and to nothing else — the
-    /// rule the query routes follow, which a statement does not get from the planner:
-    /// identifier normalization is off, so `gmag` would otherwise be a column no file has.
+    /// **An unquoted name is case-insensitive here, which is ADQL's own rule** (§2.1.3) and
+    /// not the one the `simple` routes follow. It has to be applied by hand because
+    /// identifier normalization is off: with it on DataFusion would lowercase `Gmag` and put
+    /// every mixed-case astronomy column out of reach.
     ///
-    /// **`GMAG` is refused, and that is the divergence from ADQL**, which folds an unquoted
-    /// name to uppercase. Resolving it would make the names a column answers to depend on
-    /// what else is in the file.
+    /// A delimited name is exact, which is the other half of the same rule and what makes a
+    /// column whose spelling a client read out of `TAP_SCHEMA` reachable unambiguously.
     #[tokio::test]
-    async fn an_adql_column_answers_to_its_own_spelling_and_its_lowercase() {
+    async fn an_adql_name_is_case_insensitive_unless_it_is_quoted() {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("part0.parquet"),
@@ -390,10 +399,14 @@ mod tests {
         for query in [
             "SELECT Gmag FROM t",
             "SELECT gmag FROM t",
+            "SELECT GMAG FROM t",
+            "SELECT \"Gmag\" FROM t",
             // Qualified by the table, and by an alias, since the column is the last segment
             // either way.
             "SELECT t.gmag FROM t",
-            "SELECT a.gmag FROM t AS a",
+            "SELECT a.GMAG FROM t AS a",
+            // And the table's name by the same rule.
+            "SELECT objectid FROM T",
         ] {
             let (status, body) = ask_adql(dir.path(), query).await;
             assert_eq!(status, StatusCode::OK, "{query}: {body}");
@@ -401,11 +414,8 @@ mod tests {
             assert_eq!(answer["num_rows"], 10, "{query}");
         }
 
-        let (status, body) = ask_adql(dir.path(), "SELECT GMAG FROM t").await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-
-        // The table's name by the same rule: as the request declared it, or in lowercase.
-        let (status, body) = ask_adql(dir.path(), "SELECT objectid FROM T").await;
+        // A delimited name is the file's own spelling and no other.
+        let (status, body) = ask_adql(dir.path(), "SELECT \"GMAG\" FROM t").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
@@ -492,10 +502,10 @@ mod tests {
         assert_eq!(answer["num_rows"], 9);
     }
 
-    /// A shape this service does not test, refused by name rather than as an unknown function
-    /// — which is what a caller would otherwise be told about `BOX`.
+    /// An ADQL function this service does not implement says so, rather than being reported as
+    /// a function nobody has heard of.
     #[tokio::test]
-    async fn an_adql_geometry_this_service_refuses_says_so() {
+    async fn an_adql_function_this_service_does_not_implement_says_so() {
         let dir = adql_fixture();
         let (status, body) = ask_adql(
             dir.path(),
@@ -504,7 +514,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(
-            body.contains("BOX") && body.contains("not answered"),
+            body.contains("BOX") && body.contains("not implemented"),
             "{body}"
         );
     }
@@ -620,6 +630,117 @@ mod tests {
         assert!(body.contains("partitions"), "{body}");
     }
 
+    /// **The partition bound counts partitions opened, so a `TOP` the first partition can
+    /// fill is answered** over a catalog with more partitions than are allowed — and one that
+    /// needs a second partition is refused on reaching it, never answered short.
+    ///
+    /// Both halves run with one partition allowed. The first shows the scan is lazy: an eager
+    /// one would have refused before reading. The second shows the count still binds: a lazy
+    /// one without it would have read on and answered.
+    #[tokio::test]
+    async fn a_limit_is_answered_from_the_partitions_it_needs() {
+        let dir = hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let ask = async |query: &str| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await
+        };
+
+        let (status, body) = ask("SELECT TOP 1 id FROM c").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 1, "{body}");
+        // What the partitions' own scans fetched, which a scan planned while this one runs has
+        // to report itself or the answer says nothing was read.
+        assert!(answer["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
+
+        // More rows than any one partition of the fixture holds, so it needs a second.
+        let (status, body) = ask("SELECT TOP 100000 id FROM c").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("partitions"), "{body}");
+
+        // The same when the limit reaches the scan only as a filter that stops pulling.
+        let (status, body) = ask("SELECT TOP 1 id FROM c WHERE id >= 0").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// `ORDER BY` the index is answered by the order partitions are read in, so a `TOP` over
+    /// it reads the partitions at that end of the catalog and no others. With one partition
+    /// allowed, a sort that consumed its whole input would be refused.
+    ///
+    /// The fixture's ids ascend with the index across the catalog and within each partition,
+    /// so the ids say both which partition was read and that its rows were sorted: the
+    /// descending answer has to reverse the order the file holds them in.
+    #[tokio::test]
+    async fn an_order_by_the_index_reads_from_that_end_of_the_catalog() {
+        let dir = hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let ask = async |query: &str| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await
+        };
+        let ids = |body: &str| -> Vec<i64> {
+            let answer: serde_json::Value = serde_json::from_str(body).unwrap();
+            answer["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_i64().unwrap())
+                .collect()
+        };
+        let total = i64::try_from(hats::query::tests::fixture_rows()).unwrap();
+
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1, total - 2], "{body}");
+
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 ASC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [1, 2, 3], "{body}");
+
+        // Through a filter and under an alias for the column, which is the planner's to see.
+        let (status, body) =
+            ask("SELECT TOP 2 id, _healpix_29 AS h FROM c WHERE id > 0 ORDER BY h DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1], "{body}");
+
+        // A second key keeps the sort, over rows already in order by the first, and the sort
+        // stops once the first partition's rows are past the ones it holds.
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY _healpix_29 DESC, id DESC").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(ids(&body), [total, total - 1, total - 2], "{body}");
+
+        // A first key that is not the index gives the walk nothing to go by, so the sort reads
+        // every partition.
+        let (status, body) = ask("SELECT TOP 3 id FROM c ORDER BY id DESC, _healpix_29").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("partitions"), "{body}");
+    }
+
     /// **That the pruning has teeth**, which the tests above cannot show: they would pass
     /// whether or not a partition was skipped, since skipping one changes what a query costs
     /// and not what it answers.
@@ -675,6 +796,139 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+
+    /// **A region outside a catalog's coverage answers with no rows and the columns asked
+    /// for.** It is the ordinary case — a cone where the survey did not look — and the scan
+    /// that answers it reads nothing, so what it hands back is a schema rather than a file.
+    /// That schema has to be the projected one: the projection above it carries indices into
+    /// what the scan returns, and the whole catalog's schema resolves every one of them
+    /// against the wrong column.
+    ///
+    /// The column asked for is deliberately not the catalog's first. With `id` the mistake
+    /// is invisible, index 0 being right by luck.
+    #[tokio::test]
+    async fn a_region_that_reaches_no_partition_answers_the_columns_asked_for() {
+        let dir = hats::query::tests::fixture(true);
+        for region in [
+            // Nowhere near the fixture's cells.
+            "CIRCLE(180.0, 60.0, 0.001)",
+            // A MOC of cells the catalog does not hold, which has no coordinate test at
+            // all — so the scan is chosen by the covering alone.
+            "MOC('3/3 10')",
+        ] {
+            let (status, body) = post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": format!(
+                        "SELECT ra, dec FROM c WHERE 1 = CONTAINS(POINT(ra, dec), {region})"
+                    ),
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{region}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["num_rows"], 0, "{region}: {body}");
+            assert_eq!(
+                answer["schema"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|column| column["name"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["ra", "dec"],
+                "{region}: {body}"
+            );
+        }
+    }
+
+    /// **A catalog whose coordinates are `Float32` answers a region**, the same rows as the
+    /// `Float64` one and pruned the same way.
+    ///
+    /// A region in a statement is built after type coercion has run, so nothing widened the
+    /// columns: the bounds compared a `Float32` column with an `f64` literal and arrow refused
+    /// the whole query. One partition allowed is what shows the covering still prunes through
+    /// the cast; a `DISTANCE` value and a crossmatch are the two other ways a coordinate
+    /// column reaches the geometry, and the projection shows the column keeps its own type.
+    #[tokio::test]
+    async fn a_catalog_with_narrow_coordinates_answers_a_region() {
+        let dir = hats::query::tests::narrow_fixture();
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
+        let (ra, dec, radius) = match &region {
+            Region::Circle {
+                ra,
+                dec,
+                radius_deg,
+                ..
+            } => (*ra, *dec, radius_deg.unwrap()),
+            other => panic!("the fixture's first region is a circle: {other:?}"),
+        };
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let ask = async |query: String, tables: serde_json::Value| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({"query": query, "tables": tables}),
+            )
+            .await
+        };
+        let one = serde_json::json!({"c": {"type": "hats", "url": "file:///"}});
+
+        let (status, body) = ask(
+            format!(
+                "SELECT id, ra FROM c WHERE 1 = CONTAINS(POINT(ra, dec), \
+                 CIRCLE({ra}, {dec}, {radius})) ORDER BY id"
+            ),
+            one.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Compared with the f64 positions the fixture was written from, so a row within
+        // single precision of the edge may land on either side of it.
+        let ids = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected, "{body}");
+        assert_eq!(answer["schema"][1]["type"], "Float32", "{body}");
+
+        let (status, body) = ask(
+            format!(
+                "SELECT TOP 1 DISTANCE(POINT(ra, dec), POINT({ra}, {dec})) AS sep FROM c \
+                 WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE({ra}, {dec}, {radius})) ORDER BY sep"
+            ),
+            one,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = ask(
+            format!(
+                "SELECT a.id AS aid, b.id AS bid FROM left AS a JOIN right AS b \
+                   ON 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, 0.0001)) \
+                 WHERE 1 = CONTAINS(POINT(a.ra, a.dec), CIRCLE({ra}, {dec}, {radius})) \
+                   AND 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE({ra}, {dec}, {radius}))"
+            ),
+            serde_json::json!({
+                "left": {"type": "hats", "url": "file:///"},
+                "right": {"type": "hats", "url": "file:///"},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], expected.len(), "{body}");
     }
 
     /// A crossmatch: two catalogs joined on the separation between their rows, which is
@@ -809,6 +1063,41 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// `lang` is TAP's `LANG` under another carrier, and answers to the same values — a
+    /// query moved between the two routes carries the same one. A language this service
+    /// does not answer is refused rather than parsed as ADQL and failed later.
+    #[tokio::test]
+    async fn an_adql_request_may_say_which_language_it_wrote() {
+        let dir = adql_fixture();
+        let ask = async |lang: serde_json::Value| {
+            post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": "SELECT TOP 1 objectid FROM t",
+                    "tables": {"t": {"type": "parquet", "url": "file:///part0.parquet"}},
+                    "lang": lang,
+                }),
+            )
+            .await
+        };
+
+        // Absent is ADQL, and a version after the name is the same language.
+        for lang in [
+            serde_json::Value::Null,
+            "ADQL".into(),
+            "ADQL-2.0".into(),
+            "adql-2.1".into(),
+        ] {
+            let (status, body) = ask(lang.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{lang}: {body}");
+        }
+
+        let (status, body) = ask("PQL".into()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("PQL") && body.contains("ADQL"), "{body}");
     }
 
     /// Reserved now, before a TAP layer needs them, so that no caller writes a statement

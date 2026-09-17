@@ -29,12 +29,13 @@ use crate::access::{self, AccessPolicy};
 use crate::adql;
 use crate::app::files::serve_mounted;
 use crate::app::openapi::{self, description::describe};
-use crate::app::routes::{adql::query_adql, hats, parquet::query_parquet};
-use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig};
+use crate::app::routes::{adql::query_adql, hats, parquet::query_parquet, tap};
+use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig, TapConfig};
 use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats::query::CatalogLimits;
 use crate::storage::materialize::Transfers;
+use crate::tap::TapTableList;
 
 /// What every request needs and no request may change: the rules, the shared scratch
 /// budget, and the url space each mode claims. All built once at startup, so a request
@@ -47,6 +48,9 @@ pub struct Service {
     /// Which files are read as data where no mount governs the question, which in API
     /// mode is every remote url. A mount answers it with [`mount::Mount::data_files`] instead.
     pub data_files: Arc<DataFiles>,
+    /// The tables the TAP resources publish. Read from the config at startup, which is
+    /// what keeps it config rather than a registry: nothing adds to it per request.
+    pub tap_tables: Arc<TapTableList>,
     /// How much SQL one request may carry.
     pub sql_limits: sql::Limits,
     /// What a request against a whole catalog may spend.
@@ -83,6 +87,7 @@ impl Service {
         mounts: Arc<Mounts>,
         api: &ApiConfig,
         data: &DataConfig,
+        tap: &TapConfig,
         server: &ServerConfig,
     ) -> Result<Self, ConfigError> {
         let data_files = DataFiles::new(&data.filenames)?;
@@ -119,11 +124,24 @@ impl Service {
                     .to_owned(),
             ));
         }
+        // The TAP resources are siblings under the API's own prefix, so with API mode off
+        // there is nowhere for a published table to be queried from. Refused rather than
+        // ignored: an operator who wrote the list meant it to be reachable.
+        if api_prefix.is_none() && !tap.tables.is_empty() {
+            return Err(ConfigError::Route(
+                "api.enabled is false, so the [[tap.table]] entries would be published at \
+                 no url"
+                    .to_owned(),
+            ));
+        }
+        let transfers = Arc::new(Transfers::new(limits));
+        let tap_tables = TapTableList::new(&tap.tables, &policy, &transfers)?;
         Ok(Self {
             policy: Arc::new(policy),
-            transfers: Arc::new(Transfers::new(limits)),
+            transfers,
             mounts,
             data_files: Arc::new(data_files),
+            tap_tables: Arc::new(tap_tables),
             sql_limits: limits.into(),
             catalog_limits: limits.into(),
             adql_limits: limits.into(),
@@ -187,6 +205,12 @@ pub fn router(service: Service) -> Router {
         // projection, which is the pair the other three routes take from the url and the body
         // separately.
         router = router.route(&route(&prefix, "adql"), post(query_adql));
+        // Only where an operator published something. A TAP service with no table is one a
+        // client can learn nothing from, so this deployment says it has none by not
+        // answering at all rather than by answering every query with a refusal.
+        if !service.tap_tables.is_empty() {
+            router = with_tap(router, &prefix);
+        }
         router = with_description(router, &prefix, service.contact.clone());
     }
     let mut router = router
@@ -341,6 +365,22 @@ pub(in crate::app) fn with_queries(router: Router<Service>, prefix: &str) -> Rou
         // mode: rows and a work list are different kinds of thing, and a field saying
         // which arrived is one more value a caller has to look at the body to trust.
         .route(&path("hats/plan"), post(hats::query_hats_plan))
+}
+
+/// The TAP resources. `/sync` answers `GET` and `POST` alike, which TAP §2.1 asks of a
+/// DALI-sync resource: the two differ only in where the parameters are read from.
+fn with_tap(router: Router<Service>, prefix: &str) -> Router<Service> {
+    router
+        .route(
+            &route(prefix, "tap/sync"),
+            get(tap::tap_sync_get).post(tap::tap_sync_post),
+        )
+        .route(&route(prefix, "tap/availability"), get(tap::availability))
+        .route(&route(prefix, "tap/capabilities"), get(tap::capabilities))
+        .route(&route(prefix, "tap/tables"), get(tap::tables))
+        // One table by name, which is how a client that has the name already avoids
+        // fetching every column of every table.
+        .route(&route(prefix, "tap/tables/{name}"), get(tap::table))
 }
 
 /// The two routes that describe the rest: the document, and a page rendering it.
@@ -952,6 +992,7 @@ mod tests {
                 mounts,
                 &ApiConfig::default(),
                 &DataConfig::default(),
+                &TapConfig::default(),
                 &ServerConfig::default(),
             )
             .unwrap()
@@ -1085,6 +1126,7 @@ mod tests {
                 Arc::new(mounts),
                 &api,
                 &DataConfig::default(),
+                &TapConfig::default(),
                 &ServerConfig::default(),
             )
         };
@@ -1116,11 +1158,55 @@ mod tests {
                 ..Default::default()
             },
             &DataConfig::default(),
+            &TapConfig::default(),
             &ServerConfig::default(),
         )
         .unwrap_err()
         .to_string();
         assert!(error.contains("nothing to serve"), "{error}");
+    }
+
+    /// TAP's resources are siblings under the API's prefix, so with the API off a
+    /// published table has no url — which is an operator's mistake to hear about rather
+    /// than a list to quietly drop.
+    #[tokio::test]
+    async fn a_published_table_needs_the_api_to_be_on() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("gaia")).unwrap();
+        let tap = TapConfig {
+            tables: vec![crate::config::TapTableConfig {
+                name: "gaia_dr3.gaia_source".to_owned(),
+                url: "file:///gaia".to_owned(),
+            }],
+        };
+        let service = |enabled| {
+            let mounts =
+                Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
+            let policy = AccessPolicy::new(
+                &crate::config::AccessConfig::default(),
+                Arc::clone(&mounts),
+                None,
+            )
+            .unwrap();
+            Service::new(
+                policy,
+                &LimitsConfig::default(),
+                mounts,
+                &ApiConfig {
+                    enabled,
+                    ..Default::default()
+                },
+                &DataConfig::default(),
+                &tap,
+                &ServerConfig::default(),
+            )
+        };
+        let error = service(false).unwrap_err().to_string();
+        assert!(error.contains("no url"), "{error}");
+        assert_eq!(
+            service(true).unwrap().tap_tables.names(),
+            ["gaia_dr3.gaia_source"]
+        );
     }
 
     /// A handler that never finishes, behind the deadline. Nothing this service answers
@@ -1179,6 +1265,7 @@ mod tests {
             Arc::default(),
             &ApiConfig::default(),
             &DataConfig::default(),
+            &TapConfig::default(),
             &ServerConfig::default(),
         )
         .unwrap()

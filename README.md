@@ -13,13 +13,16 @@ for the client to fan out itself.
 
 The catalog can sit on local disk or in S3, GCS, Azure Blob, WebDAV, or behind a plain
 HTTP server. A single parquet file is queryable the same way.
-Two interfaces, either or both:
+Three interfaces, any or all of them:
 
 - **[File-server mode](#file-server-mode)** publishes a local directory. Without a query
   string it is an ordinary static file server; with one, the catalog's URL is the
   query: `?ra=348&dec=-29&radius_arcsec=30&columns=source_id,mag&filters=mag<18`.
 - **[API mode](#api-mode)** takes the location in the request body, so each request names
   its own catalog instead of one this server publishes.
+- **[TAP](#tap)** publishes named catalogs to the IVOA clients astronomers already use:
+  [TOPCAT](https://www.star.bris.ac.uk/~mbt/topcat/),
+  [`pyvo`](https://pyvo.readthedocs.io/), [`astroquery`](https://astroquery.readthedocs.io/).
 
 ## Running it
 
@@ -178,7 +181,7 @@ Each route names the kind of **target** it takes, under `[api] prefix`, `/api/v1
 | a whole catalog | `POST /api/v1/simple/hats` |
 | a catalog query, resolved but not run | `POST /api/v1/simple/hats/plan` |
 
-Plus [`POST /api/v1/adql`](#adql), which takes a whole query rather than a target and two
+Plus [`POST /api/v1/adql`](#an-adql-query), which takes a whole query rather than a target and two
 fields, and `GET /api/v1/health`.
 
 The `hats` routes pick the partitions the query touches; `hats/plan` takes the same body
@@ -187,7 +190,7 @@ and returns the requests that query would take.
 | field | means                                                                                                         |
 |---|---------------------------------------------------------------------------------------------------------------|
 | `url` | the resource to query. The only required field                                                                |
-| `columns` | a list of column names to return. Nothing computed and no aliases; for those, write [ADQL](#adql)          |
+| `columns` | a list of column names to return. Nothing computed and no aliases; for those, write [ADQL](#an-adql-query)  |
 | `filters` | one row condition, a boolean SQL expression                                                                   |
 | `region` | [a shape on the sky](#selecting-a-region-of-the-sky): a circle, a zone or a MOC                                |
 | `ra_column`, `dec_column` | which columns hold the position. Required with a `region` for `/api/v1/simple/parquet`, not for HATS, which names its own |
@@ -474,12 +477,11 @@ The numeric functions are callable — `abs`, `ceil`, `floor`, `round`, `trunc`,
 `degrees`, `radians`, the trigonometric and hyperbolic functions with their inverses,
 `atan2`, `cot`, `isnan`, `iszero` and `nanvl`.
 
-### ADQL
+### An ADQL query
 
-`POST /api/v1/adql` takes an
-[ADQL](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html) query instead of a
-target and two fields. Every table the query reads is declared beside it, under the name the
-query uses. This one runs as written:
+`POST /api/v1/adql` takes an [ADQL](#adql) query instead of a target and two fields. Every
+table the query reads is declared beside it, under the name the query uses. This one runs
+as written:
 
 ```json
 {
@@ -491,14 +493,7 @@ query uses. This one runs as written:
 ```
 
 A catalog reads only the partitions the query's region reaches, the same ones the
-[`hats` routes](#the-routes) would choose. Without a region it reads every partition, and a
-query reaching more than `max_partitions` is refused rather than started.
-
-The `POINT` of a region over a catalog names the catalog's own position columns, the ones
-its `hats_col_ra` and `hats_col_dec` declare. Any other pair is refused: the partitions are
-chosen by an index over those two, so a region over other columns would be answered from
-partitions that say nothing about it. A parquet file declares nothing, so there the two
-columns are the query's to name.
+[`hats` routes](#the-routes) would choose.
 
 `type` is `hats` for a whole catalog, or `parquet` for one file:
 
@@ -527,36 +522,11 @@ around each row of one side — here matching Gaia DR3 against Euclid Q1 within 
 }
 ```
 
-**Narrow each side.** The `WHERE` gives both catalogs their own arcminute circle, which is what
-chooses the partitions; the join condition then says which of the surviving pairs match. A
-circle centred on a column is a different circle for every row, so nothing about it prunes,
-and a side the `WHERE` says nothing about is the whole catalog — refused for reaching more
-partitions than `max_partitions` rather than read. It need not be a circle: any condition that
-narrows a side will do.
+`lang` names the language version: `ADQL`, `ADQL-2.0` or `ADQL-2.1`, the same values TAP's
+`LANG` takes. It is optional and defaults to `ADQL`.
 
-`DISTANCE` is a value, in degrees, so
-`DISTANCE(POINT(g.ra, g.dec), POINT(e.ra, e.dec)) * 3600 AS sep_arcsec` reports each pair's
-separation, and an `ORDER BY` sorts on it.
-
-`GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations are all
-answered. Where ADQL spells something differently from SQL, the query is translated:
-
-| ADQL | SQL                                    |
-|---|----------------------------------------|
-| `TOP n` | `LIMIT n`                              |
-| `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
-| `1 = INTERSECTS(point, shape)` | the same test, either argument first   |
-| `DISTANCE(POINT(ra, dec), POINT(45.0, -20.0)) < r` | the circle of radius `r`               |
-| `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
-| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%`             |
-
-These ADQL functions are not supported: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
-`COORDSYS`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
-
-`RAND()` works here, and is refused on the other routes, which answer the same way twice.
-Two runs of the same query give different numbers. The standard's optional argument is
-accepted but changes nothing, because the standard leaves its meaning undefined and advises
-omitting it.
+See [ADQL](#adql) for the language itself, and for how to narrow a query over a large
+catalog.
 
 An answer over the row cap is refused rather than truncated: rows cut off are a value you
 cannot tell from the whole answer.
@@ -584,13 +554,179 @@ no use for is refused rather than ignored. Credentials are never logged, neither
 values nor their names. A `file://` URL names a mount's `path`, and a path under no mount
 is refused whether or not anything is there.
 
+## ADQL
+
+[ADQL](https://www.ivoa.net/documents/ADQL/20231215/REC-ADQL-2.1.html) is IVOA's query
+language. Two routes take it, and the language is the same in both:
+
+- [`POST /api/v1/adql`](#an-adql-query), where the query declares its own tables by URL.
+- [`/api/v1/tap/sync`](#tap), where it names catalogs the server publishes.
+
+Both accept ADQL 2.0 and 2.1, named by `lang` and `LANG` respectively. 2.1 is what is
+implemented; a 2.0 query is valid 2.1.
+
+`GROUP BY`, `HAVING`, `ORDER BY`, `DISTINCT`, joins, subqueries and set operations all
+work. Where ADQL spells something differently from SQL, the query is translated:
+
+| ADQL | SQL                                    |
+|---|----------------------------------------|
+| `TOP n` | `LIMIT n`                              |
+| `1 = CONTAINS(POINT(ra, dec), CIRCLE(ra, dec, r))` | the region test; `0 =` is its negation |
+| `1 = INTERSECTS(point, shape)` | the same test, either argument first   |
+| `DISTANCE(POINT(ra, dec), POINT(45.0, -20.0)) < r` | the circle of radius `r`               |
+| `MOC('4/30-33 38 52')` | a coverage map, in place of a `CIRCLE` |
+| `LOG`, `CEILING`, `TRUNCATE`, `MOD` | `ln`, `ceil`, `trunc`, `%`             |
+
+These ADQL functions are not implemented: `AREA`, `BOX`, `CENTROID`, `COORD1`, `COORD2`,
+`COORDSYS`, `IN_UNIT`, `IVO_GEOM_TRANSFORM`, `POLYGON`, `REGION`.
+
+`RAND()` works in ADQL, and is refused in `columns` and `filters`, which answer the same
+way twice. Two runs of the same query give different numbers. The standard's optional
+argument is accepted but changes nothing, because the standard leaves its meaning undefined
+and advises omitting it.
+
+### Geometry
+
+The coordinate system argument is optional, so `POINT(ra, dec)` and
+`POINT('ICRS', ra, dec)` both work — ADQL 2.0 required it and 2.1 deprecated it.
+Coordinates are ICRS, and naming another system is an error.
+
+Over a catalog, `POINT` names the catalog's own position columns, the ones its
+`hats_col_ra` and `hats_col_dec` declare. Any other pair is refused: the partitions are
+chosen by an index over those two, so a region over other columns would be answered from
+partitions that say nothing about it. A parquet file declares nothing, so there the query
+names the columns it wants.
+
+`DISTANCE` is a value, in degrees, so
+`DISTANCE(POINT(g.ra, g.dec), POINT(e.ra, e.dec)) * 3600 AS sep_arcsec` reports a
+separation in arcseconds, and an `ORDER BY` sorts on it.
+
+### Narrowing a query over a large catalog
+
+The service answers small queries only. A HATS catalog is split into partitions, each one
+patch of sky, and a query may read at most `max_partitions` of them (128 by default). A query
+that needs more, such as a `COUNT(*)` over a whole catalog, is refused. So a query over a
+catalog has to select a small piece of it, in one of two ways.
+
+**A region.** `CONTAINS` or `INTERSECTS` with a `CIRCLE` or a `MOC`, or a `DISTANCE` below
+some radius, chooses the partitions that overlap it, and nothing else is read:
+
+```sql
+SELECT source_id, ra, dec FROM gaia
+WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.5))
+```
+
+**A `TOP`.** Without a region, partitions are read in HEALPix order until the query has its
+rows, so `SELECT TOP 1000 source_id, ra, dec FROM gaia` reads the first few partitions and
+stops. The rows are those first partitions' rows, in whatever order their files hold them.
+
+`ORDER BY _healpix_29` changes which partitions are read and sorts the rows. `ASC` reads the
+partitions with the lowest HEALPix indices, `DESC` those with the highest, and further sort
+keys may follow the index column:
+
+```sql
+SELECT TOP 1000 source_id, ra, dec, phot_g_mean_mag FROM gaia
+ORDER BY _healpix_29 DESC, phot_g_mean_mag
+```
+
+reads the last few partitions. The index column has to be the first key; any other
+`ORDER BY` needs every row before it can pick the first 1000, so without a region it is
+refused over any catalog with more partitions than the bound.
+
+A crossmatch is written the ADQL way, as a circle around each row of one side. Here Gaia DR3
+is matched against Euclid Q1 within an arcsecond:
+
+```sql
+SELECT g.source_id, e.object_id
+FROM gaia AS g JOIN euclid AS e
+  ON 1 = CONTAINS(POINT(e.ra, e.dec), CIRCLE(g.ra, g.dec, 0.000278))
+WHERE 1 = CONTAINS(POINT(g.ra, g.dec), CIRCLE(269.73, 66.02, 0.0167))
+  AND 1 = CONTAINS(POINT(e.ra, e.dec), CIRCLE(269.73, 66.02, 0.0167))
+```
+
+Give each of the joined tables its own region. The `WHERE` gives both catalogs their own arcminute circle, which is what
+chooses the partitions; the join condition then says which of the surviving pairs match. A
+circle centred on a column is a different circle for every row, so nothing about it prunes,
+and a side the `WHERE` says nothing about is the whole catalog. The two regions need not be the
+same, or even circles: any region that selects a small part of each table will do.
+
+## TAP
+
+The service speaks IVOA's
+[Table Access Protocol](https://www.ivoa.net/documents/TAP/20190927/REC-TAP-1.1.html), so
+[TOPCAT](https://www.star.bris.ac.uk/~mbt/topcat/),
+[`pyvo`](https://pyvo.readthedocs.io/) and
+[`astroquery`](https://astroquery.readthedocs.io/) can query its catalogs. The endpoint is
+`/tap` under `[api] prefix`:
+
+```
+https://example.com/api/v1/tap
+```
+
+### Publishing catalogs
+
+Give each catalog an entry in the config file:
+
+```toml
+[[tap.table]]
+name = "gaia_dr3.gaia_source"
+url = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia"
+
+[[tap.table]]
+name = "ztf.dr24_lc"
+url = "file:///hats/ztf_dr24_lc"
+```
+
+`name` is the table name in an ADQL query's `FROM {name}` clause. It takes the form
+`{schema}.{table}` and must be unique. `url` points at the catalog and is checked at
+startup against [`[api.access]`](#what-a-request-may-reach). No storage options, such as
+credentials, are currently supported for remote catalogs.
+
+### Querying
+
+```python
+import pyvo
+
+tap = pyvo.dal.TAPService("https://example.com/api/v1/tap")
+rows = tap.run_sync(
+    "SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag FROM gaia_dr3.gaia_source "
+    "WHERE 1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 45.0, 0.0, 0.01))"
+).to_table()
+```
+
+In TOPCAT: *VO → Table Access Protocol (TAP) Query*, then paste the URL.
+
+[ADQL](#adql) says what the query language answers, and how a query over a large catalog is
+bounded.
+
+### Resources
+
+| | |
+|---|---|
+| `/api/v1/tap/sync` | run one ADQL query, `GET` or `POST` |
+| `/api/v1/tap/capabilities` | what the service supports |
+| `/api/v1/tap/availability` | whether it is up |
+| `/api/v1/tap/tables` | tables and columns; `?detail=min` for names only, `…/tables/{name}` for one |
+
+The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables`,
+`TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
+
+`sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
+`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`.
+
+`MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
+table. `MAXREC=0` returns the columns alone, which is how a client inspects a table.
+
+Queries run synchronously and have to finish inside `max_request_seconds`. `/async`, table
+upload and `/examples` are still to come.
+
 ## What a request may spend
 
 Three bounds, whichever is reached first, all in `[limits]`:
 
 | | default | |
 |---|---|---|
-| `max_partitions` | 16 | checked before anything is read |
+| `max_partitions` | 128 | checked before anything is read |
 | `max_bytes_fetched` | `10GiB` | watched as partitions land |
 | `max_rows` | 1000000 | watched as partitions land |
 
@@ -601,7 +737,9 @@ part-way: a truncated answer is one a caller cannot tell from a complete one.
 **A `limit` is the other bound that acts before work happens.** The read stops as soon as
 enough rows are in, so the limit bounds the request and `max_partitions` joins the
 counters, watched as the reads land. That is what makes `?limit=10` against a
-thousand-partition catalog cost one partition.
+thousand-partition catalog cost one partition. ADQL works the same way: `SELECT TOP 1000 …`
+over a whole catalog reads partitions in HEALPix order until it has the rows, and a statement
+that needs more than `max_partitions` of them is refused when it gets there.
 
 **Over a limit is `422`, and the body is the plan.** So the answer to "that is more than I
 will do at once" is the list of requests that would do it. The same three bind a catalog
@@ -705,6 +843,11 @@ API request names a file in it by the same path, `file:///gaia/dataset/…`, nev
 request for any path under it is a 404, while an API request naming a file in it is
 answered as usual. Two mounts may not claim overlapping URL prefixes, served or not.
 
+### Published tables
+
+`[[tap.table]]` lists the catalogs [TAP](#publishing-catalogs) serves. The TAP resources
+answer once at least one is listed.
+
 ### Which files are data
 
 One list of filename globs, matched against a file's own name and never against the path
@@ -723,7 +866,7 @@ either. A mount's own `filenames` replaces this for the files under it.
 
 ```toml
 [limits]
-max_partitions = 16             # what one catalog query may spend
+max_partitions = 128            # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 max_query_memory_bytes = "1GiB" # what one ADQL statement's joins and groups may hold

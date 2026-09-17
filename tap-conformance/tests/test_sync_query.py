@@ -48,11 +48,59 @@ def test_empty_answer_still_has_columns(tap, queryable, coordinates, record_prop
     assert found.colnames, "an empty answer carried no column metadata"
 
 
+def test_region_with_no_rows_still_has_its_columns(
+    tap, queryable, coordinates, center, record_property
+):
+    """A cone where the table holds nothing answers with the columns the SELECT wrote.
+
+    TAP 3.2 makes the answer's columns the select list's, rows or no rows — and a cone
+    outside a catalog's coverage is the ordinary way to get none. The select list is
+    written with the declination first, so an answer that carries some other column in
+    that position is visible rather than right by accident.
+    """
+    ra, dec = coordinates
+    x, y = center
+    # The opposite side of the sky from where the suite's data is.
+    far_ra, far_dec = (x + 180.0) % 360.0, -y
+    found = tap.run_sync(
+        f"SELECT TOP 5 {dec}, {ra} FROM {queryable} WHERE 1=CONTAINS("
+        f"POINT('ICRS', {ra}, {dec}), CIRCLE('ICRS', {far_ra}, {far_dec}, 0.001))"
+    ).to_table()
+    expected = [dec.strip('"').lower(), ra.strip('"').lower()]
+    record_property("detail", f"{len(found)} rows, columns {found.colnames}")
+    assert [name.lower() for name in found.colnames] == expected, (
+        f"expected {expected}, got {found.colnames}"
+    )
+
+
 def test_lang_adql(tap, rows_query, record_property):
     """LANG=ADQL is accepted, being the one language TAP makes mandatory."""
     found = tap.run_sync(rows_query(1), language="ADQL").to_table()
     record_property("detail", f"{len(found)} rows")
     assert len(found) == 1
+
+
+def test_lang_with_a_declared_version(tap, rows_query, record_property):
+    """LANG naming a version the service declares is answered.
+
+    TAP 2.7.1 lets a client write the version after the name — `LANG=ADQL-2.0` — and the
+    capabilities document is where it learns which versions there are. A version declared
+    there and refused here is a client that did exactly what it was told.
+    """
+    versions = [
+        str(version.content)
+        for language in tap.get_tap_capability().languages
+        if str(language.name).upper() == "ADQL"
+        for version in language.versions
+    ]
+    if not versions:
+        pytest.skip("the service declares no ADQL version")
+    answered = []
+    for version in versions:
+        found = tap.run_sync(rows_query(1), language=f"ADQL-{version}").to_table()
+        assert len(found) == 1, f"LANG=ADQL-{version} returned {len(found)} rows"
+        answered.append(f"ADQL-{version}")
+    record_property("detail", ", ".join(answered))
 
 
 def test_lang_unknown_is_refused(raw, rows_query, record_property):

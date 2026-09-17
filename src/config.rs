@@ -33,8 +33,37 @@ pub struct Config {
     #[serde(rename = "mount")]
     pub mounts: Vec<MountConfig>,
     pub data: DataConfig,
+    pub tap: TapConfig,
     pub limits: LimitsConfig,
     pub log: LogConfig,
+}
+
+/// The tables this service publishes over IVOA's Table Access Protocol.
+///
+/// Empty is a service with no TAP surface at all, which is what a deployment serving only
+/// the API and the mounts wants: a TAP resource with no table to name answers nothing.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TapConfig {
+    /// Zero or more `[[tap.table]]` tables.
+    #[serde(rename = "table")]
+    pub tables: Vec<TapTableConfig>,
+}
+
+/// One published table: the name a query writes, and the catalog it reads.
+///
+/// Both are required and there is nothing else. In particular there are no storage
+/// options: a url is the whole of what a table is, so a catalog needing a credential is
+/// not publishable here — which keeps an operator's secret out of a file describing a
+/// surface whose answers are public.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TapTableConfig {
+    /// The fully qualified name, `schema.table`, as a query writes it and as
+    /// `TAP_SCHEMA` publishes it.
+    pub name: String,
+    /// The HATS catalog it reads, as a url or an absolute local path.
+    pub url: String,
 }
 
 /// Which files this service will read as data, in both modes.
@@ -252,11 +281,12 @@ impl Default for LimitsConfig {
             // footer is the file. Generous enough for a real catalog and short of the
             // sizes that would be a download rather than a lookup.
             max_catalog_metadata_bytes: ByteSize::mib(256),
-            // A HATS partition runs to gigabytes, so this is already a substantial read, and
-            // the plan route is what a caller uses for a region larger than it — fanning the
-            // same partitions out as separate requests, with their own concurrency and their
-            // own retries.
-            max_partitions: 16,
+            // A cone of a few degrees over a deep catalog, or a crossmatch side of that size.
+            // A partition runs to gigabytes, but a query projects a few columns of it and
+            // prunes row groups by the covering, so this bounds the fan-out rather than the
+            // bytes — `max_bytes_fetched` and the clock are what bound those. Wider than this
+            // is the plan route's, fanning the partitions out as separate requests.
+            max_partitions: 128,
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             // Room for a real aggregate — a `GROUP BY` over a few million distinct values,
@@ -565,6 +595,10 @@ pub enum ConfigError {
     /// A `filenames` pattern that is not a glob, named as the operator wrote it. Either
     /// list can hold one, and both spell it the same way.
     Data(String, String),
+    /// A `[[tap.table]]` that cannot be published: a name no query could write, a name
+    /// twice, or a url the access policy refuses. Named by the `name`, which is what the
+    /// operator wrote and what a caller would have queried.
+    Tap(String, String),
 }
 
 impl fmt::Display for ConfigError {
@@ -580,6 +614,7 @@ impl fmt::Display for ConfigError {
             Self::Data(pattern, reason) => {
                 write!(f, "invalid filenames entry {pattern:?}: {reason}")
             }
+            Self::Tap(name, reason) => write!(f, "invalid [[tap.table]] {name:?}: {reason}"),
         }
     }
 }
@@ -755,6 +790,29 @@ mod tests {
         assert_eq!(second.filenames, None);
     }
 
+    /// A published table is a name and a url, and both halves are required. No `storage`:
+    /// a table that needs a credential is not one this file can publish.
+    #[test]
+    fn a_published_table_is_a_name_and_a_url() {
+        let config = parse(
+            "[[tap.table]]\nname = \"gaia_dr3.gaia_source\"\nurl = \"file:///hats/gaia_dr3\"\n\
+             [[tap.table]]\nname = \"ztf.dr24_lc\"\nurl = \"s3://bucket/ztf\"",
+        )
+        .unwrap();
+        let [first, second] = config.tap.tables.as_slice() else {
+            panic!("expected two tables, got {:?}", config.tap.tables)
+        };
+        assert_eq!(first.name, "gaia_dr3.gaia_source");
+        assert_eq!(first.url, "file:///hats/gaia_dr3");
+        assert_eq!(second.name, "ztf.dr24_lc");
+
+        assert!(parse("[[tap.table]]\nname = \"a.b\"").is_err());
+        assert!(parse("[[tap.table]]\nurl = \"file:///a\"").is_err());
+        assert!(parse("[[tap.table]]\nname = \"a.b\"\nurl = \"file:///a\"\nstorage = {}").is_err());
+        // No tables is the default, and is a service with no TAP surface.
+        assert!(parse("").unwrap().tap.tables.is_empty());
+    }
+
     #[test]
     fn the_api_can_be_turned_off() {
         let config = parse("[api]\nenabled = false\nprefix = \"/query\"").unwrap();
@@ -849,6 +907,9 @@ mod tests {
             // A mount is `[[mount]]`, not `[mount]`, and not `[[mounts]]`.
             "[[mounts]]\npath = \"/\"\nsource = \"/srv/data\"",
             "[mount]\npath = \"/\"\nsource = \"/srv/data\"",
+            // A published table is `[[tap.table]]`, and the list has no other spelling.
+            "[tap]\ntables = []",
+            "[[tap.tables]]\nname = \"a.b\"\nurl = \"file:///a\"",
         ] {
             assert!(parse(toml).is_err(), "{toml} was accepted");
         }

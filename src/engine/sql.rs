@@ -27,7 +27,7 @@ use datafusion::execution::context::SessionState;
 // fields back into it needs something that makes a struct. Imported rather than looked up in
 // the registry, so a build without it is a compile error instead of a request that fails.
 use datafusion::functions::core::expr_fn::named_struct;
-use datafusion::logical_expr::{Expr, LogicalPlan, UNNAMED_TABLE, Volatility};
+use datafusion::logical_expr::{Expr, LogicalPlan, UNNAMED_TABLE, Volatility, cast};
 use datafusion::sql::sqlparser::ast::{
     Expr as SqlExpr, ExprWithAlias, Ident, Statement, visit_expressions_mut,
 };
@@ -227,6 +227,14 @@ pub fn filter_text(
 /// holds strings reaches the planner as a subtraction of a number from text, and what
 /// comes back is DataFusion's account of a coercion rather than anything naming the field
 /// the caller filled in.
+///
+/// **What comes back is the column as an `f64`**, cast where it is written narrower. Every
+/// literal the geometry compares it with is an `f64`, and nothing is guaranteed to coerce the
+/// two: a region said in ADQL is built during the optimizer's simplify pass, after type
+/// coercion has run, so a `Float32` column met a `Float64` bound and arrow refused to compare
+/// them. The cast is the geometry's alone — the column keeps its own type in a projection, in
+/// an answer and in any other filter — and a cast of a column is one row-group statistics
+/// still prune through.
 pub fn coordinate_column(
     schema: &DFSchema,
     relation: Option<&TableReference>,
@@ -239,7 +247,10 @@ pub fn coordinate_column(
             "{field}: {name:?} holds {data_type:?}; a coordinate must be a number"
         )));
     }
-    Ok(column)
+    Ok(match data_type {
+        DataType::Float64 => column,
+        _ => cast(column, DataType::Float64),
+    })
 }
 
 /// The union of many terms, combined into a balanced tree rather than a left-deep chain.

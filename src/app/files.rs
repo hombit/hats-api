@@ -1356,7 +1356,7 @@ mod tests {
         let body = body_of(response).await;
         assert!(body.contains("<VOTABLE version=\"1.4\""), "{body}");
         assert!(
-            body.contains("<FIELD name=\"objectid\" datatype=\"long\"/>"),
+            body.contains("<FIELD name=\"objectid\" ID=\"objectid\" datatype=\"long\"/>"),
             "{body}"
         );
         assert!(body.contains("<TD>0</TD><TD>g</TD>"), "{body}");
@@ -1662,6 +1662,7 @@ mod tests {
             mounts,
             &ApiConfig::default(),
             &data,
+            &crate::config::TapConfig::default(),
             &ServerConfig::default(),
         )
         .unwrap();

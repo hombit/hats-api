@@ -56,42 +56,114 @@ const NAMESPACE: &str = "http://www.ivoa.net/xml/VOTable/v1.3";
 /// The whole document is built in memory, which is what the JSON and parquet answers
 /// already do with the same rows.
 pub fn encode(result: &QueryResult) -> Result<String, ApiError> {
+    document(result, false)
+}
+
+/// The same, for an answer that stopped at a row bound rather than at the last row.
+///
+/// The `OVERFLOW` marker goes *after* the table, which is DALI §4.4.1: the `OK` at the top
+/// was written before the row count was known, and a document that has already claimed to
+/// be whole says otherwise at the end. A client reading the stream therefore learns of the
+/// truncation only once it has the rows, which is what the ordering is for.
+pub fn encode_truncated(result: &QueryResult) -> Result<String, ApiError> {
+    document(result, true)
+}
+
+fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
     let mut out = String::new();
-    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    let _ = writeln!(out, "<VOTABLE version=\"{VERSION}\" xmlns=\"{NAMESPACE}\">");
-    out.push_str("<RESOURCE type=\"results\">\n");
+    prologue(&mut out);
     // DALI's spelling of "the query ran", which is what a client that reads VOTables from
     // an IVOA service looks for before it looks at the rows.
     out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OK\"/>\n");
     let _ = writeln!(out, "<TABLE nrows=\"{}\">", result.num_rows());
+    // An `ID` has to be unique in the document, and two columns may share a name — a
+    // statement can select one twice. The second one keeps its name and goes without.
+    let mut identified = Vec::new();
     for field in result.schema.fields() {
         let (datatype, arraysize) = spelling(field)?;
         let name = attribute(field.name())?;
-        match arraysize {
-            Some(size) => {
-                let _ = writeln!(
-                    out,
-                    "<FIELD name=\"{name}\" datatype=\"{datatype}\" arraysize=\"{size}\"/>"
-                );
-            }
-            None => {
-                let _ = writeln!(out, "<FIELD name=\"{name}\" datatype=\"{datatype}\"/>");
-            }
+        let _ = write!(out, "<FIELD name=\"{name}\"");
+        if is_xml_name(field.name()) && !identified.contains(&field.name()) {
+            identified.push(field.name());
+            let _ = write!(out, " ID=\"{name}\"");
         }
+        let _ = write!(out, " datatype=\"{datatype}\"");
+        if let Some(size) = arraysize {
+            let _ = write!(out, " arraysize=\"{size}\"");
+        }
+        out.push_str("/>\n");
     }
     out.push_str("<DATA>\n<TABLEDATA>\n");
     for batch in &result.batches {
         push_rows(batch, &mut out)?;
     }
-    out.push_str("</TABLEDATA>\n</DATA>\n</TABLE>\n</RESOURCE>\n</VOTABLE>\n");
+    out.push_str("</TABLEDATA>\n</DATA>\n</TABLE>\n");
+    if overflow {
+        out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+    }
+    out.push_str("</RESOURCE>\n</VOTABLE>\n");
     Ok(out)
+}
+
+/// A document saying the query was refused, which is what DALI §4.4.2 asks an error to be.
+///
+/// The `INFO` carries the status and the message is its content. There is no `TABLE`: the
+/// status comes before one and there is nothing to put after it.
+///
+/// Infallible, unlike everything else here. An error document that could itself fail to
+/// encode would leave a caller with nothing at all, so a character XML cannot carry is
+/// dropped from the message rather than refused.
+pub fn error(message: &str) -> String {
+    let readable = message
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+        .collect::<String>();
+    let mut out = String::new();
+    prologue(&mut out);
+    let _ = writeln!(
+        out,
+        "<INFO name=\"QUERY_STATUS\" value=\"ERROR\">{}</INFO>",
+        quick_xml::escape::escape(&readable)
+    );
+    out.push_str("</RESOURCE>\n</VOTABLE>\n");
+    out
+}
+
+/// Everything above the first `INFO`, which every document here shares.
+fn prologue(out: &mut String) {
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let _ = writeln!(out, "<VOTABLE version=\"{VERSION}\" xmlns=\"{NAMESPACE}\">");
+    out.push_str("<RESOURCE type=\"results\">\n");
+}
+
+/// Whether a column's name can also stand as the `FIELD`'s `ID`.
+///
+/// The two clients read different attributes — one answer came back with `source_id`
+/// through `pyvo` and `SOURCE_ID` through STILTS — so writing both with the same string is
+/// what keeps a query written in TOPCAT working when it is pasted into a notebook.
+///
+/// `ID` is an XML ID, so it has to be an XML Name: a name that is not one would make the
+/// document unparseable, which is a worse answer than the disagreement. A column out of
+/// somebody's parquet file may be called anything at all, so this is asked rather than
+/// assumed. The set is narrowed to ASCII, and the colon an XML Name also allows is left
+/// out, being what a namespace prefix is written with.
+fn is_xml_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    let leads = characters
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    leads && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// What a column is declared as: the `datatype`, and the `arraysize` where it needs one.
 ///
-/// This is the one list of what can be written, and [`writer`] covers what it admits. A
+/// This is the one list of what can be written, and `writer` covers what it admits. A
 /// type reaching neither is refused here, before a byte of the document exists.
-fn spelling(field: &Field) -> Result<(&'static str, Option<&'static str>), ApiError> {
+///
+/// Public because `TAP_SCHEMA.columns` and VOSI's table metadata publish the same pair
+/// about the same columns. A document that said one thing there and this wrote another
+/// would be a client building a query against a type the answer does not have.
+pub fn spelling(field: &Field) -> Result<(&'static str, Option<&'static str>), ApiError> {
     let datatype = match field.data_type() {
         DataType::Boolean => "boolean",
         // The only 8-bit integer VOTable has is unsigned, so a signed byte has to widen.
@@ -367,13 +439,80 @@ mod tests {
         assert!(document.contains("<TABLE nrows=\"1\">"), "{document}");
     }
 
+    /// DALI §4.4.1 puts it after the table: the `OK` at the top was written before the row
+    /// count was known, so the document says it is whole and then says otherwise.
+    #[test]
+    fn a_truncated_answer_says_so_after_the_table() {
+        let result = one("x", Arc::new(Int64Array::from(vec![1_i64, 2])));
+        let document = encode_truncated(&result).unwrap();
+        let (before, after) = document.split_once("</TABLE>").unwrap();
+        assert!(before.contains("value=\"OK\""), "{document}");
+        assert!(after.contains("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>"));
+        // And the whole answer carries no such marker anywhere.
+        assert!(!encode(&result).unwrap().contains("OVERFLOW"));
+    }
+
+    /// The other thing a `QUERY_STATUS` says, with no table to say it about.
+    #[test]
+    fn an_error_is_a_document_of_its_own() {
+        let document = error("column \"a & b\" is <not> there");
+        assert!(document.starts_with("<?xml version=\"1.0\""), "{document}");
+        assert!(
+            document.contains(
+                "<INFO name=\"QUERY_STATUS\" value=\"ERROR\">column &quot;a &amp; b&quot; \
+                 is &lt;not&gt; there</INFO>"
+            ),
+            "{document}"
+        );
+        assert!(!document.contains("<TABLE"), "{document}");
+
+        // A character XML cannot carry is dropped rather than refused: a caller with a
+        // failed error document has nothing at all.
+        assert!(error("a\u{0}b").contains("ab"));
+    }
+
+    /// The two clients read different attributes, so both carry the same string — and a
+    /// name XML has no ID for goes without rather than making the document unparseable.
+    #[test]
+    fn a_field_answers_to_one_name() {
+        let document = encode(&one("source_id", Arc::new(Int64Array::from(vec![1_i64])))).unwrap();
+        assert!(
+            document.contains("<FIELD name=\"source_id\" ID=\"source_id\" datatype=\"long\"/>"),
+            "{document}"
+        );
+
+        let batch = RecordBatch::try_from_iter_with_nullable([
+            (
+                "2mass",
+                Arc::new(Int64Array::from(vec![1_i64])) as ArrayRef,
+                true,
+            ),
+            (
+                "g-r",
+                Arc::new(Int64Array::from(vec![2_i64])) as ArrayRef,
+                true,
+            ),
+        ])
+        .unwrap();
+        let document = encode(&result(batch)).unwrap();
+        // A digit cannot lead an XML Name; a hyphen inside one is fine.
+        assert!(
+            document.contains("<FIELD name=\"2mass\" datatype=\"long\"/>"),
+            "{document}"
+        );
+        assert!(
+            document.contains("<FIELD name=\"g-r\" ID=\"g-r\" datatype=\"long\"/>"),
+            "{document}"
+        );
+    }
+
     /// Every integer width maps to the narrowest VOTable type that holds all of it, and
     /// the one that nothing holds is refused rather than wrapped.
     #[test]
     fn an_integer_only_ever_widens() {
         let document = encode(&one("x", Arc::new(Int8Array::from(vec![-1_i8])))).unwrap();
         assert!(
-            document.contains("<FIELD name=\"x\" datatype=\"short\"/>"),
+            document.contains("<FIELD name=\"x\" ID=\"x\" datatype=\"short\"/>"),
             "{document}"
         );
         let refused = encode(&one("x", Arc::new(UInt64Array::from(vec![1_u64])))).unwrap_err();
@@ -402,7 +541,7 @@ mod tests {
         let document = encode(&one("mag", Arc::new(Float32Array::from(vec![1.1_f32])))).unwrap();
         assert_eq!(cells(&document), ["1.1"]);
         assert!(
-            document.contains("<FIELD name=\"mag\" datatype=\"float\"/>"),
+            document.contains("<FIELD name=\"mag\" ID=\"mag\" datatype=\"float\"/>"),
             "{document}"
         );
     }
@@ -489,11 +628,13 @@ mod tests {
         .unwrap();
         assert!(document.contains("<TABLE nrows=\"0\">"), "{document}");
         assert!(
-            document.contains("<FIELD name=\"objectid\" datatype=\"long\"/>"),
+            document.contains("<FIELD name=\"objectid\" ID=\"objectid\" datatype=\"long\"/>"),
             "{document}"
         );
         assert!(
-            document.contains("<FIELD name=\"band\" datatype=\"unicodeChar\" arraysize=\"*\"/>"),
+            document.contains(
+                "<FIELD name=\"band\" ID=\"band\" datatype=\"unicodeChar\" arraysize=\"*\"/>"
+            ),
             "{document}"
         );
         assert!(document.contains("<TABLEDATA>\n</TABLEDATA>"), "{document}");

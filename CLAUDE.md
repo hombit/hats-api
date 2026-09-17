@@ -43,14 +43,17 @@ engine/   the caller's SQL (sql) and running a selection against one parquet fil
 sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
           (healpix), and saying one inside a query (geometry)
 hats/     a catalog: its own files (catalog, partitions, properties, local), a request
-          fanned out over it (query), and it as a table a statement names (table)
+          fanned out over it (query), it as a table a statement names (table), and the
+          partitions that table reads as rows are pulled (scan)
 adql/     the statement rewrite (translate), running one (query), the functions the
-          language requires (functions)
+          language requires (functions), and how a name is written (names)
+tap/      what this service publishes over TAP: the operator's tables (tables), what is
+          said about each (metadata), and TAP_SCHEMA's own five (schema)
 output/   an answer written out: json, dsv, votable, parquet
 app/      the HTTP surface: the service and router (service), the file-server mode (files),
           what every body shares (request), what every answer carries (answer), one module
-          per route under routes/, the directory page (listing) and the API description
-          (openapi/)
+          per route under routes/ — with routes/tap/ for the IVOA resources — the directory
+          page (listing) and the API description (openapi/)
 ```
 
 `config`, `error` and `logging` stay at the top, being everyone's.
@@ -346,6 +349,13 @@ and everything about what SQL means here is decided there.
   depends on what else is in the file. Two columns whose lowercase forms collide are each
   reachable by writing them out, and the form they share names neither.
 
+  **This is the `simple` routes' rule and the file server's. ADQL follows ADQL.** On that
+  route an unquoted name is case-insensitive and a delimited one is exact (ADQL 2.1
+  §2.1.3), for columns and tables alike, which is what `adql::query::resolve_identifiers`
+  applies. The difference is what a caller has to go on: a TAP client reads the spelling out
+  of `TAP_SCHEMA` before it writes anything, and on the other routes there is nothing to
+  read, so there the strict rule trades a guess for a refusal. Do not unify the two.
+
   This is `resolve_identifiers`, and it needs `enable_ident_normalization` to stay off in
   `engine::query::session_config` — with it on, DataFusion lowercases what the pass did not
   rewrite, and `OBJECTID` starts finding `objectid` again. Neither half works alone: a
@@ -585,9 +595,15 @@ quote and no second parser.
   order that does not exist or a value that is not a list comes back as no cells rather than
   as an error. The emptiness check is what refuses those, and it is the right place — a
   region selecting nothing is the failure worth catching, whatever produced it.
-- Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
-  widened before the arithmetic rather than the trigonometry running at single precision.
-  `sky::region::tests` crosses both column types against both right-ascension conventions.
+- **A coordinate is an `f64` inside the geometry and its own type everywhere else.**
+  Every literal in these expressions is an `f64`, and nothing may be trusted to coerce a
+  `Float32` column to meet them: a region in a statement is built during the simplify pass,
+  after type coercion has run. So `sql::coordinate_column` hands a narrower column over as a
+  cast, and `region::separation` casts whatever it is given — a crossmatch and a `DISTANCE`
+  arrive there with the caller's own columns. The column in a projection, an answer or any
+  other filter is untouched. `sky::region::tests` crosses both column types against both
+  right-ascension conventions, and `a_catalog_with_narrow_coordinates_answers_a_region` is the
+  statement case.
 - A caller's shape is validated once, into a `sky::region::Shape`, and everything downstream
   reads that. Two readings of one field — the predicate's and the covering's — is how the
   two come to disagree about what `dec: [10, 10]` meant.
@@ -904,6 +920,33 @@ request in front of it.
   two orders of magnitude high — refusing on it would refuse requests that go on to read a
   percent of it. What it bounds is how large one request could be, which is a fan-out hint
   and not a cost. Do not reach for it to make `max_bytes_fetched` act earlier.
+- **A statement reads a catalog the same way: lazily, in HEALPix order, and counted.**
+  `hats::scan::CatalogScanExec` is the ADQL route's scan. Pruning chooses among partitions
+  without reading anything, and nothing past that — no listing, no footer — happens to a
+  partition until the stream reaches it. So stopping is whatever above it stops pulling: a
+  `LIMIT`, or a filter that has its rows. `max_partitions` counts partitions opened, and a
+  statement that pulls past it ends in a refusal, never in the rows so far.
+
+  Two things keep that true. **Do not enumerate a catalog's partitions in `scan`**: a
+  directory-partitioned one is a request per partition, which for ZTF is minutes spent
+  planning a query that reads one file. And **round-robin repartition stays off on the ADQL
+  context**: a `RepartitionExec` above the scan drains it in a task of its own, so
+  `TOP 10 … WHERE mag < 10` reads to the bound. `a_limit_is_answered_from_the_partitions_it_needs`
+  holds both.
+
+  **`ORDER BY` the index column is the same walk, from either end.** A partition's index values
+  are a range fixed by its cell, and no two overlap, so sorting each partition's rows and walking
+  the list forwards or backwards sorts them all. `hats::OrderByIndex` swaps the ordered scan in
+  under a `SortExec` and removes the sort only where DataFusion's equivalence analysis says the
+  new input satisfies it — never on a match of its own over names or aliases. A `TOP` sort whose
+  first key is the index and whose later keys are not keeps its `SortExec`, rebuilt over the
+  ordered scan: DataFusion's TopK stops pulling once a batch's last row is past its heap on the
+  shared prefix. Without an explicit
+  `ORDER BY` nothing is sorted within a partition: the catalog order is a property of the walk,
+  not a promise about rows. Two traps: `try_pushdown_sort` is the built-in hook and a
+  `FilterExec` does not pass it down; and the fetch the sort carried has to be pushed down again
+  after the swap, since a filter without one gathers a whole batch and reads to the bound.
+  `an_order_by_the_index_reads_from_that_end_of_the_catalog` holds all of it.
 - **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
   a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
   bound and its two numbers, and the route renders the work list with `reason` set.
@@ -1174,6 +1217,51 @@ stopping `AWS_ENDPOINT_URL` from redirecting a request — is not observable thr
 with no `endpoint` option, because virtual-host addressing turns a redirected endpoint
 into `bucket.<host>`, which does not resolve. Every backend's equivalent guard shares
 it.
+
+## The TAP surface
+
+`tap/` is what this service publishes over IVOA's protocols and `app/routes/tap/` is the
+HTTP it is published through. TAP is written on top of DALI and defers to it constantly, so
+reading TAP alone leaves the requirement unread: `RESPONSEFORMAT` is "fully described in
+DALI", the error document is DALI §4.2, `QUERY_STATUS` and the `OVERFLOW` marker are §4.4,
+and the parameter rules are §3.
+
+- **A published table is `[[tap.table]]` and nothing else.** A name and a url; no storage
+  options, so a catalog needing a credential is not publishable — which keeps an operator's
+  secret out of the file describing a surface whose answers are public. Adding the field is
+  reopening that question, not adding a convenience. Every url goes through
+  `storage::open_dir` at startup, so the policy's refusal reaches an operator rather than a
+  caller.
+- **One list of facts feeds both documents that publish them.** `TAP_SCHEMA` and VOSI
+  `/tables` are the same metadata twice, and a validator reads them against each other, so
+  both are rendered from `tap::metadata` — the columns, the flags and the foreign keys
+  alike. A second list is how the two come to disagree about a name.
+- **A published name is one a query can write.** `adql::names::as_written` delimits a name
+  ADQL's grammar does not admit — `_healpix_29` is in every HATS catalog — and TAP §4.3 asks
+  the published name to carry the quotes. Two things it deliberately does not do: it does
+  not apply the reserved-word list, `DEC` being on it and bare in every catalog anyone
+  publishes, and it does not quote a dotted path as a whole, the dot being structure. A
+  validator complains about the second; `"lightcurve.mag"` names no field, which settles it.
+- **A row bound truncates here and refuses everywhere else.** `OVERFLOW` after the table is
+  the in-band statement whose absence makes a cut answer indistinguishable from a whole one,
+  so `adql::query::Rows` carries which a request wants. `csv` and `tsv` have nowhere to put
+  it and carry `x-hats-overflow` instead, which is this service's own and better than
+  nothing being said.
+- **`MAXREC` truncates after the query's own `TOP`, never over it.** TAP §2.7.4: the
+  truncation "occurs after any limitations imposed by the query", so `TOP 2` with `MAXREC=10`
+  is two rows and no overflow. `MAXREC=0` is the columns, no rows, and the marker whether or
+  not anything matched — and the query need not be run at all.
+- **Nothing is advertised that is not there.** A client picks its interface out of the
+  capabilities document and has no way back, so there is no async interface in it while
+  `/tap/async` answers 404, and no `uploadMethod` while `UPLOAD` is refused. The output
+  formats come from the same list the query resource reads.
+- **A name nobody defines is ignored; a standard one this service has not got is refused.**
+  `taplint` adds a parameter of its own to every query and reports a service that refuses as
+  breaking it, which is also what every HTTP server does with a query string it has no use
+  for. The house rule is about a parameter this service *acts on*.
+- **Every answer is a document a TAP client can read, refusals included.** `ApiError` renders
+  JSON, which a client looking for `QUERY_STATUS` has nothing to say about — so the status is
+  kept and the body is replaced, by `app::routes::tap::answer::answered`.
 
 ## Measuring the TAP surface
 

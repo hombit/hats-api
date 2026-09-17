@@ -1,12 +1,16 @@
 """The query language — ADQL 2.1.
 
 What a service has to understand for a query written against any other TAP service to
-run here. Only the mandatory parts: the optional geometry beyond a circle, region
-functions and user-defined functions are each a service's own decision, and a service
-that refuses them is not less conforming for it.
+run here. The mandatory parts are asked of every service. The optional ones — the
+geometry, the string and set operators, `CAST`, `OFFSET` and the rest — are each a
+service's own decision, so they are asked only of a service that declares them: a
+service that leaves one out is not less conforming for it, and one that declares one it
+does not answer has told a client something untrue.
 """
 
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -104,6 +108,119 @@ def test_delimited_identifier(tap, queryable, coordinates, record_property):
     found = tap.run_sync(f'SELECT TOP 2 "{bare}" FROM {queryable}').to_table()
     record_property("detail", f"columns {found.colnames}")
     assert len(found.colnames) == 1
+
+
+#: ADQL 2.1's optional features, by the TAPRegExt type that declares each.
+FEATURE_TYPES = {
+    "geometry": "ivo://ivoa.net/std/tapregext#features-adqlgeo",
+    "string": "ivo://ivoa.net/std/tapregext#features-adql-string",
+    "common-table": "ivo://ivoa.net/std/tapregext#features-adql-common-table",
+    "sets": "ivo://ivoa.net/std/tapregext#features-adql-sets",
+    "type": "ivo://ivoa.net/std/tapregext#features-adql-type",
+    "conditional": "ivo://ivoa.net/std/tapregext#features-adql-conditional",
+    "unit": "ivo://ivoa.net/std/tapregext#features-adql-unit",
+    "offset": "ivo://ivoa.net/std/tapregext#features-adql-offset",
+}
+
+
+def feature_queries(table: str, ra: str, dec: str, center: tuple[float, float]) -> dict:
+    """The smallest query that needs each form ADQL 2.1 defines, and nothing optional else.
+
+    Every geometry writes its coordinate system: the argument is optional in 2.1 and
+    required in 2.0, so writing it is what a query valid under either looks like. The
+    cone keeps each one cheap against a catalog of any size.
+    """
+    x, y = center
+    cone = f"CIRCLE('ICRS', {x}, {y}, 0.1)"
+    point = f"POINT('ICRS', {ra}, {dec})"
+    inside = f"SELECT TOP 1 {ra} FROM {table} WHERE 1=CONTAINS({point}, {{shape}})"
+    computed = f"SELECT TOP 1 {{value}} AS computed FROM {table}"
+    return {
+        "POINT": inside.format(shape=cone),
+        "CIRCLE": inside.format(shape=cone),
+        "CONTAINS": inside.format(shape=cone),
+        "INTERSECTS": f"SELECT TOP 1 {ra} FROM {table} WHERE 1=INTERSECTS({point}, {cone})",
+        "DISTANCE": computed.format(value=f"DISTANCE({point}, POINT('ICRS', {x}, {y}))"),
+        "BOX": inside.format(shape=f"BOX('ICRS', {x}, {y}, 0.2, 0.2)"),
+        "POLYGON": inside.format(
+            shape=f"POLYGON('ICRS', {x - 0.1}, {y - 0.1}, {x + 0.1}, {y - 0.1}, {x}, {y + 0.1})"
+        ),
+        "REGION": inside.format(shape=f"REGION('CIRCLE ICRS {x} {y} 0.1')"),
+        "AREA": computed.format(value=f"AREA({cone})"),
+        "CENTROID": computed.format(value=f"CENTROID({cone})"),
+        "COORD1": computed.format(value=f"COORD1(POINT('ICRS', {x}, {y}))"),
+        "COORD2": computed.format(value=f"COORD2(POINT('ICRS', {x}, {y}))"),
+        "COORDSYS": computed.format(value=f"COORDSYS(POINT('ICRS', {x}, {y}))"),
+        "LOWER": computed.format(value="LOWER('Ab')"),
+        "UPPER": computed.format(value="UPPER('Ab')"),
+        "ILIKE": f"SELECT TOP 1 {ra} FROM {table} WHERE 'Ab' ILIKE 'a%'",
+        "WITH": f"WITH sampled AS (SELECT TOP 1 {ra} FROM {table}) SELECT {ra} FROM sampled",
+        "UNION": f"SELECT {ra} FROM {table} WHERE 1=0 UNION SELECT {ra} FROM {table} WHERE 1=0",
+        "EXCEPT": f"SELECT {ra} FROM {table} WHERE 1=0 EXCEPT SELECT {ra} FROM {table} WHERE 1=0",
+        "INTERSECT": (
+            f"SELECT {ra} FROM {table} WHERE 1=0 INTERSECT SELECT {ra} FROM {table} WHERE 1=0"
+        ),
+        "CAST": computed.format(value=f"CAST({ra} AS INTEGER)"),
+        "COALESCE": computed.format(value=f"COALESCE({ra}, 0.0)"),
+        "IN_UNIT": computed.format(value=f"IN_UNIT({ra}, 'rad')"),
+        # Ordered, an offset without one skipping arbitrary rows; and over TAP_SCHEMA, which
+        # every service has and which is small enough that the ordering costs nothing.
+        "OFFSET": "SELECT TOP 1 table_name FROM TAP_SCHEMA.tables ORDER BY table_name OFFSET 1",
+    }
+
+
+def declared_forms(tap, feature_type: str) -> list[str]:
+    """The forms the service declares under one feature type, as `pyvo` reads them.
+
+    Read in the check rather than in a fixture: a capabilities document that will not load
+    is a finding about the service, and a fixture that raised would report it as the suite
+    being broken instead.
+    """
+    forms = []
+    for language in tap.get_tap_capability().languages:
+        if str(language.name).upper() != "ADQL":
+            continue
+        for feature_list in language.languagefeaturelists:
+            if str(feature_list.type).lower() == feature_type.lower():
+                forms += [str(feature.form) for feature in feature_list.features]
+    return forms
+
+
+@pytest.mark.parametrize("feature", sorted(FEATURE_TYPES))
+def test_declared_features_answer(
+    tap, queryable, coordinates, center, feature, record_property
+):
+    """Every form of an optional feature the service declares answers a query.
+
+    TAPRegExt §2.3: a language feature listed in the capabilities is one the service
+    supports, and a client offers what it finds there. A declared form that is refused
+    is a client told it may write something it may not. A feature left undeclared is
+    skipped rather than failed, being optional.
+    """
+    forms = declared_forms(tap, FEATURE_TYPES[feature])
+    if not forms:
+        pytest.skip(f"the service declares no {feature} feature")
+    ra, dec = coordinates
+    queries = feature_queries(queryable, ra, dec, center)
+    answered, refused, unknown = [], [], []
+    for form in forms:
+        # A form may be written as a signature — `BOX(...)` — and the name is what leads it.
+        name = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)", form)
+        query = queries.get(name.group(1).upper()) if name else None
+        if query is None:
+            unknown.append(form)
+            continue
+        try:
+            tap.run_sync(query).to_table()
+            answered.append(name.group(1).upper())
+        except Exception as error:  # noqa: BLE001 — a refusal of any kind is the finding
+            refused.append(f"{name.group(1).upper()}: {str(error).splitlines()[0][:120]}")
+    detail = f"declared {len(forms)}, answered {', '.join(answered) or 'none'}"
+    if unknown:
+        detail += f"; no query here for {', '.join(unknown)}"
+    record_property("detail", detail)
+    assert not refused, f"declared and refused: {'; '.join(refused)}"
+    assert answered, f"none of the declared forms is one this check knows: {forms}"
 
 
 @pytest.mark.parametrize("function", ["ABS(-1.5)", "CEILING(1.2)", "FLOOR(1.8)", "SQRT(4.0)"])

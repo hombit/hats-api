@@ -87,6 +87,7 @@ fn startup() -> Result<(Config, app::Service), NotServing> {
         mounts,
         &config.api,
         &config.data,
+        &config.tap,
         &config.server,
     )
     .map_err(|error| invalid(&error))?;
@@ -154,6 +155,10 @@ async fn main() -> ExitCode {
         %listen_addr,
         allows = %service.policy.allowed_schemes().join(", "),
         mounts = %describe_mounts(&service.mounts),
+        tap_tables = %match service.tap_tables.is_empty() {
+            true => "none".to_owned(),
+            false => service.tap_tables.names().join(", "),
+        },
         "listening"
     );
     if let Err(error) = axum::serve(listener, app::router(service))

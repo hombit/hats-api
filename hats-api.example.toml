@@ -119,6 +119,19 @@ allow_plain_http = false
 # the API answers 404.
 filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 
+# HATS catalogs to publish over IVOA's Table Access Protocol (TAP), for clients such as
+# TOPCAT and pyvo, at [api] prefix + /tap. Each entry is one catalog: `name` is the table a
+# query names, as FROM {schema}.{table}, and `url` is where the catalog lives. The catalog is
+# read without credentials. TAP is off until at least one is listed.
+#
+# [[tap.table]]
+# name = "gaia_dr3.gaia_source"
+# url = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia"
+#
+# [[tap.table]]
+# name = "ztf.dr24_lc"
+# url = "file:///hats/ztf_dr24_lc"
+
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. Such
 # an object is copied to scratch once and read from local disk after that. Only http(s)
@@ -146,7 +159,7 @@ max_catalog_metadata_bytes = "256MiB"
 # Only the partition count is checked before anything is read, so it is the one that
 # actually bounds the work; the other two are counters watched as partitions land, and a
 # request overshoots them by whatever the reads already in flight go on to fetch.
-max_partitions = 16
+max_partitions = 128
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 

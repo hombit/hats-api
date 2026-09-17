@@ -28,7 +28,7 @@ use std::ops::ControlFlow;
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
     LimitClause, ObjectName, ObjectNamePart, Query, SetExpr, Statement, TableFactor, Top,
-    TopQuantity, UnaryOperator, Value, VisitMut, VisitorMut,
+    TopQuantity, UnaryOperator, Value, VisitMut, VisitorMut, visit_expressions_mut,
 };
 
 use crate::engine::sql;
@@ -37,46 +37,22 @@ use crate::error::ApiError;
 /// The field a statement arrives in, and what every refusal here names first.
 const FIELD: &str = "query";
 
-/// ADQL's geometry that this service does not answer, and why — said by name, since none of
-/// these is a function DataFusion has and its own account would be of an unknown function.
+/// Functions ADQL defines and this service does not implement.
 ///
-/// The geometry functions are an optional ADQL feature declared one form at a time, so
-/// refusing these costs the service nothing it claims.
-const REFUSED: &[(&str, &str)] = &[
-    (
-        "AREA",
-        "it takes a geometry as a value, and no column here holds one",
-    ),
-    (
-        "BOX",
-        "its edges are great circles, where the zone region's run along parallels; near a pole \
-         the two differ by degrees",
-    ),
-    (
-        "CENTROID",
-        "it takes a geometry as a value, and no column here holds one",
-    ),
-    (
-        "COORD1",
-        "a position is two columns of the file; name the column",
-    ),
-    (
-        "COORD2",
-        "a position is two columns of the file; name the column",
-    ),
-    (
-        "COORDSYS",
-        "positions here are degrees in one frame and nothing is converted between frames",
-    ),
-    (
-        "IVO_GEOM_TRANSFORM",
-        "positions here are degrees in one frame and nothing is converted between frames",
-    ),
-    ("POLYGON", "no polygon is tested here yet"),
-    (
-        "REGION",
-        "it takes an STC-S string, which ADQL 2.1 deprecated",
-    ),
+/// Refused by name so the caller reads that, rather than DataFusion's account of a function it
+/// has never heard of. Each belongs to an optional feature, which the capabilities document
+/// does not declare.
+const NOT_IMPLEMENTED: &[&str] = &[
+    "AREA",
+    "BOX",
+    "CENTROID",
+    "COORD1",
+    "COORD2",
+    "COORDSYS",
+    "IN_UNIT",
+    "IVO_GEOM_TRANSFORM",
+    "POLYGON",
+    "REGION",
 ];
 
 /// ADQL's names for functions DataFusion registers under another name.
@@ -101,9 +77,12 @@ pub fn translate(query: &str, limits: sql::Limits) -> Result<Translated, ApiErro
     let mut statement = sql::statement(query, FIELD, limits)?;
     if !matches!(statement, Statement::Query(_)) {
         return Err(ApiError::bad_request(format!(
-            "{FIELD}: only a SELECT is answered; this service reads and never writes"
+            "{FIELD}: only a SELECT is answered"
         )));
     }
+    // Before anything reads a geometry's arguments, so that the two spellings of one are
+    // one shape by the time the rewrite below looks at it.
+    drop_coordinate_systems(&mut statement)?;
     let mut translator = Translator::default();
     if let ControlFlow::Break(refusal) = statement.visit(&mut translator) {
         return Err(refusal);
@@ -114,6 +93,72 @@ pub fn translate(query: &str, limits: sql::Limits) -> Result<Translated, ApiErro
         .cloned()
         .collect();
     Ok(Translated { statement, tables })
+}
+
+/// The geometry that takes a coordinate system as its first argument.
+const WITH_COORDINATE_SYSTEM: [&str; 4] = ["POINT", "CIRCLE", "BOX", "POLYGON"];
+
+/// The coordinate systems this service answers in, as ADQL spells them.
+///
+/// The empty string and `UNKNOWN` are the standard's own words for "whatever the service
+/// works in", which here is ICRS — the frame HATS positions are written in.
+const SYSTEMS: [&str; 3] = ["", "ICRS", "UNKNOWN"];
+
+/// Take the coordinate system off a geometry, and refuse one this service cannot answer.
+///
+/// The argument is optional: ADQL 2.0 required it, and 2.1 §4.2.5 deprecated it and made it
+/// optional rather than removing it. So `POINT('ICRS', ra, dec)` and `POINT(ra, dec)` are
+/// both valid 2.1, and both arrive — an archive has been answering the first since 2.0, so
+/// it is what most saved queries carry.
+///
+/// **A system this service does not work in is refused rather than dropped.** Reading
+/// `GALACTIC` as if it were ICRS would answer a region somewhere else on the sky with the
+/// same numbers in it — a wrong answer rather than an error, and one nothing in the
+/// response would mark.
+///
+/// A string literal is what says the first argument is a system: a coordinate never is one.
+/// ADQL also lets it be a column reference, which is left alone and fails to plan as an
+/// argument of the wrong type — nothing here can know what such a column holds.
+fn drop_coordinate_systems(statement: &mut Statement) -> Result<(), ApiError> {
+    let broke = visit_expressions_mut(statement, |node| {
+        let Expr::Function(call) = node else {
+            return ControlFlow::Continue(());
+        };
+        let Some(name) = adql_name(call) else {
+            return ControlFlow::Continue(());
+        };
+        if !WITH_COORDINATE_SYSTEM.contains(&name.as_str()) {
+            return ControlFlow::Continue(());
+        }
+        let FunctionArguments::List(list) = &mut call.args else {
+            return ControlFlow::Continue(());
+        };
+        let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(first))) = list.args.first() else {
+            return ControlFlow::Continue(());
+        };
+        let Expr::Value(value) = unnest(first) else {
+            return ControlFlow::Continue(());
+        };
+        let (Value::SingleQuotedString(system) | Value::DoubleQuotedString(system)) = &value.value
+        else {
+            return ControlFlow::Continue(());
+        };
+        if !SYSTEMS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(system.trim()))
+        {
+            return ControlFlow::Break(ApiError::bad_request(format!(
+                "{FIELD}: {name} names the coordinate system {system:?}, and this service \
+                 answers ICRS; converting a position between frames is not something it does"
+            )));
+        }
+        list.args.remove(0);
+        ControlFlow::Continue(())
+    });
+    match broke {
+        ControlFlow::Break(refusal) => Err(refusal),
+        ControlFlow::Continue(()) => Ok(()),
+    }
 }
 
 /// The rewrite, one node at a time.
@@ -152,14 +197,14 @@ impl VisitorMut for Translator {
                  request declares"
             )));
         }
-        match one_name(name) {
+        match written_name(name) {
             Some(table) => {
                 self.relations.insert(table);
                 ControlFlow::Continue(())
             }
             None => ControlFlow::Break(ApiError::bad_request(format!(
-                "{FIELD}: {name} is not a table name here; each table this request reads is \
-                 named by one word in its tables"
+                "{FIELD}: {name} is not a table name here; a table is named by one word, or \
+                 by a schema and a table"
             ))),
         }
     }
@@ -182,9 +227,9 @@ impl VisitorMut for Translator {
         let Some(name) = adql_name(call) else {
             return ControlFlow::Continue(());
         };
-        if let Some((_, reason)) = REFUSED.iter().find(|(refused, _)| *refused == name) {
+        if NOT_IMPLEMENTED.contains(&name.as_str()) {
             return ControlFlow::Break(ApiError::bad_request(format!(
-                "{FIELD}: {name} is not answered here — {reason}"
+                "{FIELD}: {name} is not implemented"
             )));
         }
         match name.as_str() {
@@ -233,16 +278,32 @@ fn top_as_limit(query: &mut Query) -> Result<(), ApiError> {
             )));
         }
     };
-    if query.limit_clause.is_some() {
-        return Err(ApiError::bad_request(format!(
-            "{FIELD}: TOP and LIMIT both say how many rows; write one of them"
-        )));
-    }
-    query.limit_clause = Some(LimitClause::LimitOffset {
-        limit: Some(Expr::value(Value::Number(rows.to_string(), false))),
-        offset: None,
-        limit_by: Vec::new(),
-    });
+    let limit = Some(Expr::value(Value::Number(rows.to_string(), false)));
+    // `OFFSET` is ADQL 2.1's and lives in the same clause as a `LIMIT`, so a clause holding
+    // an offset alone is the statement's own and keeps it: `TOP 10 … OFFSET 20` is the
+    // eleven-to-twentieth rows. Only a clause that already says how many rows is two
+    // answers to one question.
+    query.limit_clause = match query.limit_clause.take() {
+        None => Some(LimitClause::LimitOffset {
+            limit,
+            offset: None,
+            limit_by: Vec::new(),
+        }),
+        Some(LimitClause::LimitOffset {
+            limit: None,
+            offset,
+            limit_by,
+        }) if limit_by.is_empty() => Some(LimitClause::LimitOffset {
+            limit,
+            offset,
+            limit_by,
+        }),
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "{FIELD}: TOP and LIMIT both say how many rows; write one of them"
+            )));
+        }
+    };
     Ok(())
 }
 
@@ -530,9 +591,28 @@ fn call_to(name: &str, args: Vec<Expr>) -> Expr {
 }
 
 /// A table name of one part, as written.
-fn one_name(name: &ObjectName) -> Option<String> {
-    match name.0.as_slice() {
-        [ObjectNamePart::Identifier(ident)] => Some(ident.value.clone()),
+/// The name a `FROM` wrote, as one string.
+///
+/// One word, or a schema and a table joined by the dot between them — which is how TAP
+/// publishes every name, `TAP_SCHEMA.tables` included. Deeper than that is refused: a
+/// third part would be a catalog, and nothing here has one for it to name.
+///
+/// The quoting is dropped, which is what makes the two spellings of a name one string.
+/// What may then be read against it is the route's business: a per-request table list
+/// resolves a name it declared, and the TAP tables are matched against what was
+/// published.
+fn written_name(name: &ObjectName) -> Option<String> {
+    let parts = name
+        .0
+        .iter()
+        .map(|part| match part {
+            ObjectNamePart::Identifier(ident) => Some(ident.value.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    match parts.as_slice() {
+        [table] => Some((*table).to_owned()),
+        [schema, table] => Some(format!("{schema}.{table}")),
         _ => None,
     }
 }
@@ -571,6 +651,16 @@ mod tests {
         assert_eq!(
             translated("SELECT TOP 10 ra FROM gaia"),
             "SELECT ra FROM gaia LIMIT 10"
+        );
+    }
+
+    /// ADQL 2.1's `OFFSET` beside a `TOP`, which the parser keeps in the same clause a
+    /// `LIMIT` would be in — so it has to be told apart from one.
+    #[test]
+    fn top_keeps_an_offset() {
+        assert_eq!(
+            translated("SELECT TOP 10 ra FROM gaia ORDER BY ra OFFSET 20"),
+            "SELECT ra FROM gaia ORDER BY ra LIMIT 10 OFFSET 20"
         );
     }
 
@@ -727,8 +817,50 @@ mod tests {
         );
     }
 
+    /// The argument is optional, so both spellings answer — and a query may carry it on
+    /// one geometry and not the next.
     #[test]
-    fn a_geometry_this_service_does_not_answer_is_refused_by_name() {
+    fn a_geometry_may_name_its_coordinate_system() {
+        let expected =
+            r#"SELECT ra FROM gaia WHERE "contains"(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))"#;
+        for predicate in [
+            "1 = CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 45.0, -20.0, 0.1))",
+            // The system on one side and not the other, which is what a hand-edited query
+            // ends up as.
+            "1 = CONTAINS(POINT('icrs', ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+            // The standard's own words for "whatever the service works in".
+            "1 = CONTAINS(POINT('', ra, dec), CIRCLE('UNKNOWN', 45.0, -20.0, 0.1))",
+            // And omitted entirely, which is what 2.1 recommends.
+            "1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.1))",
+        ] {
+            assert_eq!(
+                translated(&format!("SELECT ra FROM gaia WHERE {predicate}")),
+                expected,
+                "{predicate}"
+            );
+        }
+        // And in a distance, which is the other place a POINT is written.
+        assert_eq!(
+            translated("SELECT DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', 1, 2)) AS d FROM t"),
+            "SELECT DISTANCE(POINT(ra, dec), POINT(1, 2)) AS d FROM t"
+        );
+
+        // A frame this service cannot convert to, which read as ICRS would answer a region
+        // somewhere else on the sky with the same numbers in it.
+        for system in ["GALACTIC", "FK5", "fk4"] {
+            let refusal = refusal(&format!(
+                "SELECT ra FROM gaia WHERE 1 = CONTAINS(POINT('{system}', ra, dec), \
+                 CIRCLE(45.0, -20.0, 0.1))"
+            ));
+            assert!(
+                refusal.contains(system) && refusal.contains("ICRS"),
+                "{system}: {refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_function_this_service_does_not_implement_is_refused_by_name() {
         for (name, adql) in [
             (
                 "BOX",
@@ -739,10 +871,11 @@ mod tests {
                 "SELECT ra FROM t WHERE 1 = CONTAINS(POINT(ra, dec), POLYGON(1, 2, 3, 4, 5, 6))",
             ),
             ("AREA", "SELECT AREA(CIRCLE(1, 2, 3)) FROM t"),
+            ("IN_UNIT", "SELECT IN_UNIT(ra, 'rad') FROM t"),
         ] {
             let refusal = refusal(adql);
             assert!(
-                refusal.contains(name) && refusal.contains("not answered"),
+                refusal.contains(name) && refusal.contains("not implemented"),
                 "{refusal}"
             );
         }
@@ -792,9 +925,22 @@ mod tests {
         );
     }
 
+    /// A schema and a table, which is how every name TAP publishes is written. Deeper is
+    /// a catalog, and there is nothing here for one to name.
     #[test]
-    fn a_qualified_table_name_is_refused() {
-        let refusal = refusal("SELECT * FROM TAP_SCHEMA.tables");
+    fn a_table_is_named_by_one_word_or_by_two() {
+        let tables = |adql: &str| translate(adql, LIMITS).unwrap().tables;
+        assert_eq!(
+            tables("SELECT * FROM TAP_SCHEMA.tables"),
+            BTreeSet::from(["TAP_SCHEMA.tables".to_owned()])
+        );
+        // Quoted or not is one name: what a spelling is matched against belongs to
+        // whichever route read it.
+        assert_eq!(
+            tables("SELECT * FROM \"gaia_dr3\".\"gaia_source\""),
+            BTreeSet::from(["gaia_dr3.gaia_source".to_owned()])
+        );
+        let refusal = refusal("SELECT * FROM cat.schema.table");
         assert!(refusal.contains("one word"), "{refusal}");
     }
 
