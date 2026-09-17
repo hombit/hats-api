@@ -15,7 +15,8 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`,
+  to read the same way as `serve_mounted_robots_txt`.
 
 ### Deprecated
 

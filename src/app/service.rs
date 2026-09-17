@@ -67,7 +67,7 @@ pub struct Service {
     /// the signature above because it survives `show_version` being off.
     pub(in crate::app) contact: Option<Arc<str>>,
     /// Whether a directory's own `index.html` is served in place of a generated listing.
-    pub(in crate::app) serve_index_html: bool,
+    pub(in crate::app) serve_mounted_index_html: bool,
     /// Whether a mounted `robots.txt` is served in place of the generated default.
     pub(in crate::app) serve_mounted_robots_txt: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
@@ -138,7 +138,7 @@ impl Service {
             },
             signature: server.signature()?,
             contact: server.contact()?.map(Arc::from),
-            serve_index_html: server.serve_index_html,
+            serve_mounted_index_html: server.serve_mounted_index_html,
             serve_mounted_robots_txt: server.serve_mounted_robots_txt,
             api_prefix: api_prefix.map(Arc::from),
         })
@@ -494,7 +494,7 @@ mod tests {
         assert!(!body.contains("Allow:"), "{body}");
     }
 
-    /// A mounted file wins by default — the same rule `serve_index_html` applies to
+    /// A mounted file wins by default — the same rule `serve_mounted_index_html` applies to
     /// `index.html` — and only where one is actually there: a mount with none still gets
     /// the generated default rather than an empty answer.
     #[tokio::test]
@@ -521,9 +521,10 @@ mod tests {
         assert!(body_of(response).await.contains("Disallow: /\n"));
     }
 
-    /// `serve_mounted_robots_txt = false` turns that around, the way `serve_index_html =
-    /// false` does for the directory page: the mount's file stays there under its own
-    /// name, and the root answers with the generated default regardless.
+    /// `serve_mounted_robots_txt = false` turns that around, the way
+    /// `serve_mounted_index_html = false` does for the directory page: the mount's file
+    /// stays there under its own name, and the root answers with the generated default
+    /// regardless.
     #[tokio::test]
     async fn turning_it_off_ignores_a_mounted_robots_txt() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -313,11 +313,11 @@ pub struct ServerConfig {
     /// generated page for every directory, and the `index.html` stays an ordinary file
     /// that answers to its own name — so a tree carrying pages written for some other
     /// reader is browsable here as data, which is what a HATS catalog under one is.
-    pub serve_index_html: bool,
+    pub serve_mounted_index_html: bool,
     /// Whether a `robots.txt` at the root of whichever mount answers for it is served in
     /// place of the generated default.
     ///
-    /// On by default, which is `serve_index_html`'s own rule applied to this file: a
+    /// On by default, which is `serve_mounted_index_html`'s own rule applied to this file: a
     /// mount that carries one wrote it on purpose, and it wins. Off publishes the
     /// generated default everywhere instead — `Disallow: /` for every path, and, where
     /// the API is on, `Allow` for its own docs page, health check and `openapi.json`,
@@ -358,7 +358,7 @@ impl Default for ServerConfig {
             address: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 80,
             show_version: true,
-            serve_index_html: true,
+            serve_mounted_index_html: true,
             serve_mounted_robots_txt: true,
             contact: None,
             user_agent: UserAgent::default(),

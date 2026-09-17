@@ -13,7 +13,7 @@ port = 80
 show_version = true
 # Serve a directory's own index.html in place of a generated listing. Off publishes the
 # generated page everywhere, and the file still answers to its own name.
-serve_index_html = true
+serve_mounted_index_html = true
 # Serve a mounted robots.txt in place of the generated default, where a mount has one.
 # Off publishes the generated default everywhere: Disallow: / for every path, and Allow
 # for the API's own docs, health check and openapi.json where the API is on.
