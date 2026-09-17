@@ -603,19 +603,38 @@ separation in arcseconds, and an `ORDER BY` sorts on it.
 
 ### Narrowing a query over a large catalog
 
-A region chooses which partitions may be read. Partitions are then read in HEALPix order,
-a few at a time, until the query has its rows: `SELECT TOP 1000 * FROM ztf.dr24_lc` reads
-the first few of its 12,485. A query that keeps reading past `max_partitions` — an aggregate
-over a whole catalog, say — is refused when it gets there.
+The service answers small queries only. A HATS catalog is split into partitions, each one
+patch of sky, and a query may read at most `max_partitions` of them (128 by default). A query
+that needs more, such as a `COUNT(*)` over a whole catalog, is refused. So a query over a
+catalog has to select a small piece of it, in one of two ways.
 
-Rows come out partition by partition, but within a partition they are in whatever order its
-file holds them. `ORDER BY _healpix_29` sorts them, and reads the partitions from that end of
-the sky, so `SELECT TOP 1000 * FROM gaia ORDER BY _healpix_29 DESC` reads the last few
-partitions. Further keys may follow it, as in `ORDER BY _healpix_29 DESC, phot_g_mean_mag`;
-the index column has to come first.
+**A region.** `CONTAINS` or `INTERSECTS` with a `CIRCLE` or a `MOC`, or a `DISTANCE` below
+some radius, chooses the partitions that overlap it, and nothing else is read:
 
-A crossmatch is ADQL's own spelling — a circle around each row of one side — here matching
-Gaia DR3 against Euclid Q1 within an arcsecond:
+```sql
+SELECT source_id, ra, dec FROM gaia
+WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45.0, -20.0, 0.5))
+```
+
+**A `TOP`.** Without a region, partitions are read in HEALPix order until the query has its
+rows, so `SELECT TOP 1000 source_id, ra, dec FROM gaia` reads the first few partitions and
+stops. The rows are those first partitions' rows, in whatever order their files hold them.
+
+`ORDER BY _healpix_29` changes which partitions are read and sorts the rows. `ASC` reads the
+partitions with the lowest HEALPix indices, `DESC` those with the highest, and further sort
+keys may follow the index column:
+
+```sql
+SELECT TOP 1000 source_id, ra, dec, phot_g_mean_mag FROM gaia
+ORDER BY _healpix_29 DESC, phot_g_mean_mag
+```
+
+reads the last few partitions. The index column has to be the first key; any other
+`ORDER BY` needs every row before it can pick the first 1000, so without a region it is
+refused over any catalog with more partitions than the bound.
+
+A crossmatch is written the ADQL way, as a circle around each row of one side. Here Gaia DR3
+is matched against Euclid Q1 within an arcsecond:
 
 ```sql
 SELECT g.source_id, e.object_id
@@ -625,11 +644,11 @@ WHERE 1 = CONTAINS(POINT(g.ra, g.dec), CIRCLE(269.73, 66.02, 0.0167))
   AND 1 = CONTAINS(POINT(e.ra, e.dec), CIRCLE(269.73, 66.02, 0.0167))
 ```
 
-Narrow each side. The `WHERE` gives both catalogs their own arcminute circle, which is what
+Give each of the joined tables its own region. The `WHERE` gives both catalogs their own arcminute circle, which is what
 chooses the partitions; the join condition then says which of the surviving pairs match. A
 circle centred on a column is a different circle for every row, so nothing about it prunes,
-and a side the `WHERE` says nothing about is the whole catalog. It need not be a circle:
-any condition that narrows a side will do.
+and a side the `WHERE` says nothing about is the whole catalog. The two regions need not be the
+same, or even circles: any region that selects a small part of each table will do.
 
 ## TAP
 

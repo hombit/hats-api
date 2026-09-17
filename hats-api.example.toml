@@ -119,12 +119,10 @@ allow_plain_http = false
 # the API answers 404.
 filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 
-# HATS catalogs published over IVOA's Table Access Protocol, at [api] prefix + /tap. The
-# TAP resources answer once at least one is listed.
-#
-# `name` is what goes in an ADQL query's FROM clause, as {schema}.{table}, and must be
-# unique. `url` points at the catalog and is checked at startup against [api.access]. No
-# storage options, such as credentials, are currently supported for remote catalogs.
+# HATS catalogs to publish over IVOA's Table Access Protocol (TAP), for clients such as
+# TOPCAT and pyvo, at [api] prefix + /tap. Each entry is one catalog: `name` is the table a
+# query names, as FROM {schema}.{table}, and `url` is where the catalog lives. The catalog is
+# read without credentials. TAP is off until at least one is listed.
 #
 # [[tap.table]]
 # name = "gaia_dr3.gaia_source"

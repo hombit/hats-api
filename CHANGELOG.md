@@ -10,21 +10,15 @@ Release dates are in the UTC time zone.
 
 - `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
 - `hf://` urls, with the `token` storage option and `[api.access.hf]`.
-- `[[tap.table]]`, the HATS catalogs published over IVOA's Table Access Protocol. [#68](https://github.com/hombit/hats-api/pull/68)
-- `{api.prefix}/tap/sync`, `GET` and `POST`, taking `QUERY`, `LANG`, `RESPONSEFORMAT`, `FORMAT`, `MAXREC`, `RUNID` and `REQUEST`. [#68](https://github.com/hombit/hats-api/pull/68)
-- `{api.prefix}/tap/capabilities`, `/tap/availability`, `/tap/tables` and `/tap/tables/{name}`. [#68](https://github.com/hombit/hats-api/pull/68)
-- `TAP_SCHEMA.schemas`, `.tables`, `.columns`, `.keys` and `.key_columns`, queryable through `/tap/sync`. [#68](https://github.com/hombit/hats-api/pull/68)
-- The optional coordinate system argument of an ADQL geometry, as in `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
-- `lang` in the `/api/v1/adql` body: `ADQL`, `ADQL-2.0` or `ADQL-2.1`. [#68](https://github.com/hombit/hats-api/pull/68)
-- ADQL `TOP` with `ORDER BY _healpix_29` or `ORDER BY _healpix_29 DESC` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
+- TAP sync queries at `{api.prefix}/tap`, over catalogs listed as `[[tap.table]]`. [#68](https://github.com/hombit/hats-api/pull/68)
+- `lang` in the `/api/v1/adql` body, and `POINT('ICRS', ra, dec)`. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL `TOP` over a catalog with no region. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Changed
 
 - **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
-- An unquoted name in `/api/v1/adql` is matched case-insensitively, as ADQL has it. [#68](https://github.com/hombit/hats-api/pull/68)
-- A VOTable `FIELD` carries its name as `ID` as well. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL names are matched case-insensitively unless quoted. [#68](https://github.com/hombit/hats-api/pull/68)
 - `[limits] max_partitions` defaults to 128, from 16. [#68](https://github.com/hombit/hats-api/pull/68)
-- An ADQL query over a catalog reads partitions until it has its rows, so a `TOP` needs no region; `max_partitions` counts the partitions read. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Deprecated
 
@@ -36,9 +30,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- An ADQL region outside a catalog's coverage is an empty answer, not an internal error. [#68](https://github.com/hombit/hats-api/pull/68)
-- ADQL `TOP` with `OFFSET` is answered, not refused. [#68](https://github.com/hombit/hats-api/pull/68)
-- An ADQL region over a catalog with `Float32` coordinates is answered, not refused. [#68](https://github.com/hombit/hats-api/pull/68)
+- ADQL regions outside a catalog or over `Float32` coordinates, and `TOP` with `OFFSET`. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Security
 
