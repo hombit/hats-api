@@ -27,6 +27,7 @@ use crate::app::routes::tap::answer::answered;
 use crate::app::routes::tap::format::{self, Answering};
 use crate::app::routes::tap::parameters::Parameters;
 use crate::app::routes::tap::published::describe;
+use crate::app::routes::tap::upload::{Kind, UPLOAD_SCHEMA, Upload};
 use crate::app::service::Service;
 use crate::error::ApiError;
 use crate::output::{dsv, votable};
@@ -117,6 +118,22 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
                 let table = fixed.rsplit('.').next().unwrap_or_default();
                 Source::Memory(schema::provider(table, &described)?)
             }
+            None if names_an_upload(spelling) => {
+                let upload = parameters.uploads.named(spelling).ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "query: {spelling} names no table this request uploaded; it uploads {}",
+                        match parameters.uploads.is_empty() {
+                            true => "nothing".to_owned(),
+                            false => parameters.uploads.names().join(", "),
+                        }
+                    ))
+                })?;
+                let (source, files) = uploaded(service, upload)?;
+                if let Some(files) = files {
+                    data_files = Some(files);
+                }
+                source
+            }
             None => {
                 let published = service.tap_tables.lookup(spelling).ok_or_else(|| {
                     ApiError::bad_request(format!(
@@ -177,6 +194,60 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
         "tap sync"
     );
     Ok(response)
+}
+
+/// Whether a statement's table name is one of `TAP_UPLOAD`'s.
+///
+/// Asked before the uploads are searched so that a name under that schema is answered by
+/// what the request uploaded, rather than falling through to a refusal naming the tables
+/// this service publishes — which is not where the caller's table was going to be.
+fn names_an_upload(spelling: &str) -> bool {
+    spelling
+        .split_once('.')
+        .is_some_and(|(schema, _)| schema.eq_ignore_ascii_case(UPLOAD_SCHEMA))
+}
+
+/// One uploaded table as something a statement can read, and the data-file list a catalog
+/// brings with it.
+///
+/// **Where `UPLOAD_TYPE` said nothing, the url's own name decides**: one matching the
+/// data-file globs is a parquet file and anything else is a catalog directory. A directory
+/// that is not one fails where a catalog is opened, which is the read that looks for
+/// `hats.properties`, `properties` and `collection.properties` and says so by name.
+fn uploaded(service: &Service, upload: &Upload) -> Result<(Source, Option<DataFiles>), ApiError> {
+    let files = service.data_files_for(&upload.url);
+    let kind = upload.kind.unwrap_or(match files.matches_url(&upload.url) {
+        true => Kind::Parquet,
+        false => Kind::Hats,
+    });
+    match kind {
+        Kind::Parquet => {
+            if !files.matches_url(&upload.url) {
+                return Err(ApiError::not_found(format!(
+                    "UPLOAD {} names no data file; a parquet url ends in a name matching {}",
+                    upload.name,
+                    files.describe()
+                )));
+            }
+            let file = storage::open(
+                &upload.url,
+                &upload.storage,
+                &service.policy,
+                &service.transfers,
+            )?;
+            Ok((Source::File(file), None))
+        }
+        Kind::Hats => {
+            let files = files.clone();
+            let dir = storage::open_dir(
+                &upload.url,
+                &upload.storage,
+                &service.policy,
+                &service.transfers,
+            )?;
+            Ok((Source::Catalog(dir), Some(files)))
+        }
+    }
 }
 
 /// The rows, in the format the request asked for.

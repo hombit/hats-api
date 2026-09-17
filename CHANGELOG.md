@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `UPLOAD` on `/tap/sync`, naming a HATS catalog or parquet file by url, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`.
 
 ### Changed
 

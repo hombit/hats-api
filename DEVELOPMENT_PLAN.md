@@ -59,7 +59,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
 | 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
-| 11.11 | table upload | todo | next: a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTIONS` and `UPLOAD_TYPE`. Inline VOTable upload stays later — the one capability the four reference services do not share |
+| 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
 | 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -728,19 +728,28 @@ is the second half and stays later: it is the one capability the four reference 
 not share (IRSA offers none, MAST half), so the ecosystem has not settled it, and it is
 caller-supplied bytes rather than a url, which reopens what a request may spend.
 
-`UPLOAD=name,uri` and the `TAP_UPLOAD` schema are TAP §2.5.2's own, and so is a uri that is
-an `http(s)` url rather than `param:`. What is this service's is what the url may point at —
-a HATS catalog or a parquet file, neither of them the VOTable the standard means — and the
-storage options such a url needs. So a client can write the parameter and nothing else about
-it is borrowed.
+`UPLOAD=name,uri`, the `TAP_UPLOAD` schema and a uri that is an `http(s)` url rather than
+`param:` are all TAP §2.7.6's own, uploads accumulating over repeated parameters the way DALI
+§3.2 has anything repeat. What is this service's is what the url may point at — a HATS catalog
+or a parquet file, neither of them the VOTable the standard means — and the storage options
+such a url needs. So a client can write the parameter and nothing else about it is borrowed.
 
-- **`UPLOAD_STORAGE_OPTIONS`**, a JSON object keyed by upload name, holding per upload what
+**Neither TAP nor DALI keys a value by anything but `UPLOAD`'s one comma**, so the two
+parameters below take that shape and no other: `<upload>,…`, repeated for more. A sub-parameter
+syntax would be invented twice over, and DALI's own structured values are fixed tuples of
+numbers rather than anything keyed. TAP's answer to an upload url needing authentication is
+credential delegation, a service holding the caller's certificate; these are this service's
+answer instead and are not that.
+
+- **`UPLOAD_STORAGE_OPTION=<upload>,<option>,<value>`**, one option to a value, holding what
   `/adql`'s `storage` holds. One spelling of storage options in the service, or the two drift.
-  It is accepted on `GET` as on `POST`: TAP gives the two carriers one syntax, and a
-  credential in a url is already spent by the time this service could refuse it. What the
-  service can do is not make it worse — the log records a path and never a query string, and
-  that has to stay true.
-- **`UPLOAD_TYPE`**, optional, `name,hats;other,parquet`. Absent, the type is worked out: a
+  **Everything past the second comma is the value**, so a secret carrying a comma, a space or
+  an `=` arrives whole; a separator inside a value truncates a credential, which is a request
+  that reads as anonymous. It is accepted on `GET` as on `POST`: TAP gives the two carriers one
+  syntax, and a credential in a url is already spent by the time this service could refuse it.
+  What the service can do is not make it worse — the log records a path and never a query
+  string, and that has to stay true.
+- **`UPLOAD_TYPE`**, optional, `name,hats`. Absent, the type is worked out: a
   name matching the data-file globs is a parquet file, and a directory holding
   `hats.properties`, `properties` or `collection.properties` is a catalog. Guessing costs a
   request or two and must fail as a refusal naming what was looked for, never as a broken

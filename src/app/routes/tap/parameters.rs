@@ -18,10 +18,11 @@
 use std::collections::BTreeMap;
 
 use crate::adql::language;
+use crate::app::routes::tap::upload::Uploads;
 use crate::error::ApiError;
 
 /// Every name this service reads.
-const TAKEN: [&str; 7] = [
+const TAKEN: [&str; 10] = [
     "QUERY",
     "LANG",
     "RESPONSEFORMAT",
@@ -29,16 +30,17 @@ const TAKEN: [&str; 7] = [
     "MAXREC",
     "RUNID",
     "REQUEST",
+    "UPLOAD",
+    "UPLOAD_TYPE",
+    "UPLOAD_STORAGE_OPTION",
 ];
 
-/// Parameters the standards define and this service does not implement.
+/// The ones a request may give more than once.
 ///
-/// These are the ones refused rather than ignored, and the difference is what a caller can
-/// tell afterwards: `UPLOAD` ignored is a query against a table that is not there, which
-/// comes back as a refusal about `TAP_UPLOAD` naming nothing — true, and no help at all to
-/// somebody who did exactly what the standard describes. The capabilities document offers
-/// no upload method, so a client that read it does not send one.
-const NOT_IMPLEMENTED: [&str; 1] = ["UPLOAD"];
+/// `UPLOAD` is TAP §2.5.2's, which carries several tables in one value and may also be
+/// repeated; `UPLOAD_TYPE` is this service's own and follows it. Everything else is
+/// single-valued, and DALI §3.2 says a repeat is an error.
+const REPEATABLE: [&str; 3] = ["UPLOAD", "UPLOAD_TYPE", "UPLOAD_STORAGE_OPTION"];
 
 /// The one value `REQUEST` may take.
 const DO_QUERY: &str = "doQuery";
@@ -61,6 +63,8 @@ pub(super) struct Parameters {
     pub maxrec: Option<usize>,
     /// The caller's tag for a larger job, for the log and nowhere else (DALI §3.4.6).
     pub runid: Option<String>,
+    /// The tables the request named by url, queried as `TAP_UPLOAD.<name>`.
+    pub uploads: Uploads,
 }
 
 impl Parameters {
@@ -69,28 +73,26 @@ impl Parameters {
         let mut given: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         for (name, value) in pairs {
             let upper = name.to_ascii_uppercase();
-            if let Some(unimplemented) = NOT_IMPLEMENTED.iter().find(|name| **name == upper) {
-                return Err(ApiError::bad_request(format!(
-                    "{unimplemented} is not implemented by this service, and its capabilities \
-                     do not offer it"
-                )));
-            }
-            // Anything else is somebody's own: a client's session tag, a proxy's
+            // A name nobody defines is somebody's own: a client's session tag, a proxy's
             // cache-buster, a validator checking that one does not break the query.
             if TAKEN.contains(&upper.as_str()) {
                 given.entry(upper).or_default().push(value);
             }
         }
-        // Every parameter above is single-valued, and DALI §3.2 says a service must answer
-        // with an error where one is given twice. Which of the two values was meant is not
-        // something to guess at.
-        if let Some((name, values)) = given.iter().find(|(_, values)| values.len() > 1) {
+        // DALI §3.2 says a service must answer with an error where a single-valued parameter
+        // is given twice. Which of the two values was meant is not something to guess at.
+        if let Some((name, values)) = given
+            .iter()
+            .filter(|(name, _)| !REPEATABLE.contains(&name.as_str()))
+            .find(|(_, values)| values.len() > 1)
+        {
             return Err(ApiError::bad_request(format!(
                 "{name} was given {} times and is single-valued",
                 values.len()
             )));
         }
         let one = |name: &str| given.get(name).and_then(|values| values.first()).copied();
+        let every = |name: &str| given.get(name).cloned().unwrap_or_default();
 
         let query = one("QUERY")
             .ok_or_else(|| ApiError::bad_request("QUERY is the statement to run, and is required"))?
@@ -102,6 +104,11 @@ impl Parameters {
             format: format(one("RESPONSEFORMAT"), one("FORMAT"))?,
             maxrec: maxrec(one("MAXREC"))?,
             runid: runid(one("RUNID"))?,
+            uploads: Uploads::read(
+                &every("UPLOAD"),
+                &every("UPLOAD_TYPE"),
+                &every("UPLOAD_STORAGE_OPTION"),
+            )?,
         })
     }
 }
@@ -242,16 +249,30 @@ mod tests {
         // And the misspelling really was not read as the parameter it resembles.
         assert_eq!(taken.maxrec, None);
 
-        // A standard one this service has not got says so, rather than being ignored into
-        // a refusal about a table nobody mentioned.
+        // The half of a standard parameter this service has not got says so, rather than
+        // being ignored into a refusal about a table nobody mentioned.
         let refused = read(&[
             ("QUERY", "SELECT 1"),
             ("LANG", "ADQL"),
-            ("UPLOAD", "t,http://example.org/t.vot"),
+            ("UPLOAD", "t,param:doc"),
         ])
         .unwrap_err();
-        assert!(refused.contains("UPLOAD"), "{refused}");
-        assert!(refused.contains("not implemented"), "{refused}");
+        assert!(refused.contains("inline"), "{refused}");
+        assert!(refused.contains("not implement"), "{refused}");
+    }
+
+    /// TAP §2.5.2 has `UPLOAD` carry several tables and be repeatable, so a repeat is not
+    /// the DALI §3.2 error that a second `MAXREC` is.
+    #[test]
+    fn upload_may_be_given_more_than_once() {
+        let taken = read(&[
+            ("QUERY", "SELECT 1"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", "a,file:///hats/a"),
+            ("upload", "b,file:///hats/b"),
+        ])
+        .unwrap();
+        assert_eq!(taken.uploads.names(), ["a", "b"]);
     }
 
     /// Both are required: TAP §2.7.1 says the client must provide a LANG, and a request

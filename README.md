@@ -699,6 +699,43 @@ In TOPCAT: *VO → Table Access Protocol (TAP) Query*, then paste the URL.
 [ADQL](#adql) says what the query language answers, and how a query over a large catalog is
 bounded.
 
+### Querying a catalog the service does not publish
+
+`UPLOAD` names a catalog by URL, and the query reads it as `TAP_UPLOAD.<name>`:
+
+```
+UPLOAD=mine,s3://bucket/gaia/hats
+QUERY=SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine
+```
+
+The parameter is TAP's own, but what it points at here is a HATS catalog or a parquet file
+rather than the VOTable the standard means, so a client cannot discover this from
+`/capabilities` and no `uploadMethod` is declared there. Sending a table in the request, which
+is TAP's other kind of upload, is not implemented.
+
+A private store needs `UPLOAD_STORAGE_OPTION`, one option per value, the parameter repeated
+for as many as the URL needs:
+
+```
+UPLOAD=mine,s3://bucket/gaia/hats
+UPLOAD_STORAGE_OPTION=mine,endpoint,https://minio.example.com
+UPLOAD_STORAGE_OPTION=mine,region,us-east-1
+UPLOAD_STORAGE_OPTION=mine,access_key_id,AKIAIOSFODNN7EXAMPLE
+UPLOAD_STORAGE_OPTION=mine,secret_access_key,wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+```
+
+The upload name comes first, then the option name, then the value; everything after the
+second comma is the value, so a secret containing a comma, a space or an `=` arrives whole.
+The options are the ones [storage options](#storage-options) lists. One header at a time is
+written `headers.Authorization`.
+
+`UPLOAD_TYPE=mine,hats` or `mine,parquet` says what the URL holds. It is optional: a URL
+ending in a data file name is read as parquet and anything else as a catalog directory.
+
+Credentials sent this way travel in the query string of a `GET`, where a proxy or a browser
+history may keep them; `POST` takes the same parameters in the body. This service logs the
+path of a request and never its query string.
+
 ### Resources
 
 | | |
@@ -712,13 +749,15 @@ The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables
 `TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
 
 `sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
-`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`.
+`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`. `UPLOAD`,
+with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, names a catalog by URL as
+[above](#querying-a-catalog-the-service-does-not-publish).
 
 `MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
 table. `MAXREC=0` returns the columns alone, which is how a client inspects a table.
 
-Queries run synchronously and have to finish inside `max_request_seconds`. `/async`, table
-upload and `/examples` are still to come.
+Queries run synchronously and have to finish inside `max_request_seconds`. `/async`,
+`/examples` and uploading a table in the request itself are still to come.
 
 ## What a request may spend
 

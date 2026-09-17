@@ -1259,6 +1259,19 @@ and the parameter rules are §3.
   `taplint` adds a parameter of its own to every query and reports a service that refuses as
   breaking it, which is also what every HTTP server does with a query string it has no use
   for. The house rule is about a parameter this service *acts on*.
+- **A parameter of this service's own is written `<name>,…` and repeats.** `UPLOAD` is the
+  only parameter in TAP or DALI whose value is keyed by a name, and its key is one comma;
+  DALI's structured values are fixed tuples of numbers, and several values of anything are
+  said by repeating the parameter (§3.2). So `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE` take
+  that shape and nothing more inventive — and in the first, **everything past the second
+  comma is the value**, since a separator inside a value cuts a credential short and an
+  anonymous request is not one a caller can tell from an authenticated one. A new parameter
+  here follows the same rule rather than growing a syntax of its own.
+- **A url as `UPLOAD` is not the upload `/capabilities` would be advertising.** The standard's
+  referenced upload fetches a VOTable; this fetches a HATS catalog or a parquet file, so no
+  `uploadMethod` is declared while that is all it does, and the feature is found by reading
+  the README. TAP's own answer for a url needing credentials is delegation, which this is
+  not.
 - **Every answer is a document a TAP client can read, refusals included.** `ApiError` renders
   JSON, which a client looking for `QUERY_STATUS` has nothing to say about — so the status is
   kept and the body is replaced, by `app::routes::tap::answer::answered`.
