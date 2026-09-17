@@ -9,6 +9,7 @@ Release dates are in the UTC time zone.
 ### Added
 
 - `GET /robots.txt`, and `[server] serve_mounted_robots_txt` to answer with a mounted one instead.
+- `hf://` urls, with the `token` storage option and `[api.access.hf]`.
 
 ### Changed
 

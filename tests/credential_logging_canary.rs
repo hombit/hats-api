@@ -21,7 +21,7 @@ use common::{
     SECRET_ACCESS_KEY, TestS3, capture_one_request, lookup, permissive_policy, transfers,
 };
 use hats_api::logging::CREDENTIAL_UNSAFE_TARGETS;
-use hats_api::storage::{self, AzureOptions, GcsOptions, HttpOptions, StorageOptions};
+use hats_api::storage::{self, AzureOptions, GcsOptions, HfOptions, HttpOptions, StorageOptions};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -32,6 +32,9 @@ const GCS_TOKEN: &str = "ya29.canary-gcs-access-token";
 /// The http backend's, which reaches the wire as a header rather than through a signer —
 /// so it is the one that would be logged by the HTTP client rather than by a signer.
 const HEADER_TOKEN: &str = "canary-http-bearer-token";
+/// The Hugging Face backend's, which is a header too, but reaches the wire by a second
+/// route as well: the listing is this crate's own request rather than the store's.
+const HF_TOKEN: &str = "hf_canary-hub-access-token";
 
 #[derive(Clone, Default)]
 struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
@@ -103,6 +106,52 @@ async fn http_request_with_headers(token: &str) {
         .await;
 }
 
+/// The same for a Hugging Face repository, both ways its token goes out: the store's read,
+/// and the listing, which is a `reqwest` call this crate makes itself.
+async fn hf_requests_with_a_token(token: &str) {
+    // A server apiece: the helper answers one request, and these are two requests that must
+    // both reach something. Against a closed port the client would fail before it had a
+    // request to log, and this file's whole subject is what gets logged on the way out.
+    let options = |port: u16| StorageOptions {
+        endpoint: Some(format!("http://127.0.0.1:{port}")),
+        allow_http: true,
+        hf: HfOptions {
+            token: Some(token.to_owned().into()),
+        },
+        ..Default::default()
+    };
+
+    let (read_port, _read) = capture_one_request();
+    let url = storage::parse_url("hf://datasets/owner/name/key.parquet").expect("a valid url");
+    let file = storage::open(
+        &url,
+        &options(read_port),
+        &permissive_policy(),
+        &transfers(),
+    )
+    .expect("the policy allows loopback and cleartext");
+
+    use object_store::ObjectStoreExt;
+    // A key begins with the repository here, which is what the url's path says.
+    let _ = file
+        .store
+        .get(&object_store::path::Path::from("owner/name/key.parquet"))
+        .await;
+
+    // The listing route, which is this crate's own request rather than the store's — so it
+    // carries the token by a different path and could be logged by a different target.
+    let (list_port, _list) = capture_one_request();
+    let dir_url = storage::parse_url("hf://datasets/owner/name").expect("a valid url");
+    let dir = storage::open_dir(
+        &dir_url,
+        &options(list_port),
+        &permissive_policy(),
+        &transfers(),
+    )
+    .expect("the policy allows loopback and cleartext");
+    let _ = dir.list("").await;
+}
+
 #[tokio::test]
 async fn every_target_that_logs_a_credential_is_already_known() {
     let captured = CapturedLogs::default();
@@ -157,13 +206,24 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     // Its url is its own endpoint, so this one is built rather than passed an endpoint.
     http_request_with_headers(HEADER_TOKEN).await;
 
+    // Hugging Face has no signer either, and has the extra route: its listing is a request
+    // this crate makes rather than one the store makes, so a client that logged its headers
+    // would leak there even with the store's own path clean.
+    hf_requests_with_a_token(HF_TOKEN).await;
+
     let logs = String::from_utf8_lossy(&captured.0.lock().expect("log buffer")).into_owned();
     let leaking: Vec<&str> = logs
         .lines()
         .filter(|line| {
-            [SECRET_ACCESS_KEY, AZURE_KEY, GCS_TOKEN, HEADER_TOKEN]
-                .iter()
-                .any(|secret| line.contains(secret))
+            [
+                SECRET_ACCESS_KEY,
+                AZURE_KEY,
+                GCS_TOKEN,
+                HEADER_TOKEN,
+                HF_TOKEN,
+            ]
+            .iter()
+            .any(|secret| line.contains(secret))
         })
         .collect();
 
@@ -202,6 +262,10 @@ async fn every_target_that_logs_a_credential_is_already_known() {
     );
     // A backend whose signer never ran is a backend this file is not watching, and the
     // silence would read exactly like a pass.
+    //
+    // `hf` is not in this list and should not be: it has no OpenDAL service of its own — its
+    // reads go through the `http` one, which is checked here, and its listing is a `reqwest`
+    // call whose logging is `reqwest`'s rather than a backend's.
     for service in ["s3", "gcs", "azblob", "http"] {
         assert!(
             logs.contains(service),

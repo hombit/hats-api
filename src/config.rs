@@ -487,6 +487,7 @@ pub struct AccessConfig {
     pub azure: EndpointConfig,
     pub http: HttpConfig,
     pub webdav: EndpointConfig,
+    pub hf: EndpointConfig,
 }
 
 /// Which addresses a request may reach, whatever backend it goes through: the

@@ -33,7 +33,7 @@ use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
 pub(in crate::app) struct CatalogQuery {
     /// The HATS catalog to read: the directory holding `hats.properties`, or a collection's,
     /// which is followed to its primary table. Its scheme picks the backend — `s3`, `gs`,
-    /// `az`, `https`, `webdav` or `file` — and which of those a deployment answers for is the
+    /// `az`, `https`, `webdav`, `hf` or `file` — and which of those a deployment answers for is the
     /// operator's to configure.
     // Treated as opaque: whatever query string it has belongs to the origin, not to us.
     // No `example` on the field, for the reason `ParquetQuery::url` has none.

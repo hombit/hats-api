@@ -178,6 +178,15 @@ be served here at all.
 - **A switch for every ambient credential source**, disabled per store rather than
   globally — `disable_config_load`, `disable_ec2_metadata`, `disable_vm_metadata`.
 
+**The ambient chain to check is the whole dependency tree's, not the builder's.** A service
+crate's own dependencies read the environment below OpenDAL, where no builder call reaches
+them: `opendal-service-hf` depends on `hf-xet`, which reads `HF_TOKEN` and `HF_ENDPOINT`
+itself and is built unconditionally whichever download mode is chosen. A backend whose
+credential can be picked up somewhere this crate cannot switch off is one that cannot be
+served here at all, whatever its builder offers — so read what the service crate pulls in
+before deciding it satisfies the two switches above. `hf://` is written against the Hub's
+HTTP API for this reason and not for a shortage of a crate.
+
 A service with no ambient chain at all satisfies both by construction — OpenDAL's http
 service sends an `Authorization` header only when the builder was handed one — but say so
 in the backend function rather than leaving the absence of the calls to be read as an
@@ -214,6 +223,30 @@ Then follow the shape the existing ones set:
   it has to. Reading the code cannot tell the two servers apart; `tests/http_ranges.rs`
   serves both and checks the rows.
 
+## One store per authority
+
+**DataFusion keys a registered object store by `scheme://host[:port]` and drops the path.**
+`register_object_store` is called with a `RemoteFile::base`, so what a store is registered
+under is the url's authority and nothing below it — which is a fact about every backend and
+is what a statement naming two tables runs into.
+
+Two consequences, and a backend has to be built for both:
+
+- **A store must answer for every object at its authority, not just the one the url named.**
+  An `s3://bucket` store serves that whole bucket, so a second table in the same bucket
+  reaches the right object through it. `hf://` is where this is easy to get wrong: the
+  authority is `datasets`, not the repository, so a store built for one repository would be
+  registered over by the next and a query naming two Hugging Face catalogs would read both
+  through whichever landed last. `HfStore` is therefore the Hub, and the repository is read
+  off each key — the first two segments, with everything after them a path inside it, since a
+  repository is a directory tree and a catalog is wherever in it somebody put one.
+- **Two tables at one authority get one store, so they get one set of credentials.** The
+  second registration wins. Two catalogs in one bucket with different keys, or two on one
+  Hugging Face Hub with different tokens, is the case that cannot be expressed — and it is
+  the registry's grain rather than any backend's. Do not work around it by keying a store on
+  something DataFusion does not read; what would fix it is a registry of this crate's own,
+  which is a larger decision than any one backend.
+
 ## The network
 
 - A remote store is built through `storage::remote_store`, which is the one thing that
@@ -233,7 +266,21 @@ Then follow the shape the existing ones set:
   letting a client resolve it again is DNS rebinding: the answer that passed is not the
   answer that gets connected to.
 - Do not follow redirects. A 3xx is the origin choosing the next destination, which
-  would carry the caller's credentials to a host no endpoint rule named.
+  would carry the caller's credentials to a host no endpoint rule named. The client's own
+  policy is `Policy::none()` and stays that way; a store says what it does with a 3xx by
+  the `Redirects` it is built with, and `Refused` is the answer unless the origin hands a
+  file over *by* redirecting.
+
+  **`Redirects::Followed` is one backend's, and what makes it acceptable is four
+  conditions rather than the absence of the rule.** They are written out in
+  `storage/redirect.rs`: the origin that named the target was already authorized, the hop
+  may not go from `https` to `http`, a credential does not cross an origin, and every
+  address is still judged by the resolver. Two things follow for anyone adding a backend.
+  The credential half is written for an `Authorization` header, so a backend whose
+  credential is a signature over the request — S3's, Azure's — must not be given the layer
+  without deciding what a hop does to the signature, which is a different question. And a
+  backend that merely *has* redirects is not this case: the reason is that there is no
+  second route to the bytes.
 - A host named in an endpoint list is permission at both layers — the endpoint rules and
   the network rules. An operator should not have to say it twice.
 - `access` decides which endpoint may be named; `network` decides which address may be

@@ -37,7 +37,7 @@ use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub(in crate::app) struct ParquetQuery {
     /// The parquet file to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`,
-    /// `webdav` or `file` — and which of those a deployment answers for is the operator's to
+    /// `webdav`, `hf` or `file` — and which of those a deployment answers for is the operator's to
     /// configure.
     // Treated as opaque: whatever query string it has belongs to the origin, not to us.
     // No `example` on the field: every operation's own example carries a url this route

@@ -85,6 +85,7 @@ pub enum Backend {
     Azure,
     Http,
     Webdav,
+    Hf,
 }
 
 /// Every remote backend, so that a caller listing or looping over them cannot miss one
@@ -95,6 +96,7 @@ pub const BACKENDS: &[Backend] = &[
     Backend::Azure,
     Backend::Http,
     Backend::Webdav,
+    Backend::Hf,
 ];
 
 /// The one scheme with no [`Backend`] behind it, named here because it is the other half
@@ -113,6 +115,7 @@ impl Backend {
             Self::Azure => &["az"],
             Self::Http => &["http", "https"],
             Self::Webdav => &["webdav"],
+            Self::Hf => &["hf"],
         }
     }
 
@@ -139,6 +142,10 @@ impl Backend {
             // can. There is nothing left for an option to name.
             Self::Http => None,
             Self::Webdav => None,
+            // An `hf://` url names a repository, not a server; the Hub is the server, and
+            // an organisation running a private Hub points a request at it with the same
+            // `endpoint` option the bucket-addressed backends take.
+            Self::Hf => Some("hf"),
         }
     }
 
@@ -164,6 +171,7 @@ impl Backend {
             Self::Azure => "access.azure",
             Self::Http => "access.http",
             Self::Webdav => "access.webdav",
+            Self::Hf => "access.hf",
         }
     }
 }
@@ -175,6 +183,7 @@ pub struct AccessPolicy {
     azure: EndpointRules,
     http: EndpointRules,
     webdav: EndpointRules,
+    hf: EndpointRules,
     /// Whether an `http://` url may be read when the http rules name no endpoints. A
     /// decision of the operator's rather than the caller's: the caller sends no
     /// credential to an `http(s)://` url, so what cleartext costs here is not a secret
@@ -295,6 +304,7 @@ impl AccessPolicy {
         let azure = build(&config.azure.endpoints, Backend::Azure)?;
         let http = build(&config.http.endpoints, Backend::Http)?;
         let webdav = build(&config.webdav.endpoints, Backend::Webdav)?;
+        let hf = build(&config.hf.endpoints, Backend::Hf)?;
 
         let network = NetworkPolicy::new(&config.network, &named, user_agent)?;
         Ok(Self {
@@ -303,6 +313,7 @@ impl AccessPolicy {
             azure,
             http,
             webdav,
+            hf,
             allow_plain_http: config.http.allow_plain_http,
             mounts,
             network,
@@ -357,6 +368,7 @@ impl AccessPolicy {
             Backend::Azure => &self.azure,
             Backend::Http => &self.http,
             Backend::Webdav => &self.webdav,
+            Backend::Hf => &self.hf,
         }
     }
 
@@ -624,6 +636,7 @@ pub(super) mod tests {
                 allow_plain_http: false,
             },
             webdav: entries(list),
+            hf: entries(list),
             ..Default::default()
         })
     }
@@ -656,6 +669,10 @@ pub(super) mod tests {
             },
             Backend::Webdav => AccessConfig {
                 webdav: list,
+                ..Default::default()
+            },
+            Backend::Hf => AccessConfig {
+                hf: list,
                 ..Default::default()
             },
         })
@@ -796,7 +813,10 @@ pub(super) mod tests {
         let no_s3 = with_endpoints(&[]);
         let error = no_s3.authorize(&url("s3://bucket/k.parquet")).unwrap_err();
         assert!(matches!(error, ApiError::Forbidden(_)), "{error}");
-        assert_eq!(no_s3.allowed_schemes(), ["gs", "az", "https", "webdav"]);
+        assert_eq!(
+            no_s3.allowed_schemes(),
+            ["gs", "az", "https", "webdav", "hf"]
+        );
 
         assert!(everywhere(&[]).allowed_schemes().is_empty());
     }
@@ -811,7 +831,10 @@ pub(super) mod tests {
             azure: entries(&["https://azurite.example.com"]),
             ..Default::default()
         });
-        assert_eq!(policy.allowed_schemes(), ["s3", "az", "https", "webdav"]);
+        assert_eq!(
+            policy.allowed_schemes(),
+            ["s3", "az", "https", "webdav", "hf"]
+        );
 
         assert!(policy.authorize(&url("s3://b/k.parquet")).is_ok());
         assert!(policy.authorize(&url("gs://b/k.parquet")).is_err());
@@ -1111,11 +1134,11 @@ pub(super) mod tests {
         // its cleartext half is the one thing an operator has to ask for.
         assert_eq!(
             AccessPolicy::default().allowed_schemes(),
-            ["s3", "gs", "az", "https", "webdav"]
+            ["s3", "gs", "az", "https", "webdav", "hf"]
         );
         assert_eq!(
             with_paths(&[&root], false).allowed_schemes(),
-            ["s3", "gs", "az", "https", "webdav", "file"]
+            ["s3", "gs", "az", "https", "webdav", "hf", "file"]
         );
         assert_eq!(everywhere(&[]).allowed_schemes(), Vec::<&str>::new());
     }

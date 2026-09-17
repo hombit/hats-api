@@ -569,19 +569,20 @@ ever used to answer a request, and a `file://` URL takes no storage options at a
 
 | option | scheme | means |
 | --- | --- | --- |
-| `endpoint` | `s3`, `gs`, `az` | a server other than the provider's own: MinIO, Ceph, R2, Azurite |
+| `endpoint` | `s3`, `gs`, `az`, `hf` | a server other than the provider's own: MinIO, Ceph, R2, Azurite, a private Hub |
 | `region` | `s3` | the bucket's region |
 | `access_key_id`, `secret_access_key`, `session_token` | `s3` | an AWS credential |
 | `service_account_key`, `access_token` | `gs` | the JSON Google issues, base64-encoded, or an OAuth2 token |
 | `account`, `access_key`, `sas_token` | `az` | `account` is required, the URL carrying only the container |
 | `headers` | `http`, `https` | a bearer token or an API key for a server that authenticates |
 | `transport`, `username`, `password` | `webdav` | `https` (default) or `http`, and a Basic credential |
+| `token` | `hf` | a Hugging Face access token: needed for a private or gated repository, recommended otherwise for the Hub's rate limits |
 | `allow_http` | any remote | permission to send a credential to a cleartext endpoint |
 
-Schemes: `s3`, `gs`, `az`, `http`, `https`, `webdav`, `file`. An option a scheme has no
-use for is refused rather than ignored. Credentials are never logged, neither their values
-nor their names. A `file://` URL names a mount's `path`, and a path under no mount is
-refused whether or not anything is there.
+Schemes: `s3`, `gs`, `az`, `http`, `https`, `webdav`, `hf`, `file`. An option a scheme has
+no use for is refused rather than ignored. Credentials are never logged, neither their
+values nor their names. A `file://` URL names a mount's `path`, and a path under no mount
+is refused whether or not anything is there.
 
 ## What a request may spend
 
