@@ -595,9 +595,15 @@ quote and no second parser.
   order that does not exist or a value that is not a list comes back as no cells rather than
   as an error. The emptiness check is what refuses those, and it is the right place — a
   region selecting nothing is the failure worth catching, whatever produced it.
-- Every literal in these expressions is an `f64`, so a `Float32` coordinate column is
-  widened before the arithmetic rather than the trigonometry running at single precision.
-  `sky::region::tests` crosses both column types against both right-ascension conventions.
+- **A coordinate is an `f64` inside the geometry and its own type everywhere else.**
+  Every literal in these expressions is an `f64`, and nothing may be trusted to coerce a
+  `Float32` column to meet them: a region in a statement is built during the simplify pass,
+  after type coercion has run. So `sql::coordinate_column` hands a narrower column over as a
+  cast, and `region::separation` casts whatever it is given — a crossmatch and a `DISTANCE`
+  arrive there with the caller's own columns. The column in a projection, an answer or any
+  other filter is untouched. `sky::region::tests` crosses both column types against both
+  right-ascension conventions, and `a_catalog_with_narrow_coordinates_answers_a_region` is the
+  statement case.
 - A caller's shape is validated once, into a `sky::region::Shape`, and everything downstream
   reads that. Two readings of one field — the predicate's and the covering's — is how the
   two come to disagree about what `dec: [10, 10]` meant.

@@ -21,9 +21,10 @@
 
 use std::f64::consts::PI;
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{DFSchema, TableReference};
 use datafusion::functions::math::expr_fn::{cos, sin};
-use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::{Expr, cast};
 use datafusion::prelude::lit;
 use moc::deser::ascii::from_ascii_ivoa;
 use moc::deser::json::from_json_aladin;
@@ -540,13 +541,26 @@ fn eastward_span(from: f64, to: f64) -> Result<f64, ApiError> {
 /// whole turn leaves alone, so a file writing `[0, 360)` and one writing `[-180, 180)` give
 /// the same answer with no arithmetic on the column.
 ///
-/// Every factor is an `f64`, so a `Float32` column is widened before any of this runs rather
-/// than the trigonometry being done at the column's precision. Where a position is a pair of
-/// literals the whole of its half is folded to one number before the plan runs.
+/// **Every input is cast to `f64` here**, so a `Float32` column never meets the `f64` literals
+/// as itself and the trigonometry never runs at single precision. A crossmatch or a
+/// `DISTANCE` reaches this with its columns as the caller wrote them, after type coercion has
+/// run, so nothing earlier did it. A cast of what is already an `f64` is the planner's to
+/// drop. Where a position is a pair of literals the whole of its half is folded to one
+/// number before the plan runs.
 pub fn separation(ra_a: &Expr, dec_a: &Expr, ra_b: &Expr, dec_b: &Expr) -> Expr {
+    let [ra_a, dec_a, ra_b, dec_b] = [ra_a, dec_a, ra_b, dec_b].map(widened);
     let hav_dec = squared(sin((dec_a.clone() - dec_b.clone()) * lit(HALF_DEGREE)));
-    let hav_ra = squared(sin((ra_a.clone() - ra_b.clone()) * lit(HALF_DEGREE)));
-    hav_dec + cos(dec_b.clone() * lit(DEGREE)) * cos(dec_a.clone() * lit(DEGREE)) * hav_ra
+    let hav_ra = squared(sin((ra_a - ra_b) * lit(HALF_DEGREE)));
+    hav_dec + cos(dec_b * lit(DEGREE)) * cos(dec_a * lit(DEGREE)) * hav_ra
+}
+
+/// An expression as an `f64`: left alone where it is already a cast to one, which is what
+/// `sql::coordinate_column` hands a narrower column over as.
+fn widened(expr: &Expr) -> Expr {
+    match expr {
+        Expr::Cast(existing) if existing.field.data_type() == &DataType::Float64 => expr.clone(),
+        _ => cast(expr.clone(), DataType::Float64),
+    }
 }
 
 /// Whether two positions are within `radius` degrees of each other, every one of the five an

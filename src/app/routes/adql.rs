@@ -779,6 +779,93 @@ mod tests {
         }
     }
 
+    /// **A catalog whose coordinates are `Float32` answers a region**, the same rows as the
+    /// `Float64` one and pruned the same way.
+    ///
+    /// A region in a statement is built after type coercion has run, so nothing widened the
+    /// columns: the bounds compared a `Float32` column with an `f64` literal and arrow refused
+    /// the whole query. One partition allowed is what shows the covering still prunes through
+    /// the cast; a `DISTANCE` value and a crossmatch are the two other ways a coordinate
+    /// column reaches the geometry, and the projection shows the column keeps its own type.
+    #[tokio::test]
+    async fn a_catalog_with_narrow_coordinates_answers_a_region() {
+        let dir = hats::query::tests::narrow_fixture();
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
+        let (ra, dec, radius) = match &region {
+            Region::Circle {
+                ra,
+                dec,
+                radius_deg,
+                ..
+            } => (*ra, *dec, radius_deg.unwrap()),
+            other => panic!("the fixture's first region is a circle: {other:?}"),
+        };
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let ask = async |query: String, tables: serde_json::Value| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({"query": query, "tables": tables}),
+            )
+            .await
+        };
+        let one = serde_json::json!({"c": {"type": "hats", "url": "file:///"}});
+
+        let (status, body) = ask(
+            format!(
+                "SELECT id, ra FROM c WHERE 1 = CONTAINS(POINT(ra, dec), \
+                 CIRCLE({ra}, {dec}, {radius})) ORDER BY id"
+            ),
+            one.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Compared with the f64 positions the fixture was written from, so a row within
+        // single precision of the edge may land on either side of it.
+        let ids = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, expected, "{body}");
+        assert_eq!(answer["schema"][1]["type"], "Float32", "{body}");
+
+        let (status, body) = ask(
+            format!(
+                "SELECT TOP 1 DISTANCE(POINT(ra, dec), POINT({ra}, {dec})) AS sep FROM c \
+                 WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE({ra}, {dec}, {radius})) ORDER BY sep"
+            ),
+            one,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (status, body) = ask(
+            format!(
+                "SELECT a.id AS aid, b.id AS bid FROM left AS a JOIN right AS b \
+                   ON 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE(a.ra, a.dec, 0.0001)) \
+                 WHERE 1 = CONTAINS(POINT(a.ra, a.dec), CIRCLE({ra}, {dec}, {radius})) \
+                   AND 1 = CONTAINS(POINT(b.ra, b.dec), CIRCLE({ra}, {dec}, {radius}))"
+            ),
+            serde_json::json!({
+                "left": {"type": "hats", "url": "file:///"},
+                "right": {"type": "hats", "url": "file:///"},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], expected.len(), "{body}");
+    }
+
     /// A crossmatch: two catalogs joined on the separation between their rows, which is
     /// ADQL's own spelling of one — a circle whose centre is a row of the other side.
     ///

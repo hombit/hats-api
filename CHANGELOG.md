@@ -37,6 +37,7 @@ Release dates are in the UTC time zone.
 
 - An ADQL region outside a catalog's coverage is an empty answer, not an internal error. [#68](https://github.com/hombit/hats-api/pull/68)
 - ADQL `TOP` with `OFFSET` is answered, not refused. [#68](https://github.com/hombit/hats-api/pull/68)
+- An ADQL region over a catalog with `Float32` coordinates is answered, not refused. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Security
 

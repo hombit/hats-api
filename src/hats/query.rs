@@ -686,7 +686,7 @@ pub(crate) mod tests {
     use std::fs;
     use std::path::Path;
 
-    use datafusion::arrow::array::{Array, Float64Array, Int64Array};
+    use datafusion::arrow::array::{Array, Float32Array, Float64Array, Int64Array};
     use datafusion::arrow::datatypes::{DataType, Field};
     use datafusion::parquet::arrow::ArrowWriter;
     use url::Url;
@@ -772,21 +772,35 @@ pub(crate) mod tests {
     }
 
     fn write_partition(path: &Path, rows: &[Point], healpix: bool) {
+        write_partition_at(path, rows, healpix, DataType::Float64);
+    }
+
+    /// The same, with the coordinates written at `precision`.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "writing an f32 column is the point of the narrower fixture"
+    )]
+    fn write_partition_at(path: &Path, rows: &[Point], healpix: bool, precision: DataType) {
+        let narrow = precision == DataType::Float32;
+        let coordinate = |values: Vec<f64>| -> Arc<dyn Array> {
+            match narrow {
+                true => Arc::new(Float32Array::from(
+                    values.iter().map(|value| *value as f32).collect::<Vec<_>>(),
+                )),
+                false => Arc::new(Float64Array::from(values)),
+            }
+        };
         let mut fields = vec![
             Field::new("id", DataType::Int64, false),
-            Field::new("ra", DataType::Float64, false),
-            Field::new("dec", DataType::Float64, false),
+            Field::new("ra", precision.clone(), false),
+            Field::new("dec", precision, false),
         ];
         let mut columns: Vec<Arc<dyn Array>> = vec![
             Arc::new(Int64Array::from(
                 rows.iter().map(|row| row.id).collect::<Vec<_>>(),
             )),
-            Arc::new(Float64Array::from(
-                rows.iter().map(|row| row.ra).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                rows.iter().map(|row| row.dec).collect::<Vec<_>>(),
-            )),
+            coordinate(rows.iter().map(|row| row.ra).collect()),
+            coordinate(rows.iter().map(|row| row.dec).collect()),
         ];
         if healpix {
             fields.push(Field::new("_healpix_29", DataType::Int64, false));
@@ -806,6 +820,30 @@ pub(crate) mod tests {
             ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
+    }
+
+    /// The same catalog with its coordinates written as `Float32`, which is what ZTF DR24 does.
+    pub(crate) fn narrow_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("hats.properties"),
+            format!(
+                "obs_collection=fixture\nhats_col_ra=ra\nhats_col_dec=dec\nhats_order={ORDER}\n"
+            ),
+        )
+        .unwrap();
+        let mut csv = String::from("Norder,Npix\n");
+        for cell in CELLS {
+            csv.push_str(&format!("{ORDER},{cell}\n"));
+        }
+        fs::write(root.join("partition_info.csv"), csv).unwrap();
+        for (cell, rows) in points() {
+            let path = root.join(HatsPartition::new(ORDER, cell).path(".parquet"));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_partition_at(&path, &rows, true, DataType::Float32);
+        }
+        dir
     }
 
     /// A catalog whose partitions are directories rather than files — `hats_npix_suffix=/`,

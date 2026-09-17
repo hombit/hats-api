@@ -54,7 +54,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.4 | `TAP_SCHEMA` | done | a name is matched the way ADQL says rather than exactly, which is what §10.8.1 now diverges from only on the `simple` routes |
 | 11.5 | VOSI capabilities, availability, tables | done | |
 | 11.6 | `csv` and `tsv` | done | |
-| 11.13 | a region over `Float32` coordinates | todo | a catalog writing its positions narrow — ZTF DR24 — cannot be queried with a region on the ADQL route at all: the test is built after type coercion has run, so the bounds compare two widths and arrow refuses. The pad is what makes an `f32` literal safe, and it has to be shown |
+| 11.13 | a region over `Float32` coordinates | done | |
 | 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | next. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
 | 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
 | 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
