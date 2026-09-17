@@ -724,10 +724,16 @@ UPLOAD_STORAGE_OPTION=mine,access_key_id,AKIAIOSFODNN7EXAMPLE
 UPLOAD_STORAGE_OPTION=mine,secret_access_key,wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
 ```
 
-The upload name comes first, then the option name, then the value; everything after the
-second comma is the value, so a secret containing a comma, a space or an `=` arrives whole.
-The options are the ones [storage options](#storage-options) lists. One header at a time is
-written `headers.Authorization`.
+The upload name comes first, then the option name, then the value; the value runs to the end,
+so a secret containing a comma, a space or an `=` arrives whole. The options are the ones
+[storage options](#storage-options) lists.
+
+`header` is the one option that names something before its value, since a request may carry
+several:
+
+```
+UPLOAD_STORAGE_OPTION=mine,header,Authorization,Bearer abc123
+```
 
 `UPLOAD_TYPE=mine,hats` or `mine,parquet` says what the URL holds. It is optional: a URL
 ending in a data file name is read as parquet and anything else as a catalog directory.

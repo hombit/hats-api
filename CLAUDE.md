@@ -1263,10 +1263,12 @@ and the parameter rules are §3.
   only parameter in TAP or DALI whose value is keyed by a name, and its key is one comma;
   DALI's structured values are fixed tuples of numbers, and several values of anything are
   said by repeating the parameter (§3.2). So `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE` take
-  that shape and nothing more inventive — and in the first, **everything past the second
-  comma is the value**, since a separator inside a value cuts a credential short and an
-  anonymous request is not one a caller can tell from an authenticated one. A new parameter
-  here follows the same rule rather than growing a syntax of its own.
+  that shape and nothing more inventive — and in the first, **the value runs to the end**,
+  since a separator inside a value cuts a credential short and an anonymous request is not
+  one a caller can tell from an authenticated one. How many fields precede that value is the
+  option's own name to say, the way DALI's `POS` reads three numbers after `CIRCLE` and four
+  after `RANGE`: `header` names a header before its value, every other option does not. A new
+  parameter here follows the same rule rather than growing a syntax of its own.
 - **A url as `UPLOAD` is not the upload `/capabilities` would be advertising.** The standard's
   referenced upload fetches a VOTable; this fetches a HATS catalog or a parquet file, so no
   `uploadMethod` is declared while that is all it does, and the feature is found by reading

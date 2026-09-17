@@ -743,9 +743,11 @@ answer instead and are not that.
 
 - **`UPLOAD_STORAGE_OPTION=<upload>,<option>,<value>`**, one option to a value, holding what
   `/adql`'s `storage` holds. One spelling of storage options in the service, or the two drift.
-  **Everything past the second comma is the value**, so a secret carrying a comma, a space or
-  an `=` arrives whole; a separator inside a value truncates a credential, which is a request
-  that reads as anonymous. It is accepted on `GET` as on `POST`: TAP gives the two carriers one
+  **The value runs to the end**, so a secret carrying a comma, a space or an `=` arrives
+  whole; a separator inside a value truncates a credential, which is a request that reads as
+  anonymous. The option's own name says how many fields follow it, which is how DALI reads a
+  shape — `CIRCLE` three numbers, `RANGE` four — so `header`, the one option that is a map,
+  takes a name before its value. It is accepted on `GET` as on `POST`: TAP gives the two carriers one
   syntax, and a credential in a url is already spent by the time this service could refuse it.
   What the service can do is not make it worse — the log records a path and never a query
   string, and that has to stay true.

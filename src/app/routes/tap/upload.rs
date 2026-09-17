@@ -21,6 +21,11 @@
 //!   `;` arrives whole — which is the failure a separator inside the value would cause, and a
 //!   truncated credential is a request that reads as anonymous.
 //!
+//!   **The option's name says how many fields follow it**, the way DALI reads a shape —
+//!   `CIRCLE` takes three numbers and `RANGE` four. `header` is the one option that is a map
+//!   rather than a value, so it takes a header name and then the value:
+//!   `<upload>,header,Authorization,Bearer …`.
+//!
 //!   It is read on `GET` as on `POST`: TAP gives the two carriers one syntax, and a credential
 //!   written into a url has already been sent by the time this service could refuse to read
 //!   it. What is left to protect is that it goes no further, which is the log recording a path
@@ -51,12 +56,12 @@ const STORAGE_OPTION: &str = "UPLOAD_STORAGE_OPTION";
 /// This service's own parameter for what kind of table a url holds.
 const TYPE: &str = "UPLOAD_TYPE";
 
-/// What an option name is prefixed with to set one header rather than a field.
+/// The one option that is a map rather than a value, and so takes a name before its value.
 ///
-/// `headers` is the one option that is a map of its own, so it is the one that cannot be
-/// written as a name and a value. `headers.Authorization=Bearer …` is that map, a header at
-/// a time.
-const HEADER_PREFIX: &str = "headers.";
+/// `<upload>,header,Authorization,Bearer …` sets one of them. What decides how many fields
+/// follow is the option's own name, which is how DALI reads a shape: `CIRCLE` takes three
+/// numbers and `RANGE` four, the leading word saying which.
+const HEADER: &str = "header";
 
 /// What a request uploaded, in the order the parameters named them.
 #[derive(Debug, Default)]
@@ -155,20 +160,26 @@ impl Uploads {
             let name = find(&mut list, &name, STORAGE_OPTION)?.name.clone();
             let written = declared.entry(name.clone()).or_default();
             let option = option.trim();
-            // Everything past the second comma is the value, commas and all, so a secret is
-            // never cut short by its own punctuation.
-            let value = value.trim();
-            let replaced = match option.strip_prefix(HEADER_PREFIX) {
-                Some(header) => {
+            // The option's own name says how the rest is read: a header takes a name before
+            // its value, everything else is the value itself. Whichever it is, the last field
+            // runs to the end — a secret is never cut short by its own punctuation.
+            let replaced = match option.eq_ignore_ascii_case(HEADER) {
+                true => {
+                    let (header, value) = value.split_once(',').ok_or_else(|| {
+                        ApiError::bad_request(format!(
+                            "{STORAGE_OPTION} sets one header by name: \
+                             {STORAGE_OPTION}=<upload>,{HEADER},<name>,<value>"
+                        ))
+                    })?;
                     let serde_json::Value::Object(headers) = written
                         .entry("headers")
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
                     else {
                         unreachable!("headers is written as an object above")
                     };
-                    headers.insert(header.trim().to_owned(), value.into())
+                    headers.insert(header.trim().to_owned(), value.trim().into())
                 }
-                None => written.insert(option.to_owned(), typed(value)),
+                false => written.insert(option.to_owned(), typed(value.trim())),
             };
             if replaced.is_some() {
                 return Err(ApiError::bad_request(format!(
@@ -380,7 +391,7 @@ mod tests {
             &[],
             &[
                 "a,secret_access_key,wJalr/K7MDENG+bPxRfiCY==",
-                "a,headers.Accept,text/plain, text/csv;q=0.9",
+                "a,header,Accept,text/plain, text/csv;q=0.9",
             ],
         )
         .unwrap();
