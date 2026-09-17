@@ -569,7 +569,8 @@ pub(super) fn webdav_builder(
 /// is this crate's own request rather than the store's.
 ///
 /// The endpoint is the Hub and nothing below it: the repository is part of what a key says, so
-/// one store answers for every repository of its type. [`HfRepo`] has why.
+/// one store answers for every repository of its type. [`crate::storage::huggingface::HfRepo`]
+/// has why.
 pub(super) fn hf_builder(reach: Reach<'_>) -> Result<(services::Http, Url), ApiError> {
     // The same gate the bucket-addressed backends reach through their `endpoint` option, asked
     // about the Hub rather than about the repository: the repository is what is read and the
