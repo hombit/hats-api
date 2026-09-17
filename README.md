@@ -603,8 +603,10 @@ separation in arcseconds, and an `ORDER BY` sorts on it.
 
 ### Narrowing a query over a large catalog
 
-A region chooses which partitions to read. Without one the query reads every partition, and
-one reaching more than `max_partitions` is refused rather than started.
+A region chooses which partitions may be read. Partitions are then read in HEALPix order,
+a few at a time, until the query has its rows: `SELECT TOP 1000 * FROM ztf.dr24_lc` reads
+the first few of its 12,485. A query that keeps reading past `max_partitions` — an aggregate
+over a whole catalog, say — is refused when it gets there.
 
 A crossmatch is ADQL's own spelling — a circle around each row of one side — here matching
 Gaia DR3 against Euclid Q1 within an arcsecond:
@@ -669,9 +671,8 @@ rows = tap.run_sync(
 
 In TOPCAT: *VO → Table Access Protocol (TAP) Query*, then paste the URL.
 
-[ADQL](#adql) says what the query language answers. Give a large catalog a region to
-search: `SELECT TOP 10 * FROM ztf.dr24_lc` counts all 12,485 partitions against
-`max_partitions`, while the cone above reads a handful.
+[ADQL](#adql) says what the query language answers, and how a query over a large catalog is
+bounded.
 
 ### Resources
 
@@ -700,7 +701,7 @@ Three bounds, whichever is reached first, all in `[limits]`:
 
 | | default | |
 |---|---|---|
-| `max_partitions` | 16 | checked before anything is read |
+| `max_partitions` | 128 | checked before anything is read |
 | `max_bytes_fetched` | `10GiB` | watched as partitions land |
 | `max_rows` | 1000000 | watched as partitions land |
 
@@ -711,7 +712,9 @@ part-way: a truncated answer is one a caller cannot tell from a complete one.
 **A `limit` is the other bound that acts before work happens.** The read stops as soon as
 enough rows are in, so the limit bounds the request and `max_partitions` joins the
 counters, watched as the reads land. That is what makes `?limit=10` against a
-thousand-partition catalog cost one partition.
+thousand-partition catalog cost one partition. ADQL works the same way: `SELECT TOP 1000 …`
+over a whole catalog reads partitions in HEALPix order until it has the rows, and a statement
+that needs more than `max_partitions` of them is refused when it gets there.
 
 **Over a limit is `422`, and the body is the plan.** So the answer to "that is more than I
 will do at once" is the list of requests that would do it. The same three bind a catalog
@@ -838,7 +841,7 @@ either. A mount's own `filenames` replaces this for the files under it.
 
 ```toml
 [limits]
-max_partitions = 16             # what one catalog query may spend
+max_partitions = 128            # what one catalog query may spend
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 max_query_memory_bytes = "1GiB" # what one ADQL statement's joins and groups may hold

@@ -22,6 +22,8 @@ Release dates are in the UTC time zone.
 - **Breaking**: `[server] serve_index_html` renamed to `[server] serve_mounted_index_html`.
 - An unquoted name in `/api/v1/adql` is matched case-insensitively, as ADQL has it. [#68](https://github.com/hombit/hats-api/pull/68)
 - A VOTable `FIELD` carries its name as `ID` as well. [#68](https://github.com/hombit/hats-api/pull/68)
+- `[limits] max_partitions` defaults to 128, from 16. [#68](https://github.com/hombit/hats-api/pull/68)
+- An ADQL query over a catalog reads partitions until it has its rows, so a `TOP` needs no region; `max_partitions` counts the partitions read. [#68](https://github.com/hombit/hats-api/pull/68)
 
 ### Deprecated
 

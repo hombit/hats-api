@@ -43,7 +43,8 @@ engine/   the caller's SQL (sql) and running a selection against one parquet fil
 sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
           (healpix), and saying one inside a query (geometry)
 hats/     a catalog: its own files (catalog, partitions, properties, local), a request
-          fanned out over it (query), and it as a table a statement names (table)
+          fanned out over it (query), it as a table a statement names (table), and the
+          partitions that table reads as rows are pulled (scan)
 adql/     the statement rewrite (translate), running one (query), the functions the
           language requires (functions), and how a name is written (names)
 tap/      what this service publishes over TAP: the operator's tables (tables), what is
@@ -913,6 +914,19 @@ request in front of it.
   two orders of magnitude high — refusing on it would refuse requests that go on to read a
   percent of it. What it bounds is how large one request could be, which is a fan-out hint
   and not a cost. Do not reach for it to make `max_bytes_fetched` act earlier.
+- **A statement reads a catalog the same way: lazily, in HEALPix order, and counted.**
+  `hats::scan::CatalogScanExec` is the ADQL route's scan. Pruning chooses among partitions
+  without reading anything, and nothing past that — no listing, no footer — happens to a
+  partition until the stream reaches it. So stopping is whatever above it stops pulling: a
+  `LIMIT`, or a filter that has its rows. `max_partitions` counts partitions opened, and a
+  statement that pulls past it ends in a refusal, never in the rows so far.
+
+  Two things keep that true. **Do not enumerate a catalog's partitions in `scan`**: a
+  directory-partitioned one is a request per partition, which for ZTF is minutes spent
+  planning a query that reads one file. And **round-robin repartition stays off on the ADQL
+  context**: a `RepartitionExec` above the scan drains it in a task of its own, so
+  `TOP 10 … WHERE mag < 10` reads to the bound. `a_limit_is_answered_from_the_partitions_it_needs`
+  holds both.
 - **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
   a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
   bound and its two numbers, and the route renders the work list with `reason` set.

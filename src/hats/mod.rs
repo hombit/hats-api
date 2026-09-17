@@ -24,6 +24,7 @@ pub mod local;
 pub mod partitions;
 pub mod properties;
 pub mod query;
+mod scan;
 pub mod table;
 
 pub use catalog::{Catalog, Columns, Partitioned};

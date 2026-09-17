@@ -281,11 +281,12 @@ impl Default for LimitsConfig {
             // footer is the file. Generous enough for a real catalog and short of the
             // sizes that would be a download rather than a lookup.
             max_catalog_metadata_bytes: ByteSize::mib(256),
-            // A HATS partition runs to gigabytes, so this is already a substantial read, and
-            // the plan route is what a caller uses for a region larger than it — fanning the
-            // same partitions out as separate requests, with their own concurrency and their
-            // own retries.
-            max_partitions: 16,
+            // A cone of a few degrees over a deep catalog, or a crossmatch side of that size.
+            // A partition runs to gigabytes, but a query projects a few columns of it and
+            // prunes row groups by the covering, so this bounds the fan-out rather than the
+            // bytes — `max_bytes_fetched` and the clock are what bound those. Wider than this
+            // is the plan route's, fanning the partitions out as separate requests.
+            max_partitions: 128,
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             // Room for a real aggregate — a `GROUP BY` over a few million distinct values,

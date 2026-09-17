@@ -161,7 +161,7 @@ max_catalog_metadata_bytes = "256MiB"
 # Only the partition count is checked before anything is read, so it is the one that
 # actually bounds the work; the other two are counters watched as partitions land, and a
 # request overshoots them by whatever the reads already in flight go on to fetch.
-max_partitions = 16
+max_partitions = 128
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 

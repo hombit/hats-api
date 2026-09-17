@@ -22,10 +22,7 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, Fields, Schema, SchemaRef};
 use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::{Column, DFSchema, DataFusionError, Result as DfResult, ScalarValue};
-use datafusion::datasource::listing::{
-    ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
-};
-use datafusion::execution::context::ExecutionProps;
+use datafusion::execution::context::{ExecutionProps, SessionState};
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
 use datafusion::physical_expr::create_physical_expr;
@@ -36,6 +33,7 @@ use datafusion::prelude::SessionContext;
 use crate::access::data::DataFiles;
 use crate::error::ApiError;
 use crate::hats::partitions::COMMON_METADATA;
+use crate::hats::scan::{CatalogScanExec, PartitionScan};
 use crate::hats::{Catalog, HatsPartition};
 use crate::sky::geometry;
 use crate::storage::RemoteDir;
@@ -43,18 +41,23 @@ use crate::storage::RemoteDir;
 /// What one catalog table may spend.
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// How many partitions one scan may read, checked against the list that survived pruning.
+    /// How many partitions one scan may open.
     ///
-    /// The bound that acts before any work: the memory pool bounds memory and the clock bounds
-    /// time, and neither refuses `SELECT COUNT(*)` over twelve thousand partitions before it
-    /// starts. A refusal rather than a work list, this route having no plan to answer with.
+    /// Counted as they are opened rather than against the list pruning left, which is what lets
+    /// `SELECT TOP 1000 …` over a whole catalog through: it opens a partition or two and stops.
+    /// A statement that keeps pulling is refused on opening one more than this — after that
+    /// much work rather than before any, which is the price of not enumerating a catalog to
+    /// find out. A refusal rather than a work list, this route having no plan to answer with.
     pub max_partitions: usize,
+    /// How many partitions are read at once.
+    pub max_concurrent_partitions: usize,
     pub max_metadata_bytes: u64,
 }
 
 /// One catalog, ready to be named in a statement.
 pub struct HatsTable {
-    catalog: Catalog,
+    /// Shared with every scan planned against it, a scan reading partitions after planning ends.
+    catalog: Arc<Catalog>,
     data: DataFiles,
     schema: SchemaRef,
     /// The index column the partitions are pruned on, where the catalog's files have one.
@@ -105,7 +108,7 @@ impl HatsTable {
             None => schema,
         };
         Ok(Self {
-            catalog,
+            catalog: Arc::new(catalog),
             data,
             schema,
             index,
@@ -226,81 +229,34 @@ impl TableProvider for HatsTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let reached = self.reached(filters)?;
-        // **A pushed-down limit does not excuse this bound, although it bounds the reading.**
-        // Everything below is per chosen partition before a row is read: a directory-
-        // partitioned catalog is listed one partition at a time, and `ListingTable` asks
-        // after every path it is given. So `SELECT TOP 10 …` over a catalog of twelve
-        // thousand partitions is twelve thousand requests to build a plan that then reads
-        // one file. `hats::query` lets a limit through for the opposite reason — it walks
-        // the partitions itself and stops — and that is not a shape a `TableProvider` hands
-        // back.
-        if reached.len() > self.limits.max_partitions {
-            return Err(DataFusionError::Plan(format!(
-                "this query reaches {} partitions of {}; this server reads at most {} in one \
-                 request. Narrow it with a region, or read the partitions one at a time through \
-                 the hats plan route",
-                reached.len(),
-                self.catalog.dir().url,
-                self.limits.max_partitions
-            )));
-        }
-        // Resolved after pruning, so a catalog whose partitions are directories lists only the
-        // ones that survived rather than all of them.
-        let mut paths = Vec::new();
-        for cell in &reached {
-            let partitioned = self
-                .catalog
-                .partition(cell)
-                .map_err(|error| DataFusionError::Plan(error.to_string()))?;
-            for file in partitioned
-                .files(&self.data)
-                .await
-                .map_err(|error| DataFusionError::Plan(error.to_string()))?
-            {
-                paths.push(
-                    ListingTableUrl::parse(file.url.as_str())
-                        .map_err(|error| DataFusionError::Plan(error.to_string()))?,
-                );
-            }
-        }
-        // A scan of nothing still has to have the table's schema, which is what a caller reads
-        // the columns of an empty answer from.
-        //
-        // **Projected, like any other scan's.** What sits above this is a projection whose
-        // columns carry indices into what the scan returns, so a plan handed the whole
-        // schema here resolves every one of them against the wrong field: `SELECT ra` comes
-        // back as an assertion naming whichever column is first. It is the ordinary answer
-        // for a region outside a catalog's coverage, and it was right only when the column
-        // asked for happened to be the one the catalog starts with.
-        if paths.is_empty() {
-            let schema = match projection {
-                Some(indices) => Arc::new(self.schema.project(indices)?),
-                None => Arc::clone(&self.schema),
-            };
-            return Ok(Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
-                schema,
-            )));
-        }
-        // Everything about reading parquet is `ListingTable`'s: the row-group pruning the
-        // covering drives, the projection, the limit. What this module decides is which files
-        // it is given.
-        let options = ListingOptions::new(Arc::new(
-            datafusion::datasource::file_format::parquet::ParquetFormat::default(),
-        ))
-        // A partition's name ends in `.parquet` for most catalogs and in nothing recognisable
-        // for some, `hats_npix_suffix` being the catalog's to choose. The files here were
-        // chosen by this crate rather than found by a glob, so the extension has nothing left
-        // to decide.
-        .with_file_extension("");
-        let config = ListingTableConfig::new_with_multi_paths(paths)
-            .with_listing_options(options)
-            // The catalog's own schema rather than one inferred from the files this scan
-            // happens to read, so two queries over the same catalog agree about its columns
-            // whichever partitions each of them reached.
-            .with_schema(Arc::clone(&self.schema));
-        let table = ListingTable::try_new(config)?;
-        table.scan(state, projection, filters, limit).await
+        // Pruning reads nothing — a partition's span is its cell — so choosing among twelve
+        // thousand is arithmetic. Nothing past that is done here: which files a partition holds
+        // and what is in them is `CatalogScanExec`'s to learn, one partition at a time and only
+        // for those a statement actually pulls.
+        let partitions = self.reached(filters)?;
+        // The planning session, which each partition's own scan is planned in too. It is the
+        // only `Session` DataFusion builds, so anything else reaching here is a context this
+        // table was never registered in.
+        let state = state
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Internal("a catalog is scanned in a SessionState".to_owned())
+            })?
+            .clone();
+        let exec = CatalogScanExec::new(PartitionScan {
+            catalog: Arc::clone(&self.catalog),
+            data: self.data.clone(),
+            table_schema: Arc::clone(&self.schema),
+            partitions,
+            projection: projection.cloned(),
+            filters: filters.to_vec(),
+            limit,
+            max_partitions: self.limits.max_partitions,
+            concurrency: self.limits.max_concurrent_partitions,
+            state,
+        })?;
+        Ok(Arc::new(exec))
     }
 }
 

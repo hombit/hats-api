@@ -80,6 +80,7 @@ impl From<&crate::config::LimitsConfig> for Limits {
             sql: config.into(),
             catalog: hats::table::Limits {
                 max_partitions: config.max_partitions,
+                max_concurrent_partitions: config.max_concurrent_partitions,
                 max_metadata_bytes: config.max_catalog_metadata_bytes.as_u64(),
             },
         }
@@ -352,10 +353,18 @@ fn context(limits: Limits) -> Result<SessionContext, ApiError> {
     // `reproducible` is the scan's ordering knob, and a statement makes no promise about the
     // order of its rows unless it carries an `ORDER BY`, which the planner answers. So the
     // faster read: a partition that finishes early helps a slow sibling.
-    Ok(SessionContext::new_with_config_rt(
-        session_config(false),
-        runtime,
-    ))
+    let mut config = session_config(false);
+    // **No round-robin repartition above a scan.** A catalog is read lazily, one partition
+    // after another as rows are pulled, and a `RepartitionExec` between the scan and a filter
+    // drains its input in a task of its own — so `TOP 10 … WHERE mag < 10` read on through the
+    // catalog and was refused at the partition bound, where it wanted one partition. The
+    // reading stays parallel inside the scan; what runs on one thread is the filter over rows
+    // already read.
+    config
+        .options_mut()
+        .optimizer
+        .enable_round_robin_repartition = false;
+    Ok(SessionContext::new_with_config_rt(config, runtime))
 }
 
 /// Rewrite the names a caller wrote into the names their files actually use.

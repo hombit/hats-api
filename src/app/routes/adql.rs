@@ -630,31 +630,50 @@ mod tests {
         assert!(body.contains("partitions"), "{body}");
     }
 
-    /// **A `TOP` does not excuse that bound here**, although it bounds the reading: every
-    /// chosen partition is asked about before a row is read, so a limited scan over a
-    /// catalog of twelve thousand is twelve thousand requests to build a plan that then
-    /// opens one file. The `hats` routes let a limit through because they walk the
-    /// partitions themselves and stop, which is not a shape a `TableProvider` hands back.
+    /// **The partition bound counts partitions opened, so a `TOP` the first partition can
+    /// fill is answered** over a catalog with more partitions than are allowed — and one that
+    /// needs a second partition is refused on reaching it, never answered short.
+    ///
+    /// Both halves run with one partition allowed. The first shows the scan is lazy: an eager
+    /// one would have refused before reading. The second shows the count still binds: a lazy
+    /// one without it would have read on and answered.
     #[tokio::test]
-    async fn a_limit_does_not_excuse_the_partition_bound() {
+    async fn a_limit_is_answered_from_the_partitions_it_needs() {
         let dir = hats::query::tests::fixture(true);
         let limits = LimitsConfig {
             max_partitions: 1,
             ..LimitsConfig::default()
         };
-        let mut service = mounted(dir.path(), &ApiConfig::default());
-        service.adql_limits = (&limits).into();
-        let (status, body) = post_json(
-            service,
-            "/api/v1/adql",
-            serde_json::json!({
-                "query": "SELECT TOP 3 id FROM c",
-                "tables": {"c": {"type": "hats", "url": "file:///"}},
-            }),
-        )
-        .await;
+        let ask = async |query: &str| {
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await
+        };
+
+        let (status, body) = ask("SELECT TOP 1 id FROM c").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 1, "{body}");
+        // What the partitions' own scans fetched, which a scan planned while this one runs has
+        // to report itself or the answer says nothing was read.
+        assert!(answer["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
+
+        // More rows than any one partition of the fixture holds, so it needs a second.
+        let (status, body) = ask("SELECT TOP 100000 id FROM c").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(body.contains("partitions"), "{body}");
+
+        // The same when the limit reaches the scan only as a filter that stops pulling.
+        let (status, body) = ask("SELECT TOP 1 id FROM c WHERE id >= 0").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
     }
 
     /// **That the pruning has teeth**, which the tests above cannot show: they would pass
