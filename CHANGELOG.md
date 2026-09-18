@@ -9,9 +9,11 @@ Release dates are in the UTC time zone.
 ### Added
 
 - `UPLOAD` on `/tap/sync`, naming a HATS catalog or parquet file by url, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`.
+- A date or timestamp column is answered in `votable`, as `xtype="timestamp"`, and published in `TAP_SCHEMA.columns` and `/tap/tables`.
 
 ### Changed
 
+- A date or timestamp column in `csv` and `tsv` is written in UTC in DALI's form, instead of carrying the column's own UTC offset.
 - A catalog's `limit=0` answers from `dataset/_common_metadata` where it has one, instead of
   opening a partition to describe zero rows of it.
 - A plan for `limit=0` lists no partitions, instead of one entry per partition a region reached.

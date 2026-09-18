@@ -22,6 +22,11 @@
 //! - **An integer type only ever widens.** VOTable's integers are signed and its only
 //!   8-bit type is unsigned, so `Int8` goes out as `short`; `UInt64` has nothing wide
 //!   enough to hold it and is refused rather than wrapped.
+//! - **An instant is text with an `xtype`, in UTC.** DALI §3.3.3 spells a date or a time
+//!   `YYYY-MM-DD['T'hh:mm:ss[.SSS]]` and marks the `FIELD` `xtype="timestamp"`, which is
+//!   what tells a client the characters are an instant rather than a string. A zone other
+//!   than UTC has no spelling there at all, so a column carrying one is moved to UTC and
+//!   written with the `Z` the section allows a civil time.
 //!
 //! One thing the format itself cannot say, and no writing of it can fix: an empty `TD` is
 //! the only spelling a null has, and in a character column a reader cannot tell that from
@@ -36,9 +41,11 @@ use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Float16Type, Float32Type, Float64Type, Int8Type,
     Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
 };
+use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::instant;
 
 /// The media type IVOA registers for a VOTable document.
 pub const CONTENT_TYPE: &str = "application/x-votable+xml";
@@ -80,16 +87,19 @@ fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
     // statement can select one twice. The second one keeps its name and goes without.
     let mut identified = Vec::new();
     for field in result.schema.fields() {
-        let (datatype, arraysize) = spelling(field)?;
+        let spelled = spelling(field)?;
         let name = attribute(field.name())?;
         let _ = write!(out, "<FIELD name=\"{name}\"");
         if is_xml_name(field.name()) && !identified.contains(&field.name()) {
             identified.push(field.name());
             let _ = write!(out, " ID=\"{name}\"");
         }
-        let _ = write!(out, " datatype=\"{datatype}\"");
-        if let Some(size) = arraysize {
+        let _ = write!(out, " datatype=\"{}\"", spelled.datatype);
+        if let Some(size) = spelled.arraysize {
             let _ = write!(out, " arraysize=\"{size}\"");
+        }
+        if let Some(xtype) = spelled.xtype {
+            let _ = write!(out, " xtype=\"{xtype}\"");
         }
         out.push_str("/>\n");
     }
@@ -155,15 +165,47 @@ fn is_xml_name(value: &str) -> bool {
     leads && characters.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// What a column is declared as: the `datatype`, and the `arraysize` where it needs one.
+/// How a column is declared: its `datatype`, the `arraysize` where the value has no fixed
+/// width, and the `xtype` where DALI gives what the characters mean a name of its own.
+///
+/// Public because `TAP_SCHEMA.columns` and VOSI's table metadata publish the same three
+/// about the same columns. A document that said one thing there and this wrote another
+/// would be a client building a query against a type the answer does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spelling {
+    pub datatype: &'static str,
+    pub arraysize: Option<&'static str>,
+    pub xtype: Option<&'static str>,
+}
+
+impl Spelling {
+    /// A value of the given width, meaning whatever its characters say.
+    const fn plain(datatype: &'static str, arraysize: Option<&'static str>) -> Self {
+        Self {
+            datatype,
+            arraysize,
+            xtype: None,
+        }
+    }
+
+    /// A date or a time, which DALI §3.3.3 writes as characters and marks.
+    const fn instant(arraysize: Option<&'static str>) -> Self {
+        Self {
+            datatype: "char",
+            arraysize,
+            xtype: Some(TIMESTAMP),
+        }
+    }
+}
+
+/// DALI §3.3.3's name for an instant, which is the one `xtype` this service writes.
+pub const TIMESTAMP: &str = "timestamp";
+
+/// What a column is declared as.
 ///
 /// This is the one list of what can be written, and `writer` covers what it admits. A
 /// type reaching neither is refused here, before a byte of the document exists.
-///
-/// Public because `TAP_SCHEMA.columns` and VOSI's table metadata publish the same pair
-/// about the same columns. A document that said one thing there and this wrote another
-/// would be a client building a query against a type the answer does not have.
-pub fn spelling(field: &Field) -> Result<(&'static str, Option<&'static str>), ApiError> {
+pub fn spelling(field: &Field) -> Result<Spelling, ApiError> {
     let datatype = match field.data_type() {
         DataType::Boolean => "boolean",
         // The only 8-bit integer VOTable has is unsigned, so a signed byte has to widen.
@@ -179,8 +221,19 @@ pub fn spelling(field: &Field) -> Result<(&'static str, Option<&'static str>), A
         // column holding anything else would be a document that does not say what it
         // holds. `unicodeChar` is right for every string a parquet file can carry.
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View => {
-            return Ok(("unicodeChar", Some("*")));
+            return Ok(Spelling::plain("unicodeChar", Some("*")));
         }
+        // `char` and not `unicodeChar`: DALI's form is digits, hyphens, a `T`, a dot and a
+        // `Z`, all of which are ASCII, and §3.3.3 names the datatype outright.
+        //
+        // The widths are that section's own. A date alone is ten characters and it says so
+        // in as many words; anything that may carry a time is written `*`, since how many
+        // digits of a second a column holds is a property of its values rather than of its
+        // type.
+        DataType::Timestamp(_, _) | DataType::Date64 => {
+            return Ok(Spelling::instant(Some("*")));
+        }
+        DataType::Date32 => return Ok(Spelling::instant(Some("10"))),
         nested @ (DataType::Struct(_)
         | DataType::List(_)
         | DataType::LargeList(_)
@@ -202,7 +255,7 @@ pub fn spelling(field: &Field) -> Result<(&'static str, Option<&'static str>), A
             )));
         }
     };
-    Ok((datatype, None))
+    Ok(Spelling::plain(datatype, None))
 }
 
 /// Appends one row's value to the document. The row is already known not to be null.
@@ -276,6 +329,7 @@ fn writer(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
             let array = array.as_string_view();
             Box::new(move |row, out| push_text(array.value(row), out))
         }
+        DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64 => instants(array)?,
         other => {
             return Err(ApiError::internal(format!(
                 "a {other} column reached the VOTable writer"
@@ -283,6 +337,40 @@ fn writer(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
         }
     };
     Ok(push)
+}
+
+/// DALI §3.3.3's form, as the formats arrow picks between. The strings are
+/// [`crate::output::instant`]'s, the delimited writers owing the same form.
+const INSTANT: FormatOptions<'static> = FormatOptions::new()
+    .with_date_format(Some(instant::DATE))
+    .with_datetime_format(Some(instant::DATE_TIME))
+    .with_timestamp_format(Some(instant::DATE_TIME))
+    .with_timestamp_tz_format(Some(instant::ZONED));
+
+/// One instant column, as the text DALI gives it.
+///
+/// The whole column is written up front rather than a cell at a time: a formatter is made
+/// by downcasting the array, which is a thing to do once per column and not once per row.
+fn instants(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
+    let utc = instant::utc(array);
+    let written = {
+        let formatter = ArrayFormatter::try_new(utc.as_ref(), &INSTANT).map_err(|error| {
+            ApiError::internal(format!("an instant column could not be written: {error}"))
+        })?;
+        (0..utc.len())
+            .map(|row| formatter.value(row).to_string())
+            .collect::<Vec<_>>()
+    };
+    Ok(Box::new(move |row, out| {
+        // The row is the batch's own and the text was written from that batch's column, so
+        // this is in range. Asked rather than indexed because the alternative to a refusal
+        // here is a panic in a response handler.
+        let value = written
+            .get(row)
+            .ok_or_else(|| ApiError::internal("an instant column ran out of rows"))?;
+        out.push_str(value);
+        Ok(())
+    }))
 }
 
 fn integer<T>(array: &ArrayRef) -> Push<'_>
@@ -388,8 +476,9 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::array::{
-        ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int64Array, ListArray,
-        StringArray, UInt64Array,
+        ArrayRef, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array, Int8Array,
+        Int64Array, ListArray, StringArray, TimestampMillisecondArray, TimestampNanosecondArray,
+        TimestampSecondArray, UInt64Array,
     };
     use datafusion::arrow::datatypes::{Field, Fields, Schema};
 
@@ -544,6 +633,72 @@ mod tests {
             document.contains("<FIELD name=\"mag\" ID=\"mag\" datatype=\"float\"/>"),
             "{document}"
         );
+    }
+
+    /// DALI §3.3.3: characters in the FITS and STC convention, marked with an `xtype` so a
+    /// client reads them as an instant. The fraction is the value's own, so a column
+    /// resolved to the second comes out as that section's own example.
+    #[test]
+    fn an_instant_is_characters_with_an_xtype() {
+        // 2020-01-02T03:04:05Z.
+        let seconds = TimestampSecondArray::from(vec![Some(1_577_934_245_i64), None]);
+        let document = encode(&one("observed", Arc::new(seconds))).unwrap();
+        assert!(
+            document.contains(
+                "<FIELD name=\"observed\" ID=\"observed\" datatype=\"char\" \
+                 arraysize=\"*\" xtype=\"timestamp\"/>"
+            ),
+            "{document}"
+        );
+        assert_eq!(cells(&document), ["2020-01-02T03:04:05", "<TD/>"]);
+
+        let nanos = TimestampNanosecondArray::from(vec![1_577_934_245_123_456_789_i64]);
+        assert_eq!(
+            cells(&encode(&one("observed", Arc::new(nanos))).unwrap()),
+            ["2020-01-02T03:04:05.123456789"]
+        );
+
+        // How many digits a fraction gets is the value's, not the column's: a half second
+        // is three of them whatever resolution the column is stored at.
+        let millis = TimestampMillisecondArray::from(vec![1_577_934_245_500_i64]);
+        assert_eq!(
+            cells(&encode(&one("observed", Arc::new(millis))).unwrap()),
+            ["2020-01-02T03:04:05.500"]
+        );
+    }
+
+    /// The same instant, in a column whose type names a zone two hours ahead. Printed in
+    /// that zone it would read `05:04:05`, which is the hour the value is not: DALI has no
+    /// form for a zone other than UTC, so the column is moved before it is written.
+    #[test]
+    fn a_zoned_instant_is_written_in_utc() {
+        let values =
+            TimestampSecondArray::from(vec![1_577_934_245_i64]).with_timezone("+02:00".to_owned());
+        let document = encode(&one("observed", Arc::new(values))).unwrap();
+        assert_eq!(cells(&document), ["2020-01-02T03:04:05Z"]);
+        assert!(document.contains("xtype=\"timestamp\""), "{document}");
+    }
+
+    /// A column that is a date carries no time and says so in its width, which is the one
+    /// `arraysize` DALI §3.3.3 names outright.
+    #[test]
+    fn a_date_is_ten_characters() {
+        let document = encode(&one("day", Arc::new(Date32Array::from(vec![18_263])))).unwrap();
+        assert!(
+            document.contains("arraysize=\"10\" xtype=\"timestamp\""),
+            "{document}"
+        );
+        assert_eq!(cells(&document), ["2020-01-02"]);
+
+        // The 64-bit spelling holds milliseconds, so what it can carry is a time and its
+        // width is the open one.
+        let ms = Date64Array::from(vec![1_577_923_200_000_i64]);
+        let document = encode(&one("day", Arc::new(ms))).unwrap();
+        assert!(
+            document.contains("arraysize=\"*\" xtype=\"timestamp\""),
+            "{document}"
+        );
+        assert_eq!(cells(&document), ["2020-01-02T00:00:00"]);
     }
 
     /// `true` and `false` are not among the forms the standard lists for a boolean.
