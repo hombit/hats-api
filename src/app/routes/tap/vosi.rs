@@ -333,9 +333,18 @@ fn push_column(out: &mut String, column: &crate::tap::metadata::ColumnMetadata) 
     let arraysize = column
         .arraysize
         .map_or_else(String::new, |size| format!(" arraysize=\"{size}\""));
+    // **VODataService has no `xtype` attribute, in any version.** What carries a DALI
+    // xtype here is `extendedType`, whose 1.2 wording is that its value "will usually be a
+    // VOTable xtype as defined by DALI" — with `extendedSchema` left off, which is what
+    // says the value is read that way rather than against a scheme of somebody's own. So
+    // the same fact is `xtype` in `TAP_SCHEMA` and `extendedType` in this document, which
+    // reads like a mistake and is the spelling each standard asks for.
+    let extended = column
+        .xtype
+        .map_or_else(String::new, |xtype| format!(" extendedType=\"{xtype}\""));
     let _ = writeln!(
         out,
-        "<dataType xsi:type=\"vod:VOTableType\"{arraysize}>{}</dataType>",
+        "<dataType xsi:type=\"vod:VOTableType\"{arraysize}{extended}>{}</dataType>",
         column.datatype
     );
     // VODataService's own words for the two: `indexed` says a constraint on this column
@@ -388,16 +397,30 @@ mod tests {
             schema: "sky".to_owned(),
             qualified: "sky.objects".to_owned(),
             description: Some("Objects & their positions".to_owned()),
-            columns: vec![ColumnMetadata {
-                name: "ra".to_owned(),
-                datatype: "double",
-                arraysize: None,
-                unit: Some("deg"),
-                ucd: Some("pos.eq.ra;meta.main"),
-                indexed: true,
-                principal: true,
-                std: false,
-            }],
+            columns: vec![
+                ColumnMetadata {
+                    name: "ra".to_owned(),
+                    datatype: "double",
+                    arraysize: None,
+                    xtype: None,
+                    unit: Some("deg"),
+                    ucd: Some("pos.eq.ra;meta.main"),
+                    indexed: true,
+                    principal: true,
+                    std: false,
+                },
+                ColumnMetadata {
+                    name: "observed".to_owned(),
+                    datatype: "char",
+                    arraysize: Some("*"),
+                    xtype: Some(crate::output::votable::TIMESTAMP),
+                    unit: None,
+                    ucd: None,
+                    indexed: false,
+                    principal: true,
+                    std: false,
+                },
+            ],
             keys: vec![crate::tap::metadata::ForeignKey {
                 id: "k".to_owned(),
                 target_table: "sky.fields".to_owned(),
@@ -418,6 +441,16 @@ mod tests {
             "{out}"
         );
         assert!(out.contains("<flag>indexed</flag>"), "{out}");
+        // VODataService has no `xtype` attribute in any version; what carries a DALI xtype
+        // is `extendedType`, with no `extendedSchema` beside it to send a reader elsewhere.
+        assert!(
+            out.contains(
+                "<dataType xsi:type=\"vod:VOTableType\" arraysize=\"*\" \
+                 extendedType=\"timestamp\">char</dataType>"
+            ),
+            "{out}"
+        );
+        assert!(!out.contains("extendedSchema"), "{out}");
         // A description out of a catalog is markup until it is escaped.
         assert!(out.contains("Objects &amp; their positions"), "{out}");
         // The keys, which `TAP_SCHEMA.keys` reads out of the same list — a validator

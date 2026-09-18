@@ -146,6 +146,8 @@ pub fn self_description() -> Vec<TableMetadata> {
                         name: (*name).to_owned(),
                         datatype,
                         arraysize,
+                        // Text and whole numbers, both of which mean what they say.
+                        xtype: None,
                         unit: None,
                         ucd: None,
                         indexed: false,
@@ -293,7 +295,7 @@ fn columns(described: &[TableMetadata]) -> Vec<Row> {
                         Some(column.name.clone()),
                         Some(column.datatype.to_owned()),
                         column.arraysize.map(str::to_owned),
-                        None,
+                        column.xtype.map(str::to_owned),
                         None,
                         None,
                         None,
@@ -389,6 +391,7 @@ mod tests {
                     name: "ra".to_owned(),
                     datatype: "double",
                     arraysize: None,
+                    xtype: None,
                     unit: Some("deg"),
                     ucd: Some("pos.eq.ra;meta.main"),
                     indexed: true,
@@ -399,6 +402,18 @@ mod tests {
                     name: "band".to_owned(),
                     datatype: "unicodeChar",
                     arraysize: Some("*"),
+                    xtype: None,
+                    unit: None,
+                    ucd: None,
+                    indexed: false,
+                    principal: true,
+                    std: false,
+                },
+                ColumnMetadata {
+                    name: "observed".to_owned(),
+                    datatype: "char",
+                    arraysize: Some("*"),
+                    xtype: Some(crate::output::votable::TIMESTAMP),
                     unit: None,
                     ucd: None,
                     indexed: false,
@@ -505,6 +520,29 @@ mod tests {
         for table in ["keys", "key_columns"] {
             assert!(provider(table, &published()).is_ok(), "{table}");
         }
+    }
+
+    /// What DALI calls an instant is `xtype` here and `extendedType` in VOSI's document,
+    /// and a client reads one of the two before it decides how to parse a column.
+    #[test]
+    fn an_instant_column_publishes_its_xtype() {
+        let batch = rows_of("columns", &published()).unwrap();
+        let by_name = text(&batch, "column_name")
+            .into_iter()
+            .zip(text(&batch, "xtype"))
+            .collect::<Vec<_>>();
+        assert!(
+            by_name.contains(&(
+                "observed".to_owned(),
+                crate::output::votable::TIMESTAMP.to_owned()
+            )),
+            "{by_name:?}"
+        );
+        // And nothing else claims to be one: a null is what an ordinary column carries.
+        assert!(
+            by_name.contains(&("ra".to_owned(), String::new())),
+            "{by_name:?}"
+        );
     }
 
     /// A name ADQL cannot write bare carries its quotes, which is what a client copies.

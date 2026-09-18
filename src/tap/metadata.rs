@@ -54,6 +54,9 @@ pub struct ColumnMetadata {
     pub datatype: &'static str,
     /// `"*"` for a value of no fixed length — a string, or one row's whole array.
     pub arraysize: Option<&'static str>,
+    /// What the characters of a value mean where DALI names it, which here is an instant.
+    /// Both documents carry it, under the two names their own standards give it.
+    pub xtype: Option<&'static str>,
     pub unit: Option<&'static str>,
     pub ucd: Option<&'static str>,
     /// Whether a constraint on this column makes a query read less. Here that is the two
@@ -126,11 +129,12 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
         return inner
             .iter()
             .filter_map(|leaf| {
-                let (datatype, arraysize) = element(leaf)?;
+                let spelled = element(leaf)?;
                 Some(ColumnMetadata {
                     name: names::as_written(&format!("{}.{}", field.name(), leaf.name())),
-                    datatype,
-                    arraysize,
+                    datatype: spelled.datatype,
+                    arraysize: spelled.arraysize,
+                    xtype: spelled.xtype,
                     unit: None,
                     ucd: None,
                     indexed: false,
@@ -141,7 +145,7 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
             })
             .collect();
     }
-    let Some((datatype, arraysize)) = element(field) else {
+    let Some(spelled) = element(field) else {
         return Vec::new();
     };
     let name = field.name();
@@ -153,8 +157,9 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
     };
     vec![ColumnMetadata {
         name: names::as_written(name),
-        datatype,
-        arraysize,
+        datatype: spelled.datatype,
+        arraysize: spelled.arraysize,
+        xtype: spelled.xtype,
         unit,
         ucd,
         indexed: is(marks.ra) || is(marks.dec) || is(marks.healpix),
@@ -163,16 +168,24 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
     }]
 }
 
-/// A field's VOTable datatype and arraysize, reading through a list to what it holds.
+/// How a field is declared, reading through a list to what it holds.
 ///
 /// A list of scalars is one value of no fixed length, which VOTable spells as the
 /// element's own datatype with `arraysize="*"` — the same spelling a string gets, a string
 /// being an array of characters. A list of anything else has no spelling and is `None`.
-fn element(field: &Field) -> Option<(&'static str, Option<&'static str>)> {
+///
+/// **A list of instants is one of those.** An `xtype` says what the characters of one value
+/// are, and a run of them is not that value: a client reading `xtype="timestamp"` would
+/// parse the whole array as a single date and fail. The collision a string and a list of
+/// strings already have is survivable because neither claims to be anything but characters.
+fn element(field: &Field) -> Option<votable::Spelling> {
     match field.data_type() {
         DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
-            let (datatype, _) = votable::spelling(item).ok()?;
-            Some((datatype, Some("*")))
+            let spelled = votable::spelling(item).ok()?;
+            spelled.xtype.is_none().then_some(votable::Spelling {
+                arraysize: Some("*"),
+                ..spelled
+            })
         }
         _ => votable::spelling(field).ok(),
     }
@@ -182,7 +195,7 @@ fn element(field: &Field) -> Option<(&'static str, Option<&'static str>)> {
 mod tests {
     use std::sync::Arc;
 
-    use datafusion::arrow::datatypes::{Fields, Schema};
+    use datafusion::arrow::datatypes::{Fields, Schema, TimeUnit};
 
     use super::*;
 
@@ -303,6 +316,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["id"]
         );
+    }
+
+    /// A stamped row is published as an instant, so a client knows to parse the characters
+    /// as one — and an array of them is not published at all, an `xtype` being a claim
+    /// about one value.
+    #[test]
+    fn an_instant_carries_its_xtype_and_an_array_of_them_has_no_spelling() {
+        let columns = described(
+            vec![
+                Field::new(
+                    "observed",
+                    DataType::Timestamp(TimeUnit::Microsecond, None),
+                    true,
+                ),
+                Field::new("day", DataType::Date32, true),
+                Field::new(
+                    "epochs",
+                    DataType::List(Arc::new(Field::new(
+                        "element",
+                        DataType::Timestamp(TimeUnit::Second, None),
+                        true,
+                    ))),
+                    true,
+                ),
+            ],
+            Marks::default(),
+        );
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            ["observed", "day"]
+        );
+        assert_eq!(columns[0].datatype, "char");
+        assert_eq!(columns[0].arraysize, Some("*"));
+        assert_eq!(columns[0].xtype, Some(votable::TIMESTAMP));
+        // A date cannot carry a time, and its width says as much.
+        assert_eq!(columns[1].arraysize, Some("10"));
+        assert_eq!(columns[1].xtype, Some(votable::TIMESTAMP));
     }
 
     /// A string is an array of characters, which is the same spelling a list gets.

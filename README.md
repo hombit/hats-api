@@ -408,7 +408,8 @@ reads the original. It carries the values above as themselves.
 
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
 `-Inf` written as themselves. Flat columns only: selection of a nested column fails
-the request.
+the request. A date or a timestamp is written as `2020-01-02T03:04:05`, marked
+`xtype="timestamp"`, and a column carrying a time zone is written in UTC with a `Z`.
 
 **`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
 `-inf` written as those three, which `float()` in Python reads back. Flat columns only.
