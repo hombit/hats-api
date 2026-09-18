@@ -195,6 +195,28 @@ jobs:
         if: failure()
         run: docker logs rclone
 
+  # Coverage is reported, never enforced: a threshold needs a baseline nobody has
+  # measured yet, and a flaky Codecov upload should not be why a PR is red.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo llvm-cov
+        run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
+
+      - uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          fail_ci_if_error: false
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
