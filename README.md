@@ -742,6 +742,32 @@ Credentials sent this way travel in the query string of a `GET`, where a proxy o
 history may keep them; `POST` takes the same parameters in the body. This service logs the
 path of a request and never its query string.
 
+#### Which clients can send it
+
+`pyvo` passes extra parameters straight through, and a list becomes a repeated parameter:
+
+```python
+tap = pyvo.dal.TAPService("https://example.com/api/v1/tap")
+rows = tap.run_sync(
+    "SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine",
+    UPLOAD="mine,s3://bucket/gaia/hats",
+    UPLOAD_STORAGE_OPTION=[
+        "mine,endpoint,https://minio.example.com",
+        "mine,region,us-east-1",
+    ],
+).to_table()
+```
+
+`curl`, `requests` and anything else that writes its own request work the same way.
+
+TOPCAT's TAP window sends the parameters it knows, so a catalog reached this way arrives by
+one of two other routes: the operator publishes it as a [table](#publishing-catalogs), or you
+write the whole `/sync` URL and open it with *Load Table*, which reads the answer as a
+VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for these.
+
+Both of those clients upload a table by sending it, which is the part of `UPLOAD` still to
+come.
+
 ### Resources
 
 | | |
