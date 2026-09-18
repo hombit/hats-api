@@ -38,10 +38,9 @@
 //! this service's answer instead, and are not that.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use serde::Deserialize;
-use serde::de::{self, EnumAccess, SeqAccess, VariantAccess, Visitor};
+use serde::de::{self, Visitor};
 use url::Url;
 
 use crate::adql::names;
@@ -63,7 +62,8 @@ const TYPE: &str = "UPLOAD_TYPE";
 ///
 /// `<upload>,header,Authorization,Bearer …` sets one of them. What decides how many fields
 /// follow is the option's own name, which is how DALI reads a shape: `CIRCLE` takes three
-/// numbers and `RANGE` four, the leading word saying which.
+/// numbers and `RANGE` four, the leading word saying which. [`Setting`] is what reads it;
+/// this is the word a refusal names, a request having written it rather than `headers`.
 const HEADER: &str = "header";
 
 /// What a request uploaded, in the order the parameters named them.
@@ -97,55 +97,25 @@ pub(super) enum Kind {
 /// One setting of one upload's storage options, which its own name decides the shape of.
 ///
 /// The keyword-decides-arity rule DALI writes its shapes with: `header` names a header and
-/// then its value, and every other option is a name and the value itself. Both end in a
+/// then its value, and every other option is a name and the value itself. The option names
+/// are an open set, so [`dali::OTHER`] is what carries one this service has no field for —
+/// carried rather than dropped, since `StorageOptions` refuses it where it knows the backend
+/// and dropping it would leave a request that reads as anonymous. Both variants end in a
 /// [`Tail`], so whatever punctuation a credential carries arrives with it.
-#[derive(Debug)]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum Setting {
-    Header { header: String, value: Tail },
-    Named { option: String, value: Tail },
-}
-
-impl<'de> Deserialize<'de> for Setting {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct ByName;
-
-        impl<'de> Visitor<'de> for ByName {
-            type Value = Setting;
-
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(
-                    f,
-                    "an option and its value, or {HEADER} and a header's name and value"
-                )
-            }
-
-            /// The option's name is read first, and it says what follows. A name this
-            /// service has no field for is carried anyway: `StorageOptions` refuses it where
-            /// it knows the backend, and dropping it here would leave a request that reads
-            /// as anonymous.
-            fn visit_enum<A>(self, data: A) -> Result<Setting, A::Error>
-            where
-                A: EnumAccess<'de>,
-            {
-                let (option, rest): (String, _) = data.variant()?;
-                match option.eq_ignore_ascii_case(HEADER) {
-                    true => {
-                        let (header, value) = rest.tuple_variant(2, TwoFields)?;
-                        Ok(Setting::Header { header, value })
-                    }
-                    false => Ok(Setting::Named {
-                        option: option.to_ascii_lowercase(),
-                        value: rest.newtype_variant()?,
-                    }),
-                }
-            }
-        }
-
-        deserializer.deserialize_enum("Setting", &[HEADER], ByName)
-    }
+    Header {
+        header: String,
+        value: Tail,
+    },
+    // `dali::OTHER`, which an attribute cannot be written with;
+    // `the_catch_all_is_the_one_dali_declares` is what holds the two spellings together.
+    #[serde(rename = "$dali::other")]
+    Named {
+        option: String,
+        value: Tail,
+    },
 }
 
 /// One upload's storage options as the request wrote them: names, and text or headers.
@@ -157,16 +127,16 @@ impl<'de> Deserialize<'de> for Setting {
 #[derive(Debug, Default)]
 struct Declared(Vec<(String, Field)>);
 
-/// One option's value, as the type its field takes.
+/// One option's value, as the request wrote it.
 ///
-/// A query string carries text and nothing else, so what a value's type is has to come from
-/// the option: [`storage::is_flag`] answers that from the same registry the rest of the
-/// storage code reads, rather than from what the text happens to look like. Guessing instead
-/// makes `region,true` a boolean and then a refusal about a string field.
+/// A query string carries text and nothing else, and which type an option takes is
+/// `StorageOptions`'s own field to say: `serde` reads a struct's own field with that field's
+/// type even where the struct has a flattened group, so the field asks for what it holds and
+/// this answers from the text. Deciding from what the text looks like instead is what would
+/// make `region,true` a boolean and then a refusal about a string field.
 #[derive(Debug)]
 enum Field {
     Text(String),
-    Flag(bool),
     Headers(BTreeMap<String, String>),
 }
 
@@ -189,13 +159,10 @@ impl Declared {
                     ),
                 }
             }
-            Setting::Named { option, value } => {
-                let field = match storage::is_flag(&option) {
-                    true => Field::Flag(flag(&value)?),
-                    false => Field::Text(value.into_string()),
-                };
-                (option, field)
-            }
+            Setting::Named { option, value } => (
+                option.to_ascii_lowercase(),
+                Field::Text(value.into_string()),
+            ),
         };
         if self.0.iter().any(|(name, _)| *name == option) {
             return Err(option);
@@ -210,17 +177,6 @@ impl Declared {
     }
 }
 
-/// A switch's value, which is the one thing a query string cannot say by its type.
-fn flag(value: &Tail) -> Result<bool, String> {
-    match value.as_str() {
-        text if text.eq_ignore_ascii_case("true") => Ok(true),
-        text if text.eq_ignore_ascii_case("false") => Ok(false),
-        other => Err(format!(
-            "{other:?}, which is a switch and takes true or false"
-        )),
-    }
-}
-
 impl<'de> de::IntoDeserializer<'de, de::value::Error> for Field {
     type Deserializer = Self;
 
@@ -232,18 +188,39 @@ impl<'de> de::IntoDeserializer<'de, de::value::Error> for Field {
 impl<'de> serde::Deserializer<'de> for Field {
     type Error = de::value::Error;
 
-    /// Every field knows what it is, so the one method is enough: `StorageOptions` flattens
-    /// its groups, and a flattened struct reads its values through this.
+    /// What a backend's own group holds, which is text or the headers map: a flattened group
+    /// is buffered before its struct sees it, so its fields ask the value what it is rather
+    /// than what they take.
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>,
     {
         match self {
             Self::Text(text) => visitor.visit_string(text),
-            Self::Flag(flag) => visitor.visit_bool(flag),
             Self::Headers(headers) => {
                 visitor.visit_map(de::value::MapDeserializer::new(headers.into_iter()))
             }
+        }
+    }
+
+    /// A switch, which is `allow_http` and nothing else today.
+    ///
+    /// Reached because a field of `StorageOptions` itself is read as the type it holds — only
+    /// the keys that belong to a flattened group are buffered — so the text is parsed for the
+    /// field that says it wants a bool, and no list here says which option that is. An option
+    /// added to a *group* as a switch would not reach this, which is what
+    /// `every_storage_option_is_set_from_text` is for.
+    fn deserialize_bool<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Self::Text(text) if text.eq_ignore_ascii_case("true") => visitor.visit_bool(true),
+            Self::Text(text) if text.eq_ignore_ascii_case("false") => visitor.visit_bool(false),
+            Self::Text(text) => Err(de::Error::custom(format!(
+                "{text:?}, which is a switch and takes true or false"
+            ))),
+            headers => serde::Deserializer::deserialize_any(headers, visitor),
         }
     }
 
@@ -257,33 +234,9 @@ impl<'de> serde::Deserializer<'de> for Field {
     }
 
     serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
         unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
         identifier ignored_any
-    }
-}
-
-/// A header's name and then its value, which is what `header` takes.
-struct TwoFields;
-
-impl<'de> Visitor<'de> for TwoFields {
-    type Value = (String, Tail);
-
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("a header's name and its value")
-    }
-
-    fn visit_seq<A>(self, mut fields: A) -> Result<(String, Tail), A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let header = fields
-            .next_element::<String>()?
-            .ok_or_else(|| de::Error::custom(format!("{HEADER} takes a name and then a value")))?;
-        let value = fields
-            .next_element::<Tail>()?
-            .ok_or_else(|| de::Error::custom(format!("{HEADER} {header} takes a value")))?;
-        Ok((header, value))
     }
 }
 
@@ -533,9 +486,9 @@ mod tests {
 
     /// **What an option's value means is the option's to say, never the text's.** A query
     /// string carries text and `allow_http` is the one switch among them, so the type comes
-    /// from `storage::is_flag` — read from the value instead, a region spelled `true` would
-    /// be a boolean handed to a string field, and a switch spelled `yes` would be silently
-    /// false.
+    /// from the field `StorageOptions` declares — read from the value instead, a region
+    /// spelled `true` would be a boolean handed to a string field, and a switch spelled `yes`
+    /// would be silently false.
     #[test]
     fn a_values_type_comes_from_the_option_it_sets() {
         let uploads = read(
@@ -550,6 +503,39 @@ mod tests {
 
         let refused = read(&["a,s3://bucket/a/hats"], &[], &["a,allow_http,yes"]).unwrap_err();
         assert!(refused.contains("true or false"), "{refused}");
+    }
+
+    /// Every option a body can set is reachable from a query string's text.
+    ///
+    /// Driven from the registry, so an option added is covered by having been registered, and
+    /// one whose field is not a string fails here rather than in a request: text handed to a
+    /// field inside a backend's group is buffered before that group sees it, so only a field
+    /// of `StorageOptions` itself is read as the type it holds. A switch added to a group
+    /// would need what `Field::deserialize_bool` does, and this is what says so.
+    #[test]
+    fn every_storage_option_is_set_from_text() {
+        for name in storage::option_names() {
+            let written = match name {
+                // A map rather than a value, so it is written with its own keyword, and
+                // `an_option_value_keeps_its_commas_and_equals_signs` is where it is read.
+                storage::HEADERS => continue,
+                "allow_http" => "true",
+                "transport" => "https",
+                _ => "text",
+            };
+            let read = read(
+                &["a,s3://bucket/a/hats"],
+                &[],
+                &[&format!("a,{name},{written}")],
+            );
+            assert!(read.is_ok(), "{name}: {}", read.unwrap_err());
+        }
+    }
+
+    /// The catch-all variant's name is `dali`'s, an attribute having nowhere to write a const.
+    #[test]
+    fn the_catch_all_is_the_one_dali_declares() {
+        assert_eq!(dali::OTHER, "$dali::other");
     }
 
     /// Dropped instead, it is a request whose credentials went unused, which the caller

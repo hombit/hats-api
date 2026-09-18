@@ -21,7 +21,7 @@
 //! let shape: Shape = dali::value("CIRCLE 12.3 45.6 0.5", Delimiter::Space)?;
 //! ```
 //!
-//! Three things it does that a general-purpose format does not, each because a parameter
+//! Four things it does that a general-purpose format does not, each because a parameter
 //! value is text a caller typed rather than a document a program wrote:
 //!
 //! - **[`Tail`] is the rest of the value, delimiter and all.** The last field of an option
@@ -31,6 +31,10 @@
 //!   two fields with a comma and DALI separates a shape's numbers with spaces.
 //! - **A value with fields left over is an error.** Arity is what a keyword promised, so
 //!   `CIRCLE 1 2 3 4` is a refusal rather than a circle.
+//! - **A type may declare what an unknown keyword means**, by naming a variant [`OTHER`].
+//!   `POS` declares none and refuses anything but its three shapes; a parameter whose
+//!   keywords are open — an option name, of which there are as many as there are options —
+//!   declares one and reads the word itself as that variant's first field.
 //!
 //! There is no serializer: nothing here writes a parameter, a caller's request being the
 //! only place these values come from.
@@ -92,8 +96,23 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tail(String);
 
-/// The name this format recognises [`Tail`] by, `serde` having no other way to say it.
+/// The name this format recognises [`Tail`] by.
+///
+/// A format never sees a type: all it is told is which `deserialize_*` method was called and
+/// the `&'static str` that method carries, so a name is the only channel a type has for
+/// saying it is more than the method says. `serde_json` declares `RawValue` the same way,
+/// under `$serde_json::private::RawValue`, and the leading `$` marks both as a name no
+/// caller's own type can collide with.
 const TAIL: &str = "$dali::tail";
+
+/// The variant name a type gives the keyword it does not know.
+///
+/// Declared by the type — `#[serde(rename = "$dali::other")]` — and read the way [`Tail`] is,
+/// `serde` having no attribute for a data-carrying catch-all variant (`#[serde(other)]` is
+/// for unit variants). A type that declares none refuses an unknown keyword, which is what
+/// a fixed set of shapes wants; a type that declares one gets the word as the variant's
+/// first field, which is what an open set of option names wants.
+pub const OTHER: &str = "$dali::other";
 
 impl Tail {
     pub fn as_str(&self) -> &str {
@@ -157,12 +176,17 @@ struct Reader<'de> {
 }
 
 impl<'de> Reader<'de> {
-    /// The next field.
-    fn field(&mut self) -> Result<&'de str, Error> {
+    /// The next field, and what would be left after it, without taking either.
+    fn peek(&self) -> Result<(&'de str, Option<&'de str>), Error> {
         let rest = self
             .rest
             .ok_or_else(|| Error("the value ends before its last field".to_owned()))?;
-        let (field, tail) = self.delimiter.split(rest);
+        Ok(self.delimiter.split(rest))
+    }
+
+    /// The next field.
+    fn field(&mut self) -> Result<&'de str, Error> {
+        let (field, tail) = self.peek()?;
         self.rest = tail;
         Ok(field)
     }
@@ -430,21 +454,34 @@ impl<'de> EnumAccess<'de> for Keyword<'_, 'de> {
 
     /// **A keyword is matched whatever its case.** DALI writes `CIRCLE` and a caller writes
     /// what they typed; the type's own spelling is what the variant is then read as, so the
-    /// case of a value never decides whether a request is answered. A keyword the type does
-    /// not know is passed on as it was written, for the error to name.
+    /// case of a value never decides whether a request is answered.
+    ///
+    /// A keyword the type knows is structure and is taken, the variant reading what follows
+    /// it. One it does not know is the type's [`OTHER`] variant where it declares one, and
+    /// the word stays in the value for that variant's first field to read; where it declares
+    /// none, it is passed on as written for the error to name.
     fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self), Error>
     where
         V: DeserializeSeed<'de>,
     {
-        let written = self.reader.field()?;
+        let (written, tail) = self.reader.peek()?;
         let known = self
             .variants
             .iter()
-            .find(|variant| variant.eq_ignore_ascii_case(written));
+            .find(|variant| variant.eq_ignore_ascii_case(written))
+            .copied();
         let keyword = match known {
-            Some(variant) => seed.deserialize(de::value::StrDeserializer::new(variant))?,
-            None => seed.deserialize(de::value::StrDeserializer::new(written))?,
+            Some(variant) => {
+                self.reader.rest = tail;
+                variant
+            }
+            None if self.variants.contains(&OTHER) => OTHER,
+            None => {
+                self.reader.rest = tail;
+                written
+            }
         };
+        let keyword = seed.deserialize(de::value::StrDeserializer::new(keyword))?;
         Ok((keyword, self))
     }
 }
@@ -571,8 +608,7 @@ mod tests {
         assert_eq!(secret.as_str(), "wJalr,K7/MDENG+bPxRfiCY==");
     }
 
-    /// A keyword deciding how many fields follow is the whole point, and a hand-written
-    /// `Deserialize` reads a keyword this format does not know by name.
+    /// A keyword deciding how many fields follow is the whole point.
     #[test]
     fn a_keyword_chooses_how_many_fields_follow() {
         #[derive(Debug, Deserialize, PartialEq)]
@@ -590,6 +626,50 @@ mod tests {
             value::<Setting>("endpoint,https://minio.example.com", Delimiter::Comma).unwrap(),
             Setting::Endpoint(Tail("https://minio.example.com".to_owned()))
         );
+    }
+
+    /// A keyword a type does not know, where the type says what one means: the word itself
+    /// is the catch-all variant's first field, so an open set of names needs no arm per name.
+    #[test]
+    fn an_unknown_keyword_is_the_catch_all_variants_first_field() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        #[serde(rename_all = "lowercase")]
+        enum Setting {
+            Header {
+                header: String,
+                value: Tail,
+            },
+            // The attribute cannot be written with a const, so the const is asserted below.
+            #[serde(rename = "$dali::other")]
+            Named {
+                option: String,
+                value: Tail,
+            },
+        }
+        assert_eq!(OTHER, "$dali::other");
+
+        assert_eq!(
+            value::<Setting>("header,Authorization,Bearer a,b", Delimiter::Comma).unwrap(),
+            Setting::Header {
+                header: "Authorization".to_owned(),
+                value: Tail("Bearer a,b".to_owned()),
+            }
+        );
+        assert_eq!(
+            value::<Setting>("region,us-east-1", Delimiter::Comma).unwrap(),
+            Setting::Named {
+                option: "region".to_owned(),
+                value: Tail("us-east-1".to_owned()),
+            }
+        );
+        // A keyword the type knows is still matched whatever its case, and the catch-all does
+        // not take it: `HEADER` is that option and not an option of that name.
+        assert!(matches!(
+            value::<Setting>("HEADER,X-Token,t", Delimiter::Comma).unwrap(),
+            Setting::Header { .. }
+        ));
+        // And a catch-all does not make a short value whole: its own fields are still counted.
+        assert!(value::<Setting>("region", Delimiter::Comma).is_err());
     }
 
     /// An interval is two numbers, and `-Inf` is one of them (DALI §3.3.4).

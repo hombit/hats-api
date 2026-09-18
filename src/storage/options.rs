@@ -299,9 +299,6 @@ struct Named {
     name: &'static str,
     set: bool,
     kind: Kind,
-    /// Whether it is a switch rather than a value, which is what [`is_flag`] answers for a
-    /// carrier that has only text to hand over.
-    flag: bool,
 }
 
 /// The types a [`Kind::Plain`] option is allowed to have. [`SecretString`] is
@@ -319,7 +316,6 @@ impl Named {
             name,
             set: value.is_some(),
             kind: Kind::Plain,
-            flag: false,
         }
     }
 
@@ -329,7 +325,6 @@ impl Named {
             name,
             set: value,
             kind: Kind::Plain,
-            flag: true,
         }
     }
 
@@ -341,7 +336,6 @@ impl Named {
             name,
             set: value.is_some(),
             kind: Kind::Credential,
-            flag: false,
         }
     }
 
@@ -353,7 +347,6 @@ impl Named {
             name,
             set: !value.is_empty(),
             kind: Kind::Credential,
-            flag: false,
         }
     }
 }
@@ -729,17 +722,17 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
 /// under the same one.
 pub const HEADERS: &str = "headers";
 
-/// Whether an option is a switch rather than a value.
+/// Every option a request may write, whichever backend it is for.
 ///
-/// A body sends `true` as a boolean and a query string has only text, so a carrier of text
-/// has to know which of the two it is handing over. Answered from the same registry
-/// `accepted_options` and the credential check read, so an option that becomes a switch — or
-/// stops being one — says so here without anything being written twice.
-pub fn is_flag(option: &str) -> bool {
+/// The same registry `accepted_options` and the credential check read, so a carrier that has
+/// to cover all of them — a query string, whose values are text and whose test has to reach
+/// every field a body could set — enumerates them rather than keeping a list of its own.
+pub fn option_names() -> Vec<&'static str> {
     StorageOptions::default()
         .named()
         .into_iter()
-        .any(|named| named.flag && named.name == option)
+        .map(|named| named.name)
+        .collect()
 }
 
 /// Which url schemes each storage option applies to, for the API description.
