@@ -38,13 +38,16 @@
 //! this service's answer instead, and are not that.
 
 use std::collections::BTreeMap;
+use std::fmt;
 
 use serde::Deserialize;
+use serde::de::{self, EnumAccess, SeqAccess, VariantAccess, Visitor};
 use url::Url;
 
 use crate::adql::names;
 use crate::error::ApiError;
 use crate::storage::{StorageOptions, parse_url};
+use crate::tap::dali::{self, Delimiter, Tail};
 use crate::tap::tables::RESERVED_SCHEMAS;
 
 /// The schema an uploaded table is queried under (TAP §2.5).
@@ -91,16 +94,81 @@ pub(super) enum Kind {
     Parquet,
 }
 
-impl Kind {
-    fn parse(value: &str) -> Result<Self, ApiError> {
-        match value.trim() {
-            name if name.eq_ignore_ascii_case("hats") => Ok(Self::Hats),
-            name if name.eq_ignore_ascii_case("parquet") => Ok(Self::Parquet),
-            other => Err(ApiError::bad_request(format!(
-                "UPLOAD_TYPE {other:?} is not a kind of table this service reads; it takes \
-                 hats or parquet"
-            ))),
+/// One setting of one upload's storage options, which its own name decides the shape of.
+///
+/// The keyword-decides-arity rule DALI writes its shapes with: `header` names a header and
+/// then its value, and every other option is a name and the value itself. Both end in a
+/// [`Tail`], so whatever punctuation a credential carries arrives with it.
+#[derive(Debug)]
+enum Setting {
+    Header { header: String, value: Tail },
+    Named { option: String, value: Tail },
+}
+
+impl<'de> Deserialize<'de> for Setting {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ByName;
+
+        impl<'de> Visitor<'de> for ByName {
+            type Value = Setting;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(
+                    f,
+                    "an option and its value, or {HEADER} and a header's name and value"
+                )
+            }
+
+            /// The option's name is read first, and it says what follows. A name this
+            /// service has no field for is carried anyway: `StorageOptions` refuses it where
+            /// it knows the backend, and dropping it here would leave a request that reads
+            /// as anonymous.
+            fn visit_enum<A>(self, data: A) -> Result<Setting, A::Error>
+            where
+                A: EnumAccess<'de>,
+            {
+                let (option, rest): (String, _) = data.variant()?;
+                match option.eq_ignore_ascii_case(HEADER) {
+                    true => {
+                        let (header, value) = rest.tuple_variant(2, TwoFields)?;
+                        Ok(Setting::Header { header, value })
+                    }
+                    false => Ok(Setting::Named {
+                        option: option.to_ascii_lowercase(),
+                        value: rest.newtype_variant()?,
+                    }),
+                }
+            }
         }
+
+        deserializer.deserialize_enum("Setting", &[HEADER], ByName)
+    }
+}
+
+/// A header's name and then its value, which is what `header` takes.
+struct TwoFields;
+
+impl<'de> Visitor<'de> for TwoFields {
+    type Value = (String, Tail);
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a header's name and its value")
+    }
+
+    fn visit_seq<A>(self, mut fields: A) -> Result<(String, Tail), A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let header = fields
+            .next_element::<String>()?
+            .ok_or_else(|| de::Error::custom(format!("{HEADER} takes a name and then a value")))?;
+        let value = fields
+            .next_element::<Tail>()?
+            .ok_or_else(|| de::Error::custom(format!("{HEADER} {header} takes a value")))?;
+        Ok((header, value))
     }
 }
 
@@ -115,11 +183,16 @@ impl Uploads {
             // TAP 1.0 §2.5.1 joined pairs with `;` and 1.1 dropped it for repetition. Both
             // are read, a client having no way to know which this service grew up on.
             for entry in value.split(';').filter(|entry| !entry.trim().is_empty()) {
-                named.push(pair(entry, "UPLOAD")?);
+                named.push(read_value::<(String, Tail)>(
+                    entry,
+                    "UPLOAD",
+                    "<name>,<url>",
+                )?);
             }
         }
         let mut list = Vec::new();
         for (name, uri) in named {
+            let uri = uri.into_string();
             check_name(&name)?;
             if list
                 .iter()
@@ -139,8 +212,8 @@ impl Uploads {
         }
 
         for value in types {
-            let (name, kind) = pair(value, TYPE)?;
-            let kind = Kind::parse(&kind)?;
+            let (name, kind) =
+                read_value::<(String, Kind)>(value, TYPE, "<upload>,hats or <upload>,parquet")?;
             find(&mut list, &name, TYPE)?.kind = Some(kind);
         }
 
@@ -150,36 +223,28 @@ impl Uploads {
         let mut declared: BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
             BTreeMap::new();
         for value in storage {
-            let (name, setting) = pair(value, STORAGE_OPTION)?;
-            let (option, value) = setting.split_once(',').ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "{STORAGE_OPTION} is one upload, one option and its value: \
-                     {STORAGE_OPTION}=<upload>,<option>,<value>"
-                ))
-            })?;
+            let (name, setting) = read_value::<(String, Setting)>(
+                value,
+                STORAGE_OPTION,
+                "<upload>,<option>,<value>",
+            )?;
             let name = find(&mut list, &name, STORAGE_OPTION)?.name.clone();
             let written = declared.entry(name.clone()).or_default();
-            let option = option.trim();
-            // The option's own name says how the rest is read: a header takes a name before
-            // its value, everything else is the value itself. Whichever it is, the last field
-            // runs to the end — a secret is never cut short by its own punctuation.
-            let replaced = match option.eq_ignore_ascii_case(HEADER) {
-                true => {
-                    let (header, value) = value.split_once(',').ok_or_else(|| {
-                        ApiError::bad_request(format!(
-                            "{STORAGE_OPTION} sets one header by name: \
-                             {STORAGE_OPTION}=<upload>,{HEADER},<name>,<value>"
-                        ))
-                    })?;
+            let (option, replaced) = match setting {
+                Setting::Header { header, value } => {
                     let serde_json::Value::Object(headers) = written
                         .entry("headers")
                         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
                     else {
                         unreachable!("headers is written as an object above")
                     };
-                    headers.insert(header.trim().to_owned(), value.trim().into())
+                    let replaced = headers.insert(header.clone(), value.into_string().into());
+                    (format!("{HEADER} {header}"), replaced)
                 }
-                false => written.insert(option.to_owned(), typed(value.trim())),
+                Setting::Named { option, value } => {
+                    let replaced = written.insert(option.clone(), typed(value.as_str()));
+                    (option, replaced)
+                }
             };
             if replaced.is_some() {
                 return Err(ApiError::bad_request(format!(
@@ -241,17 +306,21 @@ fn typed(value: &str) -> serde_json::Value {
     }
 }
 
-/// `name,rest` into the two, the rest kept whole.
+/// One parameter's value, read into the shape that parameter takes.
 ///
-/// One comma, which is `UPLOAD`'s own separator: what follows it is a url there, an option
-/// and its value here, and in neither case is it this function's to take apart further.
-fn pair(value: &str, parameter: &str) -> Result<(String, String), ApiError> {
-    let (name, rest) = value.trim().split_once(',').ok_or_else(|| {
+/// The comma is `UPLOAD`'s own separator (TAP §2.7.6), so every parameter here is written
+/// the way it is; what each one's fields are is the type's to say. `shape` is how the
+/// parameter is written, since what a reader of the refusal needs is the form and not the
+/// arity a deserializer counted.
+fn read_value<'de, T>(value: &'de str, parameter: &str, shape: &str) -> Result<T, ApiError>
+where
+    T: Deserialize<'de>,
+{
+    dali::value(value, Delimiter::Comma).map_err(|error| {
         ApiError::bad_request(format!(
-            "{parameter} {value:?} does not start with an upload name and a comma"
+            "{parameter} is written {parameter}={shape}: {error}"
         ))
-    })?;
-    Ok((name.trim().to_owned(), rest.trim().to_owned()))
+    })
 }
 
 /// The upload a parameter's entry names, or a refusal saying which names there are.
@@ -417,7 +486,7 @@ mod tests {
 
         // An entry naming an option and no value at all has nothing to carry.
         let refused = read(&["a,s3://bucket/a/hats"], &[], &["a,region"]).unwrap_err();
-        assert!(refused.contains("<option>"), "{refused}");
+        assert!(refused.contains("UPLOAD_STORAGE_OPTION"), "{refused}");
     }
 
     /// The inline form is the standard's, so it says what it is rather than failing as a
@@ -444,9 +513,17 @@ mod tests {
         assert!(refused.contains("twice"), "{refused}");
     }
 
+    /// What a caller needs from the refusal is how the parameter is written, so every one
+    /// of them says its own shape.
     #[test]
     fn a_value_that_is_not_a_pair_is_refused() {
         let refused = read(&["file:///hats/x"], &[], &[]).unwrap_err();
-        assert!(refused.contains("comma"), "{refused}");
+        assert!(refused.contains("UPLOAD=<name>,<url>"), "{refused}");
+
+        let refused = read(&["a,file:///hats/x"], &["a"], &[]).unwrap_err();
+        assert!(refused.contains("<upload>,hats"), "{refused}");
+
+        let refused = read(&["a,file:///hats/x"], &[], &["a,region"]).unwrap_err();
+        assert!(refused.contains("<upload>,<option>,<value>"), "{refused}");
     }
 }

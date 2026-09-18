@@ -1259,6 +1259,15 @@ and the parameter rules are §3.
   `taplint` adds a parameter of its own to every query and reports a service that refuses as
   breaking it, which is also what every HTTP server does with a query string it has no use
   for. The house rule is about a parameter this service *acts on*.
+- **A parameter's value is read by `tap::dali`, into a type.** It is a `serde` data format
+  over the one grammar DALI writes every value in: fields separated by a delimiter, where a
+  leading keyword says how many follow it. So a parameter is a type — an `enum` whose
+  variants are the keywords, a tuple whose arity is the count — rather than a chain of
+  `split_once` and a conditional per call site. Three things in it are the format's and not
+  a type's: `Tail` takes the rest of a value verbatim, so a credential carrying the delimiter
+  arrives whole; the delimiter is the parameter's, TAP writing a comma and DALI a space; and
+  a keyword is matched whatever its case, the type's own spelling being what it is read as.
+  A new parameter is a type over that reader, never a fourth parser.
 - **A parameter of this service's own is written `<name>,…` and repeats.** `UPLOAD` is the
   only parameter in TAP or DALI whose value is keyed by a name, and its key is one comma;
   DALI's structured values are fixed tuples of numbers, and several values of anything are
