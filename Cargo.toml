@@ -32,9 +32,12 @@ futures = "0.3"
 globset = "0.4"
 html-escape = "0.2"
 http = "1"
+http-range-header = "0.4"
+httpdate = "1"
 ipnet = "2"
 # A catalog's properties file is a Java properties file; escapes and continuations too.
 java-properties = "2"
+mime_guess = "2"
 # Multi-Order Coverage maps: the covering of a region, and the set algebra over it.
 moc = "0.19.2"
 # Keep in sync with datafusion

@@ -156,7 +156,7 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
                 // catalog that needs a credential is not one this resource can read.
                 data_files = Some(service.data_files_for(url).clone());
                 let dir = storage::open_dir(url, &no_storage, &service.policy, &service.transfers)?;
-                authorities.check(spelling, &dir.base, &no_storage)?;
+                authorities.check(spelling, dir.opened(&no_storage))?;
                 Source::Catalog(dir)
             }
         };
@@ -217,7 +217,7 @@ fn names_an_upload(spelling: &str) -> bool {
 /// that is not one fails where a catalog is opened, which is the read that looks for
 /// `hats.properties`, `properties` and `collection.properties` and says so by name.
 fn uploaded<'a>(
-    service: &Service,
+    service: &'a Service,
     upload: &'a Upload,
     spelling: &'a str,
     authorities: &mut Authorities<'a>,
@@ -242,7 +242,7 @@ fn uploaded<'a>(
                 &service.policy,
                 &service.transfers,
             )?;
-            authorities.check(spelling, &file.base, &upload.storage)?;
+            authorities.check(spelling, file.opened(&upload.storage))?;
             Ok((Source::File(file), None))
         }
         Kind::Hats => {
@@ -253,7 +253,7 @@ fn uploaded<'a>(
                 &service.policy,
                 &service.transfers,
             )?;
-            authorities.check(spelling, &dir.base, &upload.storage)?;
+            authorities.check(spelling, dir.opened(&upload.storage))?;
             Ok((Source::Catalog(dir), Some(files)))
         }
     }

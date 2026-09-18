@@ -26,9 +26,14 @@ use crate::tap::schema;
 /// client the table does not exist, which is the one thing it cannot tell from the truth;
 /// a refusal naming the table is something an operator can act on and a client can retry.
 pub(super) async fn describe(service: &Service) -> Result<Vec<TableMetadata>, ApiError> {
-    let ctx = SessionContext::new();
     let mut described = schema::self_description();
     for table in service.tap_tables.iter() {
+        // A context per table, because a context is what a store is registered into and
+        // DataFusion keys one by authority — see "One store per authority". Two published
+        // tables under two mounts in one bucket hold two sets of credentials, and sharing
+        // a context would have the second registration decide both. Nothing is carried
+        // between tables here anyway: each is opened, described, and let go.
+        let ctx = SessionContext::new();
         let url = table.url();
         let dir = storage::open_dir(
             url,

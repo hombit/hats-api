@@ -2,22 +2,30 @@
 //!
 //! A TAP query names a table the service already knows: there is nowhere in a TAP request
 //! to put a url, so the list is the whole of what a statement may read. Every entry is a
-//! HATS catalog — a name and a url and nothing else.
+//! HATS catalog — a name and a path and nothing else.
+//!
+//! **The path is a path under a `[[mount]]`**, which is the address the file server
+//! publishes that catalog at and the address an API request names it by. So a table is
+//! published at a url space this file does not invent, and whatever it takes to reach the
+//! catalog — an endpoint, a region, a credential — was written once on the mount rather
+//! than again here. That is what keeps an operator's secret out of the section describing
+//! a surface whose answers are public, without keeping a catalog that needs one
+//! unpublishable.
 //!
 //! **Checked at startup, so an operator hears about a mistake before a caller does.** The
-//! name has to be one a query can write, and the url goes through the access policy like
-//! any other, which is what catches a mount that does not exist and an endpoint the policy
-//! refuses.
+//! name has to be one a query can write, and the path goes through the access policy like
+//! any other, which is what catches a mount that does not exist.
 
 use std::sync::Arc;
 
 use url::Url;
 
 use crate::access::AccessPolicy;
+use crate::access::mount;
 use crate::adql::names;
 use crate::config::{ConfigError, TapTableConfig};
 use crate::storage::materialize::Transfers;
-use crate::storage::{self, StorageOptions, parse_url};
+use crate::storage::{self, StorageOptions};
 
 /// The schemas a query may not be given a table in, because TAP defines them itself.
 ///
@@ -35,9 +43,11 @@ pub struct TapTable {
     table: String,
     /// The two joined, which is what a `FROM` says and what `TAP_SCHEMA.tables` publishes.
     qualified: String,
-    /// Where the catalog is. The store is built per request rather than held: nothing here
-    /// is a registry of what a catalog turned out to contain, and a builder costs no
-    /// connection.
+    /// Where the catalog is, as the `file://` url its mount path spells. The store is
+    /// built per request rather than held: nothing here is a registry of what a catalog
+    /// turned out to contain, and a builder costs no connection. It is also what makes the
+    /// mount's own options reach this resource without being repeated — the url resolves
+    /// through the mounts like any other.
     url: Url,
 }
 
@@ -70,13 +80,12 @@ pub struct TapTableList(Vec<TapTable>);
 impl TapTableList {
     /// Read the list, refusing anything a caller could not go on to query.
     ///
-    /// The url is opened and the handle dropped: what that buys is the policy's answer —
-    /// a mount that does not exist, a scheme this deployment does not serve, an endpoint
-    /// the rules refuse — at startup rather than on somebody's query. A local directory
-    /// is checked for being there as well, the store being rooted at it; a remote one is
-    /// not, nothing here making a request. Either way no catalog is *read*, so one that
-    /// is malformed is discovered on the first query against it, the same as everywhere
-    /// else here.
+    /// The path is opened and the handle dropped: what that buys is the policy's answer —
+    /// a path under no mount, above all — at startup rather than on somebody's query. A
+    /// mount on this machine is checked for being there as well, the store being rooted at
+    /// it; a store-backed one is not, nothing here making a request. Either way no catalog
+    /// is *read*, so one that is malformed is discovered on the first query against it,
+    /// the same as everywhere else here.
     pub fn new(
         configured: &[TapTableConfig],
         policy: &AccessPolicy,
@@ -107,7 +116,9 @@ impl TapTableList {
                     clash.qualified
                 )));
             }
-            let url = parse_url(&entry.url).map_err(|error| refuse(error.to_string()))?;
+            let url = mounted_url(&entry.path).map_err(&refuse)?;
+            // No options: the mount the path lands in carries whatever reaching it takes,
+            // and a second set written here would be a second answer to one question.
             storage::open_dir(&url, &StorageOptions::default(), policy, transfers)
                 .map_err(|error| refuse(error.to_string()))?;
             tables.push(TapTable {
@@ -149,6 +160,26 @@ impl TapTableList {
     }
 }
 
+/// The url a path in this service's own url space is named by, which is the same thing an
+/// API request writes for the same catalog.
+///
+/// Normalized through [`mount::normalize_prefix`], so that `/hats/gaia` and `/hats/gaia/`
+/// are the one address they are, and so that a path that is not one — relative, or
+/// carrying a `..` — is refused here rather than resolved into some other catalog.
+fn mounted_url(path: &str) -> Result<Url, String> {
+    let path = mount::normalize_prefix(path)?;
+    // Built a segment at a time rather than by formatting, which is what percent-encodes a
+    // name: a catalog directory may hold a character a url reserves.
+    let mut url = Url::parse("file:///").map_err(|error| error.to_string())?;
+    url.path_segments_mut()
+        .map_err(|()| "file:// cannot hold a path".to_owned())?
+        // `file:///` already has one empty segment, and pushing onto it would double the
+        // separator.
+        .pop_if_empty()
+        .extend(path.split('/').filter(|segment| !segment.is_empty()));
+    Ok(url)
+}
+
 /// `schema.table`, both halves being names a query can write without quoting them.
 ///
 /// The schema is required because every published table sits in one: `TAP_SCHEMA.schemas`
@@ -188,30 +219,38 @@ mod tests {
 
     use super::*;
 
-    /// A policy with one mount at `/hats`, which is what a `file://` table needs — and a
-    /// prefix rather than `/`, so that a url outside it is a url nothing publishes.
+    /// A policy with one mount at `/hats`, which is what a published path needs — and a
+    /// prefix rather than `/`, so that a path outside it is one nothing publishes.
     fn published(dir: &std::path::Path, tables: &[(&str, &str)]) -> Result<TapTableList, String> {
-        // A local store is rooted at its directory, so the ones these urls name have to
+        publishing(mount_at(dir), tables)
+    }
+
+    fn mount_at(dir: &std::path::Path) -> MountConfig {
+        // A local store is rooted at its directory, so the ones these paths name have to
         // be there.
         for name in ["gaia", "a", "b"] {
             std::fs::create_dir_all(dir.join(name)).unwrap();
         }
-        let mount = MountConfig {
+        MountConfig {
             path: "/hats".to_owned(),
             source: dir.display().to_string(),
             serve: false,
             follow_symlinks: false,
             immutable: false,
+            storage: StorageOptions::default(),
             filenames: None,
-        };
+        }
+    }
+
+    fn publishing(mount: MountConfig, tables: &[(&str, &str)]) -> Result<TapTableList, String> {
         let mounts = Arc::new(Mounts::new(&[mount], &DataConfig::default()).unwrap());
         let policy = AccessPolicy::new(&AccessConfig::default(), mounts, None).unwrap();
         let transfers = Arc::new(Transfers::new(&LimitsConfig::default()));
         let configured = tables
             .iter()
-            .map(|(name, url)| TapTableConfig {
+            .map(|(name, path)| TapTableConfig {
                 name: (*name).to_owned(),
-                url: (*url).to_owned(),
+                path: (*path).to_owned(),
             })
             .collect::<Vec<_>>();
         TapTableList::new(&configured, &policy, &transfers).map_err(|error| error.to_string())
@@ -220,10 +259,11 @@ mod tests {
     #[test]
     fn a_table_is_published_under_its_qualified_name() {
         let dir = tempfile::TempDir::new().unwrap();
-        let list = published(dir.path(), &[("gaia_dr3.gaia_source", "file:///hats/gaia")]).unwrap();
+        let list = published(dir.path(), &[("gaia_dr3.gaia_source", "/hats/gaia")]).unwrap();
         let table = list.lookup("gaia_dr3.gaia_source").unwrap();
         assert_eq!(table.schema(), "gaia_dr3");
         assert_eq!(table.table(), "gaia_source");
+        // The path, as the url an API request would name the same catalog by.
         assert_eq!(table.url().as_str(), "file:///hats/gaia");
         assert_eq!(list.names(), ["gaia_dr3.gaia_source"]);
     }
@@ -232,7 +272,7 @@ mod tests {
     #[test]
     fn a_name_is_matched_whatever_its_case() {
         let dir = tempfile::TempDir::new().unwrap();
-        let list = published(dir.path(), &[("gaia_dr3.gaia_source", "file:///hats/gaia")]).unwrap();
+        let list = published(dir.path(), &[("gaia_dr3.gaia_source", "/hats/gaia")]).unwrap();
         for spelling in [
             "gaia_dr3.gaia_source",
             "GAIA_DR3.GAIA_SOURCE",
@@ -266,7 +306,7 @@ mod tests {
             // ADQL's grammar wants a letter first.
             "_gaia.source",
         ] {
-            let refused = published(dir.path(), &[(name, "file:///hats/gaia")]).unwrap_err();
+            let refused = published(dir.path(), &[(name, "/hats/gaia")]).unwrap_err();
             assert!(refused.contains(name), "{name}: {refused}");
         }
     }
@@ -277,7 +317,7 @@ mod tests {
     fn tap_s_own_schemas_are_not_an_operators_to_publish_in() {
         let dir = tempfile::TempDir::new().unwrap();
         for name in ["TAP_SCHEMA.tables", "tap_schema.mine", "TAP_UPLOAD.t1"] {
-            let refused = published(dir.path(), &[(name, "file:///hats/gaia")]).unwrap_err();
+            let refused = published(dir.path(), &[(name, "/hats/gaia")]).unwrap_err();
             assert!(refused.contains("schema"), "{name}: {refused}");
         }
     }
@@ -290,34 +330,49 @@ mod tests {
         let refused = published(
             dir.path(),
             &[
-                ("gaia_dr3.gaia_source", "file:///hats/a"),
-                ("gaia_dr3.GAIA_SOURCE", "file:///hats/b"),
+                ("gaia_dr3.gaia_source", "/hats/a"),
+                ("gaia_dr3.GAIA_SOURCE", "/hats/b"),
             ],
         )
         .unwrap_err();
         assert!(refused.contains("already published"), "{refused}");
     }
 
-    /// The url goes through the access policy like any other, so an operator hears about
+    /// The path goes through the access policy like any other, so an operator hears about
     /// a directory this service will not read at startup rather than on a query.
     #[test]
-    fn a_url_the_policy_refuses_is_a_startup_error() {
+    fn a_path_the_policy_refuses_is_a_startup_error() {
         let dir = tempfile::TempDir::new().unwrap();
         // Outside every mount, so nothing may read it.
-        let refused = published(dir.path(), &[("a.b", "file:///elsewhere")]).unwrap_err();
+        let refused = published(dir.path(), &[("a.b", "/elsewhere")]).unwrap_err();
         assert!(refused.contains("a.b"), "{refused}");
 
-        // A scheme this deployment does not serve at all.
-        let refused = published(dir.path(), &[("a.b", "ftp://example.org/gaia")]).unwrap_err();
-        assert!(refused.contains("a.b"), "{refused}");
+        // Not a path in this service's url space at all. A url is the shape this key used
+        // to take, so it is the mistake worth naming.
+        for written in ["s3://ipac-irsa-ztf/ztf", "file:///hats/gaia", "hats/gaia"] {
+            let refused = published(dir.path(), &[("a.b", written)]).unwrap_err();
+            assert!(refused.contains("a.b"), "{written}: {refused}");
+        }
     }
 
-    /// A remote catalog is publishable on the same terms, there being no mount involved
-    /// and no storage options to carry.
+    /// A catalog in a store is published the same way, because the mount is what reaches
+    /// it: the entry is a path in this service's url space either way, and what it takes
+    /// to read the catalog was written once, on the mount.
     #[test]
-    fn a_remote_table_is_published_too() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let list = published(dir.path(), &[("ztf.dr24_lc", "s3://ipac-irsa-ztf/ztf")]).unwrap();
-        assert_eq!(list.lookup("ztf.dr24_lc").unwrap().url().scheme(), "s3");
+    fn a_table_over_a_store_is_published_too() {
+        let mount = MountConfig {
+            path: "/hats".to_owned(),
+            source: "s3://ipac-irsa-ztf/hats".to_owned(),
+            serve: false,
+            follow_symlinks: false,
+            immutable: false,
+            storage: StorageOptions::default(),
+            filenames: None,
+        };
+        let list = publishing(mount, &[("ztf.dr24_lc", "/hats/ztf_dr24")]).unwrap();
+        let table = list.lookup("ztf.dr24_lc").unwrap();
+        // The address, not where it really is: a published table names the url space and
+        // the mount answers for the rest.
+        assert_eq!(table.url().as_str(), "file:///hats/ztf_dr24");
     }
 }

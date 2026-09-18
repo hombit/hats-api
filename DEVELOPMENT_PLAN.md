@@ -34,6 +34,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 5.2 | spatial predicate | done | `polygon` is §9 |
 | 5.3 | two endpoints, rows and plan | done | |
 | 5.4 | a catalog under a mount | done | |
+| 3.5 | a mount over a store | done | `source` takes any url `storage::open_dir` reads, with the mount's own `storage` beside it; serving one is a ranged read and a delimited listing against the origin. `[[tap.table]]` names a path under a mount rather than a url, so a published catalog can need a credential |
 | 7.3 | serve the API description | done | |
 | 7.4 | compress JSON responses, never parquet | done | |
 | 8.4 | a clock on every request | done | `[limits] max_request_seconds`; the rest of §8.4 is not done |
@@ -48,7 +49,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
 | 11.0 | the conformance suite | done | `pyvo` and STILTS `taplint` against a built service, in CI as a report rather than a gate. Written before any of §11, so none of it is tuned to what was built |
-| 11.1 | the tables the service publishes | done | temporary until §9.4, and §0.2 holds only while the list is config |
+| 11.1 | the tables the service publishes | done | temporary until §9.3, and §0.2 holds only while the list is config |
 | 11.2 | `/sync` and the parameters | done | an unrecognised parameter is ignored, which the validator checks for and the plan had wrong |
 | 11.3 | VOTable, `MAXREC`, `OVERFLOW`, errors | done | `MAXREC` truncates *after* the query's own `TOP` rather than overriding it, and `MAXREC=0` carries the marker — both the other way round in the plan |
 | 11.4 | `TAP_SCHEMA` | done | a name is matched the way ADQL says rather than exactly, which is what §10.8.1 now diverges from only on the `simple` routes |
@@ -474,7 +475,7 @@ Three things to measure before building it, none of which affects correctness:
 3. **Whether building the list column needs `nested_expressions`.** It is off, and
    `make_array` is behind it; a UDF returning a `ListArray` should sidestep that, `Unnest`
    being a plan node rather than an array function. Worth confirming, because turning the
-   feature on makes every array function callable at once — which is §9.6's decision and
+   feature on makes every array function callable at once — which is §9.5's decision and
    not this one's.
 
 It is a recognised query shape rather than general `JOIN` support. Anything outside it is
@@ -489,7 +490,7 @@ whoever goes looking: `LOWER`/`UPPER`/`ILIKE`, common table expressions, set ope
 `CAST`, `COALESCE`, `OFFSET`, `IN_UNIT`, and every UDF.
 
 Refused, each with a message that says it is refused rather than unsupported: `POLYGON`
-(§9.3), `BOX` (a centre with great-circle edges, which the `zone` region is not), `REGION`
+(§9.2), `BOX` (a centre with great-circle edges, which the `zone` region is not), `REGION`
 (an STC-S parser, deprecated in ADQL 2.1), `COORDSYS` and `ivo_geom_transform` (frame
 transforms), `IN_UNIT` (a units library), `AREA` and `CENTROID` (they want geometries as
 values, and no file here has a geometry column).
@@ -841,8 +842,9 @@ predicate, and the service makes network and filesystem requests on their behalf
 
 - **The request body is the only source.** Not an environment variable, not a file on disk,
   not ambient discovery by an SDK, not an instance profile. A request with no credentials is
-  unsigned, never the process's own identity. An operator-configured source is §9.1 and must
-  be explicit in the config when it arrives.
+  unsigned, never the process's own identity. A `[[mount]]`'s own `storage` is the one
+  operator-configured credential, and it is named explicitly in the config for that mount
+  rather than discovered from anywhere.
 - Credentials are stripped at the boundary, and a new backend adds its option names to that
   stripping and brings a new signer to check (§8.5).
 - A caller must not reach another's through the cache — §6.0's keying rule.
@@ -850,8 +852,9 @@ predicate, and the service makes network and filesystem requests on their behalf
 ### 8.2 No local filesystem until the config says so
 
 - **Refusal must not be a filesystem oracle.** Outside a mount, 403 whether or not anything
-  is there; only inside one does a missing file become 404. §9.1's remote mount sources have
-  to keep that where the answer comes from a store.
+  is there; only inside one does a missing file become 404. A mount over a store keeps the
+  first half and cannot have the second: a flat namespace has no missing directory, so a
+  prefix with nothing under it lists as empty.
 - Run as an unprivileged user, and document `ReadOnlyPaths=`/`ProtectSystem=` (systemd) and
   read-only bind mounts (Docker) in `docs/deployment.md`. **Not written yet.**
 
@@ -911,17 +914,7 @@ Nothing in it bounds what a `collect` returns.
 
 ## 9. Future development
 
-1. **Remote mount sources.** A `[[mount]]` fronting `s3://bucket/hats/` or an HTTP tree.
-   Listings become paginated `LIST` calls, static serving a proxied range read with the
-   origin's `ETag` passed through, and §8.3's network policy starts applying to the
-   file-server mode. `[api.access]` needs a prefix rule kind first: a source prefix is not
-   an endpoint entry, which would allow every bucket at that endpoint, and a mount's
-   derived grant must stay no wider than the mount. It is also the first mount that could
-   need credentials, so it is where §8.1 is revisited — any operator-configured source is
-   named explicitly in the config for that mount, never discovered from the environment —
-   and it invalidates the reasoning behind the one advisory `deny.toml` ignores, which
-   turns on every key being the caller's own.
-2. **A plain-url API for public data.** One `GET` whose only parameter is the location, the
+1. **A plain-url API for public data.** One `GET` whose only parameter is the location, the
    scheme naming the backend as `Backend::from_scheme` already does: the one-liner a
    browser, a `curl` or a notebook cell can write, lowering to the request the `POST` shape
    already carries.
@@ -932,7 +925,7 @@ Nothing in it bounds what a `collect` returns.
    query string — and the moment anything here could carry a secret it goes back to being a
    `POST`. Left to settle: where it sits in the url space, a url nested in a url needing
    encoding either way.
-3. **A `polygon` region.** `vertices: [[ra, dec], …]`, alongside `circle` and `zone`. Every
+2. **A `polygon` region.** `vertices: [[ra, dec], …]`, alongside `circle` and `zone`. Every
    other shape is a formula — one `Expr` that prunes on the coordinate columns — and this
    one is not. Four things to settle before it:
 
@@ -955,15 +948,16 @@ Nothing in it bounds what a `collect` returns.
    the work. §10 does not wait on it — ADQL's `POLYGON` is part of an optional feature, and
    the second and third points above are also what `BOX` turns on, which is why §10.7
    refuses that one rather than mapping it onto a shape with different edges.
-4. **Tables discovered rather than declared.** `[[tap.table]]` is written out per table and
+3. **Tables discovered rather than declared.** `[[tap.table]]` is written out per table and
    is temporary; the HATS registry is where it comes from instead. It reopens two things at
    once. §0.2, because a set of tables fetched from elsewhere is a registry across requests,
    with a refresh, a staleness window and two requests that may disagree about what exists.
-   And the url-only table, because a catalog the registry names may need a credential to
-   read — which is §8.1's question on a surface whose answers are public, and the reason
-   `[[tap.table]]` takes no storage options today.
-5. **Filesystem-driven cache invalidation** (§6.6).
-6. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
+   And where a registry-named catalog is addressed from, since `[[tap.table]]` names a path
+   under a `[[mount]]` and a registry hands back urls — so either the registry's urls are
+   resolved against the mounts, or a table gains an address the rest of the service has no
+   way to name.
+4. **Filesystem-driven cache invalidation** (§6.6).
+5. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today. The
    obstacle is not the expression rules — an operation over one row's list is a scalar
    function, which the allowlist admits — it is that `datafusion`'s `nested_expressions`
@@ -977,7 +971,7 @@ Nothing in it bounds what a `collect` returns.
    `array_any_match` take lambdas, which the allowlist refuses as expression kinds — either
    they stay refused, which needs saying in the error rather than a bare "not supported", or
    the lambda arms are reconsidered, which is wider than this item.
-7. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
+6. **Separate crates, separate repos.** Once ADQL and TAP exist, split into `hats`, `adql`
    and `tap`. `hats` is the catalog itself rather than this service's use of it — the
    properties file, the partitioning, `Norder`/`Npix`/`Dir`, the MOC, `_metadata` and
    `partition_info.csv`, what the Python `hats` library covers, for anyone reading a catalog

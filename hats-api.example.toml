@@ -85,24 +85,37 @@ allow_plain_http = false
 # is a private Hub.
 # endpoints = ["hf"]
 
-# There is no [api.access] section for local files: a [[mount]] is what makes a
-# directory readable.
+# There is no [api.access] section for local files, and none for a mount's own source: a
+# [[mount]] is what makes a directory readable, and naming one is the permission. The
+# sections above are about where a *caller* may point this service.
 
-# Zero or more mounts, each naming one local directory. `path` and `source` are required,
-# and two mounts may not claim the same subtree, served or not.
+# Zero or more mounts, each naming one directory. `path` and `source` are required, and
+# two mounts may not claim the same subtree, served or not.
 #
 # `path` is the address in both modes. The file server publishes the directory there, and
 # an API request names a file in it by the same path: file:///hats/dr1/x.parquet, never
-# the /data/hats it lives in.
+# the /data/hats or the s3://archive/hats it lives in.
 #
 # [[mount]]
 # path = "/hats"               # the address, in both modes
-# source = "/data/hats"        # an absolute path or a file:// url, and a directory
+# source = "/data/hats"        # an absolute path, or a url in any scheme read above
 # serve = true                 # publish it; off is API-only
-# follow_symlinks = false      # per mount
+# follow_symlinks = false      # a local source only
 # immutable = false            # never changes once published, so a cached copy needs no
 #                              # revalidating
 # filenames = ["*.parquet"]    # in place of [data] filenames, for this mount
+#
+# A source in a store. `serve` on one of these puts this service in front of that store: a
+# file under `path` is answered by a ranged read against the origin, and a directory by a
+# listing. `storage` takes the options a request carries beside its url, with the same
+# names, and it is the operator's own credential — a caller reaches the mount by `path`
+# and supplies nothing.
+#
+# [[mount]]
+# path = "/archive"
+# source = "s3://archive-bucket/hats"
+# serve = true
+# storage = {endpoint = "https://minio.example.org", region = "us-east-1", access_key_id = "…", secret_access_key = "…"}
 #
 # [[mount]]
 # path = "/staging"
@@ -121,16 +134,17 @@ filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 
 # HATS catalogs to publish over IVOA's Table Access Protocol (TAP), for clients such as
 # TOPCAT and pyvo, at [api] prefix + /tap. Each entry is one catalog: `name` is the table a
-# query names, as FROM {schema}.{table}, and `url` is where the catalog lives. The catalog is
-# read without credentials. TAP is off until at least one is listed.
+# query names, as FROM {schema}.{table}, and `path` is where the catalog is in this
+# service's own url space — a path under a [[mount]], which is what reaches it and what
+# carries any credential. TAP is off until at least one is listed.
 #
 # [[tap.table]]
 # name = "gaia_dr3.gaia_source"
-# url = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia"
+# path = "/hats/gaia_dr3"
 #
 # [[tap.table]]
 # name = "ztf.dr24_lc"
-# url = "file:///hats/ztf_dr24_lc"
+# path = "/hats/ztf_dr24_lc"
 
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. Such

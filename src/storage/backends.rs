@@ -20,7 +20,7 @@ use crate::storage::options::{
     AzureOptions, GcsOptions, S3Options, StorageOptions, WebdavOptions, WebdavTransport,
 };
 use crate::storage::redirect::FollowingRedirects;
-use crate::storage::store::file_url;
+use crate::storage::store::{NamedBy, file_url};
 
 /// S3 offers no way to discover a bucket's region, and object_store will not guess.
 pub const DEFAULT_S3_REGION: &str = "us-east-1";
@@ -64,15 +64,21 @@ pub(super) struct Reach<'a> {
     endpoint: Option<&'a str>,
     allow_http: bool,
     credentials: bool,
+    named_by: NamedBy,
     policy: &'a AccessPolicy,
 }
 
 impl<'a> Reach<'a> {
-    pub(super) fn of(options: &'a StorageOptions, policy: &'a AccessPolicy) -> Self {
+    pub(super) fn of(
+        options: &'a StorageOptions,
+        policy: &'a AccessPolicy,
+        named_by: NamedBy,
+    ) -> Self {
         Self {
             endpoint: options.endpoint.as_deref(),
             allow_http: options.allow_http,
             credentials: options.has_credentials(),
+            named_by,
             policy,
         }
     }
@@ -82,8 +88,14 @@ impl<'a> Reach<'a> {
 /// `None` is a request with no `endpoint` option, which means the provider's own
 /// service — and naming no endpoint is a choice the policy gets to refuse too.
 fn resolve_endpoint(backend: Backend, reach: Reach<'_>) -> Result<Option<Url>, ApiError> {
+    // The operator's own source url goes to the server it names, whatever `[api.access]`
+    // allows a caller to name. Both halves of the endpoint rules are skipped together: the
+    // list, and the provider a url with no `endpoint` option would default to.
+    let judged = reach.named_by == NamedBy::Caller;
     let Some(raw) = reach.endpoint else {
-        reach.policy.authorize_endpoint(backend, None)?;
+        if judged {
+            reach.policy.authorize_endpoint(backend, None)?;
+        }
         // A provider's own service is https, so there is nothing here for `allow_http`
         // to permit, and a caller who set it has misunderstood what it does.
         if reach.allow_http {
@@ -99,7 +111,11 @@ fn resolve_endpoint(backend: Backend, reach: Reach<'_>) -> Result<Option<Url>, A
     // request the policy has anything useful to say about, and saying which host it
     // will not reach would answer a question the caller did not ask.
     let scheme = require_endpoint_scheme(&endpoint)?;
-    reach.policy.authorize_endpoint(backend, Some(&endpoint))?;
+    if judged {
+        reach.policy.authorize_endpoint(backend, Some(&endpoint))?;
+    }
+    // Not skipped for the operator: this one is about the credential attached to *this*
+    // request, and a mount's credential is as much a secret as a caller's.
     allow_cleartext(&endpoint, scheme, reach.allow_http, reach.credentials)?;
     Ok(Some(endpoint))
 }
@@ -202,10 +218,12 @@ pub(super) fn remote_store(
     policy: &AccessPolicy,
     headers: &HeaderMap,
     redirects: Redirects,
+    named_by: NamedBy,
 ) -> Result<OpendalStore, ApiError> {
     let operator = Operator::new(builder)?
         .with_context(
-            OperationContext::new().with_http_transport(transport(policy, headers, redirects)),
+            OperationContext::new()
+                .with_http_transport(transport(policy, headers, redirects, named_by)),
         )
         .layer(retries());
     Ok(OpendalStore::new(operator))
@@ -229,8 +247,18 @@ pub(super) enum Redirects {
 /// credentials, and the transport underneath is shared by every store in the process.
 /// Putting them on the shared one would send one caller's token to every other caller's
 /// server.
-fn transport(policy: &AccessPolicy, headers: &HeaderMap, redirects: Redirects) -> HttpTransporter {
-    let inner = policy.network().transport();
+fn transport(
+    policy: &AccessPolicy,
+    headers: &HeaderMap,
+    redirects: Redirects,
+    named_by: NamedBy,
+) -> HttpTransporter {
+    // The operator's own source is read through the client with no address rules, the
+    // caller's url through the one whose resolver is the policy. See `NetworkPolicy`.
+    let inner = match named_by {
+        NamedBy::Caller => policy.network().transport(),
+        NamedBy::Operator => policy.network().configured_transport(),
+    };
     // Below the headers, so that the first request carries the caller's token and the hop is
     // what decides whether the second one does.
     let inner = match redirects {

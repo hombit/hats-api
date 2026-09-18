@@ -27,7 +27,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 use http::HeaderMap;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, local::LocalFileSystem};
+use object_store::{
+    GetOptions, GetResult, ObjectMeta, ObjectStore, ObjectStoreExt, local::LocalFileSystem,
+};
 use url::Url;
 
 use crate::access::{AccessPolicy, BACKENDS, Backend, LOCAL_SCHEME, Target};
@@ -38,7 +40,7 @@ use crate::storage::backends::{
 };
 use crate::storage::huggingface::{HfRepo, HfStore, hf_headers};
 use crate::storage::materialize::{MaterializingStore, Transfers};
-use crate::storage::options::{Credentials, StorageOptions, options_clause};
+use crate::storage::options::{Credentials, Opened, StorageOptions, options_clause};
 
 /// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
 /// list written out by hand, so a backend cannot be added and then refused here by a
@@ -59,15 +61,57 @@ pub fn supported_schemes() -> Vec<&'static str> {
         .collect()
 }
 
+/// The options a `[[mount]]`'s own `storage` built a store from, where one did.
+///
+/// **Carried on the handle rather than worked out again beside it.** Which mount a url
+/// lands in is settled once, by the policy, on the way to building the store; deriving it
+/// a second time at the place that needs to know — to decide whether two tables may share
+/// the one store DataFusion files them under — would be the same fact in two places, and
+/// the one that goes wrong is the one nothing checks. `None` is every other store: a
+/// caller's own url, and a mount that is a directory on this machine, whose
+/// `LocalFileSystem` is built with no credentials at all.
+pub type MountedBy = Option<Arc<StorageOptions>>;
+
 /// An opened remote file: the store it lives in, the key DataFusion registers that
-/// store under, and the object's own URL.
+/// store under, the object's own URL, and which mount's credentials built the store.
 pub struct RemoteFile {
     pub store: Arc<dyn ObjectStore>,
     pub base: Url,
     pub url: Url,
+    mounted_by: MountedBy,
 }
 
 impl RemoteFile {
+    /// A handle on a store this module did not build, for a test that has one of its own.
+    ///
+    /// Unmounted by construction, which is the only thing a store made outside `build` can
+    /// truthfully be: [`Mount::open`](crate::access::mount::Mount::open) is what stamps the
+    /// other case, and nothing here has a mount.
+    #[cfg(test)]
+    pub(crate) fn over(store: Arc<dyn ObjectStore>, base: Url, url: Url) -> Self {
+        Self {
+            store,
+            base,
+            url,
+            mounted_by: None,
+        }
+    }
+
+    /// The same object, read through another store — one that wraps this one to count its
+    /// requests, or to record them.
+    ///
+    /// Everything else is carried over, what built the store included: an instrumented
+    /// store is the same store for the purpose of who may share it, and a wrapper that
+    /// reset that would be a test measuring something other than what runs.
+    pub fn through(&self, store: Arc<dyn ObjectStore>) -> Self {
+        Self {
+            store,
+            base: self.base.clone(),
+            url: self.url.clone(),
+            mounted_by: self.mounted_by.clone(),
+        }
+    }
+
     /// Another handle on the same object, sharing the one store.
     ///
     /// Not `Clone`: a store is an `Arc` and a url is a string, so copying one is cheap, but
@@ -78,7 +122,14 @@ impl RemoteFile {
             store: Arc::clone(&self.store),
             base: self.base.clone(),
             url: self.url.clone(),
+            mounted_by: self.mounted_by.clone(),
         }
+    }
+
+    /// This store as [`Authorities`](super::Authorities) compares it: the authority it is
+    /// registered under, and what built it.
+    pub fn opened<'a>(&self, options: &'a StorageOptions) -> Opened<'a> {
+        Opened::new(&self.base, &self.mounted_by, options)
     }
 }
 
@@ -110,6 +161,7 @@ pub struct RemoteDir {
     /// The prefix, always ending in `/` so that a relative name joins onto it rather than
     /// replacing its last segment.
     pub url: Url,
+    mounted_by: MountedBy,
 }
 
 /// One entry of a listing, named relative to the directory that was listed.
@@ -119,6 +171,32 @@ pub struct Entry {
     /// which for a catalog is what makes `Norder=…/Dir=…/Npix=….parquet` one request.
     pub name: String,
     pub size: u64,
+}
+
+/// One object directly inside a directory, as a file server describes it.
+///
+/// More than an [`Entry`] carries because a listing is read by a person and by `fsspec`
+/// rather than by the catalog reader: the time is what a browser shows and what a client
+/// compares, and it is the store's own rather than anything derived here.
+#[derive(Debug, Clone)]
+pub struct Object {
+    pub name: String,
+    pub size: u64,
+    pub modified: chrono::DateTime<chrono::Utc>,
+}
+
+/// One level of a directory in a store: the names directly inside it and nothing below
+/// them.
+///
+/// A store's namespace is flat and has no directories in it, so what stands in for one is
+/// the set of keys sharing a prefix up to the next separator. That is what
+/// `list_with_delimiter` answers, and it is one request for a directory however large the
+/// tree under it is — which [`RemoteDir::list`]'s recursive walk is not.
+#[derive(Debug, Default)]
+pub struct Level {
+    /// The prefixes one step down, as bare names with no separator on either end.
+    pub directories: Vec<String>,
+    pub files: Vec<Object>,
 }
 
 /// `Url`'s own `Debug` prints its parsed fields, `password` among them.
@@ -135,12 +213,22 @@ impl std::fmt::Debug for RemoteDir {
 impl RemoteDir {
     /// A url that named a directory, normalized so that joining a name onto it appends.
     fn new(file: RemoteFile) -> Self {
-        let RemoteFile { store, base, url } = file;
+        let RemoteFile {
+            store,
+            base,
+            url,
+            mounted_by,
+        } = file;
         let mut url = url;
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));
         }
-        Self { store, base, url }
+        Self {
+            store,
+            base,
+            url,
+            mounted_by,
+        }
     }
 
     /// A file inside this directory, as the query layer reads one.
@@ -153,7 +241,27 @@ impl RemoteDir {
             store: Arc::clone(&self.store),
             base: self.base.clone(),
             url: self.join(relative)?,
+            mounted_by: self.mounted_by.clone(),
         })
+    }
+
+    /// This store as [`Authorities`](super::Authorities) compares it: the authority it is
+    /// registered under, and what built it.
+    pub fn opened<'a>(&self, options: &'a StorageOptions) -> Opened<'a> {
+        Opened::new(&self.base, &self.mounted_by, options)
+    }
+
+    /// The same handle, stamped as the given mount's.
+    ///
+    /// [`Mount::open`](crate::access::mount::Mount::open) is the one caller, and it is the
+    /// one place that knows: `open_configured_dir` is handed a url and options and has no
+    /// mount in front of it.
+    #[must_use]
+    pub fn mounted_by(self, options: Arc<StorageOptions>) -> Self {
+        Self {
+            mounted_by: Some(options),
+            ..self
+        }
     }
 
     /// A directory inside this one, joined the same way.
@@ -177,13 +285,68 @@ impl RemoteDir {
         }
     }
 
-    /// How large a file inside this directory is, without reading it.
-    pub async fn size(&self, relative: &str) -> Result<Option<u64>, ApiError> {
+    /// What the store says about one name inside this directory, or `None` where it holds
+    /// no object of that name.
+    ///
+    /// Absence is a value rather than an error for the reason it is in
+    /// [`Self::read_if_present`], and for one more: a store has no directories, so "no
+    /// object here" is also how a name that is a prefix answers.
+    pub async fn meta(&self, relative: &str) -> Result<Option<ObjectMeta>, ApiError> {
         match self.store.head(&self.key(relative)?).await {
-            Ok(meta) => Ok(Some(meta.size)),
+            Ok(meta) => Ok(Some(meta)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// How large a file inside this directory is, without reading it.
+    pub async fn size(&self, relative: &str) -> Result<Option<u64>, ApiError> {
+        Ok(self.meta(relative).await?.map(|meta| meta.size))
+    }
+
+    /// One file inside this directory, as the store hands it over — a range of it where
+    /// the options ask for one, and the conditional answer where they carry a validator.
+    ///
+    /// The bytes are not collected here. A mounted object is served as it arrives, so what
+    /// the file server needs is the stream and what the store said about it.
+    pub async fn get(&self, relative: &str, options: GetOptions) -> Result<GetResult, ApiError> {
+        Ok(self.store.get_opts(&self.key(relative)?, options).await?)
+    }
+
+    /// The names directly inside a prefix, one level down.
+    ///
+    /// One request against an object store, and one `readdir` against a local filesystem.
+    /// Distinct from [`Self::list`], which walks the whole tree: a directory page describes
+    /// one directory, and a recursive listing of a catalog's `Norder=` level is millions of
+    /// keys to build a page of ten entries from.
+    pub async fn level(&self, relative: &str) -> Result<Level, ApiError> {
+        let prefix = self.key(relative)?;
+        let listed = self.store.list_with_delimiter(Some(&prefix)).await?;
+        // The store answers with whole keys; what a listing says is names inside this one.
+        // A key that is not below the prefix cannot be described as a name in it, so it is
+        // dropped rather than rendered as whatever the arithmetic left.
+        let inside = |key: &ObjectPath| -> Option<String> {
+            let (whole, head) = (key.as_ref(), prefix.as_ref());
+            let rest = match head.is_empty() {
+                true => whole,
+                false => whole.strip_prefix(head)?.strip_prefix('/')?,
+            };
+            (!rest.is_empty() && !rest.contains('/')).then(|| rest.to_owned())
+        };
+        Ok(Level {
+            directories: listed.common_prefixes.iter().filter_map(inside).collect(),
+            files: listed
+                .objects
+                .iter()
+                .filter_map(|meta| {
+                    Some(Object {
+                        name: inside(&meta.location)?,
+                        size: meta.size,
+                        modified: meta.last_modified,
+                    })
+                })
+                .collect(),
+        })
     }
 
     /// Every file below a prefix inside this directory, recursively.
@@ -236,6 +399,23 @@ impl RemoteDir {
     }
 }
 
+/// Who wrote the url, which is what decides whether the endpoint rules have anything to
+/// say about it.
+///
+/// The rules under `[api.access]` are about where a *caller* may point this service. An
+/// operator naming a directory in the config is the permission itself — the same reason
+/// there is no `[api.access]` section for a local one — and it widens nothing, since a
+/// mount is reachable only through its own `path`. Requiring the endpoint to be named as
+/// well would be the wrong grant anyway: an entry in `endpoints` opens every bucket at
+/// that server to every caller, where the mount opens one prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamedBy {
+    /// A url in a request.
+    Caller,
+    /// A `[[mount]]` source in the config file.
+    Operator,
+}
+
 pub fn open(
     url: &Url,
     options: &StorageOptions,
@@ -243,7 +423,7 @@ pub fn open(
     transfers: &Arc<Transfers>,
 ) -> Result<RemoteFile, ApiError> {
     require_object_key(url)?;
-    build(url, options, policy, transfers)
+    build(url, options, policy, transfers, NamedBy::Caller)
 }
 
 /// The same, for a url naming a directory rather than an object.
@@ -259,7 +439,34 @@ pub fn open_dir(
     policy: &AccessPolicy,
     transfers: &Arc<Transfers>,
 ) -> Result<RemoteDir, ApiError> {
-    Ok(RemoteDir::new(build(url, options, policy, transfers)?))
+    Ok(RemoteDir::new(build(
+        url,
+        options,
+        policy,
+        transfers,
+        NamedBy::Caller,
+    )?))
+}
+
+/// The directory a `[[mount]]`'s `source` names, opened.
+///
+/// The one caller is [`crate::access::mount::Mount::open`], and what it drops is the
+/// endpoint rules — see [`NamedBy`]. Everything else `open_dir` checks still runs, the
+/// options included, so a mount carrying another backend's option is a startup error the
+/// same way a request carrying one is a 400.
+pub fn open_configured_dir(
+    url: &Url,
+    options: &StorageOptions,
+    policy: &AccessPolicy,
+    transfers: &Arc<Transfers>,
+) -> Result<RemoteDir, ApiError> {
+    Ok(RemoteDir::new(build(
+        url,
+        options,
+        policy,
+        transfers,
+        NamedBy::Operator,
+    )?))
 }
 
 fn build(
@@ -267,6 +474,7 @@ fn build(
     options: &StorageOptions,
     policy: &AccessPolicy,
     transfers: &Arc<Transfers>,
+    named_by: NamedBy,
 ) -> Result<RemoteFile, ApiError> {
     refuse_userinfo(url)?;
     refuse_query_string(url)?;
@@ -283,8 +491,15 @@ fn build(
     // a `secret_access_key` is a caller's mistake whatever the policy would have said.
     let credentials = options.resolve(url.scheme())?;
     // Before anything is built, and before the filesystem is touched.
-    match policy.authorize(url)? {
+    let target = match named_by {
+        NamedBy::Caller => policy.authorize(url)?,
+        NamedBy::Operator => Target::Remote(policy.authorize_configured(url)?),
+    };
+    match target {
         Target::Local(path) => local_file(&path),
+        // A mount whose source is a store. The store is the mount's and so are the
+        // credentials: the caller wrote a path under `path` and named neither.
+        Target::InStore(mount, relative) => mount.open(policy, transfers)?.child(&relative),
         Target::Remote(backend) => {
             refuse_port_on_a_bucket(url, backend)?;
             // `None` is a scheme with no backend, which `authorize` has just said this is not.
@@ -299,25 +514,35 @@ fn build(
                 Credentials::Hf(hf) => hf_headers(hf)?,
                 _ => HeaderMap::new(),
             };
-            let reach = Reach::of(options, policy);
+            // The requests this crate makes itself for this store — a range probe, a Hub
+            // listing — go on the same client the transport wraps, so a configured source
+            // makes them through the one with no address rules too.
+            let client = match named_by {
+                NamedBy::Caller => policy.network().client(),
+                NamedBy::Operator => policy.network().configured_client(),
+            };
+            let reach = Reach::of(options, policy, named_by);
             let store: Arc<dyn ObjectStore> = match credentials {
                 Credentials::S3(s3) => Arc::new(remote_store(
                     s3_builder(url, s3, reach)?,
                     policy,
                     &headers,
                     Redirects::Refused,
+                    named_by,
                 )?),
                 Credentials::Gcs(gcs) => Arc::new(remote_store(
                     gcs_builder(url, gcs, reach)?,
                     policy,
                     &headers,
                     Redirects::Refused,
+                    named_by,
                 )?),
                 Credentials::Azure(azure) => Arc::new(remote_store(
                     azblob_builder(url, azure, reach)?,
                     policy,
                     &headers,
                     Redirects::Refused,
+                    named_by,
                 )?),
                 // The one backend whose origin hands a file over by redirecting: the Hub
                 // answers a `resolve` with a `307` to a presigned url on a CDN for anything
@@ -339,13 +564,14 @@ fn build(
                             policy,
                             &headers,
                             Redirects::Followed,
+                            named_by,
                         )?),
                         HfRepo::kind_of(url)?,
                         hub,
                         // The listing is this crate's own request rather than the store's, so
                         // it goes on the policy's client — the same one the transport wraps,
                         // with the same resolver behind it.
-                        policy.network().client(),
+                        client,
                         headers.clone(),
                     ))
                 }
@@ -357,9 +583,10 @@ fn build(
                         policy,
                         &headers,
                         Redirects::Refused,
+                        named_by,
                     )?),
                     origin(url)?,
-                    policy.network().client(),
+                    client,
                     // The probe is a request of this service's own, made outside the
                     // store, so it needs the headers handed to it separately — a server
                     // that authenticates would answer it 401 otherwise, and the object
@@ -373,9 +600,10 @@ fn build(
                         policy,
                         &headers,
                         Redirects::Refused,
+                        named_by,
                     )?),
                     webdav_endpoint(url, webdav)?,
-                    policy.network().client(),
+                    client,
                     headers,
                     Arc::clone(transfers),
                 )),
@@ -384,6 +612,8 @@ fn build(
                 store,
                 base: origin(url)?,
                 url: file_url(url),
+                // A url the caller wrote; the mount arm above is what stamps one.
+                mounted_by: None,
             })
         }
     }
@@ -432,6 +662,9 @@ fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
         store: Arc::new(LocalFileSystem::new()),
         base: Url::parse("file://").expect("file:// is a valid url"),
         url,
+        // A `LocalFileSystem` is built with no credentials at all, so there is nothing a
+        // second table at this authority could be given that it does not already have.
+        mounted_by: None,
     })
 }
 

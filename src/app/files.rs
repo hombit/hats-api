@@ -4,16 +4,18 @@
 use std::path::Path;
 use std::time::Instant;
 
+use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{Method, header, request::Parts};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::response::{Html, IntoResponse, Json, Response};
 use futures::future::OptionFuture;
+use object_store::{GetOptions, GetRange, ObjectMeta};
 use tower_http::services::ServeFile;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
 // here and is a literal `+` in a path segment.
-use url::form_urlencoded;
+use url::{Url, form_urlencoded};
 
-use crate::access::mount::{self, Mount};
+use crate::access::mount::{self, Mount, MountSource, RemoteSource};
 use crate::access::{self};
 use crate::app::answer::{answer, hats_answer};
 use crate::app::listing::{self, Listing};
@@ -25,7 +27,7 @@ use crate::hats;
 use crate::hats::query::{CatalogSelection, Exceeded, Outcome, Search};
 use crate::output::parquet;
 use crate::sky::region::{self, Region, Spatial};
-use crate::storage;
+use crate::storage::{self, RemoteDir};
 
 /// The file a directory is served as when it has one, in place of a generated listing.
 const DIRECTORY_INDEX: &str = "index.html";
@@ -54,9 +56,31 @@ pub(in crate::app) async fn serve_mounted(
         return Err(ApiError::not_found(format!("{path} is not a route")));
     };
     let segments = mount::path_segments(relative)?;
+    match mount.source() {
+        MountSource::Local(root) => {
+            serve_from_disk(&service, mount, root, &segments, parts, body).await
+        }
+        // Everything below the url space is different: a store has no symlinks and no
+        // directories, its names come back from a listing rather than a `readdir`, and
+        // the server that would answer a `Range` is the origin's rather than this one.
+        MountSource::Remote(source) => {
+            serve_from_store(&service, mount, source, &segments, &parts).await
+        }
+    }
+}
+
+/// A path under a mount that is a directory on this machine.
+async fn serve_from_disk(
+    service: &Service,
+    mount: &Mount,
+    root: &Path,
+    segments: &[String],
+    parts: Parts,
+    body: Body,
+) -> Result<Response, ApiError> {
     let radius = service.max_query_radius_arcsec;
-    let mut requested = mount.source().to_owned();
-    requested.extend(&segments);
+    let mut requested = root.to_owned();
+    requested.extend(segments);
     let mut file = access::local::authorize_mounted(mount, &requested)?;
     if file.is_dir() {
         // A catalog is the one directory that answers a question about itself, and the
@@ -68,10 +92,11 @@ pub(in crate::app) async fn serve_mounted(
         // are against a file. Which directory this is decides whether there is a query
         // surface at all, so a directory that is not a catalog is listed with its query
         // string ignored, and one that is answers or refuses but never drops it.
-        if hats::local::describes_a_catalog(&file)
+        if hats::browse::describes_a_catalog(&file)
             && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
         {
-            return query_catalog_mounted(&service, mount, &file, &query, &parts).await;
+            let opened = storage::open_mounted_dir(&file)?;
+            return query_catalog(service, mount, opened, Hide::Local(&file), &query, &parts).await;
         }
         // A directory that publishes its own page says what it wants said about itself,
         // and the generated listing is only the fallback — unless the operator turned
@@ -89,7 +114,7 @@ pub(in crate::app) async fn serve_mounted(
         };
         match index {
             Some(index) if index.is_file() => file = index,
-            _ => return list_directory(&service, mount, &segments, &file, &parts).await,
+            _ => return list_directory(service, mount, segments, &file, &parts).await,
         }
     }
     // A query string turns a data file into a question about itself. Anything else keeps
@@ -98,7 +123,8 @@ pub(in crate::app) async fn serve_mounted(
     if mount.data_files().matches_path(&file)
         && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
     {
-        return query_mounted(&service, &file, &query, &parts).await;
+        let opened = storage::open_mounted(&file)?;
+        return query_file(service, &opened, Hide::Local(&file), &query, &parts).await;
     }
     let mut response = ServeFile::new(&file)
         .try_call(Request::from_parts(parts, body))
@@ -113,10 +139,318 @@ pub(in crate::app) async fn serve_mounted(
     if mount.data_files().matches_path(&file) {
         response.headers_mut().insert(
             header::CONTENT_TYPE,
-            header::HeaderValue::from_static(PARQUET_CONTENT_TYPE),
+            HeaderValue::from_static(PARQUET_CONTENT_TYPE),
         );
     }
     Ok(response)
+}
+
+/// A path under a mount whose `source` is a store — this service standing in front of
+/// that store, which is what `serve` on such a mount means.
+///
+/// **A store has no directories.** Its namespace is flat, so a name is a file where the
+/// store holds an object of exactly that name, and a directory otherwise — and "a prefix
+/// nothing is under" is not a case it can tell from "a prefix nobody wrote". So an empty
+/// listing is what an unknown path answers with, which is also the answer a mount gives
+/// for anything it will not serve.
+async fn serve_from_store(
+    service: &Service,
+    mount: &Mount,
+    source: &RemoteSource,
+    segments: &[String],
+    parts: &Parts,
+) -> Result<Response, ApiError> {
+    let hide = Hide::Store(source.url());
+    let root = mount.open(&service.policy, &service.transfers)?;
+    let relative = segments.join("/");
+    // The mount's own root is a directory by construction and is never an object, so it
+    // is not asked about — a store may perfectly well hold a zero-length key at the
+    // prefix a mount publishes, and serving that as the mount would publish a file where
+    // the operator published a tree.
+    let object = match relative.is_empty() {
+        true => None,
+        false => root
+            .meta(&relative)
+            .await
+            .map_err(|error| hide.apply(error))?,
+    };
+    let Some(object) = object else {
+        return serve_stored_directory(service, mount, &root, segments, parts, &hide).await;
+    };
+    // A query string turns a data file into a question about itself; anything else is the
+    // bytes, parameters and all.
+    if mount
+        .data_files()
+        .matches(object.location.filename().unwrap_or_default())
+        && let Some(query) = FileQuery::parse(
+            parts.uri.query().unwrap_or_default(),
+            service.max_query_radius_arcsec,
+        )?
+    {
+        let opened = root.child(&relative)?;
+        return query_file(service, &opened, hide, &query, parts).await;
+    }
+    serve_object(&root, &relative, &object, mount, parts, &hide).await
+}
+
+/// A directory of a store-backed mount: a catalog asked a question, its own `index.html`,
+/// or the listing.
+///
+/// One listing answers all three. Against a filesystem each of those is a `stat` that
+/// costs nothing; against a store each would be a request, and the page is already one.
+async fn serve_stored_directory(
+    service: &Service,
+    mount: &Mount,
+    root: &RemoteDir,
+    segments: &[String],
+    parts: &Parts,
+    hide: &Hide<'_>,
+) -> Result<Response, ApiError> {
+    let relative = segments.join("/");
+    let dir = root.subdir(&relative)?;
+    // The catalog probe is a request of its own, so it is made only where there is a
+    // question for it to be about. Which directory this is still decides whether there is
+    // a query surface at all — a directory that is not a catalog is listed with its query
+    // string ignored, exactly as on disk.
+    if let Some(query) = FileQuery::parse(
+        parts.uri.query().unwrap_or_default(),
+        service.max_query_radius_arcsec,
+    )? && hats::browse::in_store::describes_a_catalog(&dir)
+        .await
+        .map_err(|error| hide.apply(error))?
+    {
+        return query_catalog(service, mount, dir, *hide, &query, parts).await;
+    }
+
+    if !matches!(parts.method, Method::GET | Method::HEAD) {
+        return Err(ApiError::method_not_allowed(
+            "a listing is read, not written",
+        ));
+    }
+    let level = dir.level("").await.map_err(|error| {
+        // The same answer a directory that is not published gets: which prefixes a store
+        // will not list is something about the origin, and the operator reads it in the
+        // log. An `http(s)://` source is the ordinary case — an origin with no listing
+        // operation serves its files here and cannot be browsed.
+        tracing::warn!(error = %error, mount = mount.prefix(), "cannot list");
+        ApiError::not_found("no such directory")
+    })?;
+    // A directory that publishes its own page says what it wants said about itself, and
+    // the generated listing is the fallback — the same rule, and the same switch, as on
+    // disk. Read out of the listing rather than asked for, which is what makes it free.
+    if service.serve_mounted_index_html
+        && let Some(index) = level.files.iter().find(|file| file.name == DIRECTORY_INDEX)
+    {
+        let within = listing::relative_path(segments, &index.name);
+        let object = root
+            .meta(&within)
+            .await
+            .map_err(|error| hide.apply(error))?
+            .ok_or_else(|| ApiError::not_found("no such file"))?;
+        return serve_object(root, &within, &object, mount, parts, hide).await;
+    }
+
+    let path = listing::url(mount.prefix(), segments);
+    let listed = Listing::of_store(&level, mount.prefix(), &path);
+    let (catalog, about) = match listing::wants_html(&parts.headers) {
+        // Only for the page. The walk is a listing per level it climbs, and nothing but
+        // the page renders what it finds.
+        true => stored_catalog(&dir, root, segments, mount, hide).await?,
+        false => (None, None),
+    };
+    Ok(render(
+        service,
+        mount,
+        &listed,
+        catalog.as_deref(),
+        about.as_ref(),
+        &parts.headers,
+    ))
+}
+
+/// The catalog this directory belongs to, for the page: its url under the mount, and the
+/// little it says about itself.
+async fn stored_catalog(
+    dir: &RemoteDir,
+    root: &RemoteDir,
+    segments: &[String],
+    mount: &Mount,
+    hide: &Hide<'_>,
+) -> Result<(Option<String>, Option<hats::browse::About>), ApiError> {
+    let found = hats::browse::in_store::enclosing(root, segments)
+        .await
+        .map_err(|error| hide.apply(error))?;
+    let Some(levels) = found else {
+        return Ok((None, None));
+    };
+    let above = segments.get(..segments.len().saturating_sub(levels));
+    let at = match levels {
+        0 => dir.clone(),
+        _ => root.subdir(&above.unwrap_or_default().join("/"))?,
+    };
+    let about = hats::browse::in_store::about(&at)
+        .await
+        .map_err(|error| hide.apply(error))?;
+    Ok((
+        above.map(|above| listing::url(mount.prefix(), above)),
+        Some(about),
+    ))
+}
+
+/// One object off a store-backed mount, over HTTP.
+///
+/// What [`ServeFile`] does for a local file, done against a store: the range the client
+/// asked for, the validators it will ask with next time, and the type the readers above
+/// this look at. **The ranges are not optional.** An `lsdb` or `fsspec` client reads one
+/// partition of a catalog with ranged requests, and a server that answered `200` to one of
+/// those would hand it the head of the file for every slice it asked for — a wrong answer
+/// with nothing in it to say so, which is the same failure this service refuses everywhere
+/// else.
+///
+/// The bytes are streamed as they arrive rather than collected. A partition runs to
+/// gigabytes, and nothing here has any reason to hold one.
+async fn serve_object(
+    dir: &RemoteDir,
+    relative: &str,
+    object: &ObjectMeta,
+    mount: &Mount,
+    parts: &Parts,
+    hide: &Hide<'_>,
+) -> Result<Response, ApiError> {
+    if !matches!(parts.method, Method::GET | Method::HEAD) {
+        return Err(ApiError::method_not_allowed("a mounted file is read"));
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(tag) = object.e_tag.as_deref()
+        && let Ok(value) = HeaderValue::from_str(tag)
+    {
+        headers.insert(header::ETAG, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&httpdate::fmt_http_date(object.last_modified.into()))
+    {
+        headers.insert(header::LAST_MODIFIED, value);
+    }
+    headers.insert(header::CONTENT_TYPE, content_type(mount, relative));
+
+    // The origin's own validator, handed back to it: a client that has the object already
+    // gets a `304` and the bytes stay where they are.
+    if let Some(tag) = object.e_tag.as_deref()
+        && let Some(asked) = parts.headers.get(header::IF_NONE_MATCH)
+        && asked.to_str().is_ok_and(|asked| matches_etag(asked, tag))
+    {
+        return Ok((StatusCode::NOT_MODIFIED, headers).into_response());
+    }
+
+    let range = match parts.headers.get(header::RANGE) {
+        None => None,
+        Some(asked) => match wanted_range(asked, object.size) {
+            Some(range) => Some(range),
+            // Refused rather than answered whole: a client that asked for the tail and got
+            // the head cannot tell the two apart.
+            None => {
+                headers.insert(
+                    header::CONTENT_RANGE,
+                    HeaderValue::from_str(&format!("bytes */{}", object.size))
+                        .unwrap_or_else(|_| HeaderValue::from_static("bytes */0")),
+                );
+                return Ok((StatusCode::RANGE_NOT_SATISFIABLE, headers).into_response());
+            }
+        },
+    };
+    let (status, length) = match &range {
+        None => (StatusCode::OK, object.size),
+        Some(range) => {
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!(
+                    "bytes {}-{}/{}",
+                    range.start,
+                    range.end - 1,
+                    object.size
+                ))
+                .map_err(|_| ApiError::internal("cannot describe this range"))?,
+            );
+            (StatusCode::PARTIAL_CONTENT, range.end - range.start)
+        }
+    };
+    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+    // A `HEAD` is the same headers with no body, which is what the store is not asked for.
+    if parts.method == Method::HEAD {
+        return Ok((status, headers).into_response());
+    }
+    let options = GetOptions {
+        range: range.map(GetRange::Bounded),
+        ..GetOptions::default()
+    };
+    let result = dir
+        .get(relative, options)
+        .await
+        .map_err(|error| hide.apply(error))?;
+    Ok((status, headers, Body::from_stream(result.into_stream())).into_response())
+}
+
+/// The one range a request asked for, or `None` where it asked for something this cannot
+/// answer.
+///
+/// Several ranges at once is one of those. A multipart response is a form of answer
+/// nothing reading these files sends, and half-answering it — the first range under a
+/// `206` claiming all of them — is the mislabelling this whole path exists to avoid.
+fn wanted_range(asked: &HeaderValue, size: u64) -> Option<std::ops::Range<u64>> {
+    let text = asked.to_str().ok()?;
+    let ranges = http_range_header::parse_range_header(text)
+        .ok()?
+        .validate(size)
+        .ok()?;
+    match ranges.as_slice() {
+        [one] => Some(*one.start()..one.end().checked_add(1)?),
+        _ => None,
+    }
+}
+
+/// Whether an `If-None-Match` value covers this tag. `*` is every representation, and a
+/// list is any of them; a weak comparison is what a `GET` uses, so the `W/` prefix is not
+/// part of the comparison.
+fn matches_etag(asked: &str, tag: &str) -> bool {
+    let weak = |value: &str| value.trim().trim_start_matches("W/").to_owned();
+    asked.trim() == "*"
+        || asked
+            .split(',')
+            .any(|candidate| weak(candidate) == weak(tag))
+}
+
+/// What a mounted file is served as. The mount's own list decides the parquet half, the
+/// way it decides everything else about which of its files are data.
+fn content_type(mount: &Mount, relative: &str) -> HeaderValue {
+    let name = relative.rsplit('/').next().unwrap_or(relative);
+    if mount.data_files().matches(name) {
+        return HeaderValue::from_static(PARQUET_CONTENT_TYPE);
+    }
+    mime_guess::from_path(name)
+        .first_raw()
+        .and_then(|mime| HeaderValue::from_str(mime).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"))
+}
+
+/// How a failure against one mount is told to a caller, the mount's own location being no
+/// part of what they wrote.
+///
+/// Two rules rather than one, and the difference is not cosmetic: a local mount has no
+/// origin behind it, so a store's complaint about it is a statement about the file and
+/// answers `400`, while a store-backed mount has one and keeps the status it really got.
+#[derive(Clone, Copy)]
+enum Hide<'a> {
+    Local(&'a Path),
+    Store(&'a Url),
+}
+
+impl Hide<'_> {
+    fn apply(&self, error: ApiError) -> ApiError {
+        match self {
+            Self::Local(path) => error.from_mount(path),
+            Self::Store(url) => error.from_mounted_store(url),
+        }
+    }
 }
 
 /// The question a file-server request asks about a file, if it asks one.
@@ -362,11 +696,12 @@ fn optional_number(name: &str, raw: Option<&str>) -> Result<Option<f64>, ApiErro
 ///
 /// The file was authorized by the mount before it got here, and the caller named no
 /// store and supplied no credential — that is the whole difference from the API mode,
-/// which is why this reads through [`storage::open_mounted`] rather than through the
-/// url-judging path.
-async fn query_mounted(
+/// which is why the handle is opened by the mount rather than through the url-judging
+/// path.
+async fn query_file(
     service: &Service,
-    file: &Path,
+    opened: &storage::RemoteFile,
+    hide: Hide<'_>,
     query: &FileQuery,
     request: &Parts,
 ) -> Result<Response, ApiError> {
@@ -380,31 +715,31 @@ async fn query_mounted(
         Format::Parquet,
     )?;
     let selection = query.selection()?;
-    let opened = storage::open_mounted(file)?;
-    // Through `from_mount`, both of them: a store's own message about a local file names
-    // the path it was reading, and that path is the operator's.
+    // Through `hide`, all of them: a store's own message names where it was reading, and
+    // where a mount's files really are is the operator's.
     // The rows come back in the file's own order. The request named a file and asked for
     // less of it, so the answer describes that file, and a client that reads a partition
     // twice gets the same rows in the same places both times.
     // The layout read needs only `opened`, not the rows, so it runs alongside the query
     // rather than after it. Fetched only when the answer will actually be parquet.
     let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
-        .then(|| parquet::read_layout(&opened))
+        .then(|| parquet::read_layout(opened))
         .into();
     let (result, layout) = tokio::join!(
-        query::run(&opened, &selection, service.sql_limits, Order::File),
+        query::run(opened, &selection, service.sql_limits, Order::File),
         layout_future,
     );
-    let result = result.map_err(|error| error.from_mount(file))?;
-    let layout = layout.transpose().map_err(|error| error.from_mount(file))?;
+    let result = result.map_err(|error| hide.apply(error))?;
+    let layout = layout.transpose().map_err(|error| hide.apply(error))?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, &opened, &output, started, layout)
+    let response = answer(&result, opened, &output, started, layout)
         .await
-        .map_err(|error| error.from_mount(file))?;
+        .map_err(|error| hide.apply(error))?;
     tracing::info!(
-        // The url path, not the local path: what is on disk is the operator's business.
+        // The url path, not the mount's own: where the file really is is the operator's
+        // business.
         // Both parameters are the caller's own text and can be megabytes of `IN` list,
         // so what is logged is that they were there.
         path = request.uri.path(),
@@ -434,10 +769,11 @@ async fn query_mounted(
 /// — read partition by partition until there are enough rows, which for the first ten is the
 /// first partition. Without either, the whole catalog is what it says, and the partition
 /// bound refuses it before anything is read.
-async fn query_catalog_mounted(
+async fn query_catalog(
     service: &Service,
     mount: &Mount,
-    dir: &Path,
+    dir: RemoteDir,
+    hide: Hide<'_>,
     query: &FileQuery,
     request: &Parts,
 ) -> Result<Response, ApiError> {
@@ -453,11 +789,11 @@ async fn query_catalog_mounted(
         Format::Parquet,
     )?;
     let selection = query.catalog_selection()?;
-    // Every message from here down names the operator's directory, this being a local store.
-    let hide_the_path = |error: ApiError| error.from_mount(dir);
+    // Every message from here down names where the mount's data really is, which is the
+    // operator's and no part of what the caller wrote.
+    let hide_the_path = |error: ApiError| hide.apply(error);
 
-    let opened = storage::open_mounted_dir(dir)?;
-    let search = Search::resolve(opened, selection.regions, service.catalog_limits)
+    let search = Search::resolve(dir, selection.regions, service.catalog_limits)
         .await
         .map_err(hide_the_path)?;
     let outcome = search
@@ -481,7 +817,8 @@ async fn query_catalog_mounted(
         .await
         .map_err(hide_the_path)?;
     tracing::info!(
-        // The url path, not the local path: what is on disk is the operator's business.
+        // The url path, not the mount's own: where the catalog really is is the
+        // operator's business.
         path = request.uri.path(),
         partitions = search.catalog().partitions().len(),
         chosen = search.chosen().len(),
@@ -532,16 +869,23 @@ async fn list_directory(
     // How far the mount's root is, which is as far up as the catalog may be looked for:
     // a listing goes no higher than its mount, and neither does what it offers.
     let depth = segments.len();
+    // Only for the page, which is the one thing that renders what the walk finds. On disk
+    // it is a handful of `stat`s; the store's half of this is a request per level, and one
+    // rule for both is what keeps them from drifting.
+    let wants_catalog = listing::wants_html(&request.headers);
     // `read_dir` and a `stat` per entry are blocking calls, and a HATS `Dir=` level is
     // ten thousand of them. The catalog probe is a handful more, on the same thread.
     let read = tokio::task::spawn_blocking(move || {
         let listing = Listing::read(&dir, &root, &path, follow_symlinks)?;
         // The catalog this directory is inside, and what it says about itself — both read
         // here rather than beside the page, `about` being another small file off the disk.
-        let found = hats::local::enclosing(&dir, depth).map(|levels| {
-            let at = dir.ancestors().nth(levels).unwrap_or(&dir);
-            (levels, hats::local::about(at))
-        });
+        let found = wants_catalog
+            .then(|| hats::browse::enclosing(&dir, depth))
+            .flatten()
+            .map(|levels| {
+                let at = dir.ancestors().nth(levels).unwrap_or(&dir);
+                (levels, hats::browse::about(at))
+            });
         Ok::<_, std::io::Error>((listing, found))
     })
     .await
@@ -567,28 +911,48 @@ async fn list_directory(
         ),
         None => (None, None),
     };
+    Ok(render(
+        service,
+        mount,
+        &listing,
+        catalog.as_deref(),
+        about.as_ref(),
+        &request.headers,
+    ))
+}
+
+/// A listing as a page or as JSON, whichever the request asked for, with what its catalog
+/// says about itself where the walk found one.
+///
+/// Both mount kinds land here. What differs between them is how a directory is read and
+/// how a catalog above it is recognised; what a directory *answers with* is one thing, and
+/// a second copy of it is how the two modes come to describe one directory differently.
+fn render(
+    service: &Service,
+    mount: &Mount,
+    listing: &Listing,
+    catalog: Option<&str>,
+    about: Option<&hats::browse::About>,
+    headers: &HeaderMap,
+) -> Response {
     // Where the catalog's columns are, as a url under this mount. Only where the catalog has
     // the file: one without it is answered by the page a different way rather than offered a
     // url that is a 404. The path is the catalog's to give — a collection's is inside its
     // primary table — and the encoding is `listing`'s.
-    let schema = catalog
-        .as_deref()
-        .zip(about.as_ref())
-        .and_then(|(at, about)| {
-            let path = about.schema.as_deref()?;
-            Some(listing::below(at, path))
-        });
-
-    Ok(match listing::wants_html(&request.headers) {
+    let schema = catalog.zip(about).and_then(|(at, about)| {
+        let path = about.schema.as_deref()?;
+        Some(listing::below(at, path))
+    });
+    match listing::wants_html(headers) {
         true => Html(
             listing.to_html(
                 mount.data_files(),
                 service.api_prefix.as_deref(),
                 &listing::Catalog {
-                    url: catalog.as_deref(),
-                    name: about.as_ref().and_then(|about| about.name.as_deref()),
-                    rows: about.as_ref().and_then(|about| about.rows),
-                    order: about.as_ref().and_then(|about| about.order),
+                    url: catalog,
+                    name: about.and_then(|about| about.name.as_deref()),
+                    rows: about.and_then(|about| about.rows),
+                    order: about.and_then(|about| about.order),
                     schema_url: schema.as_deref(),
                     max_radius_arcsec: service.max_query_radius_arcsec,
                 },
@@ -600,7 +964,7 @@ async fn list_directory(
         )
         .into_response(),
         false => Json(listing).into_response(),
-    })
+    }
 }
 
 #[cfg(test)]

@@ -163,7 +163,7 @@ pub(in crate::app) async fn query_adql(
                 }
                 let file =
                     storage::open(&url, &table.storage, &service.policy, &service.transfers)?;
-                authorities.check(name, &file.base, &table.storage)?;
+                authorities.check(name, file.opened(&table.storage))?;
                 adql::query::Source::File(file)
             }
             // A directory rather than an object, and no name to match: a catalog's own files
@@ -173,7 +173,7 @@ pub(in crate::app) async fn query_adql(
                 data_files = Some(service.data_files_for(&url).clone());
                 let dir =
                     storage::open_dir(&url, &table.storage, &service.policy, &service.transfers)?;
-                authorities.check(name, &dir.base, &table.storage)?;
+                authorities.check(name, dir.opened(&table.storage))?;
                 adql::query::Source::Catalog(dir)
             }
         };

@@ -14,6 +14,7 @@ use crate::access::AccessPolicy;
 use crate::access::mount::Mounts;
 use crate::app::{Service, router};
 use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig, TapConfig};
+use crate::storage::StorageOptions;
 
 pub(in crate::app) const SECRET: &str = "wJalrXUtnFEMIsecretKEY";
 
@@ -122,6 +123,7 @@ pub(in crate::app) fn serving(dir: &Path) -> crate::config::MountConfig {
         serve: true,
         follow_symlinks: false,
         immutable: false,
+        storage: StorageOptions::default(),
         filenames: None,
     }
 }

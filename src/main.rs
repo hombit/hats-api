@@ -106,7 +106,7 @@ fn describe_mounts(mounts: &Mounts) -> String {
                     true => "",
                     false => " (api only)",
                 };
-                format!("{} -> {}{served}", mount.prefix(), mount.source().display())
+                format!("{} -> {}{served}", mount.prefix(), mount.source())
             })
             .collect::<Vec<_>>()
             .join(", "),

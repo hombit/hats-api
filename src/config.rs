@@ -14,6 +14,8 @@ use bytesize::ByteSize;
 use http::HeaderValue;
 use serde::Deserialize;
 
+use crate::storage::StorageOptions;
+
 /// Where to look for the file when `--config` is not given.
 pub const CONFIG_ENV_VAR: &str = "HATS_API_CONFIG";
 
@@ -53,17 +55,20 @@ pub struct TapConfig {
 /// One published table: the name a query writes, and the catalog it reads.
 ///
 /// Both are required and there is nothing else. In particular there are no storage
-/// options: a url is the whole of what a table is, so a catalog needing a credential is
-/// not publishable here — which keeps an operator's secret out of a file describing a
-/// surface whose answers are public.
+/// options: a published table names a place in this service's own url space, and whatever
+/// it takes to reach that place was written once, on the `[[mount]]` that publishes it.
+/// So an operator's credential is in one place in the file rather than repeated beside
+/// every surface that reads through it, and a reader of this section sees what is
+/// published rather than what it is authenticated with.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TapTableConfig {
     /// The fully qualified name, `schema.table`, as a query writes it and as
     /// `TAP_SCHEMA` publishes it.
     pub name: String,
-    /// The HATS catalog it reads, as a url or an absolute local path.
-    pub url: String,
+    /// Where the catalog is, as a path under a `[[mount]]` — the same address the file
+    /// server publishes it at and an API request names it by, e.g. `/hats/gaia_dr3`.
+    pub path: String,
 }
 
 /// Which files this service will read as data, in both modes.
@@ -116,26 +121,40 @@ impl Default for ApiConfig {
     }
 }
 
-/// One local directory this service will read, and where it sits in the url space.
+/// One directory this service will read, and where it sits in the url space.
 ///
 /// `path` and `source` are required: a mount with either missing is not a mount with a
 /// sensible default, it is an unfinished sentence. `path` is the mount's address in both
-/// modes — the API names a local file by the url space rather than by the disk — so a
+/// modes — the API names a file by the url space rather than by where it really is — so a
 /// mount that the file server does not publish still needs one.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MountConfig {
     /// The url prefix it answers under, e.g. `/` or `/hats`.
     pub path: String,
-    /// The local directory it publishes, as an absolute path or a `file://` url.
+    /// The directory it publishes: an absolute path, or a url in any scheme this service
+    /// reads — `file://`, `s3://`, `gs://`, `az://`, `https://`, `webdav://`, `hf://`.
     pub source: String,
+    /// What it takes to reach a `source` that is a store: the same options a request
+    /// carries beside its url, with the same names and the same rules. Empty for a local
+    /// directory, and an error to write for one.
+    ///
+    /// This is the one credential in the file, and it is the operator's own: it reaches
+    /// their store and is never echoed, logged, or offered to a caller. A caller reaches
+    /// the mount by its `path` and supplies nothing.
+    #[serde(default)]
+    pub storage: StorageOptions,
     /// Whether the file server publishes it at `path`. Off is API-only: the directory is
     /// still readable, and only by a request that asks a question about a file in it.
+    ///
+    /// For a store-backed mount, on means this service stands in front of that store: a
+    /// request for a name under `path` becomes a ranged read against the origin, and one
+    /// for a directory becomes a listing.
     #[serde(default)]
     pub serve: bool,
     /// Whether a path under it may go through a symlink. Per mount rather than global,
     /// so publishing a directory of links does not decide the question for every other
-    /// mount.
+    /// mount. A store has no symlinks, so it is an error to write on one.
     #[serde(default)]
     pub follow_symlinks: bool,
     /// Whether what is published never changes once published, which is what lets a
@@ -790,25 +809,28 @@ mod tests {
         assert_eq!(second.filenames, None);
     }
 
-    /// A published table is a name and a url, and both halves are required. No `storage`:
-    /// a table that needs a credential is not one this file can publish.
+    /// A published table is a name and a path, and both halves are required. No `storage`
+    /// and no `url`: what reaches the catalog was written on the mount the path lands in.
     #[test]
-    fn a_published_table_is_a_name_and_a_url() {
+    fn a_published_table_is_a_name_and_a_path() {
         let config = parse(
-            "[[tap.table]]\nname = \"gaia_dr3.gaia_source\"\nurl = \"file:///hats/gaia_dr3\"\n\
-             [[tap.table]]\nname = \"ztf.dr24_lc\"\nurl = \"s3://bucket/ztf\"",
+            "[[tap.table]]\nname = \"gaia_dr3.gaia_source\"\npath = \"/hats/gaia_dr3\"\n\
+             [[tap.table]]\nname = \"ztf.dr24_lc\"\npath = \"/hats/ztf\"",
         )
         .unwrap();
         let [first, second] = config.tap.tables.as_slice() else {
             panic!("expected two tables, got {:?}", config.tap.tables)
         };
         assert_eq!(first.name, "gaia_dr3.gaia_source");
-        assert_eq!(first.url, "file:///hats/gaia_dr3");
+        assert_eq!(first.path, "/hats/gaia_dr3");
         assert_eq!(second.name, "ztf.dr24_lc");
 
         assert!(parse("[[tap.table]]\nname = \"a.b\"").is_err());
-        assert!(parse("[[tap.table]]\nurl = \"file:///a\"").is_err());
-        assert!(parse("[[tap.table]]\nname = \"a.b\"\nurl = \"file:///a\"\nstorage = {}").is_err());
+        assert!(parse("[[tap.table]]\npath = \"/a\"").is_err());
+        assert!(parse("[[tap.table]]\nname = \"a.b\"\npath = \"/a\"\nstorage = {}").is_err());
+        // The key this replaced, so a config written against the old shape fails loudly
+        // rather than publishing nothing.
+        assert!(parse("[[tap.table]]\nname = \"a.b\"\nurl = \"file:///a\"").is_err());
         // No tables is the default, and is a service with no TAP surface.
         assert!(parse("").unwrap().tap.tables.is_empty());
     }

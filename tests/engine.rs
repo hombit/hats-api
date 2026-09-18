@@ -1058,11 +1058,7 @@ impl Counting {
             requests: AtomicUsize::new(0),
             bytes: AtomicUsize::new(0),
         });
-        let wrapped = RemoteFile {
-            store: Arc::clone(&counting) as Arc<dyn ObjectStore>,
-            base: file.base.clone(),
-            url: file.url.clone(),
-        };
+        let wrapped = file.through(Arc::clone(&counting) as Arc<dyn ObjectStore>);
         (wrapped, counting)
     }
 

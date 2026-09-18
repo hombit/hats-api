@@ -15,9 +15,9 @@ The catalog can sit on local disk or in S3, GCS, Azure Blob, WebDAV, or behind a
 HTTP server. A single parquet file is queryable the same way.
 Three interfaces, any or all of them:
 
-- **[File-server mode](#file-server-mode)** publishes a local directory. Without a query
-  string it is an ordinary static file server; with one, the catalog's URL is the
-  query: `?ra=348&dec=-29&radius_arcsec=30&columns=source_id,mag&filters=mag<18`.
+- **[File-server mode](#file-server-mode)** publishes a directory, on disk or in a store.
+  Without a query string it is an ordinary static file server; with one, the catalog's URL
+  is the query: `?ra=348&dec=-29&radius_arcsec=30&columns=source_id,mag&filters=mag<18`.
 - **[API mode](#api-mode)** takes the location in the request body, so each request names
   its own catalog instead of one this server publishes.
 - **[TAP](#tap)** publishes named catalogs to the IVOA clients astronomers already use:
@@ -32,7 +32,7 @@ docker run -p 8080:80 ghcr.io/hombit/hats-api
 
 With no configuration that is API mode on
 `http://localhost:8080/api/v1`, reading any S3, GCS, Azure, WebDAV or HTTPS store on the
-public internet. Publishing a local directory, or narrowing what may be reached, is
+public internet. Publishing a directory, or narrowing what may be reached, is
 [Configuration](#configuration).
 
 From source, with a [Rust toolchain](https://rustup.rs):
@@ -44,9 +44,11 @@ cargo build --release
 
 ## File-server mode
 
-Local directories are **mounted** onto http paths, much as a filesystem is mounted onto a
+Directories are **mounted** onto http paths, much as a filesystem is mounted onto a
 directory, e.g. `/mnt/data/gaia` on disk, mounted at `/gaia`, is served from
-`https://example.com/gaia`.
+`https://example.com/gaia`. The source can also be a prefix in a store, such as
+`s3://archive/gaia`. This service then serves that store, and a caller sees neither the
+bucket nor the credential.
 
 With no query string a mount is an ordinary static file server. Add parameters and the
 response is rows rather than bytes:
@@ -665,22 +667,27 @@ https://example.com/api/v1/tap
 
 ### Publishing catalogs
 
-Give each catalog an entry in the config file:
+Mount the catalogs, then give each one an entry in the config file:
 
 ```toml
+[[mount]]
+path = "/hats"
+source = "s3://stpubdata/gaia/gaia_dr3/public/hats"
+
 [[tap.table]]
 name = "gaia_dr3.gaia_source"
-url = "s3://stpubdata/gaia/gaia_dr3/public/hats/gaia"
+path = "/hats/gaia"
 
 [[tap.table]]
 name = "ztf.dr24_lc"
-url = "file:///hats/ztf_dr24_lc"
+path = "/hats/ztf_dr24_lc"
 ```
 
 `name` is the table name in an ADQL query's `FROM {name}` clause. It takes the form
-`{schema}.{table}` and must be unique. `url` points at the catalog and is checked at
-startup against [`[api.access]`](#what-a-request-may-reach). No storage options, such as
-credentials, are currently supported for remote catalogs.
+`{schema}.{table}` and must be unique. `path` is a path under a [`[[mount]]`](#mounts),
+the same address the file server publishes the catalog at, and is checked at startup.
+There are no storage options here. The mount already carries whatever reaches the catalog,
+so a catalog behind a credential can be published.
 
 ### Querying
 
@@ -938,14 +945,26 @@ all.
 path = "/gaia"               # the address, in both modes
 source = "/mnt/data/gaia"    # where it actually is, which no caller sees
 serve = true                 # publish it as a directory; off is API-only
-follow_symlinks = false
+follow_symlinks = false      # a local source only
 immutable = false
 filenames = ["*.parquet"]    # in place of [data] filenames, for this mount
+
+[[mount]]
+path = "/archive"
+source = "s3://archive-bucket/hats"   # or gs://, az://, https://, webdav://, hf://
+serve = true
+storage = {endpoint = "https://minio.example.org", access_key_id = "…", secret_access_key = "…"}
 ```
 
 `path` is the address in both modes. The file server publishes the directory there, and an
 API request names a file in it by the same path, `file:///gaia/dataset/…`, never the
-`/mnt/data/gaia` it lives in.
+`/mnt/data/gaia` or the `s3://archive-bucket/hats` it lives in.
+
+`source` is an absolute path, or a URL in any scheme this service
+[reads](#what-a-request-may-reach). For a URL, `storage` says how to reach it, using the
+same option names a request uses. These credentials are the operator's: a caller reaches
+the mount by `path` and sends none of their own. `follow_symlinks` applies to a local path
+only.
 
 `serve` publishes the directory. With it off the mount is not served and not listed, and a
 request for any path under it is a 404, while an API request naming a file in it is
@@ -995,8 +1014,9 @@ Two independent sets of rules, and both apply:
 
 - **`[api.access.<backend>]`** decides which endpoint a request may name. Three states per
   backend: no `endpoints` key at all for any endpoint, an empty list to turn the scheme
-  off, or a list for exactly those. There is no section for local files, a `[[mount]]`
-  being the whole of what makes one readable.
+  off, or a list for exactly those. A `[[mount]]` source has no section here. Writing a
+  directory into the config is the permission for it, so you can mount a backend you have
+  turned off for callers.
 - **`[api.access.network]`** decides which addresses may be reached, whatever backend the
   request goes through. Loopback, private ranges (link-local included, where a cloud
   instance serves this machine's own IAM credentials) and network-internal names are all

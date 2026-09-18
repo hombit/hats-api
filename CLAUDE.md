@@ -36,15 +36,18 @@ than the layer:
 access/   what a request may reach: the endpoint rules (policy), the addresses behind them
           (network), the readable directories (mount), a path under one (local), and which
           files are data (data)
+          `local` is a path on this machine; a mount whose source is a store has no such
+          path, and the two forks apart in `Mounts::resolve`'s callers rather than inside it
 storage/  a url opened into a store: the url itself (store), each backend's options
           (options), each builder (backends), and a server that will not serve ranges
           (materialize)
 engine/   the caller's SQL (sql) and running a selection against one parquet file (query)
 sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
           (healpix), and saying one inside a query (geometry)
-hats/     a catalog: its own files (catalog, partitions, properties, local), a request
-          fanned out over it (query), it as a table a statement names (table), and the
-          partitions that table reads as rows are pulled (scan)
+hats/     a catalog: its own files (catalog, partitions, properties), recognising one
+          somebody is browsing (browse), a request fanned out over it (query), it as a
+          table a statement names (table), and the partitions that table reads as rows are
+          pulled (scan)
 adql/     the statement rewrite (translate), running one (query), the functions the
           language requires (functions), and how a name is written (names)
 tap/      what this service publishes over TAP: the operator's tables (tables), what is
@@ -78,6 +81,13 @@ Say what was picked and what it costs — added crates, licence, what it does no
 rather than adding it silently. Not every crate is worth it: a one-liner with a heavy
 dependency tree is not, and neither is one that solves a different problem than the one
 at hand.
+
+**Say it in the commit message, not in `Cargo.toml`.** A comment there explaining which
+feature a crate was added for is a second place to keep in step with the code, and it is
+the one nobody updates when the feature moves or grows: the dependency is still listed
+and the reason beside it has quietly stopped being true. What a line in that file is for
+is a constraint on the *version* — why `object_store` tracks DataFusion's, why the
+properties parser is the one it is — which stays true as long as the line does.
 
 Keep `object_store` matched to DataFusion's, and `reqwest` and
 `opendal-http-transport-reqwest` matched to what `opendal` resolves to. Two copies of a
@@ -249,6 +259,38 @@ Two consequences, and a backend has to be built for both:
   the registry's grain rather than any backend's. Do not work around it by keying a store on
   something DataFusion does not read; what would fix it is a registry of this crate's own,
   which is a larger decision than any one backend.
+
+  `storage::Authorities` is what refuses that case, and **it compares what built the store
+  rather than what the request wrote.** The two are the same thing only where the caller's
+  own url is what got opened: a `file://` url resolves through the mounts, so one landing
+  in a store-backed mount opens with the *operator's* options under the origin's authority
+  while the request carried none. Comparing the written options there would let a second
+  table naming that origin outright compare as "no options" on both sides, share the store,
+  and read a url the caller chose with the mount's credentials — the mount grants its
+  prefix and the store grants the authority.
+
+  **The credentials decide and where they came from does not.** Two stores built from one
+  set of options are one store, so which registration survives changes nothing: two mounts
+  an operator wrote the same key into share, and so do a mount and a caller who sent the
+  key the mount holds, who had it already. Refusing by provenance instead would refuse the
+  ordinary crossmatch — two catalogs in one bucket, mounted separately — which is a query
+  this service exists to answer.
+
+  **The handle carries what built it, and `storage::Opened` can only be made from one.**
+  `RemoteFile::opened` and `RemoteDir::opened` are the only ways to get one, so the
+  authority and the credentials come off the same store and a call site has nothing to
+  pair wrongly. Do not reintroduce a helper that works the provenance out from the url
+  again beside the check: which mount a url lands in is settled once, by the policy, on
+  the way to building the store, and a second derivation is the same fact in two places
+  with nothing holding them together. `Mount::open` is what stamps a store-backed mount,
+  because `storage::open_configured_dir` is handed a url and options and has no mount in
+  front of it.
+
+  **A `SessionContext` is what a store is registered into, so one per context is one per
+  authority.** `app::routes::tap::published::describe` builds a context per published table
+  for exactly this: two tables under two mounts in one bucket hold two sets of credentials,
+  and a shared context would have the second registration decide both. Anything that opens
+  several tables into one context owes the `Authorities` check instead.
 
 ## The network
 
@@ -1063,13 +1105,59 @@ A mount publishes a directory, not the machine it is on. What is on disk — the
 path, the layout above it, whether a name exists outside what the mount serves — is the
 operator's business, and none of it may appear in an answer.
 
-**A `[[mount]]` is the only local directory this service reads, and its `path` is the
-address in both modes.** The file server publishes it there when `serve` says so, and a
-`file://` url in an API request names that same path — never the `source`. So there is no
-second list of directories to keep in step with the mounts, and no spelling of a path that
-reaches a directory no mount named. `Mounts::resolve` is every mount, which is what the
-API asks; `Mounts::published` is the served ones, which is what the file server asks.
-Reaching for `resolve` in the file server publishes what an operator did not.
+**A `[[mount]]` is the only directory this service reads, and its `path` is the address in
+both modes.** The file server publishes it there when `serve` says so, and a `file://` url
+in an API request names that same path — never the `source`. So there is no second list of
+directories to keep in step with the mounts, and no spelling of a path that reaches a
+directory no mount named. `Mounts::resolve` is every mount, which is what the API asks;
+`Mounts::published` is the served ones, which is what the file server asks. Reaching for
+`resolve` in the file server publishes what an operator did not.
+
+**A source is a directory on this machine or a prefix in a store, and the fork is the
+scheme.** `MountSource` carries which, and everything that needs a filesystem asks
+`Mount::local_source` rather than being handed something that stands in for one — a store
+has no symlinks, no `stat` per name and no server of ours underneath it. What both kinds
+share is `Mount::open`, which is a `RemoteDir` either way, so everything that only reads a
+directory is written once.
+
+- **Naming a source is the permission, and it is the operator's own url.**
+  `[api.access]` decides where a *caller* may point this service; there has never been a
+  section of it for a local directory, and a store-backed source is the same thing in
+  another scheme. `storage::NamedBy` is what carries that through `build`, and what it
+  skips is the endpoint rules and nothing else — the options are still checked, the
+  cleartext rule still applies to the operator's own credential, and every address still
+  goes through the resolver.
+
+  **A configured source is read through its own HTTP client, and the address rules are
+  not on it.** `NetworkPolicy` builds two: a caller's url goes through the one whose
+  resolver is `[api.access.network]`, and a `[[mount]]`'s source through
+  `configured_transport`, which has no resolver of ours. That is not a hole and not a
+  loosening — what the address check protects against is a *caller* pointing this service
+  somewhere, and a source's url and options are the config's, fixed at startup, with
+  nothing in either a request can reach.
+
+  **Do not put a source's hosts into the rules instead.** It is the shorter change and it
+  is wrong: those rules are what a caller's url is judged by, so a host in them is a
+  server a caller may name too. Two clients is what keeps the grant exactly as wide as the
+  mount, and `a_source_is_reachable_without_becoming_one_a_caller_may_name` holds both
+  halves — the mount opens, and the same server named in a request is still refused.
+
+- **A mount's `storage` is the operator's credential and the only one in the config.**
+  `StorageOptions::configured` is how it is copied out, spelled out rather than derived,
+  and it is the one place a struct holding credentials is copied at all. A local source
+  carrying one is a startup error rather than an option nobody reads.
+
+- **A store has no directories, and a listing says so.** `RemoteDir::level` is
+  `list_with_delimiter` — one request for one directory, where `RemoteDir::list` walks the
+  whole tree — and a prefix with nothing under it comes back empty rather than missing,
+  there being no key to be absent. An origin with no listing operation serves its files
+  and cannot be browsed.
+
+- **Serving a store-backed mount means answering `Range` here.** `tower_http::ServeFile`
+  does it for a local file and there is no equivalent over a store, so `app::files`
+  answers the range, the validators and `HEAD` itself. A ranged request answered `200` is
+  the mislabelling this service refuses everywhere else: `fsspec` reads a parquet footer
+  by range and does not check for a `206`.
 
 Two consequences that are easy to get backwards:
 
@@ -1084,8 +1172,16 @@ Two consequences that are easy to get backwards:
   raises about a local file is not repeatable as-is. `ApiError::from_mount` is where that
   is turned into a message of this crate's own; the original goes to the log. **Both
   modes need it**: a caller who named `file:///hats/x.parquet` wrote a mount's `path`,
-  and the store's message names its `source`. Only a remote url may keep the store's own
-  message, the path in that one being the caller's.
+  and the store's message names its `source`. Only a url the caller wrote may keep the
+  store's own message, the path in that one being theirs.
+
+  **A store-backed mount hides its source the same way, and `ApiError::from_mounted_store`
+  is that rule.** The reason is identical — the bucket, the endpoint and the operator's
+  prefix are no part of what the caller wrote — and everything the local rule turns on is
+  different: there is an origin behind this one, so `502` blames something that exists and
+  `404` about an object that is not there is the truth. So the status is kept and only the
+  message is replaced, and only where the message names the source at all. `ApiError::Hidden`
+  is what carries a status with a message of ours, and nothing else makes one.
 - **`RemoteFile::url` is that path**, spelled `file:///…`, for anything local. So it goes
   in the log and never in a response — and neither does an `object_store::path::Error`,
   whose own `Display` prints the path it was handed. `from_mount` is no help with either:
@@ -1226,12 +1322,16 @@ reading TAP alone leaves the requirement unread: `RESPONSEFORMAT` is "fully desc
 DALI", the error document is DALI §4.2, `QUERY_STATUS` and the `OVERFLOW` marker are §4.4,
 and the parameter rules are §3.
 
-- **A published table is `[[tap.table]]` and nothing else.** A name and a url; no storage
-  options, so a catalog needing a credential is not publishable — which keeps an operator's
-  secret out of the file describing a surface whose answers are public. Adding the field is
-  reopening that question, not adding a convenience. Every url goes through
-  `storage::open_dir` at startup, so the policy's refusal reaches an operator rather than a
-  caller.
+- **A published table is `[[tap.table]]` and nothing else.** A name and a `path` — a path
+  under a `[[mount]]`, which is the address the file server publishes that catalog at and
+  an API request names it by. No storage options and no url: what it takes to reach the
+  catalog was written once, on the mount, so an operator's secret stays out of the section
+  describing a surface whose answers are public *and* a catalog behind a credential is
+  publishable. Adding either field back is reopening that, not adding a convenience. Every
+  path is turned into its `file://` url and goes through `storage::open_dir` at startup, so
+  the refusal reaches an operator rather than a caller — and the mount's own options reach
+  the TAP resources without being repeated, because a `file://` url resolves through the
+  mounts like any other.
 - **One list of facts feeds both documents that publish them.** `TAP_SCHEMA` and VOSI
   `/tables` are the same metadata twice, and a validator reads them against each other, so
   both are rendered from `tap::metadata` — the columns, the flags and the foreign keys

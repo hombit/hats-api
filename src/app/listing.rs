@@ -210,6 +210,47 @@ impl Listing {
         })
     }
 
+    /// The same directory, read out of a store.
+    ///
+    /// One request where the local reader does a `readdir` and a `stat` per name: a store
+    /// hands back the size and the time with the name, and has no third kind of entry and
+    /// no symlink to decide about. So what is left of the local reader's rules is the
+    /// ordering, which is the listing's own and not the store's — `list_with_delimiter`
+    /// answers directories and objects separately and an object store's key order is not
+    /// the order a reader expects the two interleaved in.
+    ///
+    /// An empty answer is an empty directory and never a missing one. A store has no
+    /// directories to be missing: what stands in for one is a set of keys sharing a
+    /// prefix, and a prefix nothing is under is indistinguishable from a prefix nobody
+    /// ever wrote — which is the same answer a mount gives for a path it will not serve.
+    pub fn of_store(level: &crate::storage::Level, root: &str, path: &str) -> Self {
+        let mut entries: Vec<Entry> = level
+            .directories
+            .iter()
+            .map(|name| Entry {
+                url: child(path, name),
+                name: name.clone(),
+                kind: Kind::Directory,
+                size: None,
+                modified: None,
+            })
+            .chain(level.files.iter().map(|file| Entry {
+                url: child(path, &file.name),
+                name: file.name.clone(),
+                kind: Kind::File,
+                size: Some(file.size),
+                modified: Some(file.modified.to_rfc3339_opts(SecondsFormat::Secs, true)),
+            }))
+            .collect();
+        entries.sort_by(|one, other| one.name.cmp(&other.name));
+        Self {
+            path: path.to_owned(),
+            parent: parent(root, path),
+            entries,
+            root: root.to_owned(),
+        }
+    }
+
     /// The same listing as a page.
     ///
     /// `fsspec` reads a directory by pulling every `href` out of this markup and keeping
@@ -588,6 +629,21 @@ pub fn url(prefix: &str, segments: &[String]) -> String {
         true => "/".to_owned(),
         false => url,
     }
+}
+
+/// A name inside a directory, as a path below the mount — which is how a store is asked
+/// for it, keys being joined rather than addressed.
+///
+/// Not a url: nothing is encoded here, because what this produces is read by the store and
+/// never by a browser. It is beside [`url()`] all the same, one of the two being what the
+/// other is built from for the same directory.
+pub fn relative_path(segments: &[String], name: &str) -> String {
+    segments
+        .iter()
+        .map(String::as_str)
+        .chain([name])
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// A url one level below `base`. The root ends in the separator already, so joining it
