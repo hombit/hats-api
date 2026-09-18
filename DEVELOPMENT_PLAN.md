@@ -181,20 +181,17 @@ can miss an update — §6.6's watcher — is an optimization on top of that, so
 costs `ttl`-bounded staleness rather than a permanently wrong answer.
 
 **The first two are the ones worth building, and the reason is measured.** A
-`format=parquet` request reads the source footer three times, two of them this crate's own:
-DataFusion fetches it while inferring the schema and serves the scan from its own
-`FileMetadataCache`, while `output::parquet::read_layout` goes to the store and pays two
-requests — the reader's default prefetch is 8 bytes, enough for the footer tail and never
-for the footer. Every shape measured came to `+2` requests for the layout.
+`format=parquet` request reads the source footer twice: DataFusion fetches it while
+inferring the schema and serves the scan from its own `FileMetadataCache`, while
+`output::parquet::read_layout` goes to the store and reads it again through a fetcher of
+this crate's own, which knows nothing about that cache.
 
 **Nothing here should be reading metadata itself**; the read belongs to DataFusion, which
 has already done it. The obstacle is reach: the cached entry is an `Arc<dyn FileMetadata>`
 whose only accessor is `as_any`, and the concrete type lives in
 `datafusion-datasource-parquet`, which the facade does not re-export — so it means taking
 that crate as a direct dependency, version-locked the way `object_store` already is. Decide
-that here rather than paying it for one call site. Two smaller things from the same
-measurement, neither a cache: DataFusion's `metadata_size_hint` defaults to 512 KiB against
-our 8 bytes, and the layout read is sequenced after the query when it does not depend on it.
+that here rather than paying it for one call site.
 
 The range-support verdict is keyed by object, not by host — one server hands back static
 files that range and generated responses that do not. It saves only the probe on a second
