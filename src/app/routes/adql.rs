@@ -16,7 +16,7 @@ use crate::app::service::{PARQUET_CONTENT_TYPE, Service};
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
 use crate::output::{dsv, parquet, votable};
-use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
+use crate::storage::{self, Authorities, SourceUrl, StorageOptions, parse_url};
 
 /// A query written in IVOA's ADQL, over tables this request declares.
 ///
@@ -142,6 +142,10 @@ pub(in crate::app) async fn query_adql(
 
     let mut tables = Vec::new();
     let mut data_files = None;
+    // Two tables naming one authority would share DataFusion's one store for it; tracked
+    // here rather than in `adql::query::run` because it is every declared table's own
+    // `storage` that has to agree, not only the ones the statement goes on to use.
+    let mut authorities = Authorities::default();
     for (name, table) in &params.tables {
         let url = parse_url(table.url.as_str())?;
         let source = match table.r#type {
@@ -157,24 +161,20 @@ pub(in crate::app) async fn query_adql(
                         files.describe()
                     )));
                 }
-                adql::query::Source::File(storage::open(
-                    &url,
-                    &table.storage,
-                    &service.policy,
-                    &service.transfers,
-                )?)
+                let file =
+                    storage::open(&url, &table.storage, &service.policy, &service.transfers)?;
+                authorities.check(name, &file.base, &table.storage)?;
+                adql::query::Source::File(file)
             }
             // A directory rather than an object, and no name to match: a catalog's own files
             // are what its metadata names, and which of those are rows is the question
             // `data_files` answers below rather than one about this url.
             TableKind::Hats => {
                 data_files = Some(service.data_files_for(&url).clone());
-                adql::query::Source::Catalog(storage::open_dir(
-                    &url,
-                    &table.storage,
-                    &service.policy,
-                    &service.transfers,
-                )?)
+                let dir =
+                    storage::open_dir(&url, &table.storage, &service.policy, &service.transfers)?;
+                authorities.check(name, &dir.base, &table.storage)?;
+                adql::query::Source::Catalog(dir)
             }
         };
         tables.push(adql::query::Table {
@@ -997,6 +997,38 @@ mod tests {
         // Each row matched itself and nothing else, which is what makes the count above a
         // statement about the join rather than about the two regions.
         assert!(rows.iter().all(|row| row["aid"] == row["bid"]), "{body}");
+    }
+
+    /// Two tables at one authority is DataFusion's one store for it, so different
+    /// credentials for the two would leave one running under the other's — refused before
+    /// either is opened for real, naming both tables and neither secret.
+    #[tokio::test]
+    async fn a_crossmatch_refuses_two_tables_at_one_authority_with_different_credentials() {
+        let (status, body) = post_json(
+            crate::app::testing::api_only(),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT a.objectid FROM left AS a JOIN right AS b ON a.objectid = b.objectid",
+                "tables": {
+                    "left": {
+                        "type": "parquet",
+                        "url": "s3://bucket/a.parquet",
+                        "storage": {"access_key_id": "AKIA1", "secret_access_key": "first-secret"},
+                    },
+                    "right": {
+                        "type": "parquet",
+                        "url": "s3://bucket/b.parquet",
+                        "storage": {"access_key_id": "AKIA1", "secret_access_key": "second-secret"},
+                    },
+                },
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("left"), "{body}");
+        assert!(body.contains("right"), "{body}");
+        assert!(!body.contains("first-secret"), "leaked: {body}");
+        assert!(!body.contains("second-secret"), "leaked: {body}");
     }
 
     /// A separation as a value, which is what a crossmatch reports beside the pair.
