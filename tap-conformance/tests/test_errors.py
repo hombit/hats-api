@@ -18,6 +18,8 @@ from __future__ import annotations
 import pyvo
 import pytest
 
+from tap_conformance.votlint import assert_valid, check
+
 
 def is_error_document(response) -> str:
     """What the error looks like, against what TAP 1.1 §3.3 asks it to look like.
@@ -86,6 +88,20 @@ def test_the_client_raises(tap, record_property):
             f"the client could not reach the query resource at all: {str(error)[:200]}"
         ) from None
     raise AssertionError("a malformed query raised nothing in the client")
+
+
+def test_the_error_document_validates(raw, stilts_command, record_property):
+    """An error document is a VOTable too, and is held to being one.
+
+    It is the document a client reads when everything else has gone wrong, and it is
+    the one nobody writes tests against: a service whose ordinary answers are written
+    by a table writer often builds this one by hand, out of a message that arrived from
+    somewhere else and may carry anything at all.
+    """
+    report = check(raw("SELECT FROM WHERE").content, stilts_command)
+    if report.unavailable:
+        pytest.skip(report.unavailable)
+    record_property("detail", assert_valid(report, "an error document"))
 
 
 def test_the_message_says_something(raw, queryable, record_property):

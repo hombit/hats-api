@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from tap_conformance.votable import refusal
+from tap_conformance.votlint import assert_valid, check
 
 
 @pytest.fixture
@@ -40,6 +41,23 @@ def test_votable(answer, record_property):
     assert response.status_code == 200, f"status {response.status_code}"
     assert b"<VOTABLE" in response.content[:4000].upper()
     assert "votable" in media.lower(), f"content-type {media!r} does not say votable"
+
+
+def test_votable_validates(answer, stilts_command, record_property):
+    """The document a query answers with is a valid VOTable.
+
+    `taplint` validates the three VOSI documents against their schemas and never looks
+    at this one, and the clients are no help either: `astropy` reads what it recognises
+    and says nothing about the rest, so a document can carry a datatype outside the
+    twelve, an `nrows` that disagrees with the rows below it, or a value that will not
+    parse as the type its own `FIELD` claims, and still come back as a table.
+
+    `votlint` is what reads it as a VOTable reader would, schema and all.
+    """
+    report = check(answer("votable").content, stilts_command)
+    if report.unavailable:
+        pytest.skip(report.unavailable)
+    record_property("detail", assert_valid(report, "the answer to a query"))
 
 
 def test_csv(answer, record_property):
