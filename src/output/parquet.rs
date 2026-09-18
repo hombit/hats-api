@@ -114,6 +114,14 @@ struct ColumnLayout {
     bloom_filter: bool,
 }
 
+/// With no hint, `ParquetMetaDataReader` prefetches only the 8-byte trailer, learns the
+/// footer's length from it, and pays a second request for the footer itself — every time,
+/// against any origin. DataFusion's own scan avoids that by prefetching this many bytes
+/// from the end of the file on the first request, which is enough for the footer whenever
+/// it is smaller than the hint; matched here so our own footer read costs the same one
+/// request DataFusion's does, rather than two.
+const FOOTER_PREFETCH: usize = 512 * 1024;
+
 /// Read the source file's footer. One extra request against the object store, made only
 /// when the caller asked for parquet back.
 pub async fn read_layout(file: &RemoteFile) -> Result<SourceLayout, ApiError> {
@@ -129,6 +137,7 @@ pub async fn read_layout(file: &RemoteFile) -> Result<SourceLayout, ApiError> {
         path,
     };
     let metadata = ParquetMetaDataReader::new()
+        .with_prefetch_hint(Some(FOOTER_PREFETCH))
         .load_via_suffix_and_finish(fetch)
         .await
         .map_err(ApiError::SourceMetadata)?;
@@ -281,11 +290,117 @@ pub fn encode(result: &QueryResult, layout: &SourceLayout) -> Result<Vec<u8>, Ap
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use datafusion::arrow::array::{ArrayRef, Float32Array, Int64Array, RecordBatch, StringArray};
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use datafusion::parquet::file::metadata::ParquetMetaData;
+    use object_store::memory::InMemory;
+    use url::Url;
 
     use super::*;
+
+    /// Counts `get_opts` calls, so a footer read can be judged by how many requests it
+    /// cost rather than by reading the code that made them.
+    #[derive(Debug, Default)]
+    struct Counting {
+        inner: InMemory,
+        requests: AtomicUsize,
+    }
+
+    impl std::fmt::Display for Counting {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "counting({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ObjectStore for Counting {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            options: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.inner.put_opts(location, payload, options).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            options: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.inner.put_multipart_opts(location, options).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+        {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// With no prefetch hint, `ParquetMetaDataReader` fetches the 8-byte trailer to learn
+    /// the footer's length and then fetches the footer itself — two requests for one
+    /// answer, against any origin. `read_layout` sets a hint generous enough to cover an
+    /// ordinary footer in the trailer's own request, so this should cost one.
+    #[tokio::test]
+    async fn the_footer_is_read_in_one_request() {
+        let counting = Arc::new(Counting::default());
+        let batch = sample_batch();
+        let mut buffer = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut buffer, batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        counting
+            .inner
+            .put(&Path::from("fixture.parquet"), Bytes::from(buffer).into())
+            .await
+            .unwrap();
+        let file = RemoteFile {
+            store: Arc::clone(&counting) as Arc<dyn ObjectStore>,
+            base: Url::parse("mem:///").unwrap(),
+            url: Url::parse("mem:///fixture.parquet").unwrap(),
+        };
+
+        read_layout(&file).await.unwrap();
+
+        assert_eq!(counting.requests.load(Ordering::SeqCst), 1);
+    }
 
     fn sample_batch() -> RecordBatch {
         let objectid: ArrayRef = Arc::new(Int64Array::from(vec![1_i64, 2, 3]));

@@ -232,15 +232,21 @@ fn column_of(field: &datafusion::arrow::datatypes::FieldRef) -> Column {
 
 /// The result, in whichever encoding was asked for. Both modes answer through here, so
 /// the same query returns the same bytes whichever one carried it.
+///
+/// `layout` is the source file's, fetched by the caller alongside the row query rather
+/// than after it — `read_layout` needs only `file`, not the rows — and is `None`
+/// whenever `output.format` is not `Parquet`, there being nothing to copy for any other
+/// encoding.
 pub(in crate::app) async fn answer(
     result: &QueryResult,
     file: &RemoteFile,
     output: &Output,
     started: Instant,
+    layout: Option<parquet::SourceLayout>,
 ) -> Result<Response, ApiError> {
     let response = match output.format {
         Format::Json => json_response(result, started)?,
-        Format::Parquet => parquet_response(result, file, result.num_rows(), started).await?,
+        Format::Parquet => parquet_response(result, file, result.num_rows(), started, layout)?,
         Format::Votable => (
             attachment(votable::CONTENT_TYPE, &download_name(file, "vot")),
             counters(result, result.num_rows(), started),
@@ -288,14 +294,14 @@ pub(in crate::app) fn json_response(
 
 /// The answer as a parquet file laid out like the file it came from, which costs one
 /// extra footer read of that file.
-async fn parquet_response(
+fn parquet_response(
     result: &QueryResult,
     file: &RemoteFile,
     num_rows: usize,
     started: Instant,
+    layout: Option<parquet::SourceLayout>,
 ) -> Result<Response, ApiError> {
-    let layout = parquet::read_layout(file).await?;
-    let body = parquet::encode(result, &layout)?;
+    let body = parquet::encode(result, &layout.unwrap_or_default())?;
     Ok((
         attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
         counters(result, num_rows, started),

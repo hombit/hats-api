@@ -7,6 +7,7 @@ use std::time::Instant;
 use axum::extract::{Request, State};
 use axum::http::{Method, header, request::Parts};
 use axum::response::{Html, IntoResponse, Json, Response};
+use futures::future::OptionFuture;
 use tower_http::services::ServeFile;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
 // here and is a literal `+` in a path segment.
@@ -22,6 +23,7 @@ use crate::engine::query::{self, Order, Predicate, Projection, Selection};
 use crate::error::ApiError;
 use crate::hats;
 use crate::hats::query::{CatalogSelection, Exceeded, Outcome, Search};
+use crate::output::parquet;
 use crate::sky::region::{self, Region, Spatial};
 use crate::storage;
 
@@ -384,13 +386,21 @@ async fn query_mounted(
     // The rows come back in the file's own order. The request named a file and asked for
     // less of it, so the answer describes that file, and a client that reads a partition
     // twice gets the same rows in the same places both times.
-    let result = query::run(&opened, &selection, service.sql_limits, Order::File)
-        .await
-        .map_err(|error| error.from_mount(file))?;
+    // The layout read needs only `opened`, not the rows, so it runs alongside the query
+    // rather than after it. Fetched only when the answer will actually be parquet.
+    let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
+        .then(|| parquet::read_layout(&opened))
+        .into();
+    let (result, layout) = tokio::join!(
+        query::run(&opened, &selection, service.sql_limits, Order::File),
+        layout_future,
+    );
+    let result = result.map_err(|error| error.from_mount(file))?;
+    let layout = layout.transpose().map_err(|error| error.from_mount(file))?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, &opened, &output, started)
+    let response = answer(&result, &opened, &output, started, layout)
         .await
         .map_err(|error| error.from_mount(file))?;
     tracing::info!(
