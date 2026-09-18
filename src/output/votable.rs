@@ -35,18 +35,17 @@
 
 use std::fmt;
 use std::fmt::Write as _;
-use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Float16Type, Float32Type, Float64Type, Int8Type,
-    Int16Type, Int32Type, Int64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
-    TimestampNanosecondType, TimestampSecondType, UInt8Type, UInt16Type, UInt32Type,
+    Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
 };
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::instant;
 
 /// The media type IVOA registers for a VOTable document.
 pub const CONTENT_TYPE: &str = "application/x-votable+xml";
@@ -340,61 +339,20 @@ fn writer(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
     Ok(push)
 }
 
-/// The zone an instant is written in, which is the only one DALI §3.3.3 gives a spelling.
-const UTC: &str = "UTC";
-
-/// DALI §3.3.3's `YYYY-MM-DD['T'hh:mm:ss[.SSS]]`, as the four formats arrow picks between.
-///
-/// A `Z` goes on the zoned form alone: §3.3.3 has an astronomical value carry no zone
-/// indicator at all and lets a civil one carry `Z`, and a column whose type names a zone is
-/// a civil time by construction. `%.f` writes the fraction the value has and nothing where
-/// it has none, which is why a second-resolution column comes out as the section's own
-/// example rather than with three zeroes after it.
+/// DALI §3.3.3's form, as the formats arrow picks between. The strings are
+/// [`crate::output::instant`]'s, the delimited writers owing the same form.
 const INSTANT: FormatOptions<'static> = FormatOptions::new()
-    .with_date_format(Some("%Y-%m-%d"))
-    .with_datetime_format(Some("%Y-%m-%dT%H:%M:%S%.f"))
-    .with_timestamp_format(Some("%Y-%m-%dT%H:%M:%S%.f"))
-    .with_timestamp_tz_format(Some("%Y-%m-%dT%H:%M:%S%.fZ"));
+    .with_date_format(Some(instant::DATE))
+    .with_datetime_format(Some(instant::DATE_TIME))
+    .with_timestamp_format(Some(instant::DATE_TIME))
+    .with_timestamp_tz_format(Some(instant::ZONED));
 
 /// One instant column, as the text DALI gives it.
-///
-/// **A zoned column is moved to UTC first.** Arrow holds the instant itself and the zone is
-/// its type's, so this renames the zone the value is printed in without touching a value —
-/// and it has to be done, because arrow would otherwise print the local time of whatever
-/// zone the column names, which DALI has no form for.
 ///
 /// The whole column is written up front rather than a cell at a time: a formatter is made
 /// by downcasting the array, which is a thing to do once per column and not once per row.
 fn instants(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
-    let utc: ArrayRef = match array.data_type() {
-        DataType::Timestamp(unit, Some(_)) => match unit {
-            TimeUnit::Second => Arc::new(
-                array
-                    .as_primitive::<TimestampSecondType>()
-                    .clone()
-                    .with_timezone(UTC),
-            ),
-            TimeUnit::Millisecond => Arc::new(
-                array
-                    .as_primitive::<TimestampMillisecondType>()
-                    .clone()
-                    .with_timezone(UTC),
-            ),
-            TimeUnit::Microsecond => Arc::new(
-                array
-                    .as_primitive::<TimestampMicrosecondType>()
-                    .clone()
-                    .with_timezone(UTC),
-            ),
-            TimeUnit::Nanosecond => Arc::new(
-                array
-                    .as_primitive::<TimestampNanosecondType>()
-                    .clone()
-                    .with_timezone(UTC),
-            ),
-        },
-        _ => Arc::clone(array),
-    };
+    let utc = instant::utc(array);
     let written = {
         let formatter = ArrayFormatter::try_new(utc.as_ref(), &INSTANT).map_err(|error| {
             ApiError::internal(format!("an instant column could not be written: {error}"))

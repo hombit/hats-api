@@ -54,6 +54,7 @@ use datafusion::arrow::datatypes::Schema;
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::instant;
 
 /// Which of the two, which is a delimiter and the names that go with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,15 @@ pub fn encode(result: &QueryResult, kind: Dsv, null: &str) -> Result<String, Api
         .with_header(true)
         .with_delimiter(kind.delimiter())
         .with_null(null.to_owned())
+        // DALI §3.3.3's form, the same one the VOTable carries: the requirement is about
+        // the values a service returns, and §3.4.3 lists `csv` and `tsv` among the formats
+        // it returns them in. Left to the writer's own defaults, a zoned column would come
+        // out with the offset of whatever zone it names, which that section has no form
+        // for — `instant::in_utc` below is the other half of that.
+        .with_date_format(instant::DATE.to_owned())
+        .with_datetime_format(instant::DATE_TIME.to_owned())
+        .with_timestamp_format(instant::DATE_TIME.to_owned())
+        .with_timestamp_tz_format(instant::ZONED.to_owned())
         .build(&mut out);
 
     if result.batches.is_empty() {
@@ -109,7 +119,7 @@ pub fn encode(result: &QueryResult, kind: Dsv, null: &str) -> Result<String, Api
         write_batch(&mut writer, &empty)?;
     } else {
         for batch in &result.batches {
-            write_batch(&mut writer, batch)?;
+            write_batch(&mut writer, &instant::in_utc(batch)?)?;
         }
     }
     drop(writer);
@@ -200,7 +210,8 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::array::{
-        ArrayRef, Float32Array, Float64Array, Int64Array, ListArray, StringArray,
+        ArrayRef, Date32Array, Float32Array, Float64Array, Int64Array, ListArray, StringArray,
+        TimestampSecondArray,
     };
     use datafusion::arrow::datatypes::{DataType, Field};
 
@@ -268,6 +279,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(document, "x\nNaN\ninf\n-inf\n1.5\n");
+    }
+
+    /// DALI §3.3.3's form, which §3.3's preamble puts on the values a service returns
+    /// rather than on VOTable alone — and `csv` and `tsv` are two of the formats §3.4.3
+    /// lists it returning them in. So an instant is spelled here exactly as the VOTable
+    /// spells it, this test and `votable`'s asserting the same strings.
+    #[test]
+    fn an_instant_is_written_as_dali_has_it() {
+        // 2020-01-02T03:04:05Z, as a naive column and as a date.
+        let seconds = TimestampSecondArray::from(vec![Some(1_577_934_245_i64), None]);
+        assert_eq!(
+            encode(&one("t", Arc::new(seconds)), Dsv::Csv, "").unwrap(),
+            "t\n2020-01-02T03:04:05\n\"\"\n"
+        );
+        assert_eq!(
+            encode(
+                &one("t", Arc::new(Date32Array::from(vec![18_263]))),
+                Dsv::Csv,
+                ""
+            )
+            .unwrap(),
+            "t\n2020-01-02\n"
+        );
+
+        // The same instant in a column two hours east. Written in the zone its type names
+        // it would read `05:04:05`, and DALI has no form for a zone but UTC.
+        let zoned =
+            TimestampSecondArray::from(vec![1_577_934_245_i64]).with_timezone("+02:00".to_owned());
+        assert_eq!(
+            encode(&one("t", Arc::new(zoned)), Dsv::Csv, "").unwrap(),
+            "t\n2020-01-02T03:04:05Z\n"
+        );
     }
 
     /// The same value at its own width, never widened first — `1.1_f32` as an `f64` prints
