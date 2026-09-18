@@ -196,6 +196,39 @@ async fn upload_storage_options_reach_the_store() {
     assert!(body.contains("storage options"), "{body}");
 }
 
+/// Two uploads at one authority is DataFusion's one store for it, so different credentials
+/// for the two would leave one running under the other's — refused before either is opened
+/// for real, naming both uploads and neither secret.
+#[tokio::test]
+async fn two_uploads_at_one_authority_with_different_credentials_are_refused() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, body) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT one.id FROM TAP_UPLOAD.one, TAP_UPLOAD.two"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", "one,s3://bucket/a.parquet"),
+            ("UPLOAD", "two,s3://bucket/b.parquet"),
+            ("UPLOAD_STORAGE_OPTION", "one,access_key_id,AKIA1"),
+            (
+                "UPLOAD_STORAGE_OPTION",
+                "one,secret_access_key,first-secret",
+            ),
+            ("UPLOAD_STORAGE_OPTION", "two,access_key_id,AKIA1"),
+            (
+                "UPLOAD_STORAGE_OPTION",
+                "two,secret_access_key,second-secret",
+            ),
+        ],
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.contains("one"), "{body}");
+    assert!(body.contains("two"), "{body}");
+    assert!(!body.contains("first-secret"), "leaked: {body}");
+    assert!(!body.contains("second-secret"), "leaked: {body}");
+}
+
 /// A table nobody published is a refusal naming what is published, rather than a planner
 /// message about a relation.
 #[tokio::test]

@@ -13,8 +13,8 @@ mod redirect;
 mod store;
 
 pub use options::{
-    AzureOptions, GcsOptions, HEADERS, Headers, HfOptions, HttpOptions, S3Options, StorageOptions,
-    WebdavOptions, WebdavTransport, option_names, option_schemes,
+    Authorities, AzureOptions, GcsOptions, HEADERS, Headers, HfOptions, HttpOptions, S3Options,
+    StorageOptions, WebdavOptions, WebdavTransport, option_names, option_schemes,
 };
 pub use store::{
     Entry, RemoteDir, RemoteFile, SourceUrl, open, open_dir, open_mounted, open_mounted_dir,

@@ -31,7 +31,7 @@ use crate::app::routes::tap::upload::{Kind, UPLOAD_SCHEMA, Upload};
 use crate::app::service::Service;
 use crate::error::ApiError;
 use crate::output::{dsv, votable};
-use crate::storage::{self, StorageOptions};
+use crate::storage::{self, Authorities, StorageOptions};
 use crate::tap::schema;
 
 /// What a null is written as in `csv` and `tsv` here.
@@ -112,6 +112,11 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
 
     let mut tables = Vec::new();
     let mut data_files: Option<DataFiles> = None;
+    // Two tables naming one authority — an upload and a published catalog, or two uploads —
+    // would share DataFusion's one store for it; see `Authorities`. A published table has no
+    // storage of its own, so every one of them shares this empty value.
+    let no_storage = StorageOptions::default();
+    let mut authorities = Authorities::default();
     for spelling in &translated.tables {
         let source = match schema::resolve(spelling) {
             Some(fixed) => {
@@ -128,7 +133,7 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
                         }
                     ))
                 })?;
-                let (source, files) = uploaded(service, upload)?;
+                let (source, files) = uploaded(service, upload, spelling, &mut authorities)?;
                 if let Some(files) = files {
                     data_files = Some(files);
                 }
@@ -150,12 +155,9 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
                 // inside it hold rows. A published table carries no storage options, so a
                 // catalog that needs a credential is not one this resource can read.
                 data_files = Some(service.data_files_for(url).clone());
-                Source::Catalog(storage::open_dir(
-                    url,
-                    &StorageOptions::default(),
-                    &service.policy,
-                    &service.transfers,
-                )?)
+                let dir = storage::open_dir(url, &no_storage, &service.policy, &service.transfers)?;
+                authorities.check(spelling, &dir.base, &no_storage)?;
+                Source::Catalog(dir)
             }
         };
         tables.push(Table {
@@ -214,7 +216,12 @@ fn names_an_upload(spelling: &str) -> bool {
 /// data-file globs is a parquet file and anything else is a catalog directory. A directory
 /// that is not one fails where a catalog is opened, which is the read that looks for
 /// `hats.properties`, `properties` and `collection.properties` and says so by name.
-fn uploaded(service: &Service, upload: &Upload) -> Result<(Source, Option<DataFiles>), ApiError> {
+fn uploaded<'a>(
+    service: &Service,
+    upload: &'a Upload,
+    spelling: &'a str,
+    authorities: &mut Authorities<'a>,
+) -> Result<(Source, Option<DataFiles>), ApiError> {
     let files = service.data_files_for(&upload.url);
     let kind = upload.kind.unwrap_or(match files.matches_url(&upload.url) {
         true => Kind::Parquet,
@@ -235,6 +242,7 @@ fn uploaded(service: &Service, upload: &Upload) -> Result<(Source, Option<DataFi
                 &service.policy,
                 &service.transfers,
             )?;
+            authorities.check(spelling, &file.base, &upload.storage)?;
             Ok((Source::File(file), None))
         }
         Kind::Hats => {
@@ -245,6 +253,7 @@ fn uploaded(service: &Service, upload: &Upload) -> Result<(Source, Option<DataFi
                 &service.policy,
                 &service.transfers,
             )?;
+            authorities.check(spelling, &dir.base, &upload.storage)?;
             Ok((Source::Catalog(dir), Some(files)))
         }
     }

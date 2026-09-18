@@ -142,7 +142,7 @@ pub struct HfOptions {
 
 /// The transport a WebDAV server speaks. An HTTP transport must be named exactly in
 /// `api.access.webdav.endpoints`; HTTPS is used when this option is absent.
-#[derive(Debug, Clone, Copy, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum WebdavTransport {
     Http,
@@ -178,6 +178,19 @@ impl std::fmt::Debug for Headers {
 impl Headers {
     fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Same names, in the same order a `BTreeMap` always iterates in, each with the same
+    /// value. Exposes every value to compare it and hands nothing owned back.
+    fn matches(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(other.0.iter())
+                .all(|((name, value), (name2, value2))| {
+                    name == name2 && value.expose_secret() == value2.expose_secret()
+                })
     }
 
     /// The headers as something that can go on a request, with every name checked.
@@ -399,6 +412,18 @@ fn echo_secret(
     }
 }
 
+/// Whether two optional credentials are the one secret. [`SecretString`] has no `PartialEq`
+/// of its own — comparing secrets is easy to get wrong in ways that leak them — so this is
+/// the one place that exposes both sides, compares the borrowed `&str`s, and hands nothing
+/// owned back.
+fn same_secret(a: &Option<SecretString>, b: &Option<SecretString>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.expose_secret() == b.expose_secret(),
+        _ => false,
+    }
+}
+
 impl Group for S3Options {
     fn named(&self) -> Vec<Named> {
         let Self {
@@ -431,6 +456,28 @@ impl Group for S3Options {
     }
 }
 
+impl S3Options {
+    /// Destructured on both sides, so a field added here and not compared does not compile.
+    fn matches(&self, other: &Self) -> bool {
+        let Self {
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } = self;
+        let Self {
+            region: region2,
+            access_key_id: access_key_id2,
+            secret_access_key: secret_access_key2,
+            session_token: session_token2,
+        } = other;
+        region == region2
+            && same_secret(access_key_id, access_key_id2)
+            && same_secret(secret_access_key, secret_access_key2)
+            && same_secret(session_token, session_token2)
+    }
+}
+
 impl Group for GcsOptions {
     fn named(&self) -> Vec<Named> {
         let Self {
@@ -450,6 +497,21 @@ impl Group for GcsOptions {
         } = self;
         echo_secret(out, "service_account_key", service_account_key);
         echo_secret(out, "access_token", access_token);
+    }
+}
+
+impl GcsOptions {
+    fn matches(&self, other: &Self) -> bool {
+        let Self {
+            service_account_key,
+            access_token,
+        } = self;
+        let Self {
+            service_account_key: service_account_key2,
+            access_token: access_token2,
+        } = other;
+        same_secret(service_account_key, service_account_key2)
+            && same_secret(access_token, access_token2)
     }
 }
 
@@ -483,6 +545,24 @@ impl Group for AzureOptions {
     }
 }
 
+impl AzureOptions {
+    fn matches(&self, other: &Self) -> bool {
+        let Self {
+            account,
+            access_key,
+            sas_token,
+        } = self;
+        let Self {
+            account: account2,
+            access_key: access_key2,
+            sas_token: sas_token2,
+        } = other;
+        account == account2
+            && same_secret(access_key, access_key2)
+            && same_secret(sas_token, sas_token2)
+    }
+}
+
 impl Group for HttpOptions {
     fn named(&self) -> Vec<Named> {
         let Self { headers } = self;
@@ -498,6 +578,14 @@ impl Group for HttpOptions {
             }
             out.insert("headers".to_owned(), written.into());
         }
+    }
+}
+
+impl HttpOptions {
+    fn matches(&self, other: &Self) -> bool {
+        let Self { headers } = self;
+        let Self { headers: headers2 } = other;
+        headers.matches(headers2)
     }
 }
 
@@ -529,6 +617,24 @@ impl Group for WebdavOptions {
     }
 }
 
+impl WebdavOptions {
+    fn matches(&self, other: &Self) -> bool {
+        let Self {
+            transport,
+            username,
+            password,
+        } = self;
+        let Self {
+            transport: transport2,
+            username: username2,
+            password: password2,
+        } = other;
+        transport == transport2
+            && same_secret(username, username2)
+            && same_secret(password, password2)
+    }
+}
+
 impl Group for HfOptions {
     fn named(&self) -> Vec<Named> {
         let Self { token } = self;
@@ -538,6 +644,14 @@ impl Group for HfOptions {
     fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
         let Self { token } = self;
         echo_secret(out, "token", token);
+    }
+}
+
+impl HfOptions {
+    fn matches(&self, other: &Self) -> bool {
+        let Self { token } = self;
+        let Self { token: token2 } = other;
+        same_secret(token, token2)
     }
 }
 
@@ -684,6 +798,81 @@ impl StorageOptions {
         self.named()
             .iter()
             .any(|option| option.set && option.kind == Kind::Credential)
+    }
+
+    /// Whether two requests would reach the store the same way — same server, same
+    /// credentials. What [`Authorities`] asks, since two tables sharing an authority are
+    /// safe to share the one store DataFusion gives them only where this holds.
+    ///
+    /// Destructured on both sides, the same way [`Self::named`] and [`Self::echo`] are: a
+    /// group added here and not compared does not compile, and neither does a field added to
+    /// a group and not compared in its own `matches`.
+    fn matches(&self, other: &Self) -> bool {
+        let Self {
+            endpoint,
+            allow_http,
+            s3,
+            gcs,
+            azure,
+            http,
+            webdav,
+            hf,
+            unknown: _,
+        } = self;
+        let Self {
+            endpoint: endpoint2,
+            allow_http: allow_http2,
+            s3: s32,
+            gcs: gcs2,
+            azure: azure2,
+            http: http2,
+            webdav: webdav2,
+            hf: hf2,
+            unknown: _,
+        } = other;
+        endpoint == endpoint2
+            && allow_http == allow_http2
+            && s3.matches(s32)
+            && gcs.matches(gcs2)
+            && azure.matches(azure2)
+            && http.matches(http2)
+            && webdav.matches(webdav2)
+            && hf.matches(hf2)
+    }
+}
+
+/// Which storage options opened each authority a request has named so far, so a second
+/// table naming one already open can be checked against the first.
+///
+/// DataFusion keys a registered object store by `scheme://host[:port]` and drops the path —
+/// see "One store per authority" — so two tables sharing an authority share one store, the
+/// second `register_object_store` silently replacing the first. Different credentials for
+/// the two tables would then leave the first table's reads running under the second's, which
+/// this refuses instead: the fallback the crate takes rather than building a registry able to
+/// keep the two apart, which would be a larger decision than any one route.
+#[derive(Debug, Default)]
+pub struct Authorities<'a>(std::collections::HashMap<String, (&'a str, &'a StorageOptions)>);
+
+impl<'a> Authorities<'a> {
+    /// `name` is the table as the caller wrote it, kept only for the message if `base` turns
+    /// out to already be open under different options.
+    pub fn check(
+        &mut self,
+        name: &'a str,
+        base: &Url,
+        options: &'a StorageOptions,
+    ) -> Result<(), ApiError> {
+        match self.0.get(base.as_str()) {
+            None => {
+                self.0.insert(base.as_str().to_owned(), (name, options));
+                Ok(())
+            }
+            Some((_, seen)) if seen.matches(options) => Ok(()),
+            Some((first, _)) => Err(ApiError::bad_request(format!(
+                "tables {first} and {name} both name {base}, with different storage options; \
+                 a request may not give one authority more than one set of credentials"
+            ))),
+        }
     }
 }
 
@@ -987,5 +1176,85 @@ mod tests {
 
         let none = format!("{:?}", no_options());
         assert!(none.contains("0 header(s)"), "{none}");
+    }
+
+    /// Two requests reach the store the same way, secrets included, when they wrote the
+    /// same options — which is what lets two tables share one authority.
+    #[test]
+    fn identical_storage_options_match() {
+        let same = serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": SECRET,
+            "region": "us-west-2",
+        });
+        assert!(options(same.clone()).matches(&options(same)));
+        assert!(no_options().matches(&no_options()));
+    }
+
+    /// A credential, a plain option, or a header differing anywhere is enough: a caller who
+    /// wrote one different field wrote a different request, whatever else agrees.
+    #[test]
+    fn storage_options_differing_anywhere_do_not_match() {
+        let base = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": SECRET,
+            "region": "us-west-2",
+        }));
+        for changed in [
+            serde_json::json!({"access_key_id": "AKIA2", "secret_access_key": SECRET, "region": "us-west-2"}),
+            serde_json::json!({"access_key_id": "AKIA1", "secret_access_key": "different", "region": "us-west-2"}),
+            serde_json::json!({"access_key_id": "AKIA1", "secret_access_key": SECRET, "region": "us-east-1"}),
+            serde_json::json!({"access_key_id": "AKIA1", "secret_access_key": SECRET}),
+        ] {
+            assert!(!base.matches(&options(changed.clone())), "{changed}");
+        }
+
+        let a = options(serde_json::json!({"headers": {"Authorization": "Bearer a"}}));
+        let b = options(serde_json::json!({"headers": {"Authorization": "Bearer b"}}));
+        assert!(!a.matches(&b));
+    }
+
+    /// The check [`Authorities`] backs: a second table naming an authority already open is
+    /// fine where it wrote the same options, and refused — naming both tables, and neither
+    /// secret — where it wrote different ones. A different authority is unconstrained.
+    #[test]
+    fn authorities_refuse_a_second_table_with_different_options_at_one_base() {
+        let creds = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": SECRET,
+        }));
+        let different_creds = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": "other-secret",
+        }));
+
+        let left = open(&parse_url("s3://bucket/a.parquet").unwrap(), &creds).unwrap();
+        let right = open(&parse_url("s3://bucket/b.parquet").unwrap(), &creds).unwrap();
+        let elsewhere = open(
+            &parse_url("s3://other/c.parquet").unwrap(),
+            &different_creds,
+        )
+        .unwrap();
+
+        let mut authorities = Authorities::default();
+        authorities.check("left", &left.base, &creds).unwrap();
+        // Another table at the same authority, with the same options: fine.
+        authorities.check("right", &right.base, &creds).unwrap();
+        // A different authority may carry whatever options it likes.
+        authorities
+            .check("third", &elsewhere.base, &different_creds)
+            .unwrap();
+
+        let error = authorities
+            .check("fourth", &left.base, &different_creds)
+            .unwrap_err();
+        assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+        assert!(error.to_string().contains("left"), "{error}");
+        assert!(error.to_string().contains("fourth"), "{error}");
+        assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+        assert!(
+            !error.to_string().contains("other-secret"),
+            "leaked: {error}"
+        );
     }
 }
