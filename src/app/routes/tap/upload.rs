@@ -46,7 +46,7 @@ use url::Url;
 
 use crate::adql::names;
 use crate::error::ApiError;
-use crate::storage::{StorageOptions, parse_url};
+use crate::storage::{self, StorageOptions, parse_url};
 use crate::tap::dali::{self, Delimiter, Tail};
 use crate::tap::tables::RESERVED_SCHEMAS;
 
@@ -148,6 +148,121 @@ impl<'de> Deserialize<'de> for Setting {
     }
 }
 
+/// One upload's storage options as the request wrote them: names, and text or headers.
+///
+/// It deserializes into [`StorageOptions`] itself, so what an option means here is what it
+/// means in the `/adql` body — a name for another backend refused, a credential kept out of a
+/// `String`, an unknown name carried rather than dropped — and this holds no list of options
+/// of its own to fall out of step with that one.
+#[derive(Debug, Default)]
+struct Declared(Vec<(String, Field)>);
+
+/// One option's value, as the type its field takes.
+///
+/// A query string carries text and nothing else, so what a value's type is has to come from
+/// the option: [`storage::is_flag`] answers that from the same registry the rest of the
+/// storage code reads, rather than from what the text happens to look like. Guessing instead
+/// makes `region,true` a boolean and then a refusal about a string field.
+#[derive(Debug)]
+enum Field {
+    Text(String),
+    Flag(bool),
+    Headers(BTreeMap<String, String>),
+}
+
+impl Declared {
+    /// Add one setting, or name the option that was set twice.
+    fn add(&mut self, setting: Setting) -> Result<(), String> {
+        let (option, field) = match setting {
+            Setting::Header { header, value } => {
+                let written = format!("{HEADER} {header}");
+                match self.0.iter_mut().find(|(name, _)| name == storage::HEADERS) {
+                    Some((_, Field::Headers(headers))) => {
+                        match headers.insert(header, value.into_string()) {
+                            Some(_) => return Err(written),
+                            None => return Ok(()),
+                        }
+                    }
+                    _ => (
+                        storage::HEADERS.to_owned(),
+                        Field::Headers(BTreeMap::from([(header, value.into_string())])),
+                    ),
+                }
+            }
+            Setting::Named { option, value } => {
+                let field = match storage::is_flag(&option) {
+                    true => Field::Flag(flag(&value)?),
+                    false => Field::Text(value.into_string()),
+                };
+                (option, field)
+            }
+        };
+        if self.0.iter().any(|(name, _)| *name == option) {
+            return Err(option);
+        }
+        self.0.push((option, field));
+        Ok(())
+    }
+
+    /// The options themselves, read by `StorageOptions`'s own `Deserialize`.
+    fn options(self) -> Result<StorageOptions, de::value::Error> {
+        StorageOptions::deserialize(de::value::MapDeserializer::new(self.0.into_iter()))
+    }
+}
+
+/// A switch's value, which is the one thing a query string cannot say by its type.
+fn flag(value: &Tail) -> Result<bool, String> {
+    match value.as_str() {
+        text if text.eq_ignore_ascii_case("true") => Ok(true),
+        text if text.eq_ignore_ascii_case("false") => Ok(false),
+        other => Err(format!(
+            "{other:?}, which is a switch and takes true or false"
+        )),
+    }
+}
+
+impl<'de> de::IntoDeserializer<'de, de::value::Error> for Field {
+    type Deserializer = Self;
+
+    fn into_deserializer(self) -> Self {
+        self
+    }
+}
+
+impl<'de> serde::Deserializer<'de> for Field {
+    type Error = de::value::Error;
+
+    /// Every field knows what it is, so the one method is enough: `StorageOptions` flattens
+    /// its groups, and a flattened struct reads its values through this.
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            Self::Text(text) => visitor.visit_string(text),
+            Self::Flag(flag) => visitor.visit_bool(flag),
+            Self::Headers(headers) => {
+                visitor.visit_map(de::value::MapDeserializer::new(headers.into_iter()))
+            }
+        }
+    }
+
+    /// An option that was written is a value: the field is optional in the struct, not in
+    /// the request.
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        visitor.visit_some(self)
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
+        identifier ignored_any
+    }
+}
+
 /// A header's name and then its value, which is what `header` takes.
 struct TwoFields;
 
@@ -220,8 +335,7 @@ impl Uploads {
         // An entry naming no upload is refused rather than dropped: dropped, it is a request
         // whose credentials were never used, which the caller reads as a store that let them
         // in anonymously.
-        let mut declared: BTreeMap<String, serde_json::Map<String, serde_json::Value>> =
-            BTreeMap::new();
+        let mut declared: BTreeMap<String, Declared> = BTreeMap::new();
         for value in storage {
             let (name, setting) = read_value::<(String, Setting)>(
                 value,
@@ -229,40 +343,26 @@ impl Uploads {
                 "<upload>,<option>,<value>",
             )?;
             let name = find(&mut list, &name, STORAGE_OPTION)?.name.clone();
-            let written = declared.entry(name.clone()).or_default();
-            let (option, replaced) = match setting {
-                Setting::Header { header, value } => {
-                    let serde_json::Value::Object(headers) = written
-                        .entry("headers")
-                        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
-                    else {
-                        unreachable!("headers is written as an object above")
-                    };
-                    let replaced = headers.insert(header.clone(), value.into_string().into());
-                    (format!("{HEADER} {header}"), replaced)
-                }
-                Setting::Named { option, value } => {
-                    let replaced = written.insert(option.clone(), typed(value.as_str()));
-                    (option, replaced)
-                }
-            };
-            if replaced.is_some() {
-                return Err(ApiError::bad_request(format!(
-                    "{STORAGE_OPTION} sets {option} twice for {name}"
-                )));
-            }
+            declared
+                .entry(name.clone())
+                .or_default()
+                .add(setting)
+                .map_err(|option| {
+                    ApiError::bad_request(format!(
+                        "{STORAGE_OPTION} sets {option} twice for {name}"
+                    ))
+                })?;
         }
         // Through the same type the `/adql` body deserializes, so that an option means what it
         // means everywhere else — a name for another backend refused, a credential kept out of
         // a `String`, nothing dropped for being unknown.
         for (name, written) in declared {
-            let options =
-                serde_json::from_value(serde_json::Value::Object(written)).map_err(|error| {
-                    ApiError::bad_request(format!(
-                        "{STORAGE_OPTION} for {name} is not storage options this service \
-                         takes: {error}"
-                    ))
-                })?;
+            let options = written.options().map_err(|error| {
+                ApiError::bad_request(format!(
+                    "{STORAGE_OPTION} for {name} is not storage options this service takes: \
+                     {error}"
+                ))
+            })?;
             find(&mut list, &name, STORAGE_OPTION)?.storage = options;
         }
         Ok(Self(list))
@@ -298,14 +398,6 @@ impl Uploads {
 /// Every storage option is a string but `allow_http`, which is a switch — and a switch
 /// written `true` is not a string that happens to spell one. Anything else stays text, so a
 /// region that looks like a number is still a region.
-fn typed(value: &str) -> serde_json::Value {
-    match value.trim() {
-        "true" => serde_json::Value::Bool(true),
-        "false" => serde_json::Value::Bool(false),
-        _ => value.into(),
-    }
-}
-
 /// One parameter's value, read into the shape that parameter takes.
 ///
 /// The comma is `UPLOAD`'s own separator (TAP §2.7.6), so every parameter here is written
@@ -436,6 +528,28 @@ mod tests {
             uploads.named("TAP_UPLOAD.b").unwrap().kind,
             Some(Kind::Parquet)
         );
+        assert!(!a.storage.allow_http, "{:?}", a.storage);
+    }
+
+    /// **What an option's value means is the option's to say, never the text's.** A query
+    /// string carries text and `allow_http` is the one switch among them, so the type comes
+    /// from `storage::is_flag` — read from the value instead, a region spelled `true` would
+    /// be a boolean handed to a string field, and a switch spelled `yes` would be silently
+    /// false.
+    #[test]
+    fn a_values_type_comes_from_the_option_it_sets() {
+        let uploads = read(
+            &["a,s3://bucket/a/hats"],
+            &[],
+            &["a,region,true", "a,allow_http,TRUE"],
+        )
+        .unwrap();
+        let storage = &uploads.named("TAP_UPLOAD.a").unwrap().storage;
+        assert_eq!(storage.s3.region.as_deref(), Some("true"));
+        assert!(storage.allow_http, "{storage:?}");
+
+        let refused = read(&["a,s3://bucket/a/hats"], &[], &["a,allow_http,yes"]).unwrap_err();
+        assert!(refused.contains("true or false"), "{refused}");
     }
 
     /// Dropped instead, it is a request whose credentials went unused, which the caller

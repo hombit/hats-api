@@ -299,6 +299,9 @@ struct Named {
     name: &'static str,
     set: bool,
     kind: Kind,
+    /// Whether it is a switch rather than a value, which is what [`is_flag`] answers for a
+    /// carrier that has only text to hand over.
+    flag: bool,
 }
 
 /// The types a [`Kind::Plain`] option is allowed to have. [`SecretString`] is
@@ -316,6 +319,7 @@ impl Named {
             name,
             set: value.is_some(),
             kind: Kind::Plain,
+            flag: false,
         }
     }
 
@@ -325,6 +329,7 @@ impl Named {
             name,
             set: value,
             kind: Kind::Plain,
+            flag: true,
         }
     }
 
@@ -336,6 +341,7 @@ impl Named {
             name,
             set: value.is_some(),
             kind: Kind::Credential,
+            flag: false,
         }
     }
 
@@ -347,6 +353,7 @@ impl Named {
             name,
             set: !value.is_empty(),
             kind: Kind::Credential,
+            flag: false,
         }
     }
 }
@@ -486,7 +493,7 @@ impl Group for AzureOptions {
 impl Group for HttpOptions {
     fn named(&self) -> Vec<Named> {
         let Self { headers } = self;
-        vec![Named::credentials("headers", headers)]
+        vec![Named::credentials(HEADERS, headers)]
     }
 
     fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
@@ -713,6 +720,26 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
     }
     accepted.push(ALLOW_HTTP);
     accepted
+}
+
+/// The option name a request's headers are written under.
+///
+/// Named here because `HttpOptions`'s group registers it and a carrier that writes one header
+/// at a time — TAP's `UPLOAD_STORAGE_OPTION`, which has only names and text — has to put them
+/// under the same one.
+pub const HEADERS: &str = "headers";
+
+/// Whether an option is a switch rather than a value.
+///
+/// A body sends `true` as a boolean and a query string has only text, so a carrier of text
+/// has to know which of the two it is handing over. Answered from the same registry
+/// `accepted_options` and the credential check read, so an option that becomes a switch — or
+/// stops being one — says so here without anything being written twice.
+pub fn is_flag(option: &str) -> bool {
+    StorageOptions::default()
+        .named()
+        .into_iter()
+        .any(|named| named.flag && named.name == option)
 }
 
 /// Which url schemes each storage option applies to, for the API description.
