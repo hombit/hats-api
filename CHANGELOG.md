@@ -12,7 +12,9 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- A catalog's `limit=0` answers from `dataset/_common_metadata` where it has one, instead of
+  opening a partition to describe zero rows of it.
+- A plan for `limit=0` lists no partitions, instead of one entry per partition a region reached.
 
 ### Deprecated
 

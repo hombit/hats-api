@@ -27,7 +27,7 @@ use crate::config::LimitsConfig;
 use crate::engine::query::{self, Order, Predicate, Projection, QueryResult, Selection};
 use crate::engine::sql;
 use crate::error::ApiError;
-use crate::hats::partitions::DATASET_DIR;
+use crate::hats::partitions::{COMMON_METADATA, DATASET_DIR};
 use crate::hats::{Catalog, HatsPartition};
 use crate::sky::healpix::{Cover, Coverage, Detail};
 use crate::sky::region::{self, Healpix, Region, Spatial};
@@ -278,6 +278,15 @@ impl Search {
     /// work is the limit, and the partition count is watched as the reads land — the same
     /// shape as the other two, and sound for the same reason: the reads in flight when it
     /// trips are what the overshoot is.
+    ///
+    /// **A `limit` of zero is a description of the catalog, and does not choose a
+    /// partition at all.** No row of any partition answers it, so `dataset/_common_metadata`
+    /// — the schema every partition shares, and no rows — answers instead where the catalog
+    /// has one, with the caller's own `columns`, `filters` and `region` planned against it
+    /// exactly as they would be against a real partition, so a request bad against one is
+    /// bad against the other. A catalog with none, or one this fails against for any other
+    /// reason, falls through to the partition below and pays what `limit=0` always cost
+    /// before this: one partition's footer, opened and then read for zero rows.
     pub async fn run(
         &self,
         selection: &CatalogSelection<'_>,
@@ -285,6 +294,31 @@ impl Search {
         limits: sql::Limits,
         bounds: CatalogLimits,
     ) -> Result<Outcome, ApiError> {
+        if selection.limit == Some(0)
+            && let Ok(common) = self.catalog.dir().child(COMMON_METADATA)
+            && let Ok(result) = query::run(
+                &common,
+                &Selection {
+                    projection: selection.projection,
+                    predicate: selection.predicate,
+                    spatial: self.spatial_for_schema(selection.regions),
+                    limit: Some(0),
+                },
+                limits,
+                Order::Unspecified,
+            )
+            .await
+        {
+            return Ok(Outcome::Rows(Box::new(CatalogResult {
+                rows: QueryResult {
+                    schema: result.schema,
+                    batches: Vec::new(),
+                    data_bytes_read: result.data_bytes_read,
+                },
+                partitions_read: 0,
+                source: None,
+            })));
+        }
         if selection.limit.is_none() && self.chosen.len() > bounds.max_partitions {
             return Ok(Outcome::TooMuchWork(Exceeded::Partitions {
                 reached: self.chosen.len(),
@@ -586,6 +620,23 @@ impl Search {
             relation: None,
         })
     }
+
+    /// The same test, against no partition in particular — for validating a region against
+    /// `_common_metadata` rather than pruning a real partition's rows with it. `_common_metadata`
+    /// carries no HEALPix values of its own to accelerate the test with, and there are no rows
+    /// behind it to prune anyway.
+    fn spatial_for_schema<'a>(&'a self, regions: Option<&'a [Region]>) -> Option<Spatial<'a>> {
+        let regions = regions?;
+        let columns = self.columns.as_ref()?;
+        Some(Spatial {
+            regions,
+            ra_column: Some(&columns.ra),
+            dec_column: Some(&columns.dec),
+            healpix: None,
+            partition: None,
+            relation: None,
+        })
+    }
 }
 
 /// What one partition came to, before it is folded in with the rest.
@@ -774,6 +825,26 @@ pub(crate) mod tests {
             write_partition(&path, &rows, healpix);
         }
         dir
+    }
+
+    /// `dataset/_common_metadata` beside a fixture: the same schema its partitions carry,
+    /// and no rows.
+    fn write_common_metadata(root: &Path, healpix: bool) {
+        let mut fields = vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ra", DataType::Float64, false),
+            Field::new("dec", DataType::Float64, false),
+        ];
+        if healpix {
+            fields.push(Field::new("_healpix_29", DataType::Int64, false));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let path = root.join(COMMON_METADATA);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        ArrowWriter::try_new(fs::File::create(&path).unwrap(), schema, None)
+            .unwrap()
+            .close()
+            .unwrap();
     }
 
     fn write_partition(path: &Path, rows: &[Point], healpix: bool) {
@@ -1155,6 +1226,94 @@ pub(crate) mod tests {
         // A limit past the end is every row and not an error.
         let (_, everything) = read(dir.path(), None, Some(10_000)).await.unwrap();
         assert_eq!(everything.rows.num_rows(), CELLS.len() * 64);
+    }
+
+    /// A `limit=0` answers from `dataset/_common_metadata` where the catalog has one, opening
+    /// no partition at all — which is the whole of what this saves over opening one for a
+    /// footer read that fetches zero rows anyway.
+    #[tokio::test]
+    async fn a_zero_limit_answers_from_common_metadata_without_opening_a_partition() {
+        let dir = fixture(true);
+        write_common_metadata(dir.path(), true);
+        let (_, result) = read(dir.path(), None, Some(0)).await.unwrap();
+        assert_eq!(result.partitions_read, 0);
+        assert_eq!(result.rows.data_bytes_read, 0);
+        assert_eq!(result.rows.num_rows(), 0);
+        assert_eq!(
+            result
+                .rows
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "ra", "dec", "_healpix_29"]
+        );
+    }
+
+    /// A catalog with no `_common_metadata` answers `limit=0` exactly as it always has: one
+    /// partition opened for its schema, and zero rows out of it.
+    #[tokio::test]
+    async fn a_zero_limit_without_common_metadata_still_opens_one_partition() {
+        let dir = fixture(true);
+        let (_, result) = read(dir.path(), None, Some(0)).await.unwrap();
+        assert_eq!(result.partitions_read, 1);
+        assert_eq!(result.rows.num_rows(), 0);
+        assert_eq!(
+            result
+                .rows
+                .schema
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str())
+                .collect::<Vec<_>>(),
+            vec!["id", "ra", "dec", "_healpix_29"]
+        );
+    }
+
+    /// A region matching no partition is still a real catalog, so `limit=0` still describes
+    /// its columns — the schema is the catalog's own and does not depend on whether anything
+    /// this particular request asked for would have matched a row.
+    #[tokio::test]
+    async fn a_zero_limit_describes_the_catalog_even_where_the_region_matches_nothing() {
+        let dir = fixture(true);
+        write_common_metadata(dir.path(), true);
+        // The antipode of the fixture's cells, which none of them reach.
+        let (lon, lat) = cdshealpix::nested::center(ORDER, CELLS[0]);
+        let region = cone(180.0 - lon.to_degrees(), -lat.to_degrees(), 0.01);
+        let (search, result) = read(dir.path(), Some(&[region]), Some(0)).await.unwrap();
+        assert!(search.chosen().is_empty(), "the region matched a partition");
+        assert!(
+            !result.rows.schema.fields().is_empty(),
+            "a region matching nothing described a catalog with no columns"
+        );
+    }
+
+    /// A `filters` naming a column neither `_common_metadata` nor any partition has is
+    /// refused, the same as it always was — the fast path validates against the same rule
+    /// rather than skipping it because no row will be read either way.
+    #[tokio::test]
+    async fn a_zero_limit_still_refuses_a_bad_filter() {
+        let dir = fixture(true);
+        write_common_metadata(dir.path(), true);
+        let search = Search::resolve(opened(dir.path()), None, generous())
+            .await
+            .unwrap();
+        let selection = CatalogSelection {
+            predicate: Predicate::FilterText("nonexistent_column > 1"),
+            limit: Some(0),
+            ..CatalogSelection::default()
+        };
+        let error = search
+            .run(
+                &selection,
+                &DataFiles::new(&DataConfig::default().filenames).unwrap(),
+                sql::Limits::from(&LimitsConfig::default()),
+                generous(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("nonexistent_column"), "{error}");
     }
 
     /// Every bound refuses rather than trims, and says which one it was.
