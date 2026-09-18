@@ -57,7 +57,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.13 | a region over `Float32` coordinates | done | |
 | 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
 | 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
-| 11.9 | `/examples` | todo | later. A menu TOPCAT offers, not something a client needs to work |
+| 11.9 | `/examples` | deferred | waits for §6.1's catalog metadata cache. A menu TOPCAT offers, not something a client needs to work, and every example in it is generated from a published catalog |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
 | 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
@@ -179,6 +179,12 @@ Validators: `ETag` for the object stores, `ETag` else `Last-Modified` over http(
 revalidates; otherwise a TTL bounds staleness and a changed validator evicts. Anything that
 can miss an update — §6.6's watcher — is an optimization on top of that, so a missed event
 costs `ttl`-bounded staleness rather than a permanently wrong answer.
+
+**The catalog metadata layer has a reader that answers no query.** `/tables`, `TAP_SCHEMA`
+and §11.9's examples page are each built out of the properties, the partition list and
+`dataset/_common_metadata` of every published table, and a client fetches all three before
+it has asked for a row. Those reads are the whole cost of those resources, so the layer is
+what makes them cheap rather than what makes them faster.
 
 **The first two are the ones worth building, and the reason is measured.** A
 `format=parquet` request reads the source footer three times, two of them this crate's own:
@@ -705,13 +711,49 @@ answering `404`.
 
 ### 11.9 `/examples`
 
-A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. Later
-rather than first — all four reference services publish one, but a client works without it,
-which is the difference between a capability and a convenience.
+A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. All
+four reference services publish one, but a client works without it, and TAP §2.6 asks for it
+as a SHOULD; DALI §2.3 makes an absent one a 404, which is what the url answers while there
+is no page.
 
-The rules `app/openapi/` already follows apply unchanged — an example is a query that runs and
-is judged on what it costs, so each names a few columns and a catalog example carries a
-circle. It is a page this service serves, so: no CDN, complete without JavaScript.
+**It is a resource of its own, and nothing it costs is shared.** A client fetches
+`/examples` before it has asked anything, so whatever the page reads is read to draw a menu,
+and read again for the next client's menu. That makes the cost the question this step turns
+on rather than a detail of it.
+
+**Every example is generated, because `[[tap.table]]` is a name and a url.** Which columns a
+table has, which two hold a position, and where on the sky it holds rows are the catalog's
+to answer, so the page reads what `/tables` reads: the properties, the partition list and
+`dataset/_common_metadata`, per published table, per fetch. **So it waits for §6.1's catalog
+metadata cache**, where those are in memory already and the page is assembled out of them.
+
+**A good example wants more than metadata, and that is the part to bound.** A cone needs a
+position the catalog holds rows at, which one of its own partition cells gives without
+reading data. A predicate that matches anything needs to know what the values are like,
+which nothing short of a partition's statistics says, and a page that opens a partition per
+table per fetch is one nobody can afford. What a query says has to come from what the
+catalog already says about itself.
+
+Three things the generated queries have to avoid, none of them visible from a table name:
+
+- **`SELECT *` is not an example.** These catalogs are 150 to 370 columns wide, which is ten
+  to seventy seconds against about one for four named columns, the same rule
+  `app/openapi/` already follows.
+- **A nested column is refused by the format the menu is read in.** `votable` has no form for
+  `lightcurve.mag` (§7.5), so a projection chosen blindly is a 400 in the first query a new
+  user runs.
+- **A `TOP n` beside the cone is what keeps the read to the partitions the cone names.**
+
+The document is well-formed XML and so is authored as XHTML (DALI §2.3), carries one `vocab`
+attribute for the whole page, and gives each example an `id`, a `resource` pointing at
+itself, `typeof="example"`, a plain-text `name` and exactly one plain-text `query`, with the
+fully qualified table names as `table` (TAP §2.6). It is declared in `/capabilities` as
+`ivo://ivoa.net/std/DALI#examples`. It is a page this service serves, so: no CDN, complete
+without JavaScript.
+
+Left to decide: whether an operator may write examples of their own beside the generated
+ones. It is what makes a real archive's menu worth reading, and it puts caller-facing ADQL
+in a config file with nothing checking that it still runs.
 
 ### 11.10 What a caller gets told
 
