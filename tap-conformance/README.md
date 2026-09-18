@@ -3,7 +3,8 @@
 What today's TAP clients make of this service, reported rather than enforced.
 
 Every question here is asked by a client astronomers already have — `pyvo`, and STILTS
-`taplint`, which is the validator TAP services are actually judged by. Nothing in this
+`taplint`, which is the validator TAP services are actually judged by, and STILTS
+`votlint`, which reads a document the way a VOTable reader does. Nothing in this
 directory implements any part of TAP itself. That is the point: a suite written against
 this service's own idea of the protocol would agree with it by construction, which is
 worth nothing. The suite was written before the implementation for the same reason.
@@ -100,9 +101,8 @@ above the numbers and the run goes red.
 
 ## What is asked, and where
 
-One file per part of the standards, and each holds both halves — what `pyvo` makes of
-it and what `taplint` says about it — so the report reads as one list of features
-rather than as two lists from two tools.
+One file per part of the standards, holding whatever each tool says about that part, so
+the report reads as one list of features rather than one list per tool.
 
 | | |
 |---|---|

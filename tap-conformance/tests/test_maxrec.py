@@ -13,6 +13,7 @@ import pyvo
 import pytest
 
 from tap_conformance.votable import overflow, refusal, statuses
+from tap_conformance.votlint import assert_valid, check
 
 
 def test_zero(tap, rows_query, record_property):
@@ -72,6 +73,22 @@ def test_the_marker_follows_the_table(raw, queryable, record_property):
         pytest.skip("no overflow marker to place")
     record_property("detail", str(marker))
     assert marker.after_table, "the OVERFLOW marker is written before the table"
+
+
+def test_a_truncated_answer_is_still_a_valid_votable(
+    raw, queryable, stilts_command, record_property
+):
+    """A document with the marker after its table is still a document.
+
+    This is the shape most likely to be built by hand rather than by a writer: the
+    marker goes in after the rows are already written, which is an INFO appended to a
+    RESOURCE whose TABLE is closed. Whether that is where the schema allows an INFO is
+    a question only a validator answers.
+    """
+    report = check(raw(f"SELECT TOP 20 * FROM {queryable}", MAXREC=2).content, stilts_command)
+    if report.unavailable:
+        pytest.skip(report.unavailable)
+    record_property("detail", assert_valid(report, "a truncated answer"))
 
 
 def test_a_complete_answer_is_not_marked(raw, tap, queryable, record_property):

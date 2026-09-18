@@ -1305,9 +1305,16 @@ parts of TAP, DALI, VOSI and ADQL answer. It is a uv project with its own lock, 
   `QUERY_STATUS="ERROR"`, which is what DALI §4.4 says — and a stage that looked at
   nothing fails. Run the suite against a service with the feature ripped out; if the
   number does not fall, the check is measuring nothing.
-- **`taplint` lints and `tapquery` is the client.** The validator composes its own queries
-  from the metadata and is nobody's way of getting data; `stilts tapquery` is what TOPCAT
-  runs underneath. Both are used, for different questions.
+- **`taplint` lints, `tapquery` is the client, and `votlint` reads one document.** The
+  validator composes its own queries from the metadata and is nobody's way of getting data;
+  `stilts tapquery` is what TOPCAT runs underneath; `stilts votlint` takes the bytes of one
+  answer and reads them as a VOTable reader would, schema and all. All three are used, for
+  different questions. The third is the only one that looks at the document a query answered
+  with: `taplint` validates the three VOSI documents and no others.
+
+  **`votlint` exits 0 whatever it finds**, so its findings are its output and nothing may
+  read its status. It takes the body on standard input, which is what keeps the bytes
+  checked the ones that came off the wire.
 - **A check that a `taplint` stage already covers does not get a hand-written twin.** The
   validator is stronger wherever they overlap — it checks documents against schemas, every
   UCD against the vocabulary, `/tables` against `TAP_SCHEMA` column by column. What belongs
