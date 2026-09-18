@@ -8,15 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `UPLOAD` on `/tap/sync`, naming a HATS catalog or parquet file by url, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`.
-- A date or timestamp column is answered in `votable`, as `xtype="timestamp"`, and published in `TAP_SCHEMA.columns` and `/tap/tables`.
+--
 
 ### Changed
 
-- A date or timestamp column in `csv` and `tsv` is written in UTC in DALI's form, instead of carrying the column's own UTC offset.
-- A catalog's `limit=0` answers from `dataset/_common_metadata` where it has one, instead of
-  opening a partition to describe zero rows of it.
-- A plan for `limit=0` lists no partitions, instead of one entry per partition a region reached.
+--
 
 ### Deprecated
 
@@ -28,11 +24,30 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A query's own answer now sends `Accept-Ranges: none` instead of silently ignoring `Range`.
+--
 
 ### Security
 
 --
+
+## [0.0.9] - 2026-09-18
+
+### Added
+
+- `UPLOAD` on `/tap/sync`, naming a HATS catalog or parquet file by url, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`. [#74](https://github.com/hombit/hats-api/pull/74)
+- A date or timestamp column is answered in `votable`, as `xtype="timestamp"`, and published in `TAP_SCHEMA.columns` and `/tap/tables`. [#79](https://github.com/hombit/hats-api/pull/79)
+
+### Changed
+
+- A date or timestamp column in `csv` and `tsv` is written in UTC in DALI's form, instead of carrying the column's own UTC offset. [#79](https://github.com/hombit/hats-api/pull/79)
+- A catalog's `limit=0` answers from `dataset/_common_metadata` where it has one, instead of
+  opening a partition to describe zero rows of it. [#77](https://github.com/hombit/hats-api/pull/77)
+- A plan for `limit=0` lists no partitions, instead of one entry per partition a region reached. [#77](https://github.com/hombit/hats-api/pull/77)
+- A request naming two tables at one authority with different `storage` options is refused, instead of running under whichever table's credentials registered first. [#78](https://github.com/hombit/hats-api/pull/78)
+
+### Fixed
+
+- A query's own answer now sends `Accept-Ranges: none` instead of silently ignoring `Range`. [#73](https://github.com/hombit/hats-api/pull/73)
 
 ## [0.0.8] - 2026-09-17
 
@@ -127,7 +142,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.8...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.9...HEAD
+[0.0.9]: https://github.com/hombit/hats-api/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/hombit/hats-api/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/hombit/hats-api/compare/v0.0.6...v0.0.7
 [0.0.6]: https://github.com/hombit/hats-api/compare/v0.0.5...v0.0.6
