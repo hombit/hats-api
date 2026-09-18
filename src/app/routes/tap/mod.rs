@@ -5,6 +5,7 @@ mod format;
 mod parameters;
 mod published;
 mod sync;
+mod upload;
 mod vosi;
 
 #[cfg(test)]

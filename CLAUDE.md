@@ -1259,6 +1259,30 @@ and the parameter rules are §3.
   `taplint` adds a parameter of its own to every query and reports a service that refuses as
   breaking it, which is also what every HTTP server does with a query string it has no use
   for. The house rule is about a parameter this service *acts on*.
+- **A parameter's value is read by `tap::dali`, into a type.** It is a `serde` data format
+  over the one grammar DALI writes every value in: fields separated by a delimiter, where a
+  leading keyword says how many follow it. So a parameter is a type — an `enum` whose
+  variants are the keywords, a tuple whose arity is the count — rather than a chain of
+  `split_once` and a conditional per call site. Three things in it are the format's and not
+  a type's: `Tail` takes the rest of a value verbatim, so a credential carrying the delimiter
+  arrives whole; the delimiter is the parameter's, TAP writing a comma and DALI a space; and
+  a keyword is matched whatever its case, the type's own spelling being what it is read as.
+  A new parameter is a type over that reader, never a fourth parser.
+- **A parameter of this service's own is written `<name>,…` and repeats.** `UPLOAD` is the
+  only parameter in TAP or DALI whose value is keyed by a name, and its key is one comma;
+  DALI's structured values are fixed tuples of numbers, and several values of anything are
+  said by repeating the parameter (§3.2). So `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE` take
+  that shape and nothing more inventive — and in the first, **the value runs to the end**,
+  since a separator inside a value cuts a credential short and an anonymous request is not
+  one a caller can tell from an authenticated one. How many fields precede that value is the
+  option's own name to say, the way DALI's `POS` reads three numbers after `CIRCLE` and four
+  after `RANGE`: `header` names a header before its value, every other option does not. A new
+  parameter here follows the same rule rather than growing a syntax of its own.
+- **A url as `UPLOAD` is not the upload `/capabilities` would be advertising.** The standard's
+  referenced upload fetches a VOTable; this fetches a HATS catalog or a parquet file, so no
+  `uploadMethod` is declared while that is all it does, and the feature is found by reading
+  the README. TAP's own answer for a url needing credentials is delegation, which this is
+  not.
 - **Every answer is a document a TAP client can read, refusals included.** `ApiError` renders
   JSON, which a client looking for `QUERY_STATUS` has nothing to say about — so the status is
   kept and the body is replaced, by `app::routes::tap::answer::answered`.

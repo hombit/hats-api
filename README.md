@@ -699,6 +699,112 @@ In TOPCAT: *VO → Table Access Protocol (TAP) Query*, then paste the URL.
 [ADQL](#adql) says what the query language answers, and how a query over a large catalog is
 bounded.
 
+### Querying a catalog the service does not publish
+
+`UPLOAD` gives a name to a catalog URL, and the query reads that catalog as
+`TAP_UPLOAD.<name>`:
+
+```
+UPLOAD=mine,s3://bucket/gaia/hats
+QUERY=SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine
+```
+
+`UPLOAD` is TAP's standard parameter for a table the request brings with it. What is
+implemented here is a URL naming a HATS catalog or a parquet file, and only that: sending a
+VOTable in the request, which is what the standard means by an upload, is not implemented.
+So a client cannot discover the feature from `/capabilities`, and no `uploadMethod` is
+declared there.
+
+A private store needs `UPLOAD_STORAGE_OPTION`, one option per value, the parameter repeated
+for as many as the URL needs:
+
+```
+UPLOAD=mine,s3://bucket/gaia/hats
+UPLOAD_STORAGE_OPTION=mine,endpoint,https://minio.example.com
+UPLOAD_STORAGE_OPTION=mine,region,us-east-1
+UPLOAD_STORAGE_OPTION=mine,access_key_id,EXAMPLEKEYID
+UPLOAD_STORAGE_OPTION=mine,secret_access_key,VERYSECRETEXAMPLEKEY
+```
+
+The upload name comes first, then the option name, then the value; the value runs to the end,
+so a secret containing a comma, a space or an `=` arrives whole. The options are the ones
+[storage options](#storage-options) lists.
+
+`header` is the one option that names something before its value, since a request may carry
+several:
+
+```
+UPLOAD_STORAGE_OPTION=mine,header,Authorization,Bearer abc123
+```
+
+`UPLOAD_TYPE=mine,hats` or `mine,parquet` says what the URL holds. It is optional: a URL
+whose last path segment matches one of the [data-file globs](#which-files-are-data),
+`*.parquet` and the rest of `[data] filenames`, is read as parquet, and any other URL as a
+catalog directory. `mine,parquet` over a URL off that list is refused rather than read.
+
+Credentials sent this way travel in the query string of a `GET`, where a proxy or a browser
+history may keep them; `POST` takes the same parameters in the body. This service logs the
+path of a request and never its query string.
+
+#### Sending it with TAP and HTTP clients
+
+`pyvo` passes extra parameters straight through, and a list becomes a repeated parameter:
+
+```python
+tap = pyvo.dal.TAPService("https://example.com/api/v1/tap")
+rows = tap.run_sync(
+    "SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine",
+    UPLOAD="mine,s3://bucket/gaia/hats",
+    UPLOAD_STORAGE_OPTION=[
+        "mine,endpoint,https://minio.example.com",
+        "mine,region,us-east-1",
+    ],
+).to_table()
+```
+
+Repeating `UPLOAD` brings in several catalogs, each with its own options and its own name
+under `TAP_UPLOAD`, which is how one query reads two of them. A crossmatch across the two is
+[written as it is over published tables](#narrowing-a-query-over-a-large-catalog), each side
+carrying its own region:
+
+```python
+rows = tap.run_sync(
+    "SELECT TOP 10 g.source_id, z.objectid "
+    "FROM TAP_UPLOAD.gaia AS g JOIN TAP_UPLOAD.ztf AS z "
+    "ON 1 = CONTAINS(POINT('ICRS', z.ra, z.dec), CIRCLE('ICRS', g.ra, g.dec, 0.0002)) "
+    "WHERE 1 = CONTAINS(POINT('ICRS', g.ra, g.dec), CIRCLE('ICRS', 45.0, 0.0, 0.01)) "
+    "  AND 1 = CONTAINS(POINT('ICRS', z.ra, z.dec), CIRCLE('ICRS', 45.0, 0.0, 0.01))",
+    UPLOAD=[
+        "gaia,s3://bucket/gaia/hats",
+        "ztf,https://data.example.com/ztf/dr24/objects",
+    ],
+    UPLOAD_STORAGE_OPTION=[
+        "gaia,access_key_id,EXAMPLEKEYID",
+        "gaia,secret_access_key,VERYSECRETEXAMPLEKEY",
+        "ztf,header,Authorization,Bearer abc123",
+    ],
+).to_table()
+```
+
+`curl`, `requests` and anything else that writes its own request send the same pairs.
+`--data-urlencode` makes curl send a `POST`, which keeps the credential out of the URL:
+
+```sh
+curl https://example.com/api/v1/tap/sync \
+  --data-urlencode 'LANG=ADQL' \
+  --data-urlencode 'QUERY=SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine' \
+  --data-urlencode 'UPLOAD=mine,s3://bucket/gaia/hats' \
+  --data-urlencode 'UPLOAD_STORAGE_OPTION=mine,endpoint,https://minio.example.com' \
+  --data-urlencode 'UPLOAD_STORAGE_OPTION=mine,region,us-east-1' \
+  --data-urlencode 'UPLOAD_STORAGE_OPTION=mine,access_key_id,EXAMPLEKEYID' \
+  --data-urlencode 'UPLOAD_STORAGE_OPTION=mine,secret_access_key,VERYSECRETEXAMPLEKEY'
+```
+
+TOPCAT's TAP window sends the parameters it knows, so a catalog reached this way arrives by
+one of two other routes: the operator publishes it as a [table](#publishing-catalogs), or you
+write the whole `/sync` URL and open it with *Load Table*, which reads the answer as a
+VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for these.
+
 ### Resources
 
 | | |
@@ -712,13 +818,15 @@ The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables
 `TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
 
 `sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
-`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`.
+`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`. `UPLOAD`,
+with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a catalog URL as
+[above](#querying-a-catalog-the-service-does-not-publish).
 
 `MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
 table. `MAXREC=0` returns the columns alone, which is how a client inspects a table.
 
-Queries run synchronously and have to finish inside `max_request_seconds`. `/async`, table
-upload and `/examples` are still to come.
+Queries run synchronously and have to finish inside `max_request_seconds`. `/async`,
+`/examples` and uploading a table in the request itself are still to come.
 
 ## What a request may spend
 

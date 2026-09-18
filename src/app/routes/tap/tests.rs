@@ -109,6 +109,93 @@ async fn a_statement_is_answered_on_both_verbs() {
     assert_eq!(posted, got);
 }
 
+/// A catalog the request names by url, queried as `TAP_UPLOAD.<name>`.
+///
+/// This is what a TAP client has no other way to ask for: the `/adql` body declares its own
+/// tables, and until now `/sync` answered only what the operator published.
+#[tokio::test]
+async fn a_catalog_named_by_url_is_queried_as_an_upload() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, content_type, body) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT TOP 3 id FROM TAP_UPLOAD.mine ORDER BY id"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", "mine,file:///"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(content_type, "application/x-votable+xml");
+    assert!(body.contains("<FIELD name=\"id\" ID=\"id\""), "{body}");
+    assert_eq!(body.matches("<TR>").count(), 3, "{body}");
+}
+
+/// The other kind of url, and the one `UPLOAD_TYPE` need not name: a file matching the
+/// data-file globs is a parquet file, and a directory is a catalog.
+#[tokio::test]
+async fn an_upload_is_a_parquet_file_or_a_catalog() {
+    let dir = hats::query::tests::fixture(true);
+    let file = "file:///dataset/Norder=3/Dir=0/Npix=64.parquet";
+    let ask_with = async |pairs: Vec<(&str, &str)>| {
+        ask(published(dir.path(), &LimitsConfig::default()), &pairs).await
+    };
+
+    let (status, _, body) = ask_with(vec![
+        ("QUERY", "SELECT TOP 2 id FROM TAP_UPLOAD.one ORDER BY id"),
+        ("LANG", "ADQL"),
+        ("UPLOAD", &format!("one,{file}")),
+    ])
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body.matches("<TR>").count(), 2, "{body}");
+
+    // Named outright, both ways round, which is what a url the guess would read the other
+    // way needs.
+    let (status, _, body) = ask_with(vec![
+        ("QUERY", "SELECT TOP 2 id FROM TAP_UPLOAD.one"),
+        ("LANG", "ADQL"),
+        ("UPLOAD", &format!("one,{file}")),
+        ("UPLOAD_TYPE", "one,parquet"),
+    ])
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    // A directory called a parquet file says what a parquet url looks like, rather than
+    // failing somewhere inside a reader.
+    let (status, _, body) = ask_with(vec![
+        ("QUERY", "SELECT TOP 2 id FROM TAP_UPLOAD.one"),
+        ("LANG", "ADQL"),
+        ("UPLOAD", "one,file:///"),
+        ("UPLOAD_TYPE", "one,parquet"),
+    ])
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.contains("data file"), "{body}");
+}
+
+/// The storage options a url needs reach the store that opens it.
+///
+/// A `file://` url takes none, so an option meant for another backend is refused by the
+/// same check every other route's options go through — which is what shows the parameter
+/// is read and handed on rather than parsed and dropped.
+#[tokio::test]
+async fn upload_storage_options_reach_the_store() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, body) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT TOP 1 id FROM TAP_UPLOAD.mine"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", "mine,file:///"),
+            ("UPLOAD_STORAGE_OPTION", "mine,region,us-east-1"),
+        ],
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.contains("storage options"), "{body}");
+}
+
 /// A table nobody published is a refusal naming what is published, rather than a planner
 /// message about a relation.
 #[tokio::test]
@@ -154,13 +241,15 @@ async fn every_refusal_is_an_error_document() {
             ("RESPONSEFORMAT", "fits"),
         ]
         .as_slice(),
-        // A standard parameter this service does not implement.
+        // The half of UPLOAD this service does not implement: a table in the request.
         [
-            ("QUERY", "SELECT id FROM sky.objects"),
+            ("QUERY", "SELECT id FROM TAP_UPLOAD.t"),
             ("LANG", "ADQL"),
-            ("UPLOAD", "t,http://example.org/t.vot"),
+            ("UPLOAD", "t,param:doc"),
         ]
         .as_slice(),
+        // A statement naming an upload the request did not make.
+        [("QUERY", "SELECT id FROM TAP_UPLOAD.t"), ("LANG", "ADQL")].as_slice(),
     ] {
         let asked = pairs.iter().filter(|(name, _)| !name.is_empty());
         let (status, content_type, body) = ask(

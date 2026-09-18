@@ -486,7 +486,7 @@ impl Group for AzureOptions {
 impl Group for HttpOptions {
     fn named(&self) -> Vec<Named> {
         let Self { headers } = self;
-        vec![Named::credentials("headers", headers)]
+        vec![Named::credentials(HEADERS, headers)]
     }
 
     fn echo_into(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
@@ -713,6 +713,26 @@ fn accepted_options(scheme: &str) -> Vec<&'static str> {
     }
     accepted.push(ALLOW_HTTP);
     accepted
+}
+
+/// The option name a request's headers are written under.
+///
+/// Named here because `HttpOptions`'s group registers it and a carrier that writes one header
+/// at a time — TAP's `UPLOAD_STORAGE_OPTION`, which has only names and text — has to put them
+/// under the same one.
+pub const HEADERS: &str = "headers";
+
+/// Every option a request may write, whichever backend it is for.
+///
+/// The same registry `accepted_options` and the credential check read, so a carrier that has
+/// to cover all of them — a query string, whose values are text and whose test has to reach
+/// every field a body could set — enumerates them rather than keeping a list of its own.
+pub fn option_names() -> Vec<&'static str> {
+    StorageOptions::default()
+        .named()
+        .into_iter()
+        .map(|named| named.name)
+        .collect()
 }
 
 /// Which url schemes each storage option applies to, for the API description.
