@@ -482,6 +482,20 @@ async fn plan_of(
     reason: Option<Exceeded>,
 ) -> Result<PlanResponse, ApiError> {
     let url = parse_url(params.url.as_str())?;
+    // A `limit` of zero needs no partition read, so it needs no entry naming one either —
+    // and, for a catalog whose partitions are directories, no listing to find one. Answering
+    // early is what keeps a plan for zero rows from paying `Search::entries`' own cost, which
+    // for that shape of catalog is the one this route exists to let a caller avoid.
+    if params.limit == Some(0) {
+        return Ok(PlanResponse {
+            reason: reason.map(|why| why.to_string()),
+            catalog: url.to_string(),
+            num_partitions: 0,
+            estimated_bytes: Some(0),
+            requires_credentials: params.storage.has_credentials(),
+            requests: Vec::new(),
+        });
+    }
     let data = service.data_files_for(&url);
     let entries = search.entries(data).await?;
     // The route an entry is sent to. `None` cannot happen — the API is how this request
@@ -540,7 +554,10 @@ async fn plan_of(
     Ok(PlanResponse {
         reason: reason.map(|why| why.to_string()),
         catalog: url.to_string(),
-        num_partitions: search.chosen().len(),
+        // The doc says entries; matching it exactly here rather than the chosen list is
+        // what would catch the two drifting apart if a later change filtered one and not
+        // the other.
+        num_partitions: requests.len(),
         estimated_bytes,
         requires_credentials: params.storage.has_credentials(),
         requests,
@@ -880,6 +897,25 @@ mod tests {
                 false => assert_eq!(entry["body"]["ra_column"], "ra", "{entry}"),
             }
         }
+    }
+
+    /// A plan for zero rows needs no partition read, so it lists none — an empty plan for an
+    /// empty answer, rather than one entry per partition the region reached that a client
+    /// would only send to be told each one matched nothing.
+    #[tokio::test]
+    async fn a_plan_for_zero_rows_is_empty() {
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[1].clone();
+        let (status, plan) = ask_plan(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/simple/hats/plan",
+            serde_json::json!({"url": "file:///", "region": [region], "limit": 0}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["requests"], serde_json::json!([]));
+        assert_eq!(plan["num_partitions"], 0);
+        assert_eq!(plan["estimated_bytes"], 0);
     }
 
     /// Every entry of a plan is a request this service answers, and together they are the
