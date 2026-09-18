@@ -9,6 +9,8 @@ use axum::response::{Json, Response};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
+use futures::future::OptionFuture;
+
 use crate::app::answer::answer;
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
@@ -16,6 +18,7 @@ use crate::app::request::{
 use crate::app::service::Service;
 use crate::engine::query::{self, Order, Selection};
 use crate::error::ApiError;
+use crate::output::parquet;
 use crate::sky::region::{Healpix, Region, Spatial};
 use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
 
@@ -246,15 +249,26 @@ pub(in crate::app) async fn query_parquet(
     // file's layout. A `limit` is still answered reproducibly — that is `query`'s own
     // rule, since which rows come back is a different question from what order they are
     // in.
-    let result = query::run(&file, &selection, service.sql_limits, Order::Unspecified)
-        .await
-        .map_err(hide_the_path)?;
+    //
+    // The layout read needs only `file`, not the rows, so it runs alongside the query
+    // rather than after it — the two round trips overlap instead of adding up. Fetched
+    // only when the answer will actually be parquet, there being nothing to copy for
+    // any other encoding.
+    let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
+        .then(|| parquet::read_layout(&file))
+        .into();
+    let (result, layout) = tokio::join!(
+        query::run(&file, &selection, service.sql_limits, Order::Unspecified),
+        layout_future,
+    );
+    let result = result.map_err(hide_the_path)?;
+    let layout = layout.transpose().map_err(hide_the_path)?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
     // Both of them, the way the mounted path does it: encoding a parquet answer reads
     // the source file's layout, so it raises the store's messages too.
-    let response = answer(&result, &file, &output, started)
+    let response = answer(&result, &file, &output, started, layout)
         .await
         .map_err(hide_the_path)?;
     tracing::info!(

@@ -1157,8 +1157,9 @@ impl ObjectStore for Counting {
 /// `query::run` infers the schema and scans; DataFusion caches the footer it parsed for
 /// the first of those and the scan reuses it. `parquet_out::read_layout` then reads the
 /// footer again through a fetcher of this crate's own, which knows nothing about that
-/// cache — so a `format=parquet` answer pays for the same footer twice. Over an origin
-/// that is the whole latency of an extra round trip, for bytes already in memory.
+/// cache — so a `format=parquet` answer still pays for the same footer twice, once from
+/// each reader. What each of those costs is what this prints: a prefetch hint on
+/// `read_layout`'s own reader is what keeps its half at one request rather than two.
 #[tokio::test(flavor = "multi_thread")]
 async fn round_trips_per_answer() {
     if !enabled() {
