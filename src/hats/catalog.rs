@@ -276,6 +276,7 @@ mod tests {
                 serve: false,
                 follow_symlinks: false,
                 immutable: false,
+                storage: StorageOptions::default(),
                 filenames: None,
             }],
             &crate::config::DataConfig::default(),

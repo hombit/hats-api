@@ -16,15 +16,25 @@
 
 mod common;
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode, header};
 use common::{
     expect_error, fixture_retries, lookup, parquet_fixture, permissive_policy, row_count,
     skip_or_fail,
 };
+use hats_api::access::AccessPolicy;
+use hats_api::access::mount::Mounts;
+use hats_api::app::{Service, router};
+use hats_api::config::{
+    AccessConfig, ApiConfig, DataConfig, LimitsConfig, MountConfig, ServerConfig, TapConfig,
+};
 use hats_api::error::ApiError;
 use hats_api::storage::{S3Options, StorageOptions};
+use http_body_util::BodyExt;
 use opendal::{HttpTransporter, OperationContext, Operator, services};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
+use tower::ServiceExt;
 
 /// Fixture writes go one at a time, process-wide.
 ///
@@ -228,6 +238,115 @@ async fn an_anonymous_request_cannot_read_a_private_minio_bucket() {
         "an unsigned request must not read a private bucket",
     );
     assert!(!matches!(error, ApiError::Forbidden(_)), "{error}");
+}
+
+/// A `[[mount]]` over a real MinIO, served.
+///
+/// `mount_s3.rs` covers the mode itself against an in-process server, which is enough for
+/// everything that is our own logic. What it cannot cover is a real implementation's own
+/// answers to the two operations this mode adds — a `Range` and a delimited listing — and
+/// MinIO is what the deployments this serves actually run. A `Content-Range` spelling, an
+/// `ETag` with or without quotes and whether `CommonPrefixes` come back with a trailing
+/// separator are exactly the places two S3 implementations disagree.
+#[tokio::test]
+async fn a_mount_over_minio_serves_and_lists_and_queries() {
+    let Some(minio) = Minio::from_env() else {
+        return skip_or_fail("HATS_API_TEST_MINIO");
+    };
+    let prefix = "mounted";
+    minio.put_fixture(&format!("{prefix}/part0.parquet")).await;
+    let fixture = parquet_fixture();
+
+    let mount = MountConfig {
+        path: "/hats".to_owned(),
+        source: format!("s3://{}/{prefix}", minio.bucket),
+        serve: true,
+        follow_symlinks: false,
+        immutable: false,
+        storage: minio.credentialed_options(),
+        filenames: None,
+    };
+    let service = || {
+        let mounts =
+            Arc::new(Mounts::new(&[mount_config(&mount)], &DataConfig::default()).unwrap());
+        let policy =
+            AccessPolicy::new(&AccessConfig::default(), Arc::clone(&mounts), None).unwrap();
+        Service::new(
+            policy,
+            &LimitsConfig::default(),
+            mounts,
+            &ApiConfig::default(),
+            &DataConfig::default(),
+            &TapConfig::default(),
+            &ServerConfig::default(),
+        )
+        .unwrap()
+    };
+    let send = async |service: Service, request: http::request::Builder| {
+        let response = router(service)
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = response.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+        (parts, bytes)
+    };
+
+    // The bytes, whole.
+    let (parts, body) = send(service(), Request::builder().uri("/hats/part0.parquet")).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    assert_eq!(body, fixture);
+
+    // And the tail of them, which is what a parquet reader asks for first.
+    let (parts, body) = send(
+        service(),
+        Request::builder()
+            .uri("/hats/part0.parquet")
+            .header(header::RANGE, "bytes=-8"),
+    )
+    .await;
+    assert_eq!(parts.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(body, fixture[fixture.len() - 8..]);
+
+    // The directory, one level down.
+    let (parts, body) = send(service(), Request::builder().uri("/hats")).await;
+    assert_eq!(parts.status, StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let names: Vec<&str> = listing["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"part0.parquet"), "{names:?}");
+
+    // And a question about the file, answered by ranged reads against MinIO.
+    let (parts, body) = send(
+        service(),
+        Request::builder()
+            .uri("/hats/part0.parquet?columns=objectid&filters=objectid%3C3&format=json"),
+    )
+    .await;
+    let body = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(parts.status, StatusCode::OK, "{body}");
+    let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(answer["num_rows"], 3, "{body}");
+    assert!(!body.contains(&minio.bucket), "leaked the bucket: {body}");
+}
+
+/// A second `MountConfig` with the same fields. `StorageOptions` is deliberately not
+/// `Clone` — copying credentials around is a thing to have to write down — and the test
+/// above builds two services over one configuration.
+fn mount_config(from: &MountConfig) -> MountConfig {
+    MountConfig {
+        path: from.path.clone(),
+        source: from.source.clone(),
+        serve: from.serve,
+        follow_symlinks: from.follow_symlinks,
+        immutable: from.immutable,
+        storage: from.storage.configured(),
+        filenames: from.filenames.clone(),
+    }
 }
 
 /// A missing object against a real MinIO, whose 404 body differs from the in-process

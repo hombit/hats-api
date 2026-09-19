@@ -24,7 +24,7 @@ use tower_http::trace::TraceLayer;
 use url::Url;
 
 use crate::access::data::DataFiles;
-use crate::access::mount::{self, Mounts};
+use crate::access::mount::{self, Mount, MountSource, Mounts};
 use crate::access::{self, AccessPolicy};
 use crate::adql;
 use crate::app::files::serve_mounted;
@@ -135,6 +135,10 @@ impl Service {
             ));
         }
         let transfers = Arc::new(Transfers::new(limits));
+        // After the policy, which is what opening a store needs, and before the first
+        // request: a mount over a store this deployment cannot reach is an operator's
+        // mistake to hear about at startup, the way a local source that is not there is.
+        mounts.check_sources(&policy, &transfers)?;
         let tap_tables = TapTableList::new(&tap.tables, &policy, &transfers)?;
         Ok(Self {
             policy: Arc::new(policy),
@@ -475,17 +479,37 @@ async fn robots_txt(State(service): State<Service>) -> Response {
     if service.serve_mounted_robots_txt
         && let Some((mount, relative)) = service.mounts.published(ROBOTS_TXT_PATH)
         && let Ok(segments) = mount::path_segments(relative)
+        && let Some(contents) = mounted_robots_txt(&service, mount, &segments).await
     {
-        let mut requested = mount.source().to_owned();
-        requested.extend(&segments);
-        if let Ok(file) = access::local::authorize_mounted(mount, &requested)
-            && file.is_file()
-            && let Ok(contents) = tokio::fs::read(&file).await
-        {
-            return robots_response(contents);
-        }
+        return robots_response(contents);
     }
     robots_response(default_robots_txt(service.api_prefix.as_deref()).into_bytes())
+}
+
+/// The `robots.txt` a mount carries, or `None` where it carries none.
+///
+/// Every failure is a `None`: what this decides is which of two answers the root gives,
+/// and a mount that cannot be read has not published a policy. The reason goes nowhere —
+/// a crawler is not owed one, and the generated default is a complete answer.
+async fn mounted_robots_txt(
+    service: &Service,
+    mount: &Mount,
+    segments: &[String],
+) -> Option<Vec<u8>> {
+    match mount.source() {
+        MountSource::Local(root) => {
+            let mut requested = root.to_owned();
+            requested.extend(segments);
+            let file = access::local::authorize_mounted(mount, &requested).ok()?;
+            file.is_file().then_some(())?;
+            tokio::fs::read(&file).await.ok()
+        }
+        MountSource::Remote(_) => {
+            let dir = mount.open(&service.policy, &service.transfers).ok()?;
+            let bytes = dir.read_if_present(&segments.join("/")).await.ok()??;
+            Some(bytes.to_vec())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1176,7 +1200,7 @@ mod tests {
         let tap = TapConfig {
             tables: vec![crate::config::TapTableConfig {
                 name: "gaia_dr3.gaia_source".to_owned(),
-                url: "file:///gaia".to_owned(),
+                path: "/gaia".to_owned(),
             }],
         };
         let service = |enabled| {

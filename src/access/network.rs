@@ -119,18 +119,37 @@ struct Rules {
     private: Vec<IpNet>,
 }
 
-/// What `[access.network]` came to, and the HTTP client that enforces it.
+/// What `[access.network]` came to, and the HTTP clients that enforce it.
+///
+/// **Two clients, and the second is not a loosening of the first.** Every url a caller
+/// wrote goes through `client`, whose resolver is these rules; a `[[mount]]`'s own
+/// `source` goes through `configured`, which has no address rules at all. What the
+/// address check protects against is a caller pointing this service somewhere — a name
+/// that resolves onto the network this process happens to sit on, and a second resolution
+/// that answers differently from the one that was judged. A mount's source has no caller
+/// in it: the url and the options are the config's, fixed at startup, with nothing in
+/// either that a request can reach. So there is nothing there for the check to decide,
+/// and the operator who wrote the directory down has already decided it.
+///
+/// The two are kept apart so the grant stays exactly as wide as the mount. Putting a
+/// source's hosts into the rules above would let a *caller* name that server too — which
+/// is the grant an `endpoints` entry gives on purpose and this one must not.
 #[derive(Debug)]
 pub struct NetworkPolicy {
     rules: Arc<Rules>,
     client: reqwest::Client,
     transport: HttpTransporter,
+    configured: reqwest::Client,
+    configured_transport: HttpTransporter,
 }
 
 impl NetworkPolicy {
     /// `named` is every host the operator named in an endpoint list. Naming an endpoint
     /// is permission to reach it: these rules govern what a *caller* may point the
     /// service at, not what the deployment was configured for.
+    ///
+    /// A `[[mount]]`'s source is *not* among them, and must not be: it is reached through
+    /// the second client instead, which is what keeps it out of what a caller may name.
     ///
     /// `user_agent` is `[server] user_agent`, already resolved: it belongs to the client
     /// rather than to the rules, and this is where the client is built.
@@ -183,14 +202,23 @@ impl NetworkPolicy {
                 .chain(parse_nets(PRIVATE_V6))
                 .collect(),
         });
-        let client = build_client(Arc::clone(&rules), user_agent)?;
+        let client = build_client(Some(Arc::clone(&rules)), user_agent.clone())?;
         let transport = HttpTransporter::new(
             opendal_http_transport_reqwest::ReqwestTransport::new(client.clone()),
+        );
+        // No resolver of ours, which is the whole difference: there is no caller in a
+        // configured source to protect anything from. Everything else is the same client
+        // — the same refusal to follow a redirect, the same `User-Agent`.
+        let configured = build_client(None, user_agent)?;
+        let configured_transport = HttpTransporter::new(
+            opendal_http_transport_reqwest::ReqwestTransport::new(configured.clone()),
         );
         Ok(Self {
             rules,
             client,
             transport,
+            configured,
+            configured_transport,
         })
     }
 
@@ -209,11 +237,22 @@ impl NetworkPolicy {
         refused.map_err(ApiError::forbidden)
     }
 
-    /// The HTTP transport every store is built on. Its resolver is the address half of
-    /// this policy, which is what makes the check happen on the addresses that are
-    /// actually connected to.
+    /// The HTTP transport a store is built on, for a url a caller wrote. Its resolver is
+    /// the address half of this policy, which is what makes the check happen on the
+    /// addresses that are actually connected to.
     pub fn transport(&self) -> HttpTransporter {
         self.transport.clone()
+    }
+
+    /// The same, for a `[[mount]]`'s own `source`.
+    ///
+    /// It carries no address rules, and that is not a hole: the url and the options are
+    /// the config's, so there is no caller-chosen name for a resolver to be protecting
+    /// anything from, and nothing a request says can reach either. What the two clients
+    /// keep apart is the grant — a source stays reachable by this service and does not
+    /// become a server a *caller* may name.
+    pub fn configured_transport(&self) -> HttpTransporter {
+        self.configured_transport.clone()
     }
 
     /// The same client the transport above is built on, for the requests this crate makes
@@ -222,6 +261,12 @@ impl NetworkPolicy {
     /// client would resolve names again, with nothing checking the answer.
     pub fn client(&self) -> reqwest::Client {
         self.client.clone()
+    }
+
+    /// The same, for the requests this crate makes on a configured source's behalf — the
+    /// range probe against a mounted `http(s)://` tree, and a mounted Hub's listing.
+    pub fn configured_client(&self) -> reqwest::Client {
+        self.configured.clone()
     }
 }
 
@@ -389,21 +434,28 @@ impl reqwest::dns::Resolve for PolicyResolver {
 /// through [`NetworkPolicy::transport`], and the requests this crate makes directly —
 /// the range probe in [`crate::storage::materialize`] — go through [`NetworkPolicy::client`], so
 /// there is one resolver and one redirect policy rather than one per caller.
+/// `rules` is `None` for the client a configured source is read through, which is the one
+/// client here with no resolver of this crate's own — see [`NetworkPolicy`] for why that
+/// is not a loosening of the rules but an absence of anything for them to decide.
 fn build_client(
-    rules: Arc<Rules>,
+    rules: Option<Arc<Rules>>,
     user_agent: Option<HeaderValue>,
 ) -> Result<reqwest::Client, ConfigError> {
     #[expect(
         clippy::disallowed_methods,
-        reason = "the one permitted call; the lint exists to send every other one here"
+        reason = "the one permitted call; the lint exists to send every other one here, \
+                  and the two clients it builds are this policy's own"
     )]
     let mut builder = reqwest::Client::builder()
-        .dns_resolver(Arc::new(PolicyResolver { rules }))
         // A redirect is the origin choosing the next destination, which is the one
         // decision this service does not let anything but its own config make: the hop
         // would carry the caller's credentials to a host no endpoint rule named. A 3xx
-        // therefore comes back as the response it is.
+        // therefore comes back as the response it is. Both clients, since a configured
+        // source's origin is no more entitled to choose than a caller's.
         .redirect(reqwest::redirect::Policy::none());
+    if let Some(rules) = rules {
+        builder = builder.dns_resolver(Arc::new(PolicyResolver { rules }));
+    }
     // A default on the client rather than a header set per request. reqwest fills a
     // default only into a name the request has not already got, which is what makes one
     // line cover both callers above — OpenDAL builds its own request and the probe

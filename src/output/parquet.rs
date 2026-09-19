@@ -391,11 +391,11 @@ mod tests {
             .put(&Path::from("fixture.parquet"), Bytes::from(buffer).into())
             .await
             .unwrap();
-        let file = RemoteFile {
-            store: Arc::clone(&counting) as Arc<dyn ObjectStore>,
-            base: Url::parse("mem:///").unwrap(),
-            url: Url::parse("mem:///fixture.parquet").unwrap(),
-        };
+        let file = RemoteFile::over(
+            Arc::clone(&counting) as Arc<dyn ObjectStore>,
+            Url::parse("mem:///").unwrap(),
+            Url::parse("mem:///fixture.parquet").unwrap(),
+        );
 
         read_layout(&file).await.unwrap();
 

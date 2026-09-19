@@ -1,28 +1,33 @@
-//! What a request may read from local disk: a path under a mount, and nothing a symlink or
-//! a `..` leads to from there.
+//! What a request may read through a mount: a path under one, and nothing a symlink or a
+//! `..` leads to from there.
 //!
-//! Under the mount, two checks an endpoint does not need, because a filesystem has ways
-//! of pointing outside itself. The path is resolved before it is matched, so neither `..`
-//! nor a symlink inside the mount can lead out of it; and unless the mount's
-//! `follow_symlinks` is on, a path that goes through a symlink at all is refused.
+//! Where the mount is a directory on this machine, two checks an endpoint does not need,
+//! because a filesystem has ways of pointing outside itself. The path is resolved before
+//! it is matched, so neither `..` nor a symlink inside the mount can lead out of it; and
+//! unless the mount's `follow_symlinks` is on, a path that goes through a symlink at all
+//! is refused.
+//!
+//! A mount over a store has neither of those ways out — its namespace is flat, and a key
+//! is a string — so what is left there is the url-space question every mount asks: which
+//! mount, and whether what follows is a path at all.
 
 use std::path::{Component, Path, PathBuf};
 
 use url::Url;
 
-use crate::access::mount::{self, Mount};
+use crate::access::mount::{self, Mount, MountSource};
 use crate::access::policy::describe;
-use crate::access::{AccessPolicy, LOCAL_SCHEME};
+use crate::access::{AccessPolicy, Target};
 use crate::error::ApiError;
 
 impl AccessPolicy {
-    /// A `file://` url, which names a place in the mounts' url space rather than on the
-    /// disk. So the answer comes in two steps: which mount the caller named, and then
-    /// what that mount's own rules make of the path inside it.
+    /// A `file://` url, which names a place in the mounts' url space rather than a place
+    /// on a disk or in a store. So the answer comes in two steps: which mount the caller
+    /// named, and then what that mount's own rules make of the path inside it.
     ///
     /// Nothing the caller is told here names a `source`. A mount's `path` is what the
-    /// caller wrote and what an operator published; where it is on the disk is neither.
-    pub(super) fn authorize_local(&self, url: &Url) -> Result<PathBuf, ApiError> {
+    /// caller wrote and what an operator published; where the data really is is neither.
+    pub(super) fn authorize_local(&self, url: &Url) -> Result<Target<'_>, ApiError> {
         if self.mounts.is_empty() {
             return Err(ApiError::forbidden(
                 "this server reads no local files; add a [[mount]] to change that",
@@ -38,25 +43,37 @@ impl AccessPolicy {
         let Some((mount, relative)) = self.mounts.resolve(url.path()) else {
             return Err(self.local_refusal(url));
         };
-        let mut requested = mount.source().to_owned();
-        requested.extend(mount::path_segments(relative)?);
+        let segments = mount::path_segments(relative)?;
+        let root = match mount.source() {
+            MountSource::Local(root) => root,
+            // Nothing further to settle: a store has no links and nothing above its
+            // prefix, and `path_segments` has already refused the segments that are not
+            // names. Whether the object is there is the store's answer, on the read.
+            MountSource::Remote(_) => return Ok(Target::InStore(mount, segments.join("/"))),
+        };
+        let mut requested = root.to_owned();
+        requested.extend(segments);
 
-        resolve_under(mount, &requested).map_err(|refusal| {
-            // The path is the operator's; the reason is the caller's, since they named
-            // the url and can act on every one of these.
-            tracing::debug!(mount = mount.prefix(), reason = %refusal, "not read");
-            match refusal {
-                // Under the mount as written and outside it once resolved: a symlink led
-                // out of what the mount publishes.
-                LocalRefusal::NotAllowed | LocalRefusal::Symlink(_) => ApiError::forbidden(
-                    format!("{url} goes through a symlink this mount does not follow"),
-                ),
-                LocalRefusal::NotFound(_) => ApiError::not_found(format!("{url} does not exist")),
-                LocalRefusal::Unreadable(..) => {
-                    ApiError::forbidden(format!("{url} cannot be read"))
+        resolve_under(mount, &requested)
+            .map(Target::Local)
+            .map_err(|refusal| {
+                // The path is the operator's; the reason is the caller's, since they named
+                // the url and can act on every one of these.
+                tracing::debug!(mount = mount.prefix(), reason = %refusal, "not read");
+                match refusal {
+                    // Under the mount as written and outside it once resolved: a symlink led
+                    // out of what the mount publishes.
+                    LocalRefusal::NotAllowed | LocalRefusal::Symlink(_) => ApiError::forbidden(
+                        format!("{url} goes through a symlink this mount does not follow"),
+                    ),
+                    LocalRefusal::NotFound(_) => {
+                        ApiError::not_found(format!("{url} does not exist"))
+                    }
+                    LocalRefusal::Unreadable(..) => {
+                        ApiError::forbidden(format!("{url} cannot be read"))
+                    }
                 }
-            }
-        })
+            })
     }
 
     /// A url under no mount. It says which prefixes there are, because those are urls
@@ -74,29 +91,14 @@ impl AccessPolicy {
     }
 }
 
-/// The directory an entry names, resolved: an absolute path or a `file://` url, and a
-/// directory that is there now rather than a rule that silently never matches.
+/// A configured directory on this machine, resolved: there now rather than a rule that
+/// silently never matches, and canonical, so that a path under it can be compared against
+/// it afterwards.
 ///
 /// Returns the reason rather than a [`ConfigError`](crate::config::ConfigError), so that the
 /// caller names the section it read the entry out of.
-pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
-    let path = if entry.starts_with('/') {
-        PathBuf::from(entry)
-    } else {
-        let url = Url::parse(entry)
-            .map_err(|error| format!("{error}; expected an absolute path or a file:// url"))?;
-        if url.scheme() != LOCAL_SCHEME {
-            return Err(format!(
-                "scheme {:?} is not a local path; expected an absolute path or a \
-                 file:// url",
-                url.scheme()
-            ));
-        }
-        url.to_file_path()
-            .map_err(|()| "not an absolute local path".to_owned())?
-    };
-
-    let canonical = std::fs::canonicalize(&path)
+pub(crate) fn canonical_root(path: &Path) -> Result<PathBuf, String> {
+    let canonical = std::fs::canonicalize(path)
         .map_err(|error| format!("cannot resolve {}: {error}", path.display()))?;
     match canonical.is_dir() {
         true => Ok(canonical),
@@ -104,7 +106,7 @@ pub(crate) fn canonical_root(entry: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// The file a path under a mount names, for the file server.
+/// The file a path under a mount on this machine names, for the file server.
 ///
 /// Every refusal is the same answer. A caller here walked into the directory rather than
 /// naming it, so which file is missing, which is outside the mount and which is behind a
@@ -150,7 +152,13 @@ impl std::fmt::Display for LocalRefusal {
 /// its mount by prefix, and resolving it against any other would let one mount serve a
 /// file out of another's directory.
 fn resolve_under(mount: &Mount, path: &Path) -> Result<PathBuf, LocalRefusal> {
-    let root = mount.source();
+    // Every caller has already settled that this mount is a directory on this machine —
+    // the url-space half forks before it gets here, and the file-server mode forks before
+    // it builds a path at all. A store-backed one reaching this would be a path built out
+    // of nothing, so it is refused rather than resolved against the process's own root.
+    let Some(root) = mount.local_source() else {
+        return Err(LocalRefusal::NotAllowed);
+    };
     // `..` resolved without touching the filesystem, so that comparing the result with
     // the canonical path afterwards is a question about symlinks and nothing else.
     let lexical = lexically_clean(path).ok_or(LocalRefusal::NotAllowed)?;
@@ -202,10 +210,10 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
-    use crate::access::Target;
     use crate::access::mount::Mounts;
     use crate::access::policy::tests::{temp_dir, url, with_paths};
     use crate::config::{AccessConfig, DataConfig, MountConfig};
+    use crate::storage::StorageOptions;
 
     use super::*;
 
@@ -239,8 +247,11 @@ mod tests {
 
         let policy = with_paths(&[&published], false);
         assert_eq!(
-            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
-            Target::Local(inside)
+            policy
+                .authorize(&mounted_url(0, "part0.parquet"))
+                .unwrap()
+                .local(),
+            Some(inside.as_path())
         );
         // Mounting a directory is not a way to read its parent. `Url` resolves `..`
         // itself, percent-encoded or not, so what arrives here is already a path outside
@@ -310,8 +321,11 @@ mod tests {
         // Following it lands on the real file, which is what gets opened.
         let follows = with_paths(&[&root], true);
         assert_eq!(
-            follows.authorize(&mounted_url(0, "link.parquet")).unwrap(),
-            Target::Local(real)
+            follows
+                .authorize(&mounted_url(0, "link.parquet"))
+                .unwrap()
+                .local(),
+            Some(real.as_path())
         );
     }
 
@@ -332,8 +346,11 @@ mod tests {
 
         let policy = with_paths(&[&linked_root], false);
         assert_eq!(
-            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
-            Target::Local(target)
+            policy
+                .authorize(&mounted_url(0, "part0.parquet"))
+                .unwrap()
+                .local(),
+            Some(target.as_path())
         );
     }
 
@@ -386,6 +403,7 @@ mod tests {
                             serve: false,
                             follow_symlinks: false,
                             immutable: false,
+                            storage: StorageOptions::default(),
                             filenames: None,
                         },
                         MountConfig {
@@ -394,6 +412,7 @@ mod tests {
                             serve: false,
                             follow_symlinks: true,
                             immutable: false,
+                            storage: StorageOptions::default(),
                             filenames: None,
                         },
                     ],
@@ -411,8 +430,11 @@ mod tests {
         assert!(policy.authorize(&mounted_url(1, "link.parquet")).is_err());
         // Each still reads its own file.
         assert_eq!(
-            policy.authorize(&mounted_url(0, "part0.parquet")).unwrap(),
-            Target::Local(real)
+            policy
+                .authorize(&mounted_url(0, "part0.parquet"))
+                .unwrap()
+                .local(),
+            Some(real.as_path())
         );
         assert!(policy.authorize(&mounted_url(1, "part0.parquet")).is_ok());
     }

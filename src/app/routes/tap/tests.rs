@@ -18,7 +18,7 @@ fn published(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
     let tap = TapConfig {
         tables: vec![TapTableConfig {
             name: "sky.objects".to_owned(),
-            url: "file:///".to_owned(),
+            path: "/".to_owned(),
         }],
     };
     with_tap(

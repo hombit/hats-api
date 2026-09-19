@@ -1,4 +1,4 @@
-//! Recognising a catalog on local disk, for the file-server mode.
+//! Recognising a catalog somebody is browsing, for the file-server mode.
 //!
 //! The API is told what it is looking at: a caller names a catalog's url, and the answer to
 //! "is this a catalog" is whatever [`super::Catalog::open`] makes of the directory. A person
@@ -13,9 +13,20 @@
 //! and the query surface belongs to the catalog rather than to the directory they happen to
 //! be standing in. So a directory that is one of a catalog's own layers points at the
 //! catalog above it.
+//!
+//! **Both questions are asked twice over, once of a directory on this machine and once of
+//! a prefix in a store**, because a mount may be either and the page is the same page. What
+//! the two share is the whole of what a catalog is here — which files describe one, how far
+//! up the walk may climb, and what the page says about it — so they share a module rather
+//! than a vocabulary written out twice. What they do not share is the reading: a `stat` is
+//! free and a `HEAD` is a request, which is why the store half is asked only where its
+//! answer is about to be rendered.
 
 use std::io::Read as _;
 use std::path::Path;
+
+use crate::error::ApiError;
+use crate::storage::RemoteDir;
 
 use super::properties::{self, Properties};
 use super::{catalog, partitions};
@@ -49,20 +60,18 @@ pub fn describes_a_catalog(dir: &Path) -> bool {
     if dir.join(properties::NAMES[0]).is_file() || dir.join(properties::COLLECTION).is_file() {
         return true;
     }
-    holds_catalog_keys(&dir.join(properties::NAMES[1]))
+    read(&dir.join(properties::NAMES[1])).is_some_and(|text| holds_catalog_keys(&text))
 }
 
-/// Whether a file reads as a catalog's properties: a `hats_`-prefixed key at the start of
+/// Whether text reads as a catalog's properties: a `hats_`-prefixed key at the start of
 /// some line.
 ///
 /// Deliberately not the properties parser. This runs against a file nobody claimed was one,
 /// so the question is whether it looks like a catalog's, and a parse failure on some other
 /// file called `properties` would be a refusal where the answer is simply "no".
-fn holds_catalog_keys(path: &Path) -> bool {
-    read(path).is_some_and(|text| {
-        text.lines()
-            .any(|line| line.trim_start().starts_with(PREFIX))
-    })
+fn holds_catalog_keys(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(PREFIX))
 }
 
 /// The front of a file, or `None` for anything that is not a readable text file — a
@@ -176,6 +185,140 @@ fn schema(dir: &Path, properties: &Properties) -> Option<Vec<String>> {
         at.is_file().then_some(path)
     };
     below("").or_else(|| below(catalog::primary_table(properties).ok()?))
+}
+
+/// The same two questions, asked of a prefix in a store rather than of a directory on
+/// this machine.
+///
+/// **A listing rather than a probe per name.** On a filesystem the three names a catalog
+/// may be described by cost three `stat`s and nothing; against a store they would be three
+/// requests, and the walk upwards multiplies them by the layers it climbs. One
+/// `list_with_delimiter` answers all three at once and hands back the sizes with them,
+/// which is also what bounds the one read here — a bare `properties` is a name anything
+/// may have, so it is opened, and how much of it is opened is decided from what the
+/// listing said rather than by trusting it to be small.
+pub mod in_store {
+    use object_store::{GetOptions, GetRange};
+
+    use super::{About, LAYERS, PEEK, Properties, RemoteDir, catalog, is_a_layer, partitions};
+    use super::{ApiError, holds_catalog_keys, properties};
+
+    /// Whether this directory holds the file that describes a catalog.
+    pub async fn describes_a_catalog(dir: &RemoteDir) -> Result<bool, ApiError> {
+        Ok(described(dir).await?.is_some())
+    }
+
+    /// Which of the three files describes this directory as a catalog, and how large it
+    /// is. `None` is a directory that is not one.
+    async fn described(dir: &RemoteDir) -> Result<Option<(String, u64)>, ApiError> {
+        let level = dir.level("").await?;
+        let named = |name: &str| {
+            level
+                .files
+                .iter()
+                .find(|file| file.name == name)
+                .map(|file| (file.name.clone(), file.size))
+        };
+        // Recognised by name: nothing else is called either of these, so opening them here
+        // would only be opening them twice.
+        for name in [properties::NAMES[0], properties::COLLECTION] {
+            if let Some(found) = named(name) {
+                return Ok(Some(found));
+            }
+        }
+        let Some((name, size)) = named(properties::NAMES[1]) else {
+            return Ok(None);
+        };
+        let text = peek(dir, &name, size).await?;
+        Ok(holds_catalog_keys(&text).then_some((name, size)))
+    }
+
+    /// The front of a file inside this directory, bounded the way the local reader bounds
+    /// it — a ranged read rather than a whole object, since this runs against a directory
+    /// whoever is browsing chose.
+    async fn peek(dir: &RemoteDir, name: &str, size: u64) -> Result<String, ApiError> {
+        // Clamped to the object's own size: a range past the end is a `416` from a store
+        // rather than the short answer a `read` of a small file gives.
+        let end = size.min(PEEK);
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(0..end)),
+            ..GetOptions::default()
+        };
+        let bytes = dir.get(name, options).await?.bytes().await?;
+        // Not an error: a `properties` that is not text is a directory that is not a
+        // catalog, which is what the caller asked.
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// How many levels above `segments` its catalog is, or `None` if there is no catalog
+    /// over it.
+    ///
+    /// `segments` is the path below the mount, so where the walk stops is where the mount
+    /// does: what is above one is the operator's business, and a catalog there is not
+    /// published.
+    pub async fn enclosing(
+        root: &RemoteDir,
+        segments: &[String],
+    ) -> Result<Option<usize>, ApiError> {
+        let mut at = segments;
+        for level in 0..=segments.len().min(LAYERS) {
+            if describes_a_catalog(&root.subdir(&at.join("/"))?).await? {
+                return Ok(Some(level));
+            }
+            // The name about to be stepped over has to be one of the catalog's own layers,
+            // checked before stepping so that a catalog's root is reached only from inside
+            // it.
+            let Some((name, above)) = at.split_last() else {
+                return Ok(None);
+            };
+            if !is_a_layer(name) {
+                return Ok(None);
+            }
+            at = above;
+        }
+        Ok(None)
+    }
+
+    /// What this catalog says about itself, from whichever of its files describes it.
+    pub async fn about(dir: &RemoteDir) -> Result<About, ApiError> {
+        let mut about = About::default();
+        let Some((name, size)) = described(dir).await? else {
+            return Ok(about);
+        };
+        let text = peek(dir, &name, size).await?;
+        let Ok(properties) = Properties::parse(text.as_bytes()) else {
+            return Ok(about);
+        };
+        about.name = properties.name().map(str::to_owned);
+        about.rows = properties.rows().ok().flatten();
+        about.order = properties.order().ok().flatten();
+        about.schema = schema(dir, &properties).await?;
+        Ok(about)
+    }
+
+    /// Where the page reads this catalog's columns, checked to be there — the store's half
+    /// of [`super::schema`], following a collection one hop downwards and no further.
+    async fn schema(
+        dir: &RemoteDir,
+        properties: &Properties,
+    ) -> Result<Option<Vec<String>>, ApiError> {
+        let mut candidates = vec![String::new()];
+        if let Ok(primary) = catalog::primary_table(properties) {
+            candidates.push(primary.to_owned());
+        }
+        for within in candidates {
+            let path: Vec<String> = within
+                .split('/')
+                .filter(|segment| !segment.is_empty())
+                .chain(partitions::COMMON_METADATA.split('/'))
+                .map(str::to_owned)
+                .collect();
+            if dir.size(&path.join("/")).await?.is_some() {
+                return Ok(Some(path));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Whether a directory name is one of a catalog's own layers.

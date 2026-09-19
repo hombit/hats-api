@@ -1003,6 +1003,7 @@ pub(crate) mod tests {
                 serve: false,
                 follow_symlinks: false,
                 immutable: false,
+                storage: StorageOptions::default(),
                 filenames: None,
             }],
             &DataConfig::default(),

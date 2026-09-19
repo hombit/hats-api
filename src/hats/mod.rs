@@ -19,8 +19,8 @@
 //! partitioning and the `Norder`/`Dir`/`Npix` addressing are the catalog format rather
 //! than anything of ours.
 
+pub mod browse;
 mod catalog;
-pub mod local;
 pub mod partitions;
 pub mod properties;
 pub mod query;

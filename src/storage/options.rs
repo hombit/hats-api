@@ -2,6 +2,7 @@
 //! of them are credentials, and the refusal of every option the url's scheme has no use for.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use http::{HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
@@ -763,6 +764,92 @@ impl StorageOptions {
         }))
     }
 
+    /// Refuse every option, for a source with no store behind it to reach.
+    ///
+    /// A `[[mount]]` over a directory on this machine is that case: there is nothing for
+    /// an endpoint or a credential to do, and an option written there is an operator who
+    /// believes otherwise — so it is refused rather than dropped, a credential nobody uses
+    /// being worse than one nobody wrote. `file` is a scheme no backend has, so this is
+    /// the check a request naming a `file://` url already gets, asked once.
+    pub fn refuse_for_a_local_source(&self) -> Result<(), ApiError> {
+        self.resolve(crate::access::LOCAL_SCHEME).map(|_| ())
+    }
+
+    /// These options again, owned, for a `[[mount]]` whose source is read out of the
+    /// config once and held for the life of the process.
+    ///
+    /// Not a `Clone` derive. Copying a struct that may hold several credentials is a thing
+    /// to have to write down, and this is the one place it happens: the config is turned
+    /// into the rules at startup, where there is no request and no caller. Destructured
+    /// like the rest of this file, so a field added and not copied does not compile —
+    /// which here would be a mount silently missing the option that reaches its store.
+    pub fn configured(&self) -> Self {
+        let Self {
+            endpoint,
+            allow_http,
+            s3,
+            gcs,
+            azure,
+            http,
+            webdav,
+            hf,
+            unknown,
+        } = self;
+        let S3Options {
+            region,
+            access_key_id,
+            secret_access_key,
+            session_token,
+        } = s3;
+        let GcsOptions {
+            service_account_key,
+            access_token,
+        } = gcs;
+        let AzureOptions {
+            account,
+            access_key,
+            sas_token,
+        } = azure;
+        let HttpOptions { headers } = http;
+        let WebdavOptions {
+            transport,
+            username,
+            password,
+        } = webdav;
+        let HfOptions { token } = hf;
+        Self {
+            endpoint: endpoint.clone(),
+            allow_http: *allow_http,
+            s3: S3Options {
+                region: region.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                session_token: session_token.clone(),
+            },
+            gcs: GcsOptions {
+                service_account_key: service_account_key.clone(),
+                access_token: access_token.clone(),
+            },
+            azure: AzureOptions {
+                account: account.clone(),
+                access_key: access_key.clone(),
+                sas_token: sas_token.clone(),
+            },
+            http: HttpOptions {
+                headers: headers.clone(),
+            },
+            webdav: WebdavOptions {
+                transport: *transport,
+                username: username.clone(),
+                password: password.clone(),
+            },
+            hf: HfOptions {
+                token: token.clone(),
+            },
+            unknown: unknown.clone(),
+        }
+    }
+
     /// These options written back out, credentials in the clear, for a plan whose caller
     /// asked to have them.
     ///
@@ -841,8 +928,94 @@ impl StorageOptions {
     }
 }
 
-/// Which storage options opened each authority a request has named so far, so a second
-/// table naming one already open can be checked against the first.
+/// An opened store as [`Authorities`] compares it: the authority DataFusion registers it
+/// under, and what built it.
+///
+/// **Made by the handle that was opened, never beside it.** `RemoteFile::opened` and
+/// `RemoteDir::opened` are the only ways to get one, so the authority and the credentials
+/// come from the same store — a call site cannot pair one store's authority with another's
+/// credentials, or pass the request's options for a store the request's options did not
+/// build.
+///
+/// That last case is the one this exists for. A `file://` url resolves through the mounts,
+/// so one landing in a mount whose source is a store opens with the *operator's* options
+/// under the origin's authority while the request carried none. Comparing what was written
+/// rather than what was used would let a second table naming that origin outright compare
+/// as "no options" on both sides and share the store.
+/// The authority is owned and the mount's `path` is an `Arc`, so this outlives the handle
+/// that made it: a table is opened, checked, and then moved into the statement's own list.
+/// Only the options stay borrowed, and they are the request body's, which outlives both.
+#[derive(Clone)]
+pub struct Opened<'a> {
+    base: Url,
+    by: By<'a>,
+}
+
+/// `Url`'s own `Debug` prints its parsed fields, `password` among them.
+impl std::fmt::Debug for Opened<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Opened")
+            .field("base", &self.base.as_str())
+            .field("by", &self.by)
+            .finish()
+    }
+}
+
+/// Which credentials built a store, held whichever way their owner holds them: the
+/// request's are borrowed from its body and a mount's are shared out of the config.
+#[derive(Debug, Clone)]
+enum By<'a> {
+    /// The request's own options, which for a url with nothing to reach — a `file://` url
+    /// over a directory on this machine — is none and means it.
+    Request(&'a StorageOptions),
+    /// A `[[mount]]`'s own `storage`.
+    Mount(Arc<StorageOptions>),
+}
+
+impl By<'_> {
+    fn options(&self) -> &StorageOptions {
+        match self {
+            Self::Request(options) => options,
+            Self::Mount(options) => options,
+        }
+    }
+}
+
+impl<'a> Opened<'a> {
+    pub(super) fn new(
+        base: &Url,
+        mounted_by: &Option<Arc<StorageOptions>>,
+        options: &'a StorageOptions,
+    ) -> Self {
+        Self {
+            base: base.clone(),
+            by: match mounted_by {
+                Some(options) => By::Mount(Arc::clone(options)),
+                None => By::Request(options),
+            },
+        }
+    }
+
+    /// Whether two tables at one authority may share the one store DataFusion gives them.
+    ///
+    /// **The credentials decide, and where they came from does not.** Two stores built
+    /// from the same options are the same store, so which of the two registrations
+    /// survives changes nothing — whether both came from the request, both from one
+    /// mount, from two mounts an operator wrote the same credentials into, or from a
+    /// mount and a caller who sent the credentials the mount holds. In that last case the
+    /// caller had them already and sharing hands them nothing.
+    ///
+    /// Different options are refused, and that is the whole of the rule: the store that
+    /// survives would read one of the two tables under credentials nothing in the request
+    /// asked for — which, where the surviving one is a mount's, is a url the caller chose
+    /// being read with the operator's key.
+    fn matches(&self, other: &Self) -> bool {
+        self.by.options().matches(other.by.options())
+    }
+}
+
+/// What opened each authority a request has named so far, so a second table naming one
+/// already open can be checked against the first.
 ///
 /// DataFusion keys a registered object store by `scheme://host[:port]` and drops the path —
 /// see "One store per authority" — so two tables sharing an authority share one store, the
@@ -851,26 +1024,26 @@ impl StorageOptions {
 /// this refuses instead: the fallback the crate takes rather than building a registry able to
 /// keep the two apart, which would be a larger decision than any one route.
 #[derive(Debug, Default)]
-pub struct Authorities<'a>(std::collections::HashMap<String, (&'a str, &'a StorageOptions)>);
+pub struct Authorities<'a>(std::collections::HashMap<String, (&'a str, Opened<'a>)>);
 
 impl<'a> Authorities<'a> {
-    /// `name` is the table as the caller wrote it, kept only for the message if `base` turns
-    /// out to already be open under different options.
-    pub fn check(
-        &mut self,
-        name: &'a str,
-        base: &Url,
-        options: &'a StorageOptions,
-    ) -> Result<(), ApiError> {
+    /// `name` is the table as the caller wrote it, kept only for the message if the
+    /// authority turns out to already be open under something else.
+    pub fn check(&mut self, name: &'a str, opened: Opened<'a>) -> Result<(), ApiError> {
+        let base = opened.base.clone();
         match self.0.get(base.as_str()) {
             None => {
-                self.0.insert(base.as_str().to_owned(), (name, options));
+                self.0.insert(base.as_str().to_owned(), (name, opened));
                 Ok(())
             }
-            Some((_, seen)) if seen.matches(options) => Ok(()),
+            Some((_, seen)) if seen.matches(&opened) => Ok(()),
+            // The authority is named and nothing else: not either side's credentials, and
+            // not the mount's `source`, which is the operator's. What a caller is owed is
+            // which two tables collided and that they cannot both be read.
             Some((first, _)) => Err(ApiError::bad_request(format!(
-                "tables {first} and {name} both name {base}, with different storage options; \
-                 a request may not give one authority more than one set of credentials"
+                "tables {first} and {name} both read from {base} and would be read with \
+                 different credentials; a request may not give one authority more than one \
+                 set"
             ))),
         }
     }
@@ -1237,16 +1410,16 @@ mod tests {
         .unwrap();
 
         let mut authorities = Authorities::default();
-        authorities.check("left", &left.base, &creds).unwrap();
+        authorities.check("left", left.opened(&creds)).unwrap();
         // Another table at the same authority, with the same options: fine.
-        authorities.check("right", &right.base, &creds).unwrap();
+        authorities.check("right", right.opened(&creds)).unwrap();
         // A different authority may carry whatever options it likes.
         authorities
-            .check("third", &elsewhere.base, &different_creds)
+            .check("third", elsewhere.opened(&different_creds))
             .unwrap();
 
         let error = authorities
-            .check("fourth", &left.base, &different_creds)
+            .check("fourth", left.opened(&different_creds))
             .unwrap_err();
         assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
         assert!(error.to_string().contains("left"), "{error}");
@@ -1256,5 +1429,75 @@ mod tests {
             !error.to_string().contains("other-secret"),
             "leaked: {error}"
         );
+    }
+
+    /// **The credentials decide, and where they came from does not.**
+    ///
+    /// Two stores built from the same options are the same store, so it does not matter
+    /// which registration survives: two mounts an operator wrote one key into share, and
+    /// so do a mount and a caller who sent the key the mount holds — they had it already.
+    /// Different options are refused whichever side each came from, which is the case that
+    /// would otherwise read a url the caller chose with the operator's key.
+    #[test]
+    fn what_built_the_store_decides_who_may_share_it() {
+        let creds = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": SECRET,
+        }));
+        let same = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": SECRET,
+        }));
+        let other = options(serde_json::json!({
+            "access_key_id": "AKIA1",
+            "secret_access_key": "other-secret",
+        }));
+        let bucket = open(&parse_url("s3://bucket/a.parquet").unwrap(), &creds)
+            .unwrap()
+            .base;
+        // A mount's options are shared out of the config; a request's are borrowed from
+        // its body. `Mount::open` and `build` are what set the two.
+        let by_mount = |options: &StorageOptions| Some(Arc::new(options.configured()));
+        let (mounted, mounted_same, mounted_other) =
+            (by_mount(&creds), by_mount(&same), by_mount(&other));
+        let (none, request) = (no_options(), None);
+        let opened = |by, options| Opened::new(&bucket, by, options);
+
+        let paired = |first, second| {
+            let mut authorities = Authorities::default();
+            authorities.check("first", first).unwrap();
+            authorities.check("second", second)
+        };
+        // One key, however each side came by it.
+        for (first, second) in [
+            (opened(&mounted, &none), opened(&mounted_same, &none)),
+            (opened(&mounted, &none), opened(&request, &same)),
+            (opened(&request, &creds), opened(&mounted_same, &none)),
+            (opened(&request, &creds), opened(&request, &same)),
+        ] {
+            paired(first, second).unwrap();
+        }
+        // Two keys, however each side came by them — including the case this exists for:
+        // a mount holding a credential beside a url the caller named with none.
+        for (first, second) in [
+            (opened(&mounted, &none), opened(&request, &none)),
+            (opened(&request, &none), opened(&mounted, &none)),
+            (opened(&mounted, &none), opened(&mounted_other, &none)),
+            (opened(&request, &creds), opened(&request, &other)),
+        ] {
+            let error = paired(first, second).unwrap_err();
+            assert!(matches!(error, ApiError::BadRequest(_)), "{error}");
+            assert!(
+                error.to_string().contains("different credentials"),
+                "{error}"
+            );
+            // The authority and the two table names are the whole of what a caller is
+            // owed: not either side's secret, and not the operator's source.
+            assert!(!error.to_string().contains(SECRET), "leaked: {error}");
+            assert!(
+                !error.to_string().contains("other-secret"),
+                "leaked: {error}"
+            );
+        }
     }
 }

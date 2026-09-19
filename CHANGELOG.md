@@ -8,11 +8,13 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[[mount]] source` takes a url in any scheme this service reads — `s3://`, `gs://`, `az://`, `https://`, `webdav://`, `hf://` — as well as a local path.
+- `[[mount]] storage`, the options that reach a `source` in a store: the same names a request writes beside its url.
+- A served mount over a store answers `Range`, `If-None-Match` and `HEAD` against the origin, and lists a directory one level at a time.
 
 ### Changed
 
---
+- **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
 
 ### Deprecated
 

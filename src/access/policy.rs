@@ -41,12 +41,19 @@
 //! allow_plain_http = false
 //! ```
 //!
-//! **There is no local section.** A `[[mount]]` is the whole of what makes a directory
-//! readable, and a `file://` url in a request is addressed in the mounts' url space
-//! rather than on the disk: `file:///hats/dr1/x.parquet` is the mount at `/hats`, and
-//! whatever `source` that mount holds. So there is no second list of directories to keep
-//! in step with the mounts, and no spelling of a path that reaches a directory no mount
-//! named. What a path under a mount may reach is [`local`](super::local)'s.
+//! **There is no section for a mount, in any scheme.** A `[[mount]]` is the whole of what
+//! makes a directory readable, and a `file://` url in a request is addressed in the
+//! mounts' url space rather than in a store or on a disk: `file:///hats/dr1/x.parquet` is
+//! the mount at `/hats`, and whatever `source` that mount holds. So there is no second
+//! list of directories to keep in step with the mounts, and no spelling of a path that
+//! reaches a directory no mount named. What a path under a mount may reach is
+//! [`local`](super::local)'s.
+//!
+//! That is also why these rules say nothing about a mount's own `source`, whatever scheme
+//! it is in: they are about where a *caller* may point this service, and an operator
+//! writing a directory into the config is the permission for that directory.
+//! [`AccessPolicy::authorize_configured`] is the gate a source goes through instead, and
+//! the mount stays reachable only through its own `path`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,14 +61,14 @@ use std::sync::Arc;
 use http::HeaderValue;
 use url::{Host, Url};
 
-use crate::access::mount::Mounts;
+use crate::access::mount::{Mount, Mounts};
 use crate::access::network::NetworkPolicy;
 use crate::config::{AccessConfig, ConfigError};
 use crate::error::ApiError;
 
 /// What a URL turned out to be, once it was allowed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
+#[derive(Debug)]
+pub enum Target<'a> {
     /// Read it through this backend's object store. Carrying the backend rather than
     /// leaving the caller to work it out again from the scheme is what makes the match
     /// on the other side exhaustive: a backend with no arm is a compile error instead of
@@ -74,6 +81,24 @@ pub enum Target {
     /// Read this local file. Absolute, with every symlink already resolved and the
     /// result checked against the policy.
     Local(PathBuf),
+    /// Read this name out of a mount whose `source` is a store: the mount, and the path
+    /// below it.
+    ///
+    /// The mount rather than a store, because opening one needs the policy and the
+    /// scratch budget, and neither is this gate's to hold. What is settled here is the
+    /// same thing [`Self::Local`] settles — which mount the url named, and that the path
+    /// inside it is a path — and the store is the mount's own.
+    InStore(&'a Mount, String),
+}
+
+impl Target<'_> {
+    /// The file on this machine, for a caller that only reads local ones.
+    pub fn local(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Local(path) => Some(path),
+            _ => None,
+        }
+    }
 }
 
 /// A remote backend, which is to say a scheme with an endpoint behind it. `file` is not
@@ -305,7 +330,11 @@ impl AccessPolicy {
         let http = build(&config.http.endpoints, Backend::Http)?;
         let webdav = build(&config.webdav.endpoints, Backend::Webdav)?;
         let hf = build(&config.hf.endpoints, Backend::Hf)?;
-
+        // A `[[mount]]`'s own source is deliberately *not* added here. It is reached
+        // through `NetworkPolicy::configured_transport` instead, which has no address
+        // rules — so the mount stays reachable without its server becoming one a caller
+        // may name, which is what putting it in this list would do. The grant stays
+        // exactly as wide as the mount.
         let network = NetworkPolicy::new(&config.network, &named, user_agent)?;
         Ok(Self {
             s3,
@@ -375,10 +404,10 @@ impl AccessPolicy {
     /// The first gate: is this the *kind* of thing the service reads at all? For a
     /// local file that settles it. For a remote backend the endpoint is still to come,
     /// because it lives in the url's options and only `storage` knows how to read those.
-    pub fn authorize(&self, url: &Url) -> Result<Target, ApiError> {
+    pub fn authorize(&self, url: &Url) -> Result<Target<'_>, ApiError> {
         let scheme = url.scheme();
         if scheme == LOCAL_SCHEME {
-            return self.authorize_local(url).map(Target::Local);
+            return self.authorize_local(url);
         }
         match Backend::from_scheme(scheme) {
             Some(backend) if self.rules(backend).enabled() => Ok(Target::Remote(backend)),
@@ -387,6 +416,23 @@ impl AccessPolicy {
                 self.describe_schemes()
             ))),
         }
+    }
+
+    /// The same gate for a `[[mount]]`'s own `source`, which is the operator's url rather
+    /// than a caller's.
+    ///
+    /// Only the scheme is asked about. Which endpoints a caller may name is
+    /// `[api.access]`'s, and an operator writing a directory into the config is the
+    /// permission for that directory — the same reason there is no `[api.access]` section
+    /// for a local one. A backend an operator turned off for callers is therefore still
+    /// mountable, and the mount is still reachable only through its own `path`.
+    pub fn authorize_configured(&self, url: &Url) -> Result<Backend, ApiError> {
+        Backend::from_scheme(url.scheme()).ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "a mount source in scheme {:?} names no backend",
+                url.scheme()
+            ))
+        })
     }
 
     /// The second gate for a remote backend: which server the request would have us
@@ -603,6 +649,7 @@ pub(super) mod tests {
     use tempfile::TempDir;
 
     use crate::config::{DataConfig, EndpointConfig, HttpConfig, MountConfig, NetworkConfig};
+    use crate::storage::StorageOptions;
 
     use super::*;
 
@@ -691,6 +738,7 @@ pub(super) mod tests {
                 serve: false,
                 follow_symlinks,
                 immutable: false,
+                storage: StorageOptions::default(),
                 filenames: None,
             })
             .collect();

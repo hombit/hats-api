@@ -8,6 +8,7 @@ use std::path::Path;
 use datafusion::error::DataFusionError;
 use datafusion::parquet::errors::ParquetError;
 use serde::Serialize;
+use url::Url;
 
 use crate::storage::materialize::{Refused, TooLarge};
 
@@ -62,6 +63,16 @@ pub enum ApiError {
     /// the machine it happened on.
     #[error("{0}")]
     Internal(String),
+    /// A failure whose own account of itself named where a mount really is, told without
+    /// it. [`ApiError::from_mounted_store`] is the only thing that makes one.
+    ///
+    /// The status is carried rather than derived, which is the whole of why this is a
+    /// variant and not a message: there is an origin behind a store-backed mount, so a
+    /// `502` about it and a `404` about an object that is not there are both true, and
+    /// flattening them into the `400` a local mount gets would answer "your file is not
+    /// parquet" about a store that was down.
+    #[error("{1}")]
+    Hidden(StatusCode, String),
     #[error("object store error: {0}")]
     ObjectStore(#[from] object_store::Error),
     /// Raised while building a store, before any request. DataFusion's own reads come
@@ -172,7 +183,8 @@ impl ApiError {
             | Self::TooMuchWork(_)
             | Self::BodyTooLarge(_)
             | Self::Timeout(_)
-            | Self::Internal(_)) => ours,
+            | Self::Internal(_)
+            | Self::Hidden(..)) => ours,
             // Getting the bytes, or reading them as parquet. These are the failures the
             // one sentence is for, and the ones whose messages name the path.
             bytes @ (Self::ObjectStore(_)
@@ -195,10 +207,67 @@ impl ApiError {
         }
     }
 
+    /// The same failure, told to a caller who named a path under a mount whose `source`
+    /// is a store.
+    ///
+    /// The rule is [`Self::from_mount`]'s and the reason is the same one: a mount
+    /// publishes a directory and not where that directory really is, so a store's own
+    /// account of a key — which names the operator's bucket, endpoint and prefix, none of
+    /// them any part of what the caller wrote — is not repeatable as it stands.
+    ///
+    /// What differs is everything the local rule turns on. There really is an origin
+    /// behind this one, so `502` blames something that exists and `404` is the honest
+    /// answer for an object that is not there; and the bytes of an unreadable object are
+    /// not something this service would hand over regardless, so a read that failed is not
+    /// evidence about the file. So the status is kept and only the message is replaced,
+    /// and only where the message names the source at all — a planner's account of a
+    /// column that is not there is the caller's own mistake here as it is there.
+    pub fn from_mounted_store(self, source: &Url) -> Self {
+        // The whole url, its authority, and the prefix under it: a message carrying any of
+        // the three says where the mount really is. The path is checked without its
+        // separators so that a store spelling a key `hats/dr1/x.parquet` is caught by the
+        // `hats` the operator wrote.
+        let names_source = |message: &str| {
+            let path = source.path().trim_matches('/');
+            message.contains(source.as_str())
+                || source
+                    .host_str()
+                    .is_some_and(|host| !host.is_empty() && message.contains(host))
+                || (!path.is_empty() && message.contains(path))
+        };
+        match self {
+            // Written here rather than by a store, which is what makes them safe to
+            // repeat.
+            ours @ (Self::BadRequest(_)
+            | Self::Forbidden(_)
+            | Self::NotFound(_)
+            | Self::MethodNotAllowed(_)
+            | Self::TooMuchWork(_)
+            | Self::BodyTooLarge(_)
+            | Self::Timeout(_)
+            | Self::Internal(_)
+            | Self::Hidden(..)) => ours,
+            foreign if !names_source(&foreign.to_string()) => foreign,
+            foreign => {
+                let status = foreign.status();
+                tracing::warn!(
+                    error = %foreign,
+                    %status,
+                    "a mounted store said where it is; telling the caller the status alone"
+                );
+                Self::Hidden(
+                    status,
+                    "this mount could not read the file at that path".to_owned(),
+                )
+            }
+        }
+    }
+
     /// The status this error answers with. Public so that a test can check the status a
     /// caller sees rather than the message, which is the part that has to be right.
     pub fn status(&self) -> StatusCode {
         match self {
+            Self::Hidden(status, _) => *status,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
@@ -298,5 +367,71 @@ impl IntoResponse for ApiError {
             tracing::debug!(error = %message, %status, "request rejected");
         }
         (status, Json(ErrorResponse { error: message })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> Url {
+        Url::parse("s3://archive-bucket/hats/").expect("a source url")
+    }
+
+    /// What a store says about a key names the bucket, the endpoint and the operator's
+    /// prefix, and a caller wrote none of the three. The status is kept, which is the
+    /// whole of what makes this a different rule from the local one: an object that is
+    /// not there is a `404` about an origin that exists.
+    #[test]
+    fn a_store_s_account_of_a_mounted_key_is_replaced_and_its_status_kept() {
+        let missing = ApiError::ObjectStore(object_store::Error::NotFound {
+            path: "hats/dr1/x.parquet".to_owned(),
+            source: "no such key".into(),
+        });
+        let told = missing.from_mounted_store(&source());
+        assert_eq!(told.status(), StatusCode::NOT_FOUND);
+        let message = told.to_string();
+        assert!(!message.contains("archive-bucket"), "{message}");
+        assert!(!message.contains("hats"), "{message}");
+    }
+
+    /// The planner's account of a query it cannot run is about what the caller wrote, and
+    /// telling them their file is unreadable sends them to look at the one thing that is
+    /// not wrong. It names nothing of the mount's, so it goes through untouched.
+    #[test]
+    fn a_failure_that_names_nothing_of_the_mount_is_told_as_it_is() {
+        let planning = ApiError::DataFusion(DataFusionError::Plan(
+            "No field named objectd. Valid fields are objectid, band.".to_owned(),
+        ));
+        let told = planning.from_mounted_store(&source());
+        assert!(told.to_string().contains("objectd"), "{told}");
+        assert_eq!(told.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// Ours to repeat, written here rather than by a store — including a refusal that
+    /// happens to quote the caller's own url.
+    #[test]
+    fn a_message_this_crate_wrote_is_not_replaced() {
+        let ours = ApiError::bad_request("limit takes a number of rows");
+        assert!(
+            ours.from_mounted_store(&source())
+                .to_string()
+                .contains("number of rows")
+        );
+    }
+
+    /// A mount publishes a directory, not where it is, and the authority is half of where
+    /// it is: an endpoint in a message is the server the operator configured.
+    #[test]
+    fn a_message_naming_only_the_authority_is_replaced_too() {
+        let reached = ApiError::ObjectStore(object_store::Error::Generic {
+            store: "S3",
+            source: "connecting to archive-bucket.s3.example.org timed out".into(),
+        });
+        let told = reached.from_mounted_store(&source());
+        assert!(!told.to_string().contains("archive-bucket"), "{told}");
+        // There is an origin behind this mount, so blaming a gateway blames something
+        // that exists.
+        assert_eq!(told.status(), StatusCode::BAD_GATEWAY);
     }
 }
