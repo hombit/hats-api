@@ -1,0 +1,24 @@
+[project]
+name = "lsdb-conformance"
+version = "0.0.0"
+description = "What LSDB makes of this service, against what it makes of S3 directly"
+requires-python = ">=3.12"
+dependencies = [
+    "lsdb>=0.10",
+    # What the direct route reads S3 with; named here because `anon=True` is its option.
+    "s3fs>=2024.6",
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --tb=short -p no:cacheprovider -p lsdb_conformance"
+# Long enough for a first read of a real catalog over the public internet, short enough
+# that one that stops answering costs a check rather than the run.
+timeout = 300
+timeout_method = "thread"
