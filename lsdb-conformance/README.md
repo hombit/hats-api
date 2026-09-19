@@ -31,10 +31,26 @@ rebuilt. What stays true is that two readers of one bucket must agree, so `asser
 the whole assertion: same values, types, index and row order, compared through pyarrow
 because these columns hold lists.
 
-**Name the columns.** Opened without `columns`, LSDB asks for every column of a partition
-as a query on the file's own url, which re-encodes the whole partition rather than reading
-a few column chunks — 807 MB and 289 s against SDSS DR7 spectra, where the projection is
-six. A user reading three columns writes three columns, and so does a check.
+**Name the columns, and name `_healpix_29` among them.** Two separate reasons, and both
+bite.
+
+A read with no projection is answered by encoding the whole partition, and — since a range
+is cut from the body that request generated — once per block the client asks for. Against
+SDSS DR7 spectra, whose `spectra` column is a nested array per row, that is fifteen minutes
+and then a client-side timeout, against two seconds off S3.
+
+`_healpix_29` has to be named because LSDB builds the url it asks this service for *before*
+it adds the index column to what it asks `pyarrow` for. Leave it out and the service is
+asked for the other columns, honours exactly that, and `pyarrow` — holding the catalog's
+schema — fills the column it did not get with nulls, which LSDB then makes an index of. The
+frame that comes back has every value right and no position on the sky.
+
+**Two catalogs are not read through this service at all.** Euclid Q1 and the ZTF catalogs
+are written with `hats_npix_suffix = "/"`, so a partition is a directory; LSDB lists it at a
+url carrying the query string, and `fsspec` keeps only links that start with that whole
+string, query included. No href can match, so the listing is empty whatever is served —
+there is no answer this service could give. `catalogs.py` names them and the `both` fixture
+refuses them.
 
 Everything is read anonymously, both ways, so a bucket that stopped being public fails
 both routes rather than quietly using a runner's credentials.

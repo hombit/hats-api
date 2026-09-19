@@ -332,7 +332,7 @@ pub(in crate::app) async fn query_hats(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, &output, started)
+    let response = hats_answer(&result, &output, started, None)
         .await
         .map_err(&hide_the_path)?;
     tracing::info!(

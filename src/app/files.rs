@@ -235,6 +235,18 @@ async fn serve_stored_directory(
         tracing::warn!(error = %error, mount = mount.prefix(), "cannot list");
         ApiError::not_found("no such directory")
     })?;
+    // **A store has no empty directories**, so a prefix with nothing under it is a name
+    // that is not there rather than a directory that happens to be bare — and answering it
+    // `200` with an empty listing is this service inventing a resource. What that costs is
+    // not cosmetic: `hats` probes for `hats.properties`, `properties` and
+    // `collection.properties` in turn, and an empty listing answered `200` is a file as far
+    // as it can tell, so it parses the JSON as a properties file and a catalog that is
+    // perfectly readable fails to open with a validation error naming fields no listing has.
+    // A local mount is the other case and keeps its empty directories: there, the directory
+    // really is there.
+    if level.files.is_empty() && level.directories.is_empty() {
+        return Err(ApiError::not_found("no such directory"));
+    }
     // A directory that publishes its own page says what it wants said about itself, and
     // the generated listing is the fallback — the same rule, and the same switch, as on
     // disk. Read out of the listing rather than asked for, which is what makes it free.
@@ -396,7 +408,7 @@ async fn serve_object(
 /// Several ranges at once is one of those. A multipart response is a form of answer
 /// nothing reading these files sends, and half-answering it — the first range under a
 /// `206` claiming all of them — is the mislabelling this whole path exists to avoid.
-fn wanted_range(asked: &HeaderValue, size: u64) -> Option<std::ops::Range<u64>> {
+pub(in crate::app) fn wanted_range(asked: &HeaderValue, size: u64) -> Option<std::ops::Range<u64>> {
     let text = asked.to_str().ok()?;
     let ranges = http_range_header::parse_range_header(text)
         .ok()?
@@ -734,7 +746,7 @@ async fn query_file(
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, opened, &output, started, layout)
+    let response = answer(&result, opened, &output, started, layout, Some(request))
         .await
         .map_err(|error| hide.apply(error))?;
     tracing::info!(
@@ -813,7 +825,7 @@ async fn query_catalog(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, &output, started)
+    let response = hats_answer(&result, &output, started, Some(request))
         .await
         .map_err(hide_the_path)?;
     tracing::info!(
@@ -1314,11 +1326,18 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
-    /// A catalog's answer is generated once for this request too, so a `Range` against it
-    /// must be refused the same way a single file's query answer is.
+    /// A catalog's answer is a parquet body like any other, so it is sliced like one.
     #[tokio::test]
-    async fn a_catalog_query_answer_refuses_a_range_rather_than_mishonouring_it() {
+    async fn a_catalog_query_answer_serves_a_range() {
         let dir = hats::query::tests::fixture(true);
+        let whole = respond(
+            catalog_server(dir.path(), 3600.0),
+            Request::builder().uri("/?limit=1&format=parquet"),
+        )
+        .await;
+        assert_eq!(whole.headers()[header::ACCEPT_RANGES], "bytes");
+        let whole = whole.into_body().collect().await.unwrap().to_bytes();
+
         let response = respond(
             catalog_server(dir.path(), 3600.0),
             Request::builder()
@@ -1326,9 +1345,11 @@ mod tests {
                 .header(header::RANGE, "bytes=-4"),
         )
         .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
-        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        // The parquet magic, which is the read every client starts with.
+        assert_eq!(&body[..], b"PAR1");
+        assert_eq!(&body[..], &whole[whole.len() - 4..]);
     }
 
     /// A url answers what fits in one answer, and says where a wider search goes.
@@ -1621,21 +1642,29 @@ mod tests {
         assert_eq!(body["rows"][0]["objectid"], 1);
     }
 
-    /// A query's answer is generated once for this request and sent whole, so a `Range`
-    /// against it must not be honoured — and must say so, rather than silently answering
-    /// `200` with the entire body under a `bytes` claim it cannot make good on. A client
-    /// that trusts a `Range` request was honoured without checking for `206` — `fsspec`'s
-    /// HTTP filesystem, which is what `lsdb` and `nested-pandas` read a HATS catalog
-    /// through, does exactly this — reads the front of the body for whatever slice it
-    /// asked for, which is corruption with nothing here to say the request went wrong.
+    /// A query's answer is generated for this request, and a client still has to seek in
+    /// it: parquet is read footer-first, so a body that refuses ranges is a body `pyarrow`
+    /// cannot open at all. `fsspec` reports such a url as `partial: False` and hands back a
+    /// streaming file, and every `lsdb` read of an answer bigger than one block ends at
+    /// `Cannot seek streaming HTTP file`.
     ///
-    /// The plain file keeps real Range support: this is about the query answer only.
+    /// So the slice is real, and it is the slice of the body this request generated — the
+    /// magic at the end, which is where a parquet reader starts.
     #[tokio::test]
-    async fn a_query_answer_refuses_a_range_rather_than_mishonouring_it() {
+    async fn a_query_answer_serves_a_range() {
         let dir = tempfile::TempDir::new().unwrap();
         let fixture = query::tests::fixture();
         std::fs::write(dir.path().join("part0.parquet"), &fixture).unwrap();
         let service = || mounted(dir.path(), &ApiConfig::default());
+
+        let whole = respond(
+            service(),
+            Request::builder().uri("/part0.parquet?columns=objectid"),
+        )
+        .await;
+        assert_eq!(whole.status(), StatusCode::OK);
+        assert_eq!(whole.headers()[header::ACCEPT_RANGES], "bytes");
+        let whole = whole.into_body().collect().await.unwrap().to_bytes();
 
         let response = respond(
             service(),
@@ -1646,15 +1675,37 @@ mod tests {
         .await;
         assert_eq!(
             response.status(),
-            StatusCode::OK,
-            "a range was answered as one rather than refused"
+            StatusCode::PARTIAL_CONTENT,
+            "a range was answered whole rather than sliced"
         );
-        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
-        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            format!(
+                "bytes {}-{}/{}",
+                whole.len() - 4,
+                whole.len() - 1,
+                whole.len()
+            )
+        );
         let body = response.into_body().collect().await.unwrap().to_bytes();
-        // The whole generated answer, not the last four bytes of it: a `200` here must
-        // carry the whole body it claims to, not a slice mislabelled as one.
-        assert!(body.len() > 4, "body was truncated to the range asked for");
+        assert_eq!(&body[..], b"PAR1");
+        assert_eq!(&body[..], &whole[whole.len() - 4..]);
+
+        // A range past the end is refused rather than answered with what there is: a
+        // client that asked for bytes that do not exist has to hear so.
+        let response = respond(
+            service(),
+            Request::builder()
+                .uri("/part0.parquet?columns=objectid")
+                .header(header::RANGE, format!("bytes={}-", whole.len() + 1)),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            format!("bytes */{}", whole.len())
+        );
 
         // The plain file, with no query, still answers the same range for real.
         let response = respond(

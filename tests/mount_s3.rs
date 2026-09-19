@@ -308,22 +308,36 @@ async fn a_directory_in_a_bucket_is_listed_one_level_at_a_time() {
     assert_eq!(names, ["dataset", "hats.properties", "partition_info.csv"]);
 }
 
-/// A prefix nothing is under is a directory with nothing in it, because that is the only
-/// answer a flat namespace has: there is no key to be missing, and "nobody wrote this
-/// prefix" and "nothing is under it" are the same state.
+/// A prefix nothing is under is a name that is not there, and answering it `404` is the
+/// only thing that stays true in a flat namespace: "nobody wrote this prefix" and "nothing
+/// is under it" are one state, and a store has no empty directories to be the other one.
+///
+/// The `200` it used to answer was not merely generous, it broke a working catalog.
+/// `hats` opens one by asking for `hats.properties`, then `properties`, then
+/// `collection.properties`; an empty listing answered `200` is a file as far as any client
+/// can tell, so the first probe "succeeds", the JSON is parsed as a Java properties file,
+/// and `lsdb.open_catalog` fails with a validation error naming fields no listing has.
+/// Catalogs on S3 that read perfectly well directly could not be opened through this
+/// service at all.
 #[tokio::test]
-async fn a_prefix_with_nothing_under_it_lists_as_empty() {
+async fn a_prefix_with_nothing_under_it_is_not_there() {
     let server = TestS3::authenticated().await;
     server.put_bytes(&format!("{PREFIX}/part0.parquet"), b"PAR1");
+    let service = || mounted(&server, &[]);
 
-    let response = respond(
-        mounted(&server, &[]),
-        Request::builder().uri("/hats/nothing-here"),
-    )
-    .await;
+    let response = respond(service(), Request::builder().uri("/hats/nothing-here")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // The probe a client actually makes, which is what made this worth fixing: a name
+    // inside the mount that no key matches.
+    let response = respond(service(), Request::builder().uri("/hats/hats.properties")).await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    // And a prefix that does have something under it is still listed.
+    let response = respond(service(), Request::builder().uri("/hats")).await;
     assert_eq!(response.status(), StatusCode::OK);
     let listing: serde_json::Value = serde_json::from_str(&text_of(response).await).unwrap();
-    assert!(listing["entries"].as_array().unwrap().is_empty());
+    assert_eq!(listing["entries"].as_array().unwrap().len(), 1);
 }
 
 /// The page, which is the same page a local mount draws — including the catalog panel,

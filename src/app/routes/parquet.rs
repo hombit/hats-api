@@ -268,7 +268,7 @@ pub(in crate::app) async fn query_parquet(
     let data_bytes_read = result.data_bytes_read;
     // Both of them, the way the mounted path does it: encoding a parquet answer reads
     // the source file's layout, so it raises the store's messages too.
-    let response = answer(&result, &file, &output, started, layout)
+    let response = answer(&result, &file, &output, started, layout, None)
         .await
         .map_err(hide_the_path)?;
     tracing::info!(

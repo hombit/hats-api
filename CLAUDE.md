@@ -1066,6 +1066,28 @@ the whole router and two rules to keep:
   from, or to seek in, has to be a body the predicate declines — which is what makes the
   rule above about the ranged reads an `lsdb` client does, rather than about CPU.
 
+**A parquet answer is seekable, and only parquet is.** `app::answer::seekable` slices the
+body this request generated: `206` with a `Content-Range`, `416` for a range past the end,
+and `Accept-Ranges: bytes` either way. Parquet is read footer-first or not at all, so a
+query answer that refused ranges was one no reader could open — `fsspec` reports such a url
+as `partial: False`, hands `pyarrow` a streaming file, and the read ends at `Cannot seek
+streaming HTTP file`. Saying `Accept-Ranges: none` was honest and still left the query
+surface unusable from the client it was built for.
+
+Three things that rule turns on, and each is a reason not to widen it:
+
+- **The slice is of this request's own body**, regenerated per request, so a reader that
+  takes a footer and then three column chunks runs the query four times. What keeps the
+  slices coherent is that the same query over the same file answers the same bytes — the
+  file's own order, one layout, one writer. There is no cache holding them together, and a
+  source file that changes under a reader is the one case nothing here can catch.
+- **Only parquet**, because it is the one format read by seeking and the one excluded from
+  the compression layer, so it is the one whose `Content-Length` a client can trust. A
+  ranged JSON body would be a slice of something the layer above may then re-encode.
+- **Only where a `Range` can mean anything.** The API mode answers a `POST` carrying a body,
+  so it passes no request parts and keeps `Accept-Ranges: none`; advertising ranges on a
+  route that cannot honour them is the same mislabelling one step earlier.
+
 ## Directory listings
 
 A directory is served the way `apache` and `nginx` serve one: its own `index.html` if it

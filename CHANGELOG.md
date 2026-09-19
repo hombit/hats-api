@@ -26,7 +26,8 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- A parquet answer to a query on a file-server url answers `Range` — `206` with `Content-Range`, `416` past the end — where it used to send `Accept-Ranges: none`, which left `pyarrow` unable to open any answer larger than one `fsspec` block.
+- A name with nothing under it in a store-backed mount answers `404` rather than `200` with an empty listing, which `hats` read as a properties file and failed to open the catalog on.
 
 ### Security
 

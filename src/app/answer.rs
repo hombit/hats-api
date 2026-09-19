@@ -4,7 +4,8 @@
 use std::time::Instant;
 
 use axum::Json;
-use axum::http::header;
+use axum::http::request::Parts;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
@@ -103,6 +104,7 @@ pub(in crate::app) async fn hats_answer(
     result: &hats::query::CatalogResult,
     output: &Output,
     started: Instant,
+    parts: Option<&Parts>,
 ) -> Result<Response, ApiError> {
     let num_rows = result.rows.num_rows();
     let response = match output.format {
@@ -125,12 +127,14 @@ pub(in crate::app) async fn hats_answer(
                 None => parquet::SourceLayout::default(),
             };
             let body = parquet::encode(&result.rows, &layout)?;
-            (
-                attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
-                hats_counters(result, num_rows, started),
+            return Ok(seekable(
                 body,
-            )
-                .into_response()
+                (
+                    attachment(PARQUET_CONTENT_TYPE, "selection.parquet"),
+                    hats_counters(result, num_rows, started),
+                ),
+                parts,
+            ));
         }
         Format::Votable => (
             attachment(votable::CONTENT_TYPE, "selection.vot"),
@@ -148,22 +152,88 @@ pub(in crate::app) async fn hats_answer(
     Ok(without_ranges(response))
 }
 
-/// A query's answer is generated once for this request and sent whole; there is no seekable
-/// resource behind it to serve a slice of, so this says so rather than leaving a Range-aware
-/// client to find out the hard way. Without it, a client that sends `Range` and gets a plain
-/// `200` back — legal under RFC 7233 for a server that does not support ranges — may still
+/// An answer no client may seek in: generated for this request, and not parquet.
+///
+/// Saying so matters because the alternative failure is silent. A client that sends `Range`
+/// and gets a plain `200` — legal under RFC 7233 for a server without ranges — may still
 /// trust the byte count it asked for and read that many bytes off the front of the whole
-/// body, taking the head of the file for whatever slice it actually wanted. `fsspec`'s HTTP
-/// filesystem, which is what `lsdb` and `nested-pandas` read a HATS catalog over `http(s)`
-/// through, does exactly this: it pushes `columns`/`filters` onto the url and then asks for
-/// the footer with a suffix range, and a `200` there hands it back the front of the file
-/// instead — which fails far downstream, as a parquet page thrift decode error, with nothing
-/// here to say the request was ever answered wrong.
+/// body, taking the head of the answer for whatever slice it wanted.
 fn without_ranges(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::ACCEPT_RANGES,
-        header::HeaderValue::from_static("none"),
-    );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("none"));
+    response
+}
+
+/// A parquet answer, offered as something a reader can seek in.
+///
+/// **Parquet is read footer-first or not at all**, so a body that refuses ranges is a body
+/// `pyarrow` cannot open: `fsspec` reports such a url as `partial: False`, hands back a
+/// streaming file, and the read ends at `Cannot seek streaming HTTP file`. That is what an
+/// `lsdb` client meets on every answer larger than one of its blocks — which is every
+/// partition of a real catalog — so the query surface this service publishes is unusable
+/// from the client it was built for unless the answer can be sliced.
+///
+/// The slice comes from the body this request generated: there is no cache, so a client
+/// reading a footer and then three column chunks runs the query four times. That is the
+/// price of the seek, and it is bounded by what the client asks for rather than by
+/// anything here. Two consequences worth knowing:
+///
+/// - The answer has to be **the same bytes each time** for the slices to agree, which holds
+///   because the same query over the same file is answered in the file's own order by a
+///   writer that is given the same layout. A source file that changes under the client is
+///   the one case where it does not, and no validator here could make it.
+/// - Only parquet is offered this way. It is the one format read by seeking, and — being
+///   excluded from the compression layer — the one whose `Content-Length` a client can
+///   trust. A ranged JSON body would be a slice of something a gzip layer above may then
+///   re-encode.
+fn seekable(
+    bytes: Vec<u8>,
+    headers: impl axum::response::IntoResponseParts,
+    parts: Option<&Parts>,
+) -> Response {
+    // The API mode answers a `POST` carrying a body, where a `Range` is not a request for
+    // part of anything, so it passes no parts and keeps the old refusal. Advertising ranges
+    // there would be a claim nothing on that route can honour.
+    let Some(parts) = parts else {
+        return without_ranges((headers, bytes).into_response());
+    };
+    let size = bytes.len() as u64;
+    let mut response = match parts.headers.get(header::RANGE) {
+        None => (headers, bytes).into_response(),
+        Some(asked) => match crate::app::files::wanted_range(asked, size) {
+            // Refused rather than answered whole: a client that asked for the tail and got
+            // the head cannot tell the two apart.
+            None => (
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{size}"))],
+            )
+                .into_response(),
+            // `wanted_range` validated the range against this very body, so the slice is
+            // there; `get` rather than an index so that a future caller who validates
+            // against something else gets a refusal instead of a panic.
+            Some(range) => match usize::try_from(range.start)
+                .ok()
+                .zip(usize::try_from(range.end).ok())
+                .and_then(|(start, end)| bytes.get(start..end))
+            {
+                None => ApiError::internal("cannot cut this range").into_response(),
+                Some(slice) => (
+                    StatusCode::PARTIAL_CONTENT,
+                    headers,
+                    [(
+                        header::CONTENT_RANGE,
+                        format!("bytes {}-{}/{size}", range.start, range.end - 1),
+                    )],
+                    slice.to_vec(),
+                )
+                    .into_response(),
+            },
+        },
+    };
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response
 }
 
@@ -243,10 +313,13 @@ pub(in crate::app) async fn answer(
     output: &Output,
     started: Instant,
     layout: Option<parquet::SourceLayout>,
+    parts: Option<&Parts>,
 ) -> Result<Response, ApiError> {
     let response = match output.format {
         Format::Json => json_response(result, started)?,
-        Format::Parquet => parquet_response(result, file, result.num_rows(), started, layout)?,
+        Format::Parquet => {
+            return parquet_response(result, file, result.num_rows(), started, layout, parts);
+        }
         Format::Votable => (
             attachment(votable::CONTENT_TYPE, &download_name(file, "vot")),
             counters(result, result.num_rows(), started),
@@ -300,14 +373,17 @@ fn parquet_response(
     num_rows: usize,
     started: Instant,
     layout: Option<parquet::SourceLayout>,
+    parts: Option<&Parts>,
 ) -> Result<Response, ApiError> {
     let body = parquet::encode(result, &layout.unwrap_or_default())?;
-    Ok((
-        attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
-        counters(result, num_rows, started),
+    Ok(seekable(
         body,
-    )
-        .into_response())
+        (
+            attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
+            counters(result, num_rows, started),
+        ),
+        parts,
+    ))
 }
 
 /// Name the download after the source object, so a directory of these files says which
