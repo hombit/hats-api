@@ -36,7 +36,26 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def configuration(port: int, catalogs: Path | None, tables: list[tuple[str, str]]) -> str:
+#: The region the published buckets are in. A mount naming a store takes the options a
+#: request would carry beside its url, and a bucket needs its region.
+REGION = "us-east-1"
+
+
+@dataclass(frozen=True)
+class Published:
+    """One table the suite publishes, and where the service reaches it.
+
+    A `[[tap.table]]` names a path in the service's own url space, so a catalog in a
+    bucket is published by mounting it and naming the mount — `source` is that bucket, or
+    `None` for one already under the sample mount.
+    """
+
+    name: str
+    path: str
+    source: str | None = None
+
+
+def configuration(port: int, catalogs: Path | None, tables: list[Published]) -> str:
     """The configuration file the service is started with.
 
     The limits are raised well above their defaults on purpose. A validator asks for
@@ -68,8 +87,20 @@ def configuration(port: int, catalogs: Path | None, tables: list[tuple[str, str]
             "serve = false",
             "",
         ]
-    for name, url in tables:
-        lines += ["[[tap.table]]", f'name = "{name}"', f'url = "{url}"', ""]
+    # A catalog in a bucket is reached the same way a local one is: by a mount. What it
+    # takes to read it is written there, once, and the table below names the address.
+    for table in tables:
+        if table.source is not None:
+            lines += [
+                "[[mount]]",
+                f'path = "{table.path}"',
+                f'source = "{table.source}"',
+                "serve = false",
+                f'storage = {{region = "{REGION}"}}',
+                "",
+            ]
+    for table in tables:
+        lines += ["[[tap.table]]", f'name = "{table.name}"', f'path = "{table.path}"', ""]
     return "\n".join(lines)
 
 
