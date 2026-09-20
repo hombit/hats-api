@@ -16,6 +16,7 @@ Release dates are in the UTC time zone.
 ### Changed
 
 - **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
+- A parquet answer is written with `zstd(1)`, a page index, `BYTE_STREAM_SPLIT` on float columns, row groups of 128k rows and pages of 16k rows or 256 KiB, instead of copying the source file's codec, encodings, statistics and row group size.
 
 ### Deprecated
 
