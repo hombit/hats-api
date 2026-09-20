@@ -17,9 +17,53 @@
 
 use std::collections::BTreeMap;
 
+use axum::extract::rejection::StringRejection;
+use axum::http::{HeaderMap, StatusCode, header};
+
 use crate::adql::language;
 use crate::app::routes::tap::upload::Uploads;
 use crate::error::ApiError;
+
+/// The pairs of a query string or a form body, which are the same encoding.
+pub(super) fn pairs(text: &str) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(text.as_bytes())
+        .into_owned()
+        .collect()
+}
+
+/// The pairs of a `POST`, whichever resource it arrived at.
+///
+/// Both query resources take the same body in the same encoding and refuse the same things,
+/// so this is one function rather than a copy apiece: a rule that held on `/sync` and not on
+/// `/async` would be a difference no caller could have predicted.
+pub(super) fn posted(
+    headers: &HeaderMap,
+    body: Result<String, StringRejection>,
+) -> Result<Vec<(String, String)>, ApiError> {
+    // A `multipart/form-data` body is how TAP carries an inline `UPLOAD`, which this
+    // service does not implement — so saying that is more use than reading the bytes as
+    // form-encoded and reporting that they hold no QUERY.
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type.starts_with("multipart/") {
+        return Err(ApiError::bad_request(
+            "this service takes a POST as application/x-www-form-urlencoded; multipart is \
+             for an inline UPLOAD, which it does not implement",
+        ));
+    }
+    // Asked of the rejection's status rather than by naming a variant: the body limit
+    // surfaces through whichever buffering error the extractor wraps, and the status is the
+    // part of that axum promises.
+    let body = body.map_err(|rejection| match rejection.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => ApiError::body_too_large(
+            "the request body is larger than this service accepts; send a shorter statement",
+        ),
+        _ => ApiError::bad_request("the request body is not text this service can read"),
+    })?;
+    Ok(pairs(&body))
+}
 
 /// Every name this service reads.
 const TAKEN: [&str; 10] = [

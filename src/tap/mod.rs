@@ -9,6 +9,7 @@ pub mod jobs;
 pub mod metadata;
 pub mod schema;
 pub mod tables;
+pub mod uws;
 
 pub use metadata::{ColumnMetadata, Marks, TableMetadata};
 pub use tables::{TapTable, TapTableList};
