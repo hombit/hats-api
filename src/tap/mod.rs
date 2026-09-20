@@ -5,6 +5,7 @@
 //! them, and the grammar a parameter's value is written in.
 
 pub mod dali;
+pub mod jobs;
 pub mod metadata;
 pub mod schema;
 pub mod tables;
