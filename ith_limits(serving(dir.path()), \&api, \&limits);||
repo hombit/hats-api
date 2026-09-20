@@ -1,1 +1,0 @@
-|| with_limits(serving(dir.path()), &api, &limits);//! `POST {api.prefix}/simple/hats` and `/simple/hats/plan`: the same projection and predicate

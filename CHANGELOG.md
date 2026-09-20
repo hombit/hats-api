@@ -23,6 +23,7 @@ Release dates are in the UTC time zone.
 - **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
 - A parquet answer is written with `zstd(1)`, a page index, `BYTE_STREAM_SPLIT` on float columns, row groups of 128k rows and pages of 16k rows or 256 KiB, instead of copying the source file's codec, encodings, statistics and row group size.
 - `[limits] scratch_dir` also holds `/tap/async` results, which live until a job is destroyed rather than until a request ends.
+- A job's answer is written to its file as the rows arrive, instead of built whole in memory and written at the end; `[tap.async] max_result_bytes` refuses at the byte that passes it rather than once the whole answer exists. A job's VOTable carries no `nrows` attribute, the count not being known when the document's head is written.
 
 ### Deprecated
 
