@@ -16,6 +16,7 @@ Release dates are in the UTC time zone.
 ### Changed
 
 - **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
+- A parquet answer is written with snappy, a page index, and `BYTE_STREAM_SPLIT` on float columns, instead of copying the source file's codec, encodings and statistics.
 
 ### Deprecated
 
