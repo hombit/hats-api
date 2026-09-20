@@ -9,6 +9,19 @@ from __future__ import annotations
 #: Every bucket here is in this region.
 REGION = "us-east-1"
 
+#: The ones whose partitions are directories — `hats_npix_suffix = "/"` — which no check
+#: reads through this service.
+#:
+#: LSDB reads such a partition by listing it, and the url it lists carries the query
+#: string it would have read the partition with. `fsspec`'s HTTP listing keeps only links
+#: that start with the url it was given, query string and all, so no href can match and
+#: the listing is empty whatever is served. There is no answer this service could give
+#: that would work; the query has to be dropped before the listing, in `hats` or in
+#: `fsspec`. Both routes are fine reading these off S3, which lists natively.
+DIRECTORY_PARTITIONED = frozenset(
+    {"euclid_q1", "ztf_dr23_lc", "ztf_dr23_objects", "ztf_dr24_lc", "ztf_dr24_objects"}
+)
+
 CATALOGS: dict[str, str] = {
     "delve_dr2": "s3://stpubdata/mast/public/delve/hats/delve_dr2",
     "delve_dr3_gold": "s3://stpubdata/mast/public/delve/hats/delve_dr3_gold",

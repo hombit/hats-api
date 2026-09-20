@@ -194,6 +194,17 @@ max_request_seconds = 90
 # time goes on network latency, so the reads go out together.
 max_concurrent_partitions = 4
 
+# How long a generated answer is held for the other requests that read it. "0" turns it
+# off. A parquet reader opens one url three times — a size probe, the footer, then the
+# data — and without this each of those re-runs the query and re-reads the file.
+#
+# Deliberately short: the key is the url, and nothing asks the store whether the object has
+# changed, so this is also how long a replaced file may still be answered with.
+query_cache_seconds = 240
+# The most held in such answers at once. One larger than this is never kept, and the oldest
+# go when a new one does not fit.
+max_query_cache_bytes = "2GiB"
+
 # How large a request body may be; over it, 413. "0" is no bound. What makes a body large
 # is "region" — a serialized MOC, or one circle per source of a cross-match — and no other
 # limit bounds it.

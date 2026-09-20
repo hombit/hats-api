@@ -9,7 +9,7 @@ import pytest
 from upath import UPath
 
 from lsdb_conformance import service
-from lsdb_conformance.catalogs import CATALOGS
+from lsdb_conformance.catalogs import CATALOGS, DIRECTORY_PARTITIONED
 
 @pytest.fixture(scope="session")
 def base_url(request) -> str:
@@ -26,6 +26,22 @@ def base_url(request) -> str:
     return url
 
 
+@pytest.fixture(scope="session")
+def dask_client():
+    """Two worker processes, for the checks that read partitions at once.
+
+    Processes rather than threads, because what is being exercised is several readers
+    with HTTP sessions of their own; threads in one process would share a connection
+    pool and hide exactly that. Session-scoped: a cluster costs seconds to start and
+    nothing to reuse.
+    """
+    distributed = pytest.importorskip("distributed")
+    with distributed.Client(
+        n_workers=2, threads_per_worker=1, processes=True, dashboard_address=None
+    ) as client:
+        yield client
+
+
 @pytest.fixture
 def both(base_url):
     """Ask one question twice, and hand back what each route said.
@@ -40,6 +56,8 @@ def both(base_url):
 
     def route(where):
         def open_catalog(slug: str, **kwargs):
+            if slug in DIRECTORY_PARTITIONED:
+                pytest.fail(f"{slug} is directory-partitioned; see catalogs.py for why")
             return lsdb.open_catalog(where(slug), **kwargs)
 
         return open_catalog

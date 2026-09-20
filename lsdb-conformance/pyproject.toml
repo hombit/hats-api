@@ -7,6 +7,8 @@ dependencies = [
     "lsdb>=0.10",
     # What the direct route reads S3 with; named here because `anon=True` is its option.
     "s3fs>=2024.6",
+    # The parallel read: two worker processes, which is how LSDB is actually used.
+    "distributed>=2024.6",
     "pytest>=8.0",
     "pytest-timeout>=2.3",
 ]

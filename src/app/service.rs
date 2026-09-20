@@ -27,6 +27,7 @@ use crate::access::data::DataFiles;
 use crate::access::mount::{self, Mount, MountSource, Mounts};
 use crate::access::{self, AccessPolicy};
 use crate::adql;
+use crate::app::cache;
 use crate::app::files::serve_mounted;
 use crate::app::openapi::{self, description::describe};
 use crate::app::routes::{adql::query_adql, hats, parquet::query_parquet, tap};
@@ -60,6 +61,8 @@ pub struct Service {
     /// The widest circle a query string may ask for. The file-server mode's bound alone: a
     /// url is followed rather than fanned out, so what it asks for has to fit in one answer.
     pub(in crate::app) max_query_radius_arcsec: f64,
+    /// Answers held for the rest of the requests that read them; see [`cache`].
+    pub(in crate::app) answers: Arc<cache::Answers>,
     /// How long a request has to produce an answer; `None` where the operator set no bound.
     request_timeout: Option<Duration>,
     /// How large a request body may be, in bytes; `None` where the operator set no bound.
@@ -150,6 +153,10 @@ impl Service {
             catalog_limits: limits.into(),
             adql_limits: limits.into(),
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
+            answers: Arc::new(cache::Answers::new(
+                limits.query_cache_seconds,
+                limits.max_query_cache_bytes.as_u64(),
+            )),
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
             // Saturating rather than refusing: a 32-bit host cannot hold a body that large

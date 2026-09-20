@@ -2,6 +2,7 @@
 //! divides the url space between them.
 
 mod answer;
+mod cache;
 mod files;
 pub mod listing;
 pub mod openapi;

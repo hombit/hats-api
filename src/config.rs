@@ -258,6 +258,26 @@ pub struct LimitsConfig {
     /// `limit` request, a circle being what a catalog's url narrows rather than what makes
     /// it answerable.
     pub max_query_radius_arcsec: f64,
+    /// How long a generated answer is kept for the requests that read it. `0` keeps
+    /// nothing, which turns the cache off.
+    ///
+    /// A parquet reader opens one url three times — a size probe, the footer, then the
+    /// data — and each of those is a separate request that would otherwise re-run the
+    /// query and re-read the same bytes from the store. This is how long the answer to a
+    /// query waits for the rest of the reads that belong to it.
+    ///
+    /// **Deliberately short, and time is the only validator.** The key is the request's own
+    /// path and query string; nothing asks the store whether the object has changed, since
+    /// that would be the round trip this exists to avoid. So the window is how long a
+    /// replaced file may still be answered with, and it wants to be the length of a read
+    /// rather than of a session.
+    pub query_cache_seconds: u64,
+    /// The most this service will hold in answers waiting to be read again.
+    ///
+    /// An answer larger than this is never kept, and the oldest are let go of when a new
+    /// one does not fit. Without it a service answering large queries would hold every one
+    /// of them for the whole of `query_cache_seconds`.
+    pub max_query_cache_bytes: ByteSize,
     /// How large a request body may be. `0` is no bound.
     ///
     /// It bounds the bytes a caller sends, which the expression limits cannot: those are
@@ -322,6 +342,19 @@ impl Default for LimitsConfig {
             // which is the size of question a person browsing actually asks — and still
             // small enough against a partition that it lands in a couple of them.
             max_query_radius_arcsec: 600.0,
+            // Four minutes: long enough to cover the three requests a parquet reader makes
+            // of one url, including a slow first read of a large partition, and short
+            // enough that a replaced file is answered from here for one read rather than
+            // for a session. It is a window over one client's reads, not a cache anyone
+            // else is expected to hit.
+            query_cache_seconds: 240,
+            // Sized against what an answer actually weighs rather than against a tidy
+            // number. A re-encoded partition of a real catalog runs to hundreds of
+            // megabytes, and several readers are reading at once, so a cap that holds one
+            // of them evicts on every second request and buys nothing. A cap rather than
+            // an allocation: what is held is what has been asked for in the last few
+            // minutes, which for a service nobody is reading is nothing.
+            max_query_cache_bytes: ByteSize::gib(2),
             // Axum's own default, which is what this replaces rather than widens. A body
             // here is a query and not an upload, so the figure is set by the largest thing a
             // query legitimately carries: a `region`, either as a serialized MOC or as one

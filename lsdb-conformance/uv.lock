@@ -616,6 +616,7 @@ name = "lsdb-conformance"
 version = "0.0.0"
 source = { editable = "." }
 dependencies = [
+    { name = "distributed" },
     { name = "lsdb" },
     { name = "pytest" },
     { name = "pytest-timeout" },
@@ -624,6 +625,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "distributed", specifier = ">=2024.6" },
     { name = "lsdb", specifier = ">=0.10" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-timeout", specifier = ">=2.3" },

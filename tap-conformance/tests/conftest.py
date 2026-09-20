@@ -103,24 +103,38 @@ def service(pytestconfig, data, manifest, report_dir):
     started.stop()
 
 
-def published_tables(data: Path, manifest: dict | None) -> list[tuple[str, str]]:
-    """Each table as the name and url a config entry is written from.
+def published_tables(data: Path, manifest: dict | None) -> list[under_test.Published]:
+    """Each table as the address the service publishes it at.
+
+    A published table names a path in the service's own url space, so a catalog in a
+    bucket carries the bucket along and is mounted at a path of its own; one built here
+    sits under the sample mount already.
 
     A sample catalog that was never built is left out rather than named: the service
-    checks a table's url at startup, so one missing directory would cost every other
-    table its chance to be served.
+    checks a table at startup, so one missing directory would cost every other table its
+    chance to be served.
     """
     if not manifest:
         return []
     tables = []
     for table in manifest["tables"]:
         if table.get("url"):
-            tables.append((table["name"], table["url"]))
+            tables.append(
+                under_test.Published(
+                    name=table["name"],
+                    path=f"/{table['key']}",
+                    source=table["url"],
+                )
+            )
             continue
         directory = table.get("directory")
         if directory and (data / directory).is_dir():
             below = directory.removeprefix("hats/")
-            tables.append((table["name"], f"file://{under_test.MOUNT_PATH}/{below}"))
+            tables.append(
+                under_test.Published(
+                    name=table["name"], path=f"{under_test.MOUNT_PATH}/{below}"
+                )
+            )
     return tables
 
 
