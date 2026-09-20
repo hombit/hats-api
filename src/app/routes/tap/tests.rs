@@ -1,13 +1,24 @@
-//! `/tap/sync` end to end: the parameters, the documents, and the row bound.
+//! The two TAP query resources end to end: the parameters, the documents, the row bound,
+//! and a job from its creation to its rows.
+//!
+//! Both are here rather than in a file each because almost everything under them is one
+//! path — the same statement, the same parameters, the same format table — so what these
+//! are really checking is the little that differs, and the two sitting side by side is
+//! what makes that visible.
+
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
-use crate::app::service::{Service, router};
+use crate::app::routes::tap::Jobs;
+use crate::app::service::{Service, router, router_with};
 use crate::app::testing::{serving, with_tap};
-use crate::config::{ApiConfig, LimitsConfig, ServerConfig, TapConfig, TapTableConfig};
+use crate::config::{
+    ApiConfig, AsyncConfig, LimitsConfig, ServerConfig, TapConfig, TapTableConfig,
+};
 use crate::hats;
 
 /// The catalog fixture, published as `sky.objects`.
@@ -771,4 +782,290 @@ async fn a_service_with_no_published_table_has_no_tap_resource() {
     );
     let (status, _, _) = ask(service, &[("QUERY", "SELECT 1"), ("LANG", "ADQL")]).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ------------------------------------------------------------------ `/tap/async`
+
+/// A service and the job resource behind it, kept together.
+///
+/// One `Jobs` across every request, because the store is in it: a router built fresh per
+/// request would forget each job the moment it was made.
+struct Jobbed {
+    service: Service,
+    jobs: Arc<Jobs>,
+}
+
+impl Jobbed {
+    fn new(dir: &std::path::Path) -> Self {
+        let limits = LimitsConfig::default();
+        let service = published(dir, &limits);
+        let jobs =
+            Jobs::new(service.clone(), &limits, &AsyncConfig::default()).expect("the job resource");
+        Self {
+            service,
+            jobs: Arc::new(jobs),
+        }
+    }
+
+    async fn send(&self, request: Request<Body>) -> http::Response<Body> {
+        router_with(self.service.clone(), Some(Arc::clone(&self.jobs)))
+            .oneshot(request)
+            .await
+            .expect("a response")
+    }
+
+    async fn get(&self, uri: &str) -> http::Response<Body> {
+        self.send(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+    }
+
+    /// Post form parameters, the way every TAP client sends them.
+    async fn form(&self, uri: &str, pairs: &[(&str, &str)]) -> http::Response<Body> {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs)
+            .finish();
+        self.send(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Create a job and return the path of the one that was made.
+    ///
+    /// The `303` and its `Location` are asserted here rather than in a test of their own,
+    /// so that every job below is one UWS §2.2.3.1 was satisfied by.
+    async fn submit(&self, pairs: &[(&str, &str)]) -> String {
+        let response = self.form("/api/v1/tap/async", pairs).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response.headers()[header::LOCATION]
+            .to_str()
+            .expect("a text location")
+            .to_owned();
+        let path = location
+            .split_once("/api/v1")
+            .map(|(_, rest)| format!("/api/v1{rest}"))
+            .expect("a location under the api prefix");
+        assert!(path.starts_with("/api/v1/tap/async/"), "{path}");
+        path
+    }
+
+    /// Poll the phase until the job stops, so nothing here depends on how long it took.
+    async fn settled(&self, job: &str) -> String {
+        for _ in 0..600 {
+            let phase = text_of(self.get(&format!("{job}/phase")).await).await;
+            if ["COMPLETED", "ERROR", "ABORTED"].contains(&phase.as_str()) {
+                return phase;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("the job never finished");
+    }
+}
+
+async fn text_of(response: http::Response<Body>) -> String {
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+/// A job runs and its rows come back from the resource TAP names.
+///
+/// The headers are half of what is being checked. A result is a file rather than a body
+/// built in memory precisely so that it carries a length and admits a range, and a client
+/// collecting a large answer is the reason — so a regression there is a regression in the
+/// thing the design was for, not a cosmetic one.
+#[tokio::test]
+async fn a_job_answers_its_rows_as_a_file() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id FROM sky.objects ORDER BY id"),
+            ("LANG", "ADQL"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+    let document = text_of(harness.get(&job).await).await;
+    assert!(
+        document.contains("<uws:phase>COMPLETED</uws:phase>"),
+        "{document}"
+    );
+    assert!(document.contains("/results/result\"/>"), "{document}");
+
+    let response = harness.get(&format!("{job}/results/result")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::CONTENT_TYPE], "application/x-votable+xml");
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    assert!(headers.contains_key(header::CONTENT_LENGTH));
+    assert_eq!(headers["x-hats-overflow"], "false");
+    let rows = text_of(response).await;
+    assert!(rows.contains("<FIELD name=\"id\" ID=\"id\""), "{rows}");
+    assert!(rows.contains("<TR>"), "{rows}");
+}
+
+/// The half a body built in memory could not offer.
+///
+/// A client resuming a large download asks for a range, and a `200` carrying the whole file
+/// where a `206` was asked for is the wrong-answer shape this service refuses everywhere
+/// else — a reader that trusts the range gets the head of the file and nothing says so.
+#[tokio::test]
+async fn a_job_result_is_served_by_range() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+
+    let whole = text_of(harness.get(&format!("{job}/results/result")).await).await;
+    let response = harness
+        .send(
+            Request::builder()
+                .uri(format!("{job}/results/result"))
+                .header(header::RANGE, "bytes=0-19")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    let part = text_of(response).await;
+    assert_eq!(part.len(), 20, "{part:?}");
+    assert!(whole.starts_with(&part), "{part:?}");
+}
+
+/// TAP §2.7: a parameter is enforced when the query runs, not when the job is made.
+///
+/// So a submission with no `QUERY` is a job, and the refusal is that job's. Getting this
+/// the other way round — refusing the `POST` — breaks the one workflow the rule exists for,
+/// which is creating a job `PENDING` and posting its parameters one at a time.
+#[tokio::test]
+async fn a_missing_parameter_is_the_jobs_error_and_not_the_submissions() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    // Accepted, though there is nothing to run.
+    let job = harness.submit(&[("LANG", "ADQL")]).await;
+    assert_eq!(
+        text_of(harness.get(&format!("{job}/phase")).await).await,
+        "PENDING"
+    );
+
+    let response = harness
+        .form(&format!("{job}/phase"), &[("PHASE", "RUN")])
+        .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(harness.settled(&job).await, "ERROR");
+
+    // And the reason is readable where TAP §2.2 says it is, as the document DALI §4.4
+    // specifies rather than as this service's own JSON.
+    let response = harness.get(&format!("{job}/error")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let document = text_of(response).await;
+    assert!(document.contains("<VOTABLE"), "{document}");
+    assert!(
+        document.contains("name=\"QUERY_STATUS\" value=\"ERROR\""),
+        "{document}"
+    );
+    assert!(document.contains("QUERY"), "{document}");
+    // A failed job has no rows anywhere, so the result resource is not a place to look.
+    assert_eq!(
+        harness.get(&format!("{job}/results/result")).await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// The job list is a document and describes nothing, whatever is in the store.
+///
+/// UWS §2.2.2.1 asks for the jobs "that the client can see in the current security
+/// context", and §3 leaves what that means to the service. With no authentication a job is
+/// visible to whoever holds its id, so an anonymous caller's context holds nothing — the
+/// alternative being that every caller is handed every other caller's results.
+#[tokio::test]
+async fn the_job_list_describes_no_one_elses_job() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[("QUERY", "SELECT id FROM sky.objects"), ("LANG", "ADQL")])
+        .await;
+    let id = job.rsplit('/').next().expect("an id");
+
+    let response = harness.get("/api/v1/tap/async").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let document = text_of(response).await;
+    assert!(document.contains("<uws:jobs"), "{document}");
+    assert!(!document.contains("<uws:jobref"), "{document}");
+    assert!(!document.contains(id), "{document}");
+    // And the holder of the id still reaches it, which is what makes the empty list a
+    // policy rather than a hole.
+    assert_eq!(harness.get(&job).await.status(), StatusCode::OK);
+}
+
+/// An id naming no job is a `404`, and so is a malformed one.
+///
+/// The same answer to both, deliberately. UWS §3 asks for a `403` where a caller may not
+/// see a job, which would confirm that the id exists — and the id is the whole of the
+/// protection, so telling the two apart tells whoever is guessing which guess was closer.
+#[tokio::test]
+async fn an_id_naming_no_job_says_nothing_about_which_ids_exist() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    // A real job first, so this cannot pass against a service with no resource at all.
+    let job = harness
+        .submit(&[("QUERY", "SELECT id FROM sky.objects"), ("LANG", "ADQL")])
+        .await;
+    assert_eq!(harness.get(&job).await.status(), StatusCode::OK);
+
+    for id in ["AAAAAAAAAAAAAAAAAAAAAA", "short", "../../../etc/passwd"] {
+        let response = harness.get(&format!("/api/v1/tap/async/{id}")).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{id}");
+    }
+}
+
+/// Destroying a job forgets it and takes its rows with it.
+///
+/// UWS §2.1.7: "any results from the job are destroyed and storage reclaimed; the service
+/// forgets that the job existed". A record that went while its file stayed would be a
+/// result nothing points at, held until the process ends.
+#[tokio::test]
+async fn destroying_a_job_takes_its_result_too() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+    let id = job.rsplit('/').next().expect("an id");
+    let file = harness
+        .jobs
+        .result_path(id)
+        .await
+        .expect("a written result");
+    assert!(file.exists(), "{}", file.display());
+
+    let response = harness
+        .send(
+            Request::builder()
+                .method("DELETE")
+                .uri(&job)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(harness.get(&job).await.status(), StatusCode::NOT_FOUND);
+    assert!(!file.exists(), "the rows outlived the job that held them");
 }

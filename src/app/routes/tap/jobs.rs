@@ -104,6 +104,20 @@ impl Jobs {
         self.runner.expire().await;
     }
 
+    /// Where a finished job's rows are on disk.
+    ///
+    /// For a test that a destroyed job takes its file with it, which is the one thing about
+    /// this resource no response can show: a record that went while its file stayed answers
+    /// `404` either way.
+    #[cfg(test)]
+    pub(in crate::app) async fn result_path(&self, id: &str) -> Option<std::path::PathBuf> {
+        let id: JobId = id.parse().ok()?;
+        let job = self.store.get(&id).await.ok()??;
+        job.product
+            .as_ref()
+            .map(|product| self.results.path(&product.file))
+    }
+
     /// The job, or the `404` that an id naming none gets.
     async fn job(&self, id: &str) -> Result<Job, ApiError> {
         let missing = || ApiError::not_found("no job of that name");
