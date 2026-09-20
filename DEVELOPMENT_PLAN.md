@@ -57,7 +57,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.6 | `csv` and `tsv` | done | |
 | 11.13 | a region over `Float32` coordinates | done | |
 | 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
-| 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one. The shape is settled — a job is a record, a store trait over it, the runner process-local — and §0.2 is what it reopens. Was §9.4 |
+| 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. Inline `UPLOAD` is still §11.11's, and a job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
 | 11.9 | `/examples` | deferred | waits for §6.1's catalog metadata cache. A menu TOPCAT offers, not something a client needs to work, and every example in it is generated from a published catalog |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
@@ -69,10 +69,15 @@ what is deferred.
 
 ## 0. Invariants
 
-1. **The service only ever reads.** No endpoint writes, no mount is writable. Mounts
-   therefore carry no `readonly` flag. Adding writes is a new document, not a new flag.
-2. **Stateless per request.** No session cache, no catalog registry across requests.
-   §6's caches must be evictable, bounded, and correct when empty.
+1. **The service reads what a caller names, and writes only its own scratch.** No endpoint
+   writes to a store, no mount is writable, so mounts carry no `readonly` flag. What it does
+   write is under `[limits] scratch_dir`, at a path of its own choosing: a materialized copy,
+   and a job's answer. The invariant is *where*, not *whether*, and a caller's url is never
+   the destination.
+2. **A request keeps nothing; a job is the caller's own.** No session cache, no catalog
+   registry across requests, and §6's caches must be evictable, bounded, and correct when
+   empty. The one thing that outlives a request is a job the caller asked for and can
+   destroy — it is in this process only, so it belongs to one replica and a restart loses it.
 3. **Nothing reaches an object store without passing its mode's policy.**
    `AccessPolicy::authorize` in `storage::open` is the only route to a store, and a
    `file://` url reaches a mount's `path` and nothing else.
@@ -273,11 +278,11 @@ underneath either way.
 
 ### 7.2 Long requests
 
-**The job interface is TAP's, and it is §11.8.** UWS specifies its shape, so it gets built
-once there rather than invented here and then reconciled — and the answers below are what a
-request outside TAP gets, none of them being a job. Everything in this section stands
-whether or not §11.8 has landed: a job is a second answer to a slow request and not a
-replacement for making one fast.
+**The job interface is TAP's, and it is built.** A slow query submitted to `/tap/async`
+has somewhere to go; a slow request anywhere else does not, and the answers below are what
+those get. None of this section is superseded by it: a job is a second answer to a slow
+request rather than a replacement for making one fast, and a caller outside TAP has no
+job to be given.
 
 | slow case | decomposable? | answer |
 |---|---|---|
@@ -593,25 +598,24 @@ MAST — before any of this was written, and what they have in common is what se
 A specification marks everything MUST or SHOULD and cannot say which of it a client
 actually needs; four independent services agreeing does say so.
 
-**Tier 1 is `/async`, alone.** All four implement it, so by that rule it belongs with
-everything already built and is held back by one thing only: it is a job model, which is
-state, against a service whose every answer today is collected inside one request future.
-It is the one piece of this phase that is a design question rather than a mapping.
+Tier 1 was `/async`, alone, and it is built. What is left is what the four reference
+services do *not* agree on, so the ordering rule that set tier 1 says nothing about any of
+it and each piece has to argue for itself.
 
-**Everything else is later**, with one piece taken out of it and moved ahead of tier 1:
-naming a catalog by url as `UPLOAD` (§11.11), which is the only way a TAP client can ask
-about a catalog this service does not publish, and which `/adql` already answers in its own
-body. Inline upload stays later, IRSA offering none and MAST half, so the ecosystem has not
-settled it and the four agree only on *declaring* what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to work. The
-formats this service has of its own — `parquet`, `json` — and how a nested column is
-declared are questions no reference service can be asked, because none of them has such a
-column.
+**Naming a catalog by url as `UPLOAD` (§11.11)** came ahead of tier 1 and is built: it is
+the only way a TAP client can ask about a catalog this service does not publish, and
+`/adql` already answered it in its own body. Inline upload stays later, IRSA offering none
+and MAST half, so the ecosystem has not settled it and the four agree only on *declaring*
+what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to
+work. The formats this service has of its own — `parquet`, `json` — and how a nested column
+is declared are questions no reference service can be asked, because none of them has such
+a column.
 
-**Until Tier 1 lands this is deliberately not a conforming TAP service, in exactly one
-place.** `/async` is a MUST (TAP §2.2), and what that costs is in the README rather than
-left to be discovered from a validator: a query too slow for `max_request_seconds` has
-nowhere to go, because the resource a client would be sent to does not exist, and the
-answer is to make the query smaller.
+**What a job still cannot do is carry an operator's credential**, which is not a gap in the
+job model but the same one `/sync` has: a `[[tap.table]]` takes no storage options, and a
+caller's own credential reaches a job through `UPLOAD_STORAGE_OPTION` as it does through
+`/sync`. And a job belongs to one process, so a deployment behind more than one replica
+needs sticky routing until something implements `JobStore` durably.
 
 
 ### 11.7 Simple Cone Search, both versions
@@ -692,291 +696,6 @@ nothing here encodes a url space this step has not decided. The 1.03 half goes t
 `pyvo.dal.SCSService` and is calibrated against VizieR's cone search; the 2.0 half asks over
 HTTP because no client implements a draft yet, and each of its checks names the clause it
 came from so that what has to move when the draft moves is findable.
-
-### 11.8 `/async` and UWS — tier 1
-
-The one MUST this service does not answer, and the whole of tier 1. Every reference service
-implements it, so there is no reading of the evidence in which it is optional; what holds it
-back is that it is the only part of this phase that is a design question rather than a
-mapping.
-
-A job model is state — creation, phases, polling, results that outlive the request that
-asked for them, destruction times and their collection — against a service whose every
-answer today is collected inside one request future. It is where §5.3's and §7.2's
-no-job-queue decision is revisited, where §0.2 is reopened, and where a job id becomes an
-authorization surface. UWS specifies the shape, so it gets built once rather than invented
-and then reconciled.
-
-#### One execution path, two resources
-
-`/sync` today reads the parameters, resolves the format, translates, opens the tables, runs
-and encodes, and none of that knows it is inside a request future. It comes out as one
-callable taking a `Service`, the parameters and a `Limits`, and producing the encoded answer
-with its content type and its overflow flag. `/sync` awaits it and puts that in the response;
-`/async` spawns it and puts it in a file. The uploads, `MAXREC`, the `TAP_SCHEMA` tables and
-the format table then answer the same on both resources by construction, rather than by a
-test that the two have not drifted.
-
-What the two do *not* share is when the parameters are checked. TAP §2.7: the requirements
-on them "must be satisfied (and errors returned if not) only when the query is run (in the
-sense of UWS job execution)". So a `POST /async` carrying no `QUERY` creates a job and
-redirects; the refusal is the job's, at `RUN`, as `ERROR` with the document at `/error`. A
-job therefore holds the pairs as the caller sent them and `Parameters::read` runs inside the
-runner — with one exception, and it is the only thing read at submission:
-`UPLOAD_STORAGE_OPTION` is lifted out of the pairs as they arrive and put in the runner's
-table, because a credential is the one thing that must not be written down. Checking it is
-still the runner's; keeping it is not the store's.
-
-The same sentence is why the result is encoded at completion into the format
-`RESPONSEFORMAT` named — DALI §3.4.3 makes it "the content-type of the result resource(s)
-the client can retrieve", which is a decision taken at run time and not at submission.
-
-#### A job is data; running one is not
-
-Two things, with two lifetimes, and the split is the whole of what makes the store
-replaceable.
-
-- **The record.** Id, phase, the three timestamps, execution duration, destruction time, the
-  parameters as sent, the error summary, and where the result is — its content type, its
-  length, and the name of the file holding it. Every field a value: no handles, no futures,
-  nothing that cannot be written to a row.
-- **The runner.** A process-local table keyed by job id, holding the abort handle and the
-  job's credentials, plus a semaphore for how many may execute at once. Never stored — a
-  restart has no running jobs by definition, so there is nothing for a persistent store to
-  reconstruct.
-
-The store is a trait over `create`, `get`, `list`, `apply`, `delete` and `sweep`, with
-`apply` taking a closed enum of transitions — run, started, completed, failed, aborted,
-destruction, execution duration, parameter — and returning the resulting record. A
-transition rather than a read-modify-write is what lets one `Mutex<HashMap>` and one
-`UPDATE … WHERE phase = ?` both be atomic without a version column and without an
-optimistic-retry loop at every call site, and it keeps the state machine in one place that
-both implementations call. What it costs is that this is not a general key-value store,
-which it was never going to be.
-
-#### The result is a file, and it is served as one
-
-**A result goes to disk and never into the store.** What the store holds is a name, a
-content type and a length; the bytes are a file under `[limits] scratch_dir`, beside the
-copies `MaterializingStore` already puts there. One root, two kinds of thing under it, and
-two budgets on one disk: `max_materialize_total_bytes` bounds the ephemeral copies and the
-job quota bounds the results, neither knows about the other, and an operator sizing the
-volume adds them. A results volume separate from the scratch one is the key to add if
-anybody wants it, and not before. Keeping them in the record instead would mean a process holding every live job's answer
-at once — the retention, not the peak, being what would exhaust it — and would put a blob in
-the thing designed to become a row.
-
-`GET /async/{id}/results/result` serves that file statically. Two things come with that and
-neither is available to a body built in memory: a `Content-Length`, and a ranged read, so a
-client resuming a large download is doing what it already does against a mount. The
-compression predicate is unchanged and already right — it excludes by content type, so a
-parquet result served this way keeps its length and its ranges for the same reason a mounted
-parquet file does.
-
-What the files need, each rule a failure that has a name elsewhere in this document:
-
-- **A file's presence means a complete result.** Written under a temporary name and renamed
-  on completion, so a crash mid-write leaves nothing a later request can read as an answer —
-  a truncated document being one a client cannot tell from a whole one.
-- **Each run holds a lock beside its directory, and the sweep is `flock` and not a
-  heuristic.** A starting service takes a non-blocking exclusive lock on every other run's
-  lock file; one it can take is held by no live process, so that run is dead and its
-  directory goes. The kernel releases a lock however the process ended — a clean exit,
-  `SIGTERM`, the OOM killer, `kill -9`, the power going out — and a reboot leaves none at
-  all, which is exactly the liveness signal a sweep needs and the one thing a destructor
-  cannot be.
-
-  **A destructor is not the mechanism, and `TempDir` was the wrong answer.** It cleans up
-  only on an orderly `Drop`, which is the case that least needs cleaning; `SIGTERM` is how a
-  container is stopped and runs none, so results would leak on every ordinary deployment
-  rather than only on a crash. Sweeping by age or by "every name that is not mine" is worse
-  than leaking: both destroy the results of a process still serving them, which a restart
-  overlapping a draining old one does every time.
-
-  The lock goes in before the directory, never after, so there is no moment where a
-  directory exists that nothing can prove is dead. A `Drop` still takes this run's own
-  directory on an orderly exit — not what the design rests on, but it leaves the ordinary
-  case with nothing for the next service to find.
-- **Where there is no `flock` the sweep is skipped and the service says so once.** A crash on
-  such a platform leaves a directory nothing reclaims, which is worth a warning at startup
-  and is not worth refusing to run over. Unix has it; nothing else here is tested.
-- **Making the directory is the check that results can be written**, and it happens at
-  startup because `/async` is not a resource an operator can decline. It asks exactly what a
-  probe file would ask, so there is no probe file.
-- **No mount may publish it.** A results directory served by the file server hands every
-  result to anyone who can list a directory, which is the whole of the id's protection gone.
-  It is the same shape as the mount-inside-the-API-prefix check and belongs beside it, at
-  startup.
-- **Destroying a job deletes its file**, and the byte budget is therefore a disk quota rather
-  than a memory one.
-
-**What this does not fix is the peak.** `output::votable::encode` and its siblings take a
-collected `QueryResult` and build the whole document in memory, so a job still holds its
-rows and its rendered answer while it is being written. Disk removes the copy held for the
-job's *lifetime*, which is minutes to a day and multiplied by every live job; the seconds-long
-peak while one result is encoded is unchanged, and making it small is the streaming writer in
-§7.2 rather than anything here. Say which of the two a bound is about before setting it.
-
-#### The id is the only thing protecting a job
-
-UWS §2.2.1 asks only that the identifier "should be a legal URI path element". Everything
-else here follows from §3, whose only access control is authentication and a `403`: with
-neither, the id *is* the capability. So it is 128 bits from the OS CSPRNG, written
-base64url without padding — 22 characters. Never a counter, a timestamp, a UUIDv7 or a
-ULID, each of which is guessable to within a window.
-
-Three consequences, and each is a decision rather than a fallout.
-
-- **The job list is empty.** §2.2.2.1 asks for "a list (which may be empty) of all the jobs
-  … that the client can see in the current security context", and §3 leaves the policy to
-  the service, noting that a user "might only obtain a restricted list of jobs within the
-  joblist". The policy here is that a job is visible to whoever holds its id, and an
-  anonymous caller's context holds nothing — so `GET /async` is a well-formed `uws:jobs`
-  describing none. `PHASE`, `AFTER` and `LAST` are read and answered rather than refused.
-  This is the standard's own allowance and not a divergence.
-- **`404`, never `403`.** §3 asks for a `403` where a caller may not see a job, which would
-  confirm that the id exists — and the id is the whole of the protection. §2.2 already
-  answers an absent job with `404`, so both cases answer alike and neither is
-  distinguishable from the other. That one *is* the divergence, and it is the only one.
-- **No credential is ever stored or echoed.** `UPLOAD_STORAGE_OPTION` carries a secret by
-  design, and a job outlives the request that sent it, so the value goes in the runner's
-  process-local table and never into the record — a row-backed store then inherits no
-  secret and can never write one to disk. The parameters list omits the parameter entirely:
-  §2.1.11 calls it "an enumeration of the Job parameters" and requires no completeness, so
-  withholding needs no masking syntax invented for it. `UPLOAD` and `UPLOAD_TYPE` are echoed,
-  `refuse_userinfo` being what makes a caller's url safe to print — but the rendering goes
-  through the same "as far as it is safe to print" path, since a job is readable before it
-  has been run and so before that refusal has happened.
-
-#### The phases, and what a bound does
-
-`PENDING`, `QUEUED`, `EXECUTING`, `COMPLETED`, `ERROR`, `ABORTED`. `HELD` and `SUSPENDED`
-describe a scheduler this has not got; `UNKNOWN` describes a service that has lost track of
-a job, which an in-process store cannot do. **`ARCHIVED` is not used**: §2.1.3 describes it
-as "an alternative that the server may choose" at destruction time, so nothing requires it,
-and a phase kept for one eviction path is a state every client and every test has to know
-about. A job over the byte budget is destroyed, which is what §2.1.7 describes in full —
-execution aborted, results destroyed, "the service forgets that the job existed".
-
-The clock is `executionduration`, which UWS defines "in real clock seconds" and whose being
-exceeded "should automatically abort the job, which has the same effect as when a manual
-'Abort' is requested" — so `ABORTED`, not `ERROR`. It replaces `max_request_seconds` for the
-work; the router's clock still bounds every HTTP request against the resource, which is why
-`WAIT` is capped below it. **CPU time is not a bound that can be offered**: it is not
-observable per task, and what actually bounds CPU here is the concurrent-job count against
-DataFusion's `target_partitions`. Say that rather than add a knob nothing enforces.
-
-`WAIT` is UWS 1.1's and belongs to the job resource alone, not to `/phase`; it blocks only
-in `PENDING`, `QUEUED` and `EXECUTING`, `-1` means indefinitely, and a service "may impose a
-maximum blocking time" — so the cap is the standard's own allowance rather than a
-shortfall.
-
-What a job may spend is `[limits]`'s, except where `[tap.async.limits]` overrides a field,
-each defaulting to its sync value — one list of bound names, and an operator writes only the
-difference. `max_partitions` is the field this exists for: a job is what a request too wide
-for one response future turns into, so the partition count is what async buys. The counters
-— `max_bytes_fetched`, `max_rows`, `max_query_memory_bytes` — are unchanged and per job.
-
-**There is no switch turning it on.** TAP §2.2 makes `/async` a MUST alongside §2.1's
-`/sync`, so a TAP surface has both or is not one — an operator who publishes a
-`[[tap.table]]` is publishing a job resource, and the only question left is what it may
-spend. What already decides whether there is any TAP at all is the table list: no
-`[[tap.table]]`, no resources, which is the existing rule and is unchanged. An operator with
-no room for jobs sets the bounds low; an operator who cannot host them at all cannot publish
-TAP, and that is the standard's answer rather than this service's.
-
-The job system's own knobs go in `[tap.async]`: how many records are kept, how many run at
-once, the disk quota over all of them and the ceiling on one, the default and maximum
-execution duration, the default and maximum destruction time, and the cap on `WAIT`. **Not
-where the results go** — that is `[limits] scratch_dir`, which already exists and already
-means "where this service puts bytes on local disk". A second path key would be a second
-answer to one question, and an operator pointing one at a volume and forgetting the other is
-the failure it would buy. Two pressures with two answers, and they must not be
-collapsed: the disk quota destroys the oldest completed job, while the record count refuses a
-new job with `503` — a caller can retry a refusal, and a burst of submissions must not be
-able to take away results that have already been promised.
-
-**The quota is disk and the engine's bounds are memory, and neither stands in for the
-other.** `max_query_memory_bytes` is DataFusion's working set while a job runs;
-`max_rows` is how large an answer may be; the quota is how much finished answer may be
-lying around. A single job can be within all three and a hundred of them still fill a disk,
-which is what the quota alone catches.
-
-#### When something fails
-
-**Every failure has to land on a phase.** Nobody is waiting on an HTTP request, so there is
-no status to return and no caller to tell — a job that fails and does not say so is a job
-that polls as `EXECUTING` until its execution duration runs out, which a client cannot tell
-from a slow query. That is the shape to check each of these against.
-
-- **The query fails** — bad ADQL, a table that is not there, a store that refuses. `ERROR`,
-  with the `ApiError` the sync route would have returned as the `errorSummary` and as the
-  DALI document at `/error`. A failed job has no result, so `/results/result` is a `404` and
-  `/error` is where the answer is.
-- **A bound is reached.** `ERROR` naming the bound, except the clock, which is `ABORTED`.
-  `max_rows` is the one that does not fail at all: under TAP it truncates and marks
-  `OVERFLOW`, the same as on `/sync`.
-- **The result cannot be written** — no space, or over the per-result ceiling. `ERROR` naming
-  it, discovered while writing rather than predicted, since the size is not known until the
-  document is made.
-- **The job task panics.** The runner keeps the `JoinHandle` and records the outcome,
-  `JoinError::is_panic` included, as `ERROR` with a message of this crate's own. A spawned
-  task nobody joins is the case that strands a job in `EXECUTING`, and it is the only failure
-  here that leaves no other trace.
-- **A transition cannot be recorded.** The work is done and the store will not take the
-  result — which an in-process one cannot do, and a row-backed one can. There is nothing to
-  hand back: log it loudly, leave the phase, and let the clock abort it. Worth knowing before
-  choosing the second implementation rather than after.
-- **The process dies.** Everything goes — the record with it, the store being in-process — so
-  a client polling gets `404`, which is the destroyed-job case the standard already describes.
-  A clean shutdown takes the results directory with it and a crash does not, which is what
-  the next service's sweep is for.
-- **`DELETE` while running.** Abort the handle, drop the record, delete the file. The
-  DataFusion stream unwinds on drop, which is the same mechanism a `limit` already stops a
-  catalog read with.
-
-#### What stops being true
-
-- **§0.1 is rewritten rather than deleted.** No endpoint writes to a store and no mount is
-  writable, still. What changes is that the service writes a result to a scratch directory of
-  its own, at a path it chooses — which is the same kind of write `MaterializingStore`
-  already makes, and the reason the invariant has to say *where* rather than *whether*.
-- **§0.2 is rewritten rather than deleted.** Nothing is cached across requests still holds.
-  What changes is that a caller's own job outlives the request that made it.
-- **One process.** A job created on one replica is a `404` on another, so a multi-replica
-  deployment needs sticky routing until the store is shared. That is the concrete reason the
-  trait is worth its cost before there is a second implementation, and it belongs in the
-  README beside the deployment notes rather than being discovered.
-- **A restart loses every job**, which is the destroyed-job case the standard already
-  describes and answers `404`.
-- **`{api.prefix}/tap/async` stops answering `404`**, and the README's sentence about a
-  query too slow for `max_request_seconds` having nowhere to go stops being true.
-
-**`/capabilities` needs nothing, and that is a consequence of both resources being
-mandatory.** The TAP capability declares one interface with `use="base"` and a client derives
-`/sync` and `/async` from it, so with both always present there is nothing conditional to
-advertise and nothing that could come to disagree with what answers. What is left is
-cosmetic: TAPRegExt also allows a `use="full"` interface per resource, the way the three VOSI
-capabilities here already declare one, and whether the reference services bother is worth a
-look when the document is next touched — it changes what a validator says and nothing a
-client does.
-
-The corollary is the state today, and it is already written down at the head of §11: a client
-reading `use="base"` will try `/async` and get a `404`. That is not a missing declaration to
-be added, because there is no declaration that would withhold it — it is the missing resource,
-and this section is what closes it.
-
-`tap-conformance/tests/test_async.py` is the measurement, and it is written and failing.
-Thirteen checks against a service with no `/async`, none of them passing on a blanket 404 —
-every one submits a real job first — and each naming the clause it came from. What they ask
-is what `taplint`'s `JobStage` does not: it reads `/phase`, `/executionduration`,
-`/destruction`, `/quote` and the parameters list, POSTs a `runId` and `RUN` and `ABORT`, and
-deletes, and it never fetches the job list, never fetches `/error` or `/results`, never
-*writes* a destruction time or an execution duration, and never asks what becomes of a job
-submitted with no `QUERY`. The job-list checks deliberately do not require a submitted job to
-appear, §2.2.2.1's "may be empty" and "the current security context" putting that with the
-service's policy — so the visibility decision above is measured for conformance and not
-against one reading of it.
 
 ### 11.9 `/examples`
 

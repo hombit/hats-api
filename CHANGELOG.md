@@ -12,11 +12,14 @@ Release dates are in the UTC time zone.
 - `[[mount]] storage`, the options that reach a `source` in a store: the same names a request writes beside its url.
 - A served mount over a store answers `Range`, `If-None-Match` and `HEAD` against the origin, and lists a directory one level at a time.
 - `[limits] query_cache_seconds` and `[limits] max_query_cache_bytes`: an answer is held for the requests that read it. `0` seconds is off.
+- `/api/v1/tap/async`: ADQL queries as UWS jobs — submit, poll, collect, abort, destroy. TAP's one remaining MUST.
+- `[tap.async]`, and `[tap.async.limits]` for the `[limits]` fields a job answers to differently.
 
 ### Changed
 
 - **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
 - A parquet answer is written with `zstd(1)`, a page index, `BYTE_STREAM_SPLIT` on float columns, row groups of 128k rows and pages of 16k rows or 256 KiB, instead of copying the source file's codec, encodings, statistics and row group size.
+- `[limits] scratch_dir` also holds `/tap/async` results, which live until a job is destroyed rather than until a request ends.
 
 ### Deprecated
 
@@ -31,6 +34,7 @@ Release dates are in the UTC time zone.
 - A query on a file-server url that narrows nothing answers with the file, instead of a re-encoded copy of it.
 - A parquet query answer answers `Range`, instead of `Accept-Ranges: none`.
 - A name with nothing under it in a store-backed mount answers `404`, instead of `200` and an empty listing.
+- `SIGTERM` shuts the service down gracefully, instead of terminating it and cutting requests in flight.
 
 ### Security
 

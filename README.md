@@ -817,6 +817,7 @@ VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for
 | | |
 |---|---|
 | `/api/v1/tap/sync` | run one ADQL query, `GET` or `POST` |
+| `/api/v1/tap/async` | submit a query as a job, poll it, collect the rows |
 | `/api/v1/tap/capabilities` | what the service supports |
 | `/api/v1/tap/availability` | whether it is up |
 | `/api/v1/tap/tables` | tables and columns; `?detail=min` for names only, `…/tables/{name}` for one |
@@ -832,7 +833,13 @@ with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a catalog URL as
 `MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
 table. `MAXREC=0` returns the columns alone, which is how a client inspects a table.
 
-Queries run synchronously and have to finish inside `max_request_seconds`. `/async`,
+`/sync` answers inside `max_request_seconds`. A query that will not fit goes to `/async`
+instead: `POST` the same parameters, follow the `303` to the job, poll `…/phase` until it
+reads `COMPLETED`, and collect the rows from `…/results/result`. That is UWS, so TOPCAT and
+`pyvo` drive it for you. A job holds its rows as a file, so a large answer can be fetched by
+range and resumed, and `[tap.async]` is where an operator lets one read more than a `/sync`
+request may.
+
 `/examples` and uploading a table in the request itself are still to come.
 
 ## What a request may spend
@@ -848,6 +855,9 @@ Three bounds, whichever is reached first, all in `[limits]`:
 Only the first can act before work happens; the other two are counters, so a request
 overshoots them by whatever the reads already in flight go on to fetch. Nothing is returned
 part-way: a truncated answer is one a caller cannot tell from a complete one.
+
+Those bound one request. A `/tap/async` job answers to `[tap.async]` instead, and to
+`[tap.async.limits]` wherever an operator set it above these.
 
 **A `limit` is the other bound that acts before work happens.** The read stops as soon as
 enough rows are in, so the limit bounds the request and `max_partitions` joins the

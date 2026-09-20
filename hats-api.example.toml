@@ -146,6 +146,28 @@ filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 # name = "ztf.dr24_lc"
 # path = "/hats/ztf_dr24_lc"
 
+# What a query submitted to /tap/async may spend. There is no switch for it: TAP requires
+# /sync and /async both, so publishing a table publishes a job resource too.
+[tap.async]
+max_jobs = 256                       # records kept; full refuses a new job with 503
+max_running = 2                      # executing at once, the rest wait in QUEUED
+max_result_bytes = "1GiB"            # one answer
+max_result_bytes_total = "20GiB"     # every held answer; over it the oldest finished job goes
+default_execution_seconds = 600      # a job's own clock, which a client may raise…
+max_execution_seconds = 3600         # …to here
+default_destruction_seconds = 86400  # how long a finished job and its rows are kept…
+max_destruction_seconds = 604800     # …at most
+max_wait_seconds = 30                # the longest a blocking GET's WAIT may hold
+
+# What a job's query may spend where it should differ from [limits]; absent is the [limits]
+# value. This is what async buys — a job is not answering inside one response, so it can
+# read partitions a /sync request never could.
+#
+# [tap.async.limits]
+# max_partitions = 100000
+# max_rows = 10000000
+# max_query_memory_bytes = "2GiB"
+
 [limits]
 # A plain HTTP server may ignore a Range request and answer with the whole object. Such
 # an object is copied to scratch once and read from local disk after that. Only http(s)
@@ -157,8 +179,9 @@ max_materialize_bytes = "2GiB"
 max_materialize_total_bytes = "8GiB"
 # How many copies may be in flight at once. Beyond this a request waits.
 max_concurrent_materializations = 4
-# Where the copies go. Absent is the system temporary directory. Each is deleted when
-# the request that made it ends, cancelled or not.
+# Where the copies go, and where a /tap/async job writes its rows. Absent is the system
+# temporary directory. A copy is deleted when the request that made it ends, cancelled or
+# not; a job's rows when the job is destroyed, and a whole run's when the service stops.
 # scratch_dir = "/var/tmp/hats-api"
 
 # The most of a HATS catalog's "dataset/_metadata" that will be fetched to learn its

@@ -105,8 +105,8 @@ impl Default for AsyncConfig {
             // Two, because a job is a whole query engine: each one is already reading
             // partitions in parallel, so the concurrency that matters is inside one job.
             max_running: 2,
-            max_result_bytes_total: ByteSize::gib(2),
-            max_result_bytes: ByteSize::mib(512),
+            max_result_bytes_total: ByteSize::gib(20),
+            max_result_bytes: ByteSize::gib(1),
             default_execution_seconds: 600,
             max_execution_seconds: 3600,
             default_destruction_seconds: 86_400,
