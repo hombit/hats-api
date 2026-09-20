@@ -203,7 +203,7 @@ max_concurrent_partitions = 4
 query_cache_seconds = 240
 # The most held in such answers at once. One larger than this is never kept, and the oldest
 # go when a new one does not fit.
-max_query_cache_bytes = "512MiB"
+max_query_cache_bytes = "2GiB"
 
 # How large a request body may be; over it, 413. "0" is no bound. What makes a body large
 # is "region" — a serialized MOC, or one circle per source of a cross-match — and no other

@@ -348,10 +348,13 @@ impl Default for LimitsConfig {
             // for a session. It is a window over one client's reads, not a cache anyone
             // else is expected to hit.
             query_cache_seconds: 240,
-            // A few large answers rather than many: the point is to survive the reads of
-            // the answer being made now, and an answer nobody is part-way through reading
-            // is not worth holding.
-            max_query_cache_bytes: ByteSize::mib(512),
+            // Sized against what an answer actually weighs rather than against a tidy
+            // number. A re-encoded partition of a real catalog runs to hundreds of
+            // megabytes, and several readers are reading at once, so a cap that holds one
+            // of them evicts on every second request and buys nothing. A cap rather than
+            // an allocation: what is held is what has been asked for in the last few
+            // minutes, which for a service nobody is reading is nothing.
+            max_query_cache_bytes: ByteSize::gib(2),
             // Axum's own default, which is what this replaces rather than widens. A body
             // here is a query and not an upload, so the figure is set by the largest thing a
             // query legitimately carries: a `region`, either as a serialized MOC or as one
