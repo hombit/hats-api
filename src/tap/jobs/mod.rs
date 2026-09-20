@@ -7,9 +7,11 @@
 mod id;
 mod job;
 mod memory;
+mod results;
 mod store;
 
 pub use id::JobId;
 pub use job::{Change, Job, Phase, Product};
 pub use memory::{Bounds, MemoryJobStore};
+pub use results::{Results, Written};
 pub use store::JobStore;

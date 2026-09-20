@@ -778,20 +778,19 @@ What the files need, each rule a failure that has a name elsewhere in this docum
 - **A file's presence means a complete result.** Written under a temporary name and renamed
   on completion, so a crash mid-write leaves nothing a later request can read as an answer —
   a truncated document being one a client cannot tell from a whole one.
-- **Each run writes into a directory of its own**, and the sweep deletes the *other* runs'
-  rather than emptying the parent. Emptying it is wrong twice over: two processes sharing the
-  volume — a second replica, or a restart overlapping a draining old one — would each destroy
-  the other's live results, and a sweep running beside new jobs would delete files the current
-  run is still writing. A per-run directory makes both impossible by construction rather than
-  by timing.
-- **The sweep does not block startup.** Nothing about correctness waits on it: an id is 128
-  random bits, so a new job cannot collide with a stale file and no old file can be served as
-  a new result. It is disk housekeeping, so it is a spawned task, and a failure is logged
-  rather than fatal — garbage on disk is not a reason to refuse to serve.
-- **That the directory is writable is checked at startup, and that one does block.** A
-  service that cannot write a result cannot answer `/async`, which is not optional, so it is
-  an operator's mistake to hear at startup the way a `[[tap.table]]` whose url will not open
-  already is. One probe file, never a walk.
+- **The directory is a private temporary one, and there is no sweep at all.** A `TempDir`
+  under `[limits] scratch_dir`, which removes itself and its contents when the service shuts
+  down. Sweeping a fixed directory was the first answer and is wrong: it cannot tell a dead
+  process's leftovers from a live process's working files, so a restart overlapping a
+  draining old one — a rolling update, or any graceful shutdown — deletes results that
+  process is still serving. Giving each run a directory of its own does not fix it, since
+  the newcomer still cannot tell which of the other names is alive; what would is a lock file
+  per run, and a private temporary directory is that guarantee with none of the machinery.
+  What it costs is that a crash leaks one directory — the leak `NamedTempFile` already has
+  here for a materialized copy, and handled the same way.
+- **Making that directory is the check that results can be written**, and it happens at
+  startup because `/async` is not a resource an operator can decline. It asks exactly what a
+  probe file would ask, so there is no probe file.
 - **No mount may publish it.** A results directory served by the file server hands every
   result to anyone who can list a directory, which is the whole of the id's protection gone.
   It is the same shape as the mount-inside-the-API-prefix check and belongs beside it, at
@@ -918,7 +917,7 @@ from a slow query. That is the shape to check each of these against.
   choosing the second implementation rather than after.
 - **The process dies.** Everything goes — the record with it, the store being in-process — so
   a client polling gets `404`, which is the destroyed-job case the standard already describes.
-  The per-run directory is what stops the file outliving it.
+  A clean shutdown takes the results directory with it; a crash leaks it.
 - **`DELETE` while running.** Abort the handle, drop the record, delete the file. The
   DataFusion stream unwinds on drop, which is the same mechanism a `limit` already stops a
   catalog read with.
