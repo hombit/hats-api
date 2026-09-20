@@ -50,6 +50,86 @@ pub struct TapConfig {
     /// Zero or more `[[tap.table]]` tables.
     #[serde(rename = "table")]
     pub tables: Vec<TapTableConfig>,
+    /// What a job may spend, under `[tap.async]`.
+    #[serde(rename = "async")]
+    pub jobs: AsyncConfig,
+}
+
+/// What the `/async` job resource will spend.
+///
+/// **There is no switch turning it on.** TAP §2.2 makes `/async` a MUST alongside §2.1's
+/// `/sync`, so a TAP surface has both or is not one — publishing a `[[tap.table]]` is
+/// publishing a job resource, and what is left to say is only what it may cost. An operator
+/// with little room sets these low; one who cannot host jobs at all cannot publish TAP, and
+/// that is the standard's answer rather than this service's.
+///
+/// Where the results go is not here either: that is `[limits] scratch_dir`, which already
+/// means "where this service puts bytes on local disk". A second path key would be a second
+/// answer to one question, and an operator pointing one at a volume and forgetting the other
+/// is the failure it would buy.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AsyncConfig {
+    /// How many job records are kept, in any phase. Reaching it refuses a new job with a
+    /// `503` and destroys nothing: a burst of submissions must not be able to take away a
+    /// result somebody has already been promised.
+    pub max_jobs: usize,
+    /// How many jobs execute at once; the rest wait in `QUEUED`. Also the only thing
+    /// bounding CPU, there being no per-task measure to offer — what a deployment really
+    /// limits is this against DataFusion's `target_partitions`.
+    pub max_running: usize,
+    /// How much disk every held result may take together. Over it the oldest finished job
+    /// is destroyed, that one having had its chance to be collected.
+    pub max_result_bytes_total: ByteSize,
+    /// The largest answer one job may leave on disk.
+    pub max_result_bytes: ByteSize,
+    /// How long a job may run when it says nothing, and the most it may ask for. UWS lets a
+    /// client write to `executionduration`, and lets a service cap what it writes.
+    pub default_execution_seconds: u64,
+    pub max_execution_seconds: u64,
+    /// How long a finished job and its result are kept, and the most a client may ask for.
+    pub default_destruction_seconds: u64,
+    pub max_destruction_seconds: u64,
+    /// The longest a `WAIT` may block. UWS 1.1 lets a service "impose a maximum blocking
+    /// time"; this one must stay under `max_request_seconds`, or the router's own clock cuts
+    /// the poll before the bound the client asked for is reached.
+    pub max_wait_seconds: u64,
+    /// What a job's query may spend, where it differs from `[limits]`.
+    pub limits: AsyncLimitsConfig,
+}
+
+impl Default for AsyncConfig {
+    fn default() -> Self {
+        Self {
+            max_jobs: 256,
+            // Two, because a job is a whole query engine: each one is already reading
+            // partitions in parallel, so the concurrency that matters is inside one job.
+            max_running: 2,
+            max_result_bytes_total: ByteSize::gib(20),
+            max_result_bytes: ByteSize::gib(1),
+            default_execution_seconds: 600,
+            max_execution_seconds: 3600,
+            default_destruction_seconds: 86_400,
+            max_destruction_seconds: 604_800,
+            max_wait_seconds: 30,
+            limits: AsyncLimitsConfig::default(),
+        }
+    }
+}
+
+/// The `[limits]` fields a job's query answers to differently.
+///
+/// **Every field is an override and absent means the sync value**, so there is one list of
+/// bound names rather than two that drift, and an operator writes only the difference. What
+/// this exists for is `max_partitions`: a job is what a request too wide for one response
+/// future turns into, so the partition count is what async buys. The clock is not here —
+/// a job's is `executionduration`, which the client can read and raise.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AsyncLimitsConfig {
+    pub max_partitions: Option<usize>,
+    pub max_rows: Option<usize>,
+    pub max_query_memory_bytes: Option<ByteSize>,
 }
 
 /// One published table: the name a query writes, and the catalog it reads.

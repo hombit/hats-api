@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{env, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -151,6 +151,33 @@ async fn main() -> ExitCode {
         }
     };
 
+    // Built before the first request and fatal if it cannot be: making it is what creates
+    // the results directory and reclaims what dead runs left behind, and a deployment that
+    // cannot write a result cannot answer `/async` — which TAP does not let it decline.
+    // None where nothing is published, there being no TAP surface at all then.
+    let jobs = match service.tap_tables.is_empty() {
+        true => None,
+        false => match app::Jobs::new(service.clone(), &config.limits, &config.tap.jobs) {
+            Ok(jobs) => Some(Arc::new(jobs)),
+            Err(error) => {
+                tracing::error!(%error, "cannot serve TAP jobs");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    if let Some(jobs) = jobs.clone() {
+        // Destruction times are absolute, so something has to come round and act on them.
+        // A job is also destroyed the moment a request touches it past its time, but a job
+        // nobody ever asks about again would otherwise hold its rows until shutdown.
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(SWEEP);
+            loop {
+                ticks.tick().await;
+                jobs.expire().await;
+            }
+        });
+    }
+
     tracing::info!(
         %listen_addr,
         allows = %service.policy.allowed_schemes().join(", "),
@@ -161,7 +188,7 @@ async fn main() -> ExitCode {
         },
         "listening"
     );
-    if let Err(error) = axum::serve(listener, app::router(service))
+    if let Err(error) = axum::serve(listener, app::router_with(service, jobs))
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
@@ -171,8 +198,51 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Wait for whichever signal means stop.
+///
+/// **`SIGTERM` as well as `SIGINT`, and `SIGTERM` is the one that matters.** It is how
+/// `docker stop`, a Kubernetes eviction and `systemctl restart` all ask a process to end;
+/// its default disposition terminates immediately, so a service that waits only for
+/// `Ctrl-C` runs no graceful shutdown on any of them — every deployment cuts whatever
+/// requests were in flight, and no destructor runs.
+///
+/// Unix only, `SIGTERM` being a unix signal. Elsewhere `Ctrl-C` is the whole of it, which
+/// is what that platform has.
+/// How often expired jobs are swept up.
+///
+/// A minute, which is far finer than any destruction time an operator would set and coarse
+/// enough to cost nothing. Exactness is not wanted here: a job past its time that nobody
+/// asks about is holding disk, not giving a wrong answer.
+const SWEEP: Duration = Duration::from_secs(60);
+
 async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to listen for shutdown signal");
-    }
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for an interrupt");
+            // Never resolving is right: the other arm is still waiting, and returning would
+            // shut the service down because nothing could listen for the signal.
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to listen for a termination signal");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    let signalled = tokio::select! {
+        () = interrupt => "interrupt",
+        () = terminate => "terminate",
+    };
+    tracing::info!(signal = signalled, "shutting down");
 }

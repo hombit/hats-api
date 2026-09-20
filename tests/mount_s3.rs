@@ -74,6 +74,7 @@ fn mounted(server: &TestS3, tables: &[(&str, &str)]) -> Service {
                 path: (*path).to_owned(),
             })
             .collect(),
+        jobs: Default::default(),
     };
     Service::new(
         policy,

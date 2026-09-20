@@ -668,9 +668,13 @@ fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
     })
 }
 
-/// The URL as far as it is safe to print. [`refuse_userinfo`] means an opened file never
+/// The URL as far as it is safe to print. `refuse_userinfo` means an opened file never
 /// has any, but this also builds the error messages — one of which is that refusal.
-pub(super) fn file_url(url: &Url) -> Url {
+///
+/// Public because a caller's url exists before it is opened, and so before that refusal has
+/// run: anything holding one at that stage prints it through here rather than through a
+/// formula of its own.
+pub fn file_url(url: &Url) -> Url {
     let mut file = url.clone();
     file.set_query(None);
     file.set_fragment(None);

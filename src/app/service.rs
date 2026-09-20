@@ -30,6 +30,7 @@ use crate::adql;
 use crate::app::cache;
 use crate::app::files::serve_mounted;
 use crate::app::openapi::{self, description::describe};
+use crate::app::routes::tap::Jobs;
 use crate::app::routes::{adql::query_adql, hats, parquet::query_parquet, tap};
 use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConfig, TapConfig};
 use crate::engine::sql;
@@ -79,6 +80,38 @@ pub struct Service {
     pub(in crate::app) serve_mounted_robots_txt: bool,
     /// The subtree the API answers under, normalized; `None` when API mode is off.
     pub(in crate::app) api_prefix: Option<Arc<str>>,
+}
+
+/// What the router hands a handler: the service, and the job resource where there is one.
+///
+/// **Two fields rather than a `jobs` on [`Service`], and the reason is a cycle.** The job
+/// runner has to run a statement, so it holds a `Service`; a `Service` holding the runner
+/// back would be an `Arc` cycle, and what that costs is not memory — it is the results
+/// directory's `Drop`, which would then never run and would leave every clean shutdown
+/// behaving like a crash.
+#[derive(Debug, Clone)]
+pub struct AppState {
+    pub service: Service,
+    /// `None` where this deployment publishes no TAP table, there being no resource then.
+    pub(in crate::app) jobs: Option<Arc<Jobs>>,
+}
+
+impl AppState {
+    /// The job resource, or the refusal a deployment without one answers.
+    ///
+    /// Unreachable through the router, which registers these routes only where there is a
+    /// resource — so this is the belt to that braces, and says something true either way.
+    pub(in crate::app) fn jobs(&self) -> Result<&Jobs, ApiError> {
+        self.jobs
+            .as_deref()
+            .ok_or_else(|| ApiError::not_found("this service publishes no TAP tables"))
+    }
+}
+
+impl axum::extract::FromRef<AppState> for Service {
+    fn from_ref(state: &AppState) -> Self {
+        state.service.clone()
+    }
 }
 
 impl Service {
@@ -198,7 +231,20 @@ impl Service {
     }
 }
 
+/// The router with no job resource behind it, which is what a test that is not about jobs
+/// wants: building one makes a results directory and sweeps for dead runs, and a check about
+/// a listing or a mount should pay for neither.
 pub fn router(service: Service) -> Router {
+    router_with(service, None)
+}
+
+/// The router, and the job resource it needs built first.
+///
+/// `jobs` is `None` where nothing is published over TAP. Building it is what creates the
+/// results directory and reclaims what dead runs left, so a deployment that cannot write
+/// results finds out at startup rather than on its first job — and that failure is fatal,
+/// `/async` being a resource TAP §2.2 does not let an operator decline.
+pub fn router_with(service: Service, jobs: Option<Arc<Jobs>>) -> Router {
     let timeout = service.request_timeout;
     let body_limit = service.request_body_limit;
     let signature = service.signature.clone();
@@ -228,7 +274,7 @@ pub fn router(service: Service) -> Router {
         // Mounts claim whatever the API's routes did not, so a mount at `/` and the API
         // at `/api/v1` divide the url space without either being nested in the other.
         .fallback(serve_mounted)
-        .with_state(service)
+        .with_state(AppState { service, jobs })
         .layer(compression());
     if let Some(limit) = timeout {
         router = router.layer(middleware::from_fn_with_state(limit, deadline));
@@ -365,7 +411,7 @@ pub(in crate::app) const QUERY_SEGMENT: &str = "simple";
 /// every proxy's access log and the caller's shell history on the way. A body also has no
 /// url-length limit — a long `IN` list and a wide column list both run past nginx's 8 KB
 /// header buffer — and needs no url nested inside a url.
-pub(in crate::app) fn with_queries(router: Router<Service>, prefix: &str) -> Router<Service> {
+pub(in crate::app) fn with_queries(router: Router<AppState>, prefix: &str) -> Router<AppState> {
     let path = |target| route(prefix, &format!("{QUERY_SEGMENT}/{target}"));
     router
         .route(&path("parquet"), post(query_parquet))
@@ -380,7 +426,8 @@ pub(in crate::app) fn with_queries(router: Router<Service>, prefix: &str) -> Rou
 
 /// The TAP resources. `/sync` answers `GET` and `POST` alike, which TAP §2.1 asks of a
 /// DALI-sync resource: the two differ only in where the parameters are read from.
-fn with_tap(router: Router<Service>, prefix: &str) -> Router<Service> {
+fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
+    let job = |child: &str| route(prefix, &format!("tap/async/{{id}}{child}"));
     router
         .route(
             &route(prefix, "tap/sync"),
@@ -392,6 +439,36 @@ fn with_tap(router: Router<Service>, prefix: &str) -> Router<Service> {
         // One table by name, which is how a client that has the name already avoids
         // fetching every column of every table.
         .route(&route(prefix, "tap/tables/{name}"), get(tap::table))
+        // The job list, and one job. `DELETE` and a `POST` carrying `ACTION=DELETE` are
+        // the same thing said two ways, UWS §2.2.3.2 offering the second for a client that
+        // cannot send the first.
+        .route(
+            &route(prefix, "tap/async"),
+            get(tap::list).post(tap::create),
+        )
+        .route(&job(""), get(tap::show).post(tap::act).delete(tap::destroy))
+        // The child resources. Each is a value a client reads on its own and, where UWS
+        // allows it, writes — and a write is honoured, clamped or refused, never dropped.
+        .route(&job("/phase"), get(tap::phase).post(tap::set_phase))
+        .route(
+            &job("/executionduration"),
+            get(tap::execution_duration).post(tap::set_execution_duration),
+        )
+        .route(
+            &job("/destruction"),
+            get(tap::destruction).post(tap::set_destruction),
+        )
+        .route(&job("/quote"), get(tap::quote))
+        .route(&job("/owner"), get(tap::owner))
+        .route(&job("/error"), get(tap::error))
+        .route(
+            &job("/parameters"),
+            get(tap::job_parameters).post(tap::set_job_parameters),
+        )
+        .route(&job("/results"), get(tap::results))
+        // Named rather than fixed at `result`, so that asking for a name this job has not
+        // got says so instead of falling through to whatever the router matches next.
+        .route(&job("/results/{name}"), get(tap::result))
 }
 
 /// The two routes that describe the rest: the document, and a page rendering it.
@@ -400,10 +477,10 @@ fn with_tap(router: Router<Service>, prefix: &str) -> Router<Service> {
 /// prefix is the operator's. It is a few hundred microseconds of `serde_json` on a route
 /// nothing calls in a loop.
 fn with_description(
-    router: Router<Service>,
+    router: Router<AppState>,
     prefix: &str,
     contact: Option<Arc<str>>,
-) -> Router<Service> {
+) -> Router<AppState> {
     let document = route(prefix, "openapi.json");
     let page = openapi::page(&describe(prefix, contact.as_deref()), &document);
     router
@@ -1209,6 +1286,7 @@ mod tests {
                 name: "gaia_dr3.gaia_source".to_owned(),
                 path: "/gaia".to_owned(),
             }],
+            jobs: Default::default(),
         };
         let service = |enabled| {
             let mounts =

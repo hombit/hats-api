@@ -57,7 +57,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.6 | `csv` and `tsv` | done | |
 | 11.13 | a region over `Float32` coordinates | done | |
 | 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
-| 11.8 | `/async` and UWS | todo | tier 1, and the only thing in it. Every reference service has one; it is held back for being state rather than a mapping. Was §9.4 |
+| 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. Inline `UPLOAD` is still §11.11's, and a job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
 | 11.9 | `/examples` | deferred | waits for §6.1's catalog metadata cache. A menu TOPCAT offers, not something a client needs to work, and every example in it is generated from a published catalog |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
@@ -69,10 +69,15 @@ what is deferred.
 
 ## 0. Invariants
 
-1. **The service only ever reads.** No endpoint writes, no mount is writable. Mounts
-   therefore carry no `readonly` flag. Adding writes is a new document, not a new flag.
-2. **Stateless per request.** No session cache, no catalog registry across requests.
-   §6's caches must be evictable, bounded, and correct when empty.
+1. **The service reads what a caller names, and writes only its own scratch.** No endpoint
+   writes to a store, no mount is writable, so mounts carry no `readonly` flag. What it does
+   write is under `[limits] scratch_dir`, at a path of its own choosing: a materialized copy,
+   and a job's answer. The invariant is *where*, not *whether*, and a caller's url is never
+   the destination.
+2. **A request keeps nothing; a job is the caller's own.** No session cache, no catalog
+   registry across requests, and §6's caches must be evictable, bounded, and correct when
+   empty. The one thing that outlives a request is a job the caller asked for and can
+   destroy — it is in this process only, so it belongs to one replica and a restart loses it.
 3. **Nothing reaches an object store without passing its mode's policy.**
    `AccessPolicy::authorize` in `storage::open` is the only route to a store, and a
    `file://` url reaches a mount's `path` and nothing else.
@@ -128,7 +133,9 @@ could be `GET`s under a mount, and nothing emits them. The catalog page's Plan b
 to the API's plan route, so a mount with the API off offers no plan at all — which is what
 a route of `GET` entries would fix, if anyone wants one.
 
-No job queue, job ids or polling: a plan is a list of stateless requests. See §7.2.
+A plan is a list of stateless requests, and stays one whatever §11.8 builds: it answers a
+request too large for one response with the requests that would do it, which is a different
+answer from one that runs the whole thing somewhere else and hands over an id. See §7.2.
 
 ### 5.4 A catalog under a mount
 
@@ -271,9 +278,11 @@ underneath either way.
 
 ### 7.2 Long requests
 
-**No async job interface in this plan.** TAP's `/async` (§11.8) is what forces one and UWS
-specifies its shape, so it gets built once rather than invented and then reconciled. A job
-system would also break §0's statelessness and add job ids as an authorization surface.
+**The job interface is TAP's, and it is built.** A slow query submitted to `/tap/async`
+has somewhere to go; a slow request anywhere else does not, and the answers below are what
+those get. None of this section is superseded by it: a job is a second answer to a slow
+request rather than a replacement for making one fast, and a caller outside TAP has no
+job to be given.
 
 | slow case | decomposable? | answer |
 |---|---|---|
@@ -589,25 +598,24 @@ MAST — before any of this was written, and what they have in common is what se
 A specification marks everything MUST or SHOULD and cannot say which of it a client
 actually needs; four independent services agreeing does say so.
 
-**Tier 1 is `/async`, alone.** All four implement it, so by that rule it belongs with
-everything already built and is held back by one thing only: it is a job model, which is
-state, against a service whose every answer today is collected inside one request future.
-It is the one piece of this phase that is a design question rather than a mapping.
+Tier 1 was `/async`, alone, and it is built. What is left is what the four reference
+services do *not* agree on, so the ordering rule that set tier 1 says nothing about any of
+it and each piece has to argue for itself.
 
-**Everything else is later**, with one piece taken out of it and moved ahead of tier 1:
-naming a catalog by url as `UPLOAD` (§11.11), which is the only way a TAP client can ask
-about a catalog this service does not publish, and which `/adql` already answers in its own
-body. Inline upload stays later, IRSA offering none and MAST half, so the ecosystem has not
-settled it and the four agree only on *declaring* what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to work. The
-formats this service has of its own — `parquet`, `json` — and how a nested column is
-declared are questions no reference service can be asked, because none of them has such a
-column.
+**Naming a catalog by url as `UPLOAD` (§11.11)** came ahead of tier 1 and is built: it is
+the only way a TAP client can ask about a catalog this service does not publish, and
+`/adql` already answered it in its own body. Inline upload stays later, IRSA offering none
+and MAST half, so the ecosystem has not settled it and the four agree only on *declaring*
+what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to
+work. The formats this service has of its own — `parquet`, `json` — and how a nested column
+is declared are questions no reference service can be asked, because none of them has such
+a column.
 
-**Until Tier 1 lands this is deliberately not a conforming TAP service, in exactly one
-place.** `/async` is a MUST (TAP §2.2), and what that costs is in the README rather than
-left to be discovered from a validator: a query too slow for `max_request_seconds` has
-nowhere to go, because the resource a client would be sent to does not exist, and the
-answer is to make the query smaller.
+**What a job still cannot do is carry an operator's credential**, which is not a gap in the
+job model but the same one `/sync` has: a `[[tap.table]]` takes no storage options, and a
+caller's own credential reaches a job through `UPLOAD_STORAGE_OPTION` as it does through
+`/sync`. And a job belongs to one process, so a deployment behind more than one replica
+needs sticky routing until something implements `JobStore` durably.
 
 
 ### 11.7 Simple Cone Search, both versions
@@ -688,24 +696,6 @@ nothing here encodes a url space this step has not decided. The 1.03 half goes t
 `pyvo.dal.SCSService` and is calibrated against VizieR's cone search; the 2.0 half asks over
 HTTP because no client implements a draft yet, and each of its checks names the clause it
 came from so that what has to move when the draft moves is findable.
-
-### 11.8 `/async` and UWS — tier 1
-
-The one MUST this service does not answer, and the whole of tier 1. Every reference service
-implements it, so there is no reading of the evidence in which it is optional; what holds it
-back is that it is the only part of this phase that is a design question rather than a
-mapping.
-
-A job model is state — creation, phases, polling, results that outlive the request that
-asked for them, destruction times and their collection — against a service whose every
-answer today is collected inside one request future. It is where §5.3's and §7.2's
-no-job-queue decision is revisited, where §0.2 is reopened, and where a job id becomes an
-authorization surface. UWS specifies the shape, so it gets built once rather than invented
-and then reconciled.
-
-Two things stop being true when it lands, and both are written down elsewhere as temporary:
-`/capabilities` starts advertising an async interface, and `{api.prefix}/tap/async` stops
-answering `404`.
 
 ### 11.9 `/examples`
 

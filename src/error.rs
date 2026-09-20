@@ -59,6 +59,14 @@ pub enum ApiError {
     /// already done and nothing to hand back, so the message is all the caller gets.
     #[error("{0}")]
     Timeout(String),
+    /// This service is full rather than broken, and the same request later is answered.
+    ///
+    /// Distinct from [`Self::TooMuchWork`], which is about the request: that one is refused
+    /// however empty the service is, and retrying it changes nothing. This one says nothing
+    /// about the request at all — a job resource with no room left for a record answers it,
+    /// and a caller's right move is to wait rather than to ask for less.
+    #[error("{0}")]
+    Unavailable(String),
     /// Something on this side went wrong. The message is ours, and says nothing about
     /// the machine it happened on.
     #[error("{0}")]
@@ -124,6 +132,10 @@ impl ApiError {
 
     pub fn timeout(message: impl Into<String>) -> Self {
         Self::Timeout(message.into())
+    }
+
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::Unavailable(message.into())
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -284,6 +296,7 @@ impl ApiError {
             // client's retry policy already knows. `408` is the other standard code and
             // says the caller was slow to send the request, which is a different event.
             Self::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::ObjectStore(error) => object_store_status(error),
             Self::Storage(error) => storage_status(error),

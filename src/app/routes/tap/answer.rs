@@ -34,6 +34,17 @@ pub(super) fn answered(outcome: Result<Response, ApiError>) -> Response {
     }
 }
 
+/// Whether the answer stopped at the row bound, for the formats with nowhere to say it.
+///
+/// **Only a VOTable can say it was truncated**, `OVERFLOW` being a VOTable marker — so `csv`
+/// and `tsv` carry this instead. It is this service's own and no client reads it; what it is
+/// for is that the fact is stated somewhere rather than nowhere, a delimited body having no
+/// room for it and TAP defining nothing for one.
+///
+/// Both query resources send it, from the same const: a job's answer is collected later and
+/// by a client that did not see the request, so it is if anything the one that needs it more.
+pub(super) const OVERFLOW_HEADER: &str = "x-hats-overflow";
+
 /// What the XML documents are served as. VOSI's own media type, and the one every
 /// reference service answers these three resources with.
 pub(super) const XML_CONTENT_TYPE: &str = "text/xml";

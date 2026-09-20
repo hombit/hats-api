@@ -17,6 +17,6 @@ pub use options::{
     S3Options, StorageOptions, WebdavOptions, WebdavTransport, option_names, option_schemes,
 };
 pub use store::{
-    Entry, Level, MountedBy, NamedBy, Object, RemoteDir, RemoteFile, SourceUrl, open,
+    Entry, Level, MountedBy, NamedBy, Object, RemoteDir, RemoteFile, SourceUrl, file_url, open,
     open_configured_dir, open_dir, open_mounted, open_mounted_dir, parse_url, supported_schemes,
 };

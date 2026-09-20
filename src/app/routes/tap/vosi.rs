@@ -95,11 +95,17 @@ pub(in crate::app) async fn availability() -> Response {
 
 /// What this service can do, and where.
 ///
-/// **Nothing is advertised that is not there.** A client picks its interface out of this
-/// document and has no way back: told about an async endpoint that answers 404, it fails
-/// at the point of submitting a job rather than at the point of choosing. So there is no
-/// async interface here and no `uploadMethod`, both being things this service does not
-/// have yet — declaring one and failing the submission is worse than offering neither.
+/// **Nothing optional is advertised that is not there.** A client picks what it may do out
+/// of this document and has no way back, so a `uploadMethod` is declared only where an
+/// upload works: told it may send a VOTable, a client fails at the point of sending rather
+/// than at the point of choosing, and this service reads no VOTable.
+///
+/// **`/async` is not one of those, and no wording here can withhold it.** The TAP capability
+/// declares one `<accessURL use="base">` and a client appends the resource names itself, so
+/// a client is told about `/async` by the base url whatever else is written — which is
+/// correct, TAP §2.2 making that resource a MUST, and is why there is no switch for it
+/// either. While the resource is unimplemented what a client meets is a `404` at submission,
+/// and that is a missing resource rather than a missing declaration.
 pub(in crate::app) async fn capabilities(
     State(service): State<Service>,
     headers: HeaderMap,
