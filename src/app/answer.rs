@@ -375,7 +375,10 @@ pub(in crate::app) fn streamed(
 ) -> Result<Response, ApiError> {
     let schema = Arc::clone(&planned.schema);
     let batches = planned.batches()?;
-    let encoder = encoder_for(output, &schema)?;
+    let mut encoder = encoder_for(output, &schema)?;
+    // While a status can still be chosen: `csv` refuses a nested column here, and a
+    // refusal after the `200` is a dropped connection rather than a message.
+    let head = encoder.begin(&schema)?;
     let content_type = content_type_for(output);
     // The plan outlives the rows, which is what makes the ending readable: `data_bytes_read`
     // is a counter on the scan and is final only once the last batch has come off it.
@@ -388,7 +391,7 @@ pub(in crate::app) fn streamed(
         // anything is read. There is nothing here that can stop part-way.
         refused: None,
     };
-    let body = Body::from_stream(stream::streamed(encoder, schema, batches, ending));
+    let body = Body::from_stream(stream::streamed(encoder, head, batches, ending));
     Ok((
         [
             (header::CONTENT_TYPE, content_type.to_owned()),
@@ -409,7 +412,7 @@ pub(in crate::app) fn streamed(
 /// accumulated, and a bound reached part-way is a `refused` the encoder renders rather
 /// than the `422` with a work list a collected answer would have given.
 pub(in crate::app) fn streamed_rows<S>(
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
     batches: S,
     refused: Arc<std::sync::Mutex<Option<hats::query::Exceeded>>>,
     output: &Output,
@@ -420,7 +423,9 @@ where
         + Send
         + 'static,
 {
-    let encoder = encoder_for(output, &schema)?;
+    let mut encoder = encoder_for(output, schema)?;
+    // While a status can still be chosen, for the reason [`streamed`] gives.
+    let head = encoder.begin(schema)?;
     let content_type = content_type_for(output);
     let ending = move |rows: usize| stream::Ending {
         rows,
@@ -435,7 +440,7 @@ where
             .ok()
             .and_then(|held| held.map(|why| why.to_string())),
     };
-    let body = Body::from_stream(stream::streamed(encoder, schema, batches, ending));
+    let body = Body::from_stream(stream::streamed(encoder, head, batches, ending));
     Ok((
         [
             (header::CONTENT_TYPE, content_type.to_owned()),

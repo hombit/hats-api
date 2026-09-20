@@ -83,9 +83,14 @@ pub fn collected(
 ///
 /// The ending is computed once the rows run out, by whatever knows what they cost — for a
 /// file that is the plan's own metrics, which are final as soon as the last batch is in.
+/// `head` is what [`Encoder::begin`] already returned, written by the caller rather than
+/// here. **That is where a format refuses.** `csv` has no form for a nested column and says
+/// so in `begin`; asked for inside the body, that refusal arrives after the `200` and the
+/// caller sees a dropped connection instead of the `400` naming the column. So the head is
+/// written while a status can still be chosen, and what reaches here cannot fail.
 pub fn streamed<S, F>(
     encoder: Box<dyn Encoder>,
-    schema: SchemaRef,
+    head: Vec<u8>,
     batches: S,
     ending: F,
 ) -> impl Stream<Item = Result<Bytes, ApiError>> + Send
@@ -95,7 +100,7 @@ where
 {
     let writing = Writing {
         encoder,
-        schema,
+        head: Some(head),
         batches: Box::pin(batches),
         ending: Some(ending),
         rows: 0,
@@ -105,7 +110,7 @@ where
         let sent = match writing.phase {
             Phase::Begin => {
                 writing.phase = Phase::Rows;
-                writing.encoder.begin(&writing.schema)
+                Ok(writing.head.take().unwrap_or_default())
             }
             Phase::Rows => match writing.batches.next().await {
                 Some(Ok(batch)) => {
@@ -151,7 +156,8 @@ enum Phase {
 
 struct Writing<S, F> {
     encoder: Box<dyn Encoder>,
-    schema: SchemaRef,
+    /// What `begin` wrote, waiting to be the first chunk.
+    head: Option<Vec<u8>>,
     batches: std::pin::Pin<Box<S>>,
     ending: Option<F>,
     rows: usize,

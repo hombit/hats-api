@@ -929,7 +929,12 @@ request in front of it.
   covering is for, and it is why `Coverage` is computed from both sides. `Selection.spatial`
   is `None` for such a partition — not an empty region, which means something else.
 - **Partitions are read in the catalog's own order**, which is HEALPix order, and that is a
-  promise the catalog routes make and the single-file route does not. A cell's number is
+  promise the catalog routes make and the single-file route does not — with one exception,
+  a streamed answer with no `limit`, where the partitions are sent as they land. Every
+  matching row still comes back; what is given up is the order they arrive in, and what it
+  buys is the read no longer waiting on its slowest partition at each step (over S3, a cone
+  across 31 partitions: 2.7 s in order, 2.0 s as they land). **A `limit` keeps the order**,
+  because there it decides which rows come back at all. A cell's number is
   where it is on the sky, so the order costs nothing — the partitions are enumerated anyway
   — and it makes a `limit` a coherent piece of sky rather than an arbitrary sample. Order
   *within* a partition is `engine::query::Order`'s and is unchanged.

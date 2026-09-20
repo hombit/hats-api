@@ -16,6 +16,7 @@ Release dates are in the UTC time zone.
 - `[tap.async]`, and `[tap.async.limits]` for the `[limits]` fields a job answers to differently.
 - `/api/v1/tap/examples`: a cone search per published table, declared in `/capabilities` as `ivo://ivoa.net/std/DALI#examples`. [#93](https://github.com/hombit/hats-api/pull/93)
 - `[[tap.table.example]]`, with `name` and `query`, offering queries of your own in place of a table's generated one. [#93](https://github.com/hombit/hats-api/pull/93)
+- `streaming` on `POST {api.prefix}/simple/parquet` and `/simple/hats`: the answer is sent as it is read, in `json`, `csv`, `tsv` and `votable`. `false` by default; refused with `parquet`.
 
 ### Changed
 

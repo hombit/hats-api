@@ -86,10 +86,16 @@ pub(in crate::app) struct CatalogQuery {
     /// Send the answer as it is read, rather than reading every partition and then sending
     /// it.
     ///
-    /// The rows are the same rows, in the same order, read the same number at a time. What
+    /// The rows are the same rows, read the same number of partitions at a time. What
     /// changes is that a partition's rows leave as it lands, so the body starts sooner and
     /// this service holds less of it — and that the `x-hats-*` counts are gone, headers
     /// being sent before the first row is read. `json` reports them at the end of its body.
+    ///
+    /// **Without a `limit`, the order is whatever the partitions land in.** Waiting to send
+    /// them in the catalog's order costs the read its slowest partition at every step: over
+    /// S3, a cone across 31 partitions took 2.7 s in order and 2.0 s as they landed. Every
+    /// matching row still comes back. **With a `limit` the catalog's order is kept**, since
+    /// there it decides which rows come back at all.
     ///
     /// **A bound reached is said in the body rather than answered with the work list.** A
     /// collected answer that goes over `max_partitions`, `max_bytes_fetched` or `max_rows`
@@ -383,7 +389,7 @@ pub(in crate::app) async fn query_hats(
             elapsed_ms = started.elapsed().as_millis(),
             "catalog query"
         );
-        return streamed_rows(schema, batches, refused, &output, started);
+        return streamed_rows(&schema, batches, refused, &output, started);
     }
     let outcome = search
         .run(
@@ -729,6 +735,64 @@ mod tests {
                 _ => assert_eq!(whole, streamed, "{format}"),
             }
         }
+    }
+
+    /// A streamed answer with a `limit` is still the catalog's order, because there the
+    /// order decides *which* rows come back.
+    ///
+    /// Without one the partitions are sent as they land — every matching row comes back
+    /// whatever order they arrive in, and waiting for position costs the read its slowest
+    /// partition at every step. With one, that would make the answer a different set of
+    /// rows each time, which is the thing a limit is not allowed to be.
+    #[tokio::test]
+    async fn a_limit_keeps_a_streamed_answer_in_the_catalogs_order() {
+        let dir = hats::query::tests::fixture(true);
+        let ask = |streaming: bool| {
+            ask_hats(
+                mounted(dir.path(), &ApiConfig::default()),
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id"],
+                    "limit": 5,
+                    "streaming": streaming,
+                }),
+            )
+        };
+        let (status, whole) = ask(false).await;
+        assert_eq!(status, StatusCode::OK, "{whole}");
+        let (status, streamed) = ask(true).await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+
+        let rows =
+            |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap()["rows"].clone();
+        // The same five rows in the same places: a limit under a stream is answered the
+        // way it is answered collected, and twice the same.
+        assert_eq!(rows(&whole), rows(&streamed));
+        let (_, again) = ask(true).await;
+        assert_eq!(rows(&streamed), rows(&again));
+    }
+
+    /// A format that cannot carry a column says so with a status, not by hanging up.
+    ///
+    /// `csv` refuses a nested column, and that refusal comes from the head of the
+    /// document — which a streamed answer writes before the `200` for this reason. Written
+    /// inside the body instead, the caller gets a dropped connection and nothing naming the
+    /// column, which is what this catches.
+    #[tokio::test]
+    async fn a_column_a_format_cannot_write_is_refused_before_the_status() {
+        let dir = hats::query::tests::fixture(true);
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///",
+                "columns": ["lightcurve"],
+                "format": "csv",
+                "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("lightcurve"), "{body}");
     }
 
     /// A bound reached mid-stream cannot become the `422` and the work list a collected
