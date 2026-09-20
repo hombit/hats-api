@@ -171,8 +171,44 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Wait for whichever signal means stop.
+///
+/// **`SIGTERM` as well as `SIGINT`, and `SIGTERM` is the one that matters.** It is how
+/// `docker stop`, a Kubernetes eviction and `systemctl restart` all ask a process to end;
+/// its default disposition terminates immediately, so a service that waits only for
+/// `Ctrl-C` runs no graceful shutdown on any of them — every deployment cuts whatever
+/// requests were in flight, and no destructor runs.
+///
+/// Unix only, `SIGTERM` being a unix signal. Elsewhere `Ctrl-C` is the whole of it, which
+/// is what that platform has.
 async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::error!(%error, "failed to listen for shutdown signal");
-    }
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::error!(%error, "failed to listen for an interrupt");
+            // Never resolving is right: the other arm is still waiting, and returning would
+            // shut the service down because nothing could listen for the signal.
+            std::future::pending::<()>().await;
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to listen for a termination signal");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    let signalled = tokio::select! {
+        () = interrupt => "interrupt",
+        () = terminate => "terminate",
+    };
+    tracing::info!(signal = signalled, "shutting down");
 }
