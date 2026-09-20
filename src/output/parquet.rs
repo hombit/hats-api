@@ -122,9 +122,28 @@ struct ColumnLayout {
 /// request DataFusion's does, rather than two.
 const FOOTER_PREFETCH: usize = 512 * 1024;
 
+/// The source file's own footer: its layout to copy, and the statistics that say whether
+/// the query needs running at all.
+///
+/// One request, and the same one either way — the layout is derived from the metadata
+/// rather than read separately.
+pub async fn read_source(
+    file: &RemoteFile,
+) -> Result<(SourceLayout, Arc<ParquetMetaData>), ApiError> {
+    let metadata = read_metadata(file).await?;
+    Ok((SourceLayout::from_metadata(&metadata), metadata))
+}
+
 /// Read the source file's footer. One extra request against the object store, made only
 /// when the caller asked for parquet back.
 pub async fn read_layout(file: &RemoteFile) -> Result<SourceLayout, ApiError> {
+    read_metadata(file)
+        .await
+        .map(|metadata| SourceLayout::from_metadata(&metadata))
+}
+
+/// The footer itself, parsed.
+async fn read_metadata(file: &RemoteFile) -> Result<Arc<ParquetMetaData>, ApiError> {
     // Neither the url nor the error goes into the message. For a local file `file.url`
     // is where it sits on the disk, and `object_store`'s own path errors print the path
     // they were given — so both would put a mount's `source` in a response.
@@ -136,12 +155,12 @@ pub async fn read_layout(file: &RemoteFile) -> Result<SourceLayout, ApiError> {
         store: Arc::clone(&file.store),
         path,
     };
-    let metadata = ParquetMetaDataReader::new()
+    ParquetMetaDataReader::new()
         .with_prefetch_hint(Some(FOOTER_PREFETCH))
         .load_via_suffix_and_finish(fetch)
         .await
-        .map_err(ApiError::SourceMetadata)?;
-    Ok(SourceLayout::from_metadata(&metadata))
+        .map(Arc::new)
+        .map_err(ApiError::SourceMetadata)
 }
 
 impl SourceLayout {

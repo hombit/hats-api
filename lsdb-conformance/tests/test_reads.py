@@ -33,19 +33,27 @@ SDSS_COLUMNS = ["OBJID", "RA", "DEC", "MAG", "SFD_EBV", INDEX]
 #: The default clock is set for a read of a few columns; these read whole partitions.
 slow = pytest.mark.timeout(1800)
 
-# **Every check here names its columns**, and not only to keep the suite quick. A read
-# with no projection at all is answered by encoding the whole partition — and, because a
-# slice is cut from the body this request generated, once per block the client asks for.
-# For SDSS DR7 spectra, whose `spectra` column is a nested array per row, that is fifteen
-# minutes and then a client-side timeout, against two seconds off S3. A projected read
-# does not have that shape: the bodies are small and the re-encoding is cheap. What would
-# close the gap is holding a generated answer between the requests that slice it, which is
-# a decision about caching that nothing here makes.
 
 
 def test_head(both):
     def read(open_catalog):
         return open_catalog("sdss_dr7_spectra", columns=["OBJID", "RA", "DEC"]).head(5)
+
+    assert_same(*both(read))
+
+
+@slow
+def test_whole_partition_of_sdss(both):
+    """A partition with no projection at all, which is every column of it.
+
+    The heaviest thing LSDB asks for and the one the service should do least work for: the
+    url names every column and a predicate that is the partition's own cell bounds, so the
+    answer is the file, and the service says so from the footer rather than by re-encoding
+    a hundred megabytes of nested `spectra` column three times over.
+    """
+
+    def read(open_catalog):
+        return open_catalog("sdss_dr7_spectra").partitions[0].compute()
 
     assert_same(*both(read))
 

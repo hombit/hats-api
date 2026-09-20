@@ -1066,6 +1066,49 @@ the whole router and two rules to keep:
   from, or to seek in, has to be a body the predicate declines — which is what makes the
   rule above about the ranged reads an `lsdb` client does, rather than about CPU.
 
+**A query that narrows nothing is answered with the file.** `engine::whole` decides it
+from the footer: no `limit` and no region, a projection whose fields are the file's own,
+and a predicate provably true of every row. `app::files::query_file` then answers `None`
+and the caller serves the object as it would with no query string at all.
+
+This is not an optimisation looking for a case. It is the request an `lsdb` client sends
+for a partition it has not projected — every column named, and the partition's own HEALPix
+bounds as a predicate — and answering it as a query is a full read and a full re-encode of
+a partition for bytes already sitting in the store. Measured on SDSS DR7 spectra: 278
+seconds and 807 MB read, against 84 milliseconds.
+
+Four things it turns on, and each is a way to get it wrong:
+
+- **Plan with `engine::query::session_context`, never a default DataFusion one.**
+  `enable_ident_normalization` is off in ours, and with the default on `OBJID` lowers to
+  `objid`, nothing resolves, and every request against an astronomy catalog is re-encoded
+  in full while looking perfectly correct from outside. The decision has to plan the way
+  the query plans or it is answering about a different query.
+- **Compare the fields the projection produces, not the names the caller wrote.** `lsdb`
+  asks for a nested column one dotted path per field — `spectra.flux`, `spectra.ivar` —
+  which this service packs back into one column. Names would compare six things the file
+  has not got; fields compare the packed column against the file's.
+- **Compare shape, not nullability.** Packing marks a struct's fields nullable where the
+  file says they are not. The values are the same and the file's schema is the stricter of
+  the two, so `whole::shape` drops the claim on both sides before comparing.
+- **Prove the predicate, do not pattern-match it.** `PruningPredicate` over the simplified
+  *negation* of the filter, asked of the row-group statistics: if no row group can hold a
+  row satisfying `NOT filter`, every row satisfies `filter`. Simplified, because pruning
+  makes nothing of a `NOT` sitting on a comparison. And a column the predicate names must
+  have no nulls anywhere, since statistics describe the values that are there and `null >=
+  0` is null — the file would hand back rows the query would not.
+
+**A generated answer is held for the requests that read it.** `app::cache` keys on the
+request's path and query string and holds the body for `[limits] query_cache_seconds`,
+`0` being off. A parquet reader opens one url three times — a size probe, the footer, the
+data — and without this each of those re-runs the query and re-reads the file: measured
+against Gaia DR3, three runs of 27.6 MB apiece to deliver a 27.6 MB answer.
+
+Time is the only validator, and that is why the window is short: nothing asks the store
+whether the object changed, because that is the round trip being avoided. `[limits]
+max_query_cache_bytes` bounds what is held at once, an answer larger than the cap is never
+kept, and the oldest go when a new one does not fit.
+
 **A parquet answer is seekable, and only parquet is.** `app::answer::seekable` slices the
 body this request generated: `206` with a `Content-Range`, `416` for a range past the end,
 and `Accept-Ranges: bytes` either way. Parquet is read footer-first or not at all, so a

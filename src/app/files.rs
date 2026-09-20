@@ -8,7 +8,7 @@ use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::response::{Html, IntoResponse, Json, Response};
-use futures::future::OptionFuture;
+use bytes::Bytes;
 use object_store::{GetOptions, GetRange, ObjectMeta};
 use tower_http::services::ServeFile;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
@@ -17,11 +17,13 @@ use url::{Url, form_urlencoded};
 
 use crate::access::mount::{self, Mount, MountSource, RemoteSource};
 use crate::access::{self};
-use crate::app::answer::{answer, hats_answer};
+use crate::app::answer::{self, answer, hats_answer};
+use crate::app::cache;
 use crate::app::listing::{self, Listing};
 use crate::app::request::{Format, Output};
 use crate::app::service::{PARQUET_CONTENT_TYPE, Service};
 use crate::engine::query::{self, Order, Predicate, Projection, Selection};
+use crate::engine::whole;
 use crate::error::ApiError;
 use crate::hats;
 use crate::hats::query::{CatalogSelection, Exceeded, Outcome, Search};
@@ -124,7 +126,12 @@ async fn serve_from_disk(
         && let Some(query) = FileQuery::parse(parts.uri.query().unwrap_or_default(), radius)?
     {
         let opened = storage::open_mounted(&file)?;
-        return query_file(service, &opened, Hide::Local(&file), &query, &parts).await;
+        // `None` is "the answer is the file", which is what the plain serve below does.
+        if let Some(response) =
+            query_file(service, &opened, Hide::Local(&file), &query, &parts).await?
+        {
+            return Ok(response);
+        }
     }
     let mut response = ServeFile::new(&file)
         .try_call(Request::from_parts(parts, body))
@@ -188,7 +195,9 @@ async fn serve_from_store(
         )?
     {
         let opened = root.child(&relative)?;
-        return query_file(service, &opened, hide, &query, parts).await;
+        if let Some(response) = query_file(service, &opened, hide, &query, parts).await? {
+            return Ok(response);
+        }
     }
     serve_object(&root, &relative, &object, mount, parts, &hide).await
 }
@@ -710,13 +719,21 @@ fn optional_number(name: &str, raw: Option<&str>) -> Result<Option<f64>, ApiErro
 /// store and supplied no credential — that is the whole difference from the API mode,
 /// which is why the handle is opened by the mount rather than through the url-judging
 /// path.
+///
+/// **`None` means the answer is the file itself**, and the caller serves it the way it
+/// would have without a query string. That is not an optimisation of a query, it is the
+/// observation that the query is not one: `engine::whole` proves from the footer that the
+/// projection is every column and the predicate keeps every row, which is exactly what an
+/// `lsdb` client sends for a partition it has not projected. Answering it as a query is a
+/// full read and a full re-encode, three times over, for bytes that are already sitting in
+/// the store.
 async fn query_file(
     service: &Service,
     opened: &storage::RemoteFile,
     hide: Hide<'_>,
     query: &FileQuery,
     request: &Parts,
-) -> Result<Response, ApiError> {
+) -> Result<Option<Response>, ApiError> {
     if !matches!(request.method, Method::GET | Method::HEAD) {
         return Err(ApiError::method_not_allowed("a query is read, not written"));
     }
@@ -729,26 +746,70 @@ async fn query_file(
     let selection = query.selection()?;
     // Through `hide`, all of them: a store's own message names where it was reading, and
     // where a mount's files really are is the operator's.
+    //
+    // The footer is read before the rows rather than alongside them, which costs one round
+    // trip on the way to a query and is what buys the two decisions below: whether this is
+    // a query at all, and — for the answer that is one — the layout to write it in. Both
+    // need the same footer, so the read is not an extra one either way.
+    let layout = match output.format {
+        Format::Parquet => {
+            let (layout, metadata) = parquet::read_source(opened)
+                .await
+                .map_err(|error| hide.apply(error))?;
+            if whole::answers_with_the_file(&selection, &metadata, service.sql_limits) {
+                return Ok(None);
+            }
+            Some(layout)
+        }
+        _ => None,
+    };
+
+    // The answer this request would make may already have been made: a parquet reader opens
+    // one url three times, and without this each of those re-runs the query and re-reads
+    // the file. Keyed by the url and bounded by a few minutes — see `app::cache`.
+    let asked = cache::Asked::new(request.uri.path(), request.uri.query());
+    if matches!(output.format, Format::Parquet)
+        && let Some(held) = service.answers.get(&asked)
+    {
+        return Ok(Some(answer::parquet_answer(
+            held.body.to_vec(),
+            opened,
+            held.counts,
+            started,
+            Some(request),
+        )));
+    }
+
     // The rows come back in the file's own order. The request named a file and asked for
     // less of it, so the answer describes that file, and a client that reads a partition
     // twice gets the same rows in the same places both times.
-    // The layout read needs only `opened`, not the rows, so it runs alongside the query
-    // rather than after it. Fetched only when the answer will actually be parquet.
-    let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
-        .then(|| parquet::read_layout(opened))
-        .into();
-    let (result, layout) = tokio::join!(
-        query::run(opened, &selection, service.sql_limits, Order::File),
-        layout_future,
-    );
-    let result = result.map_err(|error| hide.apply(error))?;
-    let layout = layout.transpose().map_err(|error| hide.apply(error))?;
+    let result = query::run(opened, &selection, service.sql_limits, Order::File)
+        .await
+        .map_err(|error| hide.apply(error))?;
 
     let num_rows = result.num_rows();
     let data_bytes_read = result.data_bytes_read;
-    let response = answer(&result, opened, &output, started, layout, Some(request))
-        .await
-        .map_err(|error| hide.apply(error))?;
+    let response = match output.format {
+        Format::Parquet => {
+            let body = parquet::encode(&result, &layout.unwrap_or_default())
+                .map_err(|error| hide.apply(error))?;
+            let counts = answer::Counts {
+                num_rows,
+                data_bytes_read,
+            };
+            service.answers.insert(
+                asked,
+                cache::Held {
+                    body: Bytes::from(body.clone()),
+                    counts,
+                },
+            );
+            answer::parquet_answer(body, opened, counts, started, Some(request))
+        }
+        _ => answer(&result, opened, &output, started, None, Some(request))
+            .await
+            .map_err(|error| hide.apply(error))?,
+    };
     tracing::info!(
         // The url path, not the mount's own: where the file really is is the operator's
         // business.
@@ -765,7 +826,7 @@ async fn query_file(
         elapsed_ms = started.elapsed().as_millis(),
         "query"
     );
-    Ok(response)
+    Ok(Some(response))
 }
 
 /// A catalog under a mount, asked for the rows inside a circle.
@@ -1640,6 +1701,55 @@ mod tests {
         assert_eq!(body["num_rows"], 1);
         assert!(body["data_bytes_read"].as_u64().unwrap() > 0, "{body}");
         assert_eq!(body["rows"][0]["objectid"], 1);
+    }
+
+    /// A query that narrows nothing is answered with the file, byte for byte.
+    ///
+    /// This is the request an `lsdb` client sends for a partition it has not projected:
+    /// every column named, and a predicate that is the partition's own cell bounds, which
+    /// every row satisfies. Answered as a query it is a full read and a full re-encode, and
+    /// three times over, for bytes already sitting in the store.
+    ///
+    /// The check is that the body *is* the file — not merely that it holds the same rows —
+    /// since that is the difference between serving bytes and generating them.
+    #[tokio::test]
+    async fn a_query_that_narrows_nothing_answers_with_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let fixture = query::tests::fixture();
+        std::fs::write(dir.path().join("part0.parquet"), &fixture).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for url in [
+            "/part0.parquet?columns=objectid,band",
+            // The column order is not the file's, which is the order `lsdb` writes.
+            "/part0.parquet?columns=band,objectid",
+            // Every row satisfies it, proved from the footer rather than by reading.
+            "/part0.parquet?columns=objectid,band&filters=objectid%3E=0",
+        ] {
+            let response = respond(service(), Request::builder().uri(url)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{url}");
+            assert_eq!(
+                response.headers()[header::CONTENT_TYPE],
+                PARQUET_CONTENT_TYPE
+            );
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                &body[..],
+                &fixture[..],
+                "{url} was re-encoded rather than served"
+            );
+        }
+
+        // And a query that does narrow something is still a query: the answer is smaller
+        // than the file and is not it.
+        let response = respond(
+            service(),
+            Request::builder().uri("/part0.parquet?columns=objectid&filters=objectid%3E5"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_ne!(&body[..], &fixture[..]);
     }
 
     /// A query's answer is generated for this request, and a client still has to seek in

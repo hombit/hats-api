@@ -11,6 +11,7 @@ Release dates are in the UTC time zone.
 - `[[mount]] source` takes a url in any scheme this service reads — `s3://`, `gs://`, `az://`, `https://`, `webdav://`, `hf://` — as well as a local path.
 - `[[mount]] storage`, the options that reach a `source` in a store: the same names a request writes beside its url.
 - A served mount over a store answers `Range`, `If-None-Match` and `HEAD` against the origin, and lists a directory one level at a time.
+- `[limits] query_cache_seconds`, 240 by default, and `[limits] max_query_cache_bytes`, 512 MiB: how long a generated answer is held for the requests that read it, and how much is held at once. `0` seconds turns it off.
 
 ### Changed
 
@@ -26,6 +27,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
+- A query on a file-server url that narrows nothing — every column, a predicate true of every row, no `limit` and no region — is answered with the file itself instead of a re-encoded copy of it.
 - A parquet answer to a query on a file-server url answers `Range` — `206` with `Content-Range`, `416` past the end — where it used to send `Accept-Ranges: none`, which left `pyarrow` unable to open any answer larger than one `fsspec` block.
 - A name with nothing under it in a store-backed mount answers `404` rather than `200` with an empty listing, which `hats` read as a properties file and failed to open the catalog on.
 

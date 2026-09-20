@@ -376,14 +376,50 @@ fn parquet_response(
     parts: Option<&Parts>,
 ) -> Result<Response, ApiError> {
     let body = parquet::encode(result, &layout.unwrap_or_default())?;
-    Ok(seekable(
+    Ok(parquet_answer(
+        body,
+        file,
+        Counts {
+            num_rows,
+            data_bytes_read: result.data_bytes_read,
+        },
+        started,
+        parts,
+    ))
+}
+
+/// What a parquet answer reports beside its bytes. Carried apart from the rows so that an
+/// answer served again from the cache reports what reading it actually cost, rather than
+/// the nothing this request spent.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::app) struct Counts {
+    pub num_rows: usize,
+    pub data_bytes_read: u64,
+}
+
+/// A parquet body, named after the file it came from and offered as a seekable resource.
+///
+/// The one place a parquet answer becomes a response, so an answer generated now and one
+/// handed back from the cache are the same bytes under the same headers.
+pub(in crate::app) fn parquet_answer(
+    body: Vec<u8>,
+    file: &RemoteFile,
+    counts: Counts,
+    started: Instant,
+    parts: Option<&Parts>,
+) -> Response {
+    seekable(
         body,
         (
             attachment(PARQUET_CONTENT_TYPE, &download_name(file, "parquet")),
-            counters(result, num_rows, started),
+            [
+                (NUM_ROWS_HEADER, counts.num_rows.to_string()),
+                (DATA_BYTES_READ_HEADER, counts.data_bytes_read.to_string()),
+                (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
+            ],
         ),
         parts,
-    ))
+    )
 }
 
 /// Name the download after the source object, so a directory of these files says which
