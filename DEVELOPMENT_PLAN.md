@@ -56,7 +56,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.5 | VOSI capabilities, availability, tables | done | |
 | 11.6 | `csv` and `tsv` | done | |
 | 11.13 | a region over `Float32` coordinates | done | |
-| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it and adds `TABLE` |
+| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it, adds `TABLE`, and fixes the names of its own resources. `VERB` and the id column are settled; the url space, the circle's spelling and the row bound are not |
 | 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. Inline `UPLOAD` is still §11.11's, and a job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
 | 11.9 | `/examples` | deferred | waits for §6.1's catalog metadata cache. A menu TOPCAT offers, not something a client needs to work, and every example in it is generated from a published catalog |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
@@ -626,16 +626,27 @@ That is the whole protocol.
 
 [SCS 2.0](https://github.com/ivoa-std/SCS2) is built on DALI, so it inherits nearly all of
 what TAP already answers where 1.03 inherits none of it — `MAXREC`, `RESPONSEFORMAT`, DALI
-error documents, VOSI `/capabilities` and `/tables` beside the query endpoint, and UCD1+. Its
-one genuinely new idea is `TABLE`, which breaks 1.03's identity of one service with one
-table and makes the url space look like TAP's rather than like 1.03's.
+error documents, VOSI `/capabilities` and `/tables` beside the query endpoint, and UCD1+. Two
+things in it are not TAP's. `TABLE` breaks 1.03's identity of one service with one table and
+makes the url space look like TAP's rather than like 1.03's. And a refusal may not carry a
+`200`: the draft asks for "4xx when the service sees a client error and a 5xx when the service
+diagnoses an error", where TAP §3.3 permits the error document to arrive with a `200` and this
+service takes that permission.
+
+**The resource names are the draft's, and only the base is ours.** §5 fixes three against it —
+`<base-url>/scs2` is the query, `<base-url>/capabilities` and `<base-url>/tables` are the VOSI
+documents — and tells a client to build the second by dropping the query's last path segment,
+so the three move together or not at all. The capability to declare is
+`ivo://ivoa.net/scs2#query-2.0`.
 
 It is a Working Draft, which is a fact about maintenance rather than a reason to wait: the
 checks for it each name the clause they came from, so when the draft moves, what has to
 move with it is findable.
 
 So the two are not one piece of work done twice. **1.03 is the odd one**, and the list below
-is what *it* does not inherit; SCS2 costs a parameter and a second set of capabilities.
+is what *it* does not inherit; SCS2 costs `TABLE`, a second set of capabilities and its own
+three resource names. `VERB` is the exception in the other direction — the one thing 1.03 has
+that DALI never took up, kept by SCS2 anyway — so it belongs to both and is below on its own.
 
 **It is cheap because TAP paid for it.** A cone predicate, HATS partitions pruned by it, a
 VOTable writer and a list of published tables with known coordinate columns are every part
@@ -655,19 +666,75 @@ Four things it does *not* inherit, because it predates DALI by a decade:
   not be unified with that one on the grounds that both are errors in VOTables.
 - **The UCDs are UCD1, not UCD1+.** The three required columns are marked `ID_MAIN`,
   `POS_EQ_RA_MAIN` and `POS_EQ_DEC_MAIN`, where the rest of this phase writes
-  `meta.id;meta.main` and `pos.eq.ra;meta.main`. Whether to publish both spellings is the
-  one decision here worth making deliberately: clients of this protocol are old.
-- **An ID column is mandatory**, and a HATS catalog does not promise one. Which column it
-  is has to come from somewhere — the catalog's own metadata or the published-table entry —
-  and a catalog with no such column cannot be published over this protocol at all.
+  `meta.id;meta.main` and `pos.eq.ra;meta.main` — and SCS2 §6 asks for those. Publishing both
+  spellings is not open: a `FIELD` carries one `ucd`. So the marking is per version, which
+  is the only thing that makes one column description serve two documents.
+- **An ID column is mandatory**, and a HATS catalog does not promise one. It is named by
+  `[tap.table.cone] id`, and naming it is what publishes the table over both versions: a
+  `[[tap.table]]` with no such section is TAP's alone. 1.03 §2 wants the column to be "an
+  array character type", which no HATS identifier is — Gaia's `source_id` and ZTF's
+  `objectId` are both integers — so where the named column is not a string a `{id}_str` is
+  attached beside it and carries the mandatory UCD. A catalog already holding a column of
+  that name is a startup error rather than a silent rename. Neither column is TAP's: the
+  attached one is absent from `TAP_SCHEMA` and `/tables` and cannot be named in ADQL, since
+  it exists to satisfy a type requirement in one protocol.
 - **There is no `MAXREC`.** `MaxRecords` is a registry property describing the service, not
   a request parameter, and the protocol says nothing about truncating. What this service's
   row bound does here therefore needs deciding rather than inheriting: silently truncating
   is the failure this repository keeps refusing.
 
+#### Which columns come back
+
+**`VERB` is the one column mechanism either version has, and both have it.** 1.03 §2 makes it
+optional; SCS2 §5.1.5 makes it mandatory — "which we keep from ConeSearch-1". Both define the
+same three tiers and hand the choice to the provider: 1 is "the bare minimum of columns that
+the provider considers useful", 2 is "most typically useful" and the default, 3 is "all of the
+columns that are available". Both also permit ignoring it — "it is legal to always return the
+same set of columns independently of the value of `VERB`."
+
+Ignoring it is what must not happen here. These catalogs are 150 to 370 columns wide, and that
+is the whole cost of a cone rather than the rows it returns — the measurement the `/docs`
+examples are sized by, ten to seventy seconds against about one. And the tier is not a corner:
+`pyvo`'s `SCSService.search` defaults to `verbosity=2` and writes the parameter, so VERB=2 is
+what every astronomer sends whether or not they have heard of it.
+
+| `VERB` | what comes back |
+| --- | --- |
+| 1 | the HEALPix index, the two coordinate columns, `hats_cols_sort` if the catalog names any, and the string id |
+| 2 | `hats_cols_default` plus both id columns, or every column where the catalog names none |
+| 3 | every column |
+
+**The catalog says the middle tier, not the config.** `hats_cols_default` is HATS's own key —
+"which columns should be read from parquet files, when user doesn't otherwise specify" — which
+is VERB=2's question asked in the catalog's own words. So there is no key here for a column
+list and no second place for one to disagree from. `hats_cols_sort` is the other half of tier
+1 and is read here already; it is *not* in HATS's reference implementation, so it will find
+nothing on any catalog an importer writes today, and it stays because it costs nothing and is
+right if one ever does.
+
+Tier 1 is the machinery rather than the minimum the standard imagines: what it returns is
+enough to locate a row and come back for the rest of it. The index and the sort columns carry
+a description and no UCD — there is no UCD1 word for a HEALPix index, and 1.03's "description,
+data-type, and UCD" for an extra field is a SHOULD.
+
+**A tier that reaches a nested column is refused, at 2 as at 3.** No format either version can
+answer in carries one — not VOTable, not `csv`, not `tsv` — so the alternative is a column
+silently absent from a request that asked for all of them. The refusal points at
+`POST {api.prefix}/v1/hats` with `format: parquet`, which is where a nested column is answered
+today; it cannot point at `RESPONSEFORMAT`, `parquet` and `json` being deliberately absent
+from the TAP format table until §11.12. What it costs is that a cone over a catalog with a
+nested column does not answer at all until an operator writes `hats_cols_default`, ZTF DR24
+being the one here.
+
+#### Still to settle
+
 **One endpoint per table** in 1.03, which is the other shape difference — a cone search
 service *is* a table, where TAP and SCS2 publish many under one base url. So the url space
-needs a decision that TAP did not need.
+needs a decision that TAP did not need, and it has to hold both shapes at once: one name per
+published table, beside SCS2's three fixed ones. Putting them in a single space works because
+a published name is `schema.table` and always carries a dot, so it can never collide with
+`scs2`, `capabilities` or `tables` — which is an invariant to enforce at startup rather than
+to rely on.
 
 **The file-server mode's circle should end up spelled the same way**, and that is the part
 of this step with a cost. A url there carries `ra`, `dec` and one of `radius_deg` or
@@ -690,12 +757,22 @@ Aliases are the likely answer, since the file server's names are published and a
 client cannot be asked to learn new ones. What must not happen is the two drifting: whatever
 is decided, one piece of code parses a circle from a url.
 
-**The conformance suite covers both already**, ten checks over the two, skipped until
-`--scs-url` and `--scs2-url` name an endpoint — they are given rather than guessed, so that
-nothing here encodes a url space this step has not decided. The 1.03 half goes through
-`pyvo.dal.SCSService` and is calibrated against VizieR's cone search; the 2.0 half asks over
-HTTP because no client implements a draft yet, and each of its checks names the clause it
-came from so that what has to move when the draft moves is findable.
+**The conformance suite covers 1.03 and not SCS2.** Four checks through `pyvo.dal.SCSService`,
+calibrated against VizieR's cone search and skipped until `--scs-url` names an endpoint — given
+rather than guessed, so that nothing there encodes a url space this step has not decided.
+
+Two halves are missing, and neither is a matter of writing more of the same. **SCS2 has no
+client**: `pyvo` 1.9 has an `scs` module and nothing for 2.0, and STILTS has `cone` and no
+SCS2 task, so the 2.0 checks ask over plain HTTP and each names the clause it came from, which
+is what makes a moving draft findable rather than a maintenance surprise. **1.03 has a second
+client and is not put to it**: `stilts cone` is an independent implementation of the same
+protocol, and every other resource here is asked by two clients precisely because a document
+can satisfy one and be refused by the other.
+
+The `VERB` tiers are what the new checks are mostly about, and they are checked by counting
+rather than by naming columns: 1 is fewer than 2 is no more than 3, the three mandatory UCDs
+are present at every tier, and a catalog with a nested column is refused at 2 and 3 with a
+message naming where such a column is answered.
 
 ### 11.9 `/examples`
 
