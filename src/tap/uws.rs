@@ -70,10 +70,16 @@ pub fn job(job: &Job, base: &str) -> String {
     if let Some(run_id) = &job.run_id {
         let _ = writeln!(out, "<uws:runId>{}</uws:runId>", escape(run_id));
     }
-    // Nil rather than absent: this service has no authentication, so every job's owner is
-    // nobody, and UWS §2.1.8 has the object exist only "in cases where the access to the
-    // service is authenticated".
-    out.push_str("<uws:ownerId xsi:nil=\"true\"/>\n");
+    // Read off the record rather than decided here. It is `None` for every job this service
+    // makes, there being no authentication, and UWS §2.1.8 has the object exist only "in
+    // cases where the access to the service is authenticated" — so nil is right, and it is
+    // right because the job says so rather than because this function assumes it.
+    match &job.owner {
+        Some(owner) => {
+            let _ = writeln!(out, "<uws:ownerId>{}</uws:ownerId>", escape(owner));
+        }
+        None => out.push_str("<uws:ownerId xsi:nil=\"true\"/>\n"),
+    }
     let _ = writeln!(out, "<uws:phase>{}</uws:phase>", job.phase);
     // Nothing here can estimate how long a query will take, and a number that is a guess is
     // worse than none: a client shows it to a user as a promise.
@@ -106,32 +112,8 @@ pub fn job(job: &Job, base: &str) -> String {
         instant(job.destruction)
     );
 
-    out.push_str("<uws:parameters>\n");
-    for (name, value) in &job.parameters {
-        if name.eq_ignore_ascii_case(WITHHELD) {
-            continue;
-        }
-        let _ = writeln!(
-            out,
-            "<uws:parameter id=\"{}\">{}</uws:parameter>",
-            escape(&name.to_lowercase()),
-            escape(value)
-        );
-    }
-    out.push_str("</uws:parameters>\n");
-
-    out.push_str("<uws:results>\n");
-    // Only where there is one. TAP §2.2 requires the result resource to exist for a query
-    // that matched no rows, which is a completed job with an empty table — not a job that
-    // failed, which has an error document instead and no result at all.
-    if job.product.is_some() {
-        let _ = writeln!(
-            out,
-            "<uws:result id=\"{RESULT}\" xlink:href=\"{}/results/{RESULT}\"/>",
-            escape(base)
-        );
-    }
-    out.push_str("</uws:results>\n");
+    parameter_list(&mut out, job);
+    result_list(&mut out, job, base);
 
     if let Some(message) = &job.error {
         // `fatal`, never `transient`: nothing this service refuses becomes allowed by being
@@ -145,6 +127,83 @@ pub fn job(job: &Job, base: &str) -> String {
     }
     out.push_str("</uws:job>\n");
     out
+}
+
+/// The parameters, as `GET /async/{id}/parameters` answers them.
+///
+/// The same element the job document carries, written by the same code — so the standalone
+/// resource and the one inside the job cannot come to disagree about what was withheld.
+pub fn parameters(job: &Job) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let _ = writeln!(out, "<uws:parameters xmlns:uws=\"{NAMESPACE}\">");
+    for (name, value) in &job.parameters {
+        if name.eq_ignore_ascii_case(WITHHELD) {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "<uws:parameter id=\"{}\">{}</uws:parameter>",
+            escape(&name.to_lowercase()),
+            escape(value)
+        );
+    }
+    out.push_str("</uws:parameters>\n");
+    out
+}
+
+/// The results, as `GET /async/{id}/results` answers them.
+pub fn results(job: &Job, base: &str) -> String {
+    let mut out = String::new();
+    out.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    let _ = writeln!(
+        out,
+        "<uws:results xmlns:uws=\"{NAMESPACE}\" \
+         xmlns:xlink=\"http://www.w3.org/1999/xlink\">"
+    );
+    if job.product.is_some() {
+        let _ = writeln!(
+            out,
+            "<uws:result id=\"{RESULT}\" xlink:href=\"{}/results/{RESULT}\"/>",
+            escape(base)
+        );
+    }
+    out.push_str("</uws:results>\n");
+    out
+}
+
+/// The `<uws:parameters>` block, inside a job document.
+fn parameter_list(out: &mut String, job: &Job) {
+    out.push_str("<uws:parameters>\n");
+    for (name, value) in &job.parameters {
+        if name.eq_ignore_ascii_case(WITHHELD) {
+            continue;
+        }
+        let _ = writeln!(
+            out,
+            "<uws:parameter id=\"{}\">{}</uws:parameter>",
+            escape(&name.to_lowercase()),
+            escape(value)
+        );
+    }
+    out.push_str("</uws:parameters>\n");
+}
+
+/// The `<uws:results>` block, inside a job document.
+///
+/// One result where there is one. TAP §2.2 requires the resource to exist for a query that
+/// matched no rows — a completed job with an empty table — but a failed job has an error
+/// document and no rows anywhere, so an href there would send a client to a `404`.
+fn result_list(out: &mut String, job: &Job, base: &str) {
+    out.push_str("<uws:results>\n");
+    if job.product.is_some() {
+        let _ = writeln!(
+            out,
+            "<uws:result id=\"{RESULT}\" xlink:href=\"{}/results/{RESULT}\"/>",
+            escape(base)
+        );
+    }
+    out.push_str("</uws:results>\n");
 }
 
 /// The job list, as `GET /async` answers it.

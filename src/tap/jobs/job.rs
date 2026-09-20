@@ -95,6 +95,20 @@ pub struct Job {
     pub id: JobId,
     /// The caller's `RUNID`, if they sent one (DALI §3.4.6).
     pub run_id: Option<String>,
+    /// Who created it, where that can be said.
+    ///
+    /// **Always `None` today, and the field is where authentication would land.** UWS
+    /// §2.1.8 has the owner exist only "in cases where the access to the service is
+    /// authenticated", and §3 asks an authenticated service to "set the owner object to the
+    /// identity obtained by the authentication" — so this is the standard's own shape rather
+    /// than a guess at one, and `/owner` and `<uws:ownerId>` read it rather than each
+    /// deciding that there is nobody.
+    ///
+    /// What would change beside it: the job list, which is empty because an anonymous
+    /// caller's security context holds nothing, and the `404` that an id naming somebody
+    /// else's job gets — §3 asks for a `403` there, which only means something once two
+    /// callers can be told apart.
+    pub owner: Option<String>,
     pub phase: Phase,
     pub created: DateTime<Utc>,
     pub started: Option<DateTime<Utc>>,
@@ -153,6 +167,7 @@ impl Job {
         Self {
             id,
             run_id,
+            owner: None,
             phase: Phase::Pending,
             created: now,
             started: None,

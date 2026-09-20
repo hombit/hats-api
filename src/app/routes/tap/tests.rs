@@ -20,6 +20,7 @@ fn published(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
             name: "sky.objects".to_owned(),
             path: "/".to_owned(),
         }],
+        jobs: Default::default(),
     };
     with_tap(
         serving(dir),

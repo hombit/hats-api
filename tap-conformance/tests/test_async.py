@@ -125,8 +125,15 @@ def phase_of(session, job: str) -> str:
 
 
 def settled(session, job: str, timeout: float = SETTLE_SECONDS) -> str:
-    """Run the job and wait for it to stop, returning the phase it stopped in."""
-    session.post(job, data={"PHASE": "RUN"}, allow_redirects=False)
+    """Run the job and wait for it to stop, returning the phase it stopped in.
+
+    `PHASE=RUN` goes to the phase resource, which is where UWS's REST binding puts the
+    phase. Posting it to the job URL instead is not something the standard describes —
+    UWS names that URL for *parameters*, and DALI then forbids even those there — so a
+    service that declines it is within its rights and this helper would be testing a
+    shape nobody specified.
+    """
+    session.post(f"{job}/phase", data={"PHASE": "RUN"}, allow_redirects=False)
     deadline = time.monotonic() + timeout
     phase = phase_of(session, job)
     while phase not in TERMINAL and time.monotonic() < deadline:
@@ -392,15 +399,17 @@ def test_the_job_list_takes_the_uws_1_1_filters(
 
 
 @pytest.mark.parametrize(
-    ("resource", "parameter", "wanted"),
+    ("resource", "element", "parameter", "wanted"),
     [
-        ("destruction", "DESTRUCTION", None),
-        ("executionduration", "EXECUTIONDURATION", "30"),
+        ("destruction", "destruction", "DESTRUCTION", None),
+        # The resource is lower-case in the URL and camel-case in the document; UWS spells
+        # them differently and a check that assumed one name found neither.
+        ("executionduration", "executionDuration", "EXECUTIONDURATION", "30"),
     ],
     ids=["destruction", "executionduration"],
 )
 def test_a_writable_value_is_honoured_or_refused(
-    session, service, job_query, resource, parameter, wanted, record_property
+    session, service, job_query, resource, element, parameter, wanted, record_property
 ):
     """Writing one changes it, or is refused — never accepted and dropped.
 
@@ -416,7 +425,7 @@ def test_a_writable_value_is_honoured_or_refused(
     """
     job = submitted(session, service, QUERY=job_query(1), LANG="ADQL")
     try:
-        before = (document(session, job).find(f"{{{UWS}}}{resource}").text or "").strip()
+        before = (document(session, job).find(f"{{{UWS}}}{element}").text or "").strip()
         if wanted is None:
             wanted = (datetime.now(UTC) + timedelta(minutes=5)).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
@@ -424,7 +433,7 @@ def test_a_writable_value_is_honoured_or_refused(
         answered = session.post(
             f"{job}/{resource}", data={parameter: wanted}, allow_redirects=False
         )
-        after = (document(session, job).find(f"{{{UWS}}}{resource}").text or "").strip()
+        after = (document(session, job).find(f"{{{UWS}}}{element}").text or "").strip()
         record_property(
             "detail",
             f"{before!r} → asked {wanted!r} → {after!r} ({answered.status_code})",

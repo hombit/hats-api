@@ -12,4 +12,5 @@ mod service;
 #[cfg(test)]
 mod testing;
 
-pub use service::{Service, health_schema, router};
+pub use routes::tap::Jobs;
+pub use service::{Service, health_schema, router, router_with};
