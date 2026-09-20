@@ -1,6 +1,7 @@
 //! What a query answers with: the response bodies, the encodings, and the counts that travel
 //! as headers where a body has no room for them.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -373,26 +374,9 @@ pub(in crate::app) fn streamed(
     started: Instant,
 ) -> Result<Response, ApiError> {
     let schema = Arc::clone(&planned.schema);
-    let columns = columns_of_schema(&schema);
-    let encoder: Box<dyn stream::Encoder> = match output.format {
-        Format::Json => Box::new(JsonBody::new(columns)),
-        Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, &output.dsv_null)),
-        Format::Votable => Box::new(votable::Document::new(None)),
-        Format::Parquet => {
-            return Err(ApiError::bad_request(
-                "parquet cannot be streamed: it is read from its footer backwards, so a \
-                 reader needs the whole file; ask for json, csv, tsv or votable, or leave \
-                 streaming out",
-            ));
-        }
-    };
-    let content_type = match output.format {
-        Format::Json => "application/json",
-        Format::Dsv(kind) => kind.content_type(),
-        Format::Votable => votable::CONTENT_TYPE,
-        Format::Parquet => PARQUET_CONTENT_TYPE,
-    };
     let batches = planned.batches()?;
+    let encoder = encoder_for(output, &schema)?;
+    let content_type = content_type_for(output);
     // The plan outlives the rows, which is what makes the ending readable: `data_bytes_read`
     // is a counter on the scan and is final only once the last batch has come off it.
     let ending = move |rows: usize| stream::Ending {
@@ -400,6 +384,9 @@ pub(in crate::app) fn streamed(
         data_bytes_read: planned.data_bytes_read(),
         elapsed: started.elapsed(),
         overflow: false,
+        // One file, and its bounds are the expression limits, which are checked before
+        // anything is read. There is nothing here that can stop part-way.
+        refused: None,
     };
     let body = Body::from_stream(stream::streamed(encoder, schema, batches, ending));
     Ok((
@@ -413,6 +400,78 @@ pub(in crate::app) fn streamed(
         body,
     )
         .into_response())
+}
+
+/// A catalog's rows, sent as its partitions land.
+///
+/// The counterpart of [`streamed`] for the route whose rows come from many files rather
+/// than one — so what the ending costs is not one plan's counter but what the read
+/// accumulated, and a bound reached part-way is a `refused` the encoder renders rather
+/// than the `422` with a work list a collected answer would have given.
+pub(in crate::app) fn streamed_rows<S>(
+    schema: datafusion::arrow::datatypes::SchemaRef,
+    batches: S,
+    refused: Arc<std::sync::Mutex<Option<hats::query::Exceeded>>>,
+    output: &Output,
+    started: Instant,
+) -> Result<Response, ApiError>
+where
+    S: futures::Stream<Item = Result<datafusion::arrow::array::RecordBatch, ApiError>>
+        + Send
+        + 'static,
+{
+    let encoder = encoder_for(output, &schema)?;
+    let content_type = content_type_for(output);
+    let ending = move |rows: usize| stream::Ending {
+        rows,
+        // A streamed catalog read reports no byte count: it is summed as the partitions
+        // land, and the sum belongs to the read rather than to any one plan. What it cost
+        // is in the log line, which is the operator's rather than the caller's.
+        data_bytes_read: 0,
+        elapsed: started.elapsed(),
+        overflow: false,
+        refused: refused
+            .lock()
+            .ok()
+            .and_then(|held| held.map(|why| why.to_string())),
+    };
+    let body = Body::from_stream(stream::streamed(encoder, schema, batches, ending));
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (header::ACCEPT_RANGES, "none".to_owned()),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// Which encoder writes this answer, and the one format that has no streamed form.
+fn encoder_for(
+    output: &Output,
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+) -> Result<Box<dyn stream::Encoder>, ApiError> {
+    Ok(match output.format {
+        Format::Json => Box::new(JsonBody::new(columns_of_schema(schema))),
+        Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, &output.dsv_null)),
+        Format::Votable => Box::new(votable::Document::new(None)),
+        Format::Parquet => {
+            return Err(ApiError::bad_request(
+                "parquet cannot be streamed: it is read from its footer backwards, so a \
+                 reader needs the whole file; ask for json, csv, tsv or votable, or leave \
+                 streaming out",
+            ));
+        }
+    })
+}
+
+fn content_type_for(output: &Output) -> &'static str {
+    match output.format {
+        Format::Json => "application/json",
+        Format::Dsv(kind) => kind.content_type(),
+        Format::Votable => votable::CONTENT_TYPE,
+        Format::Parquet => PARQUET_CONTENT_TYPE,
+    }
 }
 
 /// The same body [`SelectResponse`] is, written around rows that have not arrived yet.
@@ -455,37 +514,65 @@ impl stream::Encoder for JsonBody {
     }
 
     fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
-        let mut out = self.rows.end(ending)?;
+        let mut out = self.rows.end(ending.clone())?;
         // An answer of no rows at all: the row writer never opened its array, and an empty
         // one still has to be there for `rows` to be a list.
         if !self.wrote {
             out.extend_from_slice(b"[]");
         }
-        let counts = format!(
-            ",\"num_rows\":{},\"data_bytes_read\":{},\"elapsed_ms\":{}}}",
+        let mut counts = format!(
+            ",\"num_rows\":{},\"data_bytes_read\":{},\"elapsed_ms\":{}",
             ending.rows,
             ending.data_bytes_read,
             ending.elapsed.as_millis(),
         );
+        // Where a bound stopped the rows, the body says so rather than ending as though
+        // it were whole. A collected answer never reaches here: there, a bound is a `422`
+        // carrying the work list, which is what a caller can act on and what a stream that
+        // has already sent its status cannot go back and offer.
+        if let Some(why) = &ending.refused {
+            let _ = write!(
+                counts,
+                ",\"refused\":{}",
+                serde_json::Value::from(why.as_str())
+            );
+        }
+        counts.push('}');
         out.extend_from_slice(counts.as_bytes());
         Ok(out)
     }
 }
 
+/// The same body, written straight out rather than through `serde_json::Value`.
+///
+/// **The detour was most of what a JSON answer cost.** Running the arrow writer to bytes,
+/// parsing those into a `Value` per cell and serializing them again held 481 MB for a
+/// 53 MB answer and took 460 ms where the writing alone takes 57 — so the collected path
+/// now drives the same encoder a streamed one does, and the `Value`s are gone from both.
+///
+/// [`SelectResponse`] stays as the type the description publishes: it is what the body
+/// *is*, and `utoipa` reads it to say so.
 pub(in crate::app) fn json_response(
     result: &QueryResult,
     started: Instant,
 ) -> Result<Response, ApiError> {
-    let rows = json::to_json(result)?;
-    let schema = columns_of(result);
-    Ok(Json(SelectResponse {
-        num_rows: rows.len(),
-        schema,
-        data_bytes_read: result.data_bytes_read,
-        elapsed_ms: started.elapsed().as_millis(),
-        rows,
-    })
-    .into_response())
+    let mut body = JsonBody::new(columns_of(result));
+    let bytes = stream::collected(
+        &mut body,
+        result,
+        stream::Ending {
+            rows: result.num_rows(),
+            data_bytes_read: result.data_bytes_read,
+            elapsed: started.elapsed(),
+            overflow: false,
+            refused: None,
+        },
+    )?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        Body::from(bytes),
+    )
+        .into_response())
 }
 
 /// The answer as a parquet file laid out like the file it came from, which costs one

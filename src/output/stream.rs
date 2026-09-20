@@ -31,13 +31,21 @@ use crate::engine::query::QueryResult;
 use crate::error::ApiError;
 
 /// What is known only once the last row is in, and what the end of a document may say.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct Ending {
     pub rows: usize,
     pub data_bytes_read: u64,
     pub elapsed: Duration,
     /// Whether a row bound cut the answer short, which DALI §4.4.1 puts *after* the table.
     pub overflow: bool,
+    /// Why this answer is not the whole answer, where a bound stopped it part-way.
+    ///
+    /// A collected answer never has one — a bound reached there is a `422` and a work list,
+    /// which is what the caller wants and what a stream cannot go back and send. So this is
+    /// the streamed case only, and each format says it the way it can: JSON writes it,
+    /// VOTable turns it into `OVERFLOW`, and the delimited formats, having nowhere to put
+    /// it, end the body without its terminating chunk rather than look complete.
+    pub refused: Option<String>,
 }
 
 /// One format, written in three pieces.

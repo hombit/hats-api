@@ -177,7 +177,17 @@ impl stream::Encoder for Delimited {
     /// A body of no bytes at all is a different answer from one naming the columns and
     /// holding no rows: the first says nothing about what was asked for, and this format
     /// has nowhere else to say it. An empty batch is how the writer is made to emit it.
-    fn end(&mut self, _ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+    fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // Delimited text has nowhere to say "this is not the whole answer" — no trailer,
+        // no comment, nothing a reader of a table would look at. So an answer a bound cut
+        // short ends the body here instead, and what a client sees is a transfer that
+        // stopped rather than a table that finished.
+        if let Some(why) = ending.refused {
+            return Err(ApiError::internal(format!(
+                "this answer stopped part-way and {} has no way to say so: {why}",
+                self.kind.name()
+            )));
+        }
         if !self.wrote
             && let Some(schema) = self.schema.clone()
         {

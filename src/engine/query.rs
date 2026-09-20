@@ -50,6 +50,69 @@ pub enum Predicate<'a> {
     FilterText(&'a str),
 }
 
+/// The same two, owning their text.
+///
+/// A streamed answer outlives the request it came from — the body is still being written
+/// when the handler returns — so what the rows are selected by cannot borrow from the
+/// request body. These own it, and [`OwnedProjection::view`] hands back the borrowed form
+/// the query layer takes, so there is one selection type below this and two ways of
+/// holding its strings.
+#[derive(Debug, Default, Clone)]
+pub enum OwnedProjection {
+    #[default]
+    All,
+    Columns(Vec<String>),
+    ColumnText(String),
+}
+
+impl OwnedProjection {
+    pub fn view(&self) -> Projection<'_> {
+        match self {
+            Self::All => Projection::All,
+            Self::Columns(names) => Projection::Columns(names),
+            Self::ColumnText(text) => Projection::ColumnText(text),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+pub enum OwnedPredicate {
+    #[default]
+    All,
+    Filters(String),
+    FilterText(String),
+}
+
+impl OwnedPredicate {
+    pub fn view(&self) -> Predicate<'_> {
+        match self {
+            Self::All => Predicate::All,
+            Self::Filters(text) => Predicate::Filters(text),
+            Self::FilterText(text) => Predicate::FilterText(text),
+        }
+    }
+}
+
+impl From<Projection<'_>> for OwnedProjection {
+    fn from(projection: Projection<'_>) -> Self {
+        match projection {
+            Projection::All => Self::All,
+            Projection::Columns(names) => Self::Columns(names.to_vec()),
+            Projection::ColumnText(text) => Self::ColumnText(text.to_owned()),
+        }
+    }
+}
+
+impl From<Predicate<'_>> for OwnedPredicate {
+    fn from(predicate: Predicate<'_>) -> Self {
+        match predicate {
+            Predicate::All => Self::All,
+            Predicate::Filters(text) => Self::Filters(text.to_owned()),
+            Predicate::FilterText(text) => Self::FilterText(text.to_owned()),
+        }
+    }
+}
+
 /// What to read. The projection and the predicate each arrive in one of two wire forms, a
 /// body's or a query string's, and mean the same thing in either.
 #[derive(Debug, Default)]

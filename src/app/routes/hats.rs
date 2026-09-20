@@ -2,6 +2,7 @@
 //! against a whole HATS catalog, answered with the rows or with the work that would read them.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use axum::extract::{State, rejection::JsonRejection};
@@ -11,7 +12,7 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::app::answer::hats_answer;
+use crate::app::answer::{hats_answer, streamed_rows};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
@@ -21,6 +22,9 @@ use crate::hats::query::{CatalogSelection, Exceeded, Outcome, Search};
 use crate::sky::healpix::Cover;
 use crate::sky::region::Region;
 use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::Schema;
+use futures::StreamExt;
 
 /// A query against a whole HATS catalog: the url names the catalog and the partitions to
 /// read are chosen from the region.
@@ -79,6 +83,26 @@ pub(in crate::app) struct CatalogQuery {
     /// request returns the same rows.
     #[schema(example = 100)]
     limit: Option<usize>,
+    /// Send the answer as it is read, rather than reading every partition and then sending
+    /// it.
+    ///
+    /// The rows are the same rows, in the same order, read the same number at a time. What
+    /// changes is that a partition's rows leave as it lands, so the body starts sooner and
+    /// this service holds less of it — and that the `x-hats-*` counts are gone, headers
+    /// being sent before the first row is read. `json` reports them at the end of its body.
+    ///
+    /// **A bound reached is said in the body rather than answered with the work list.** A
+    /// collected answer that goes over `max_partitions`, `max_bytes_fetched` or `max_rows`
+    /// is a `422` carrying the requests it would take; a streamed one has sent its status
+    /// already, so `json` ends with a `refused`, `votable` with `OVERFLOW`, and `csv` and
+    /// `tsv` — which have nowhere to put it — end without the transfer completing. Ask
+    /// `/simple/hats/plan` for the work list.
+    ///
+    /// Not for `parquet`, which is read footer-first: a body with no length is one a reader
+    /// cannot seek in.
+    #[serde(default)]
+    #[schema(example = false)]
+    streaming: bool,
     /// Every key the body carried that this endpoint has no field for.
     #[serde(flatten)]
     #[schema(ignore)]
@@ -97,6 +121,7 @@ impl CatalogQuery {
             "format",
             "dsv_null_value",
             "limit",
+            "streaming",
         ]
     }
 
@@ -117,6 +142,7 @@ impl CatalogQuery {
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
+            streaming: self.streaming,
             echo: None,
         }
     }
@@ -183,9 +209,13 @@ pub(in crate::app) struct CatalogPlanQuery {
 
 impl CatalogPlanQuery {
     /// Every field this endpoint takes, in the order a body is written in: the catalog
-    /// query's, and last the one field that is this endpoint's own.
+    /// query's, less the one that means nothing here, and last the one that is this
+    /// endpoint's own.
     pub(in crate::app) fn fields() -> Vec<&'static str> {
         let mut fields = CatalogQuery::fields();
+        // A plan is a document rather than a stream of rows, so there is nothing here to
+        // send as it is read and no field to have asked with.
+        fields.retain(|field| *field != "streaming");
         fields.push("return_storage");
         fields
     }
@@ -206,7 +236,10 @@ impl CatalogPlanQuery {
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
-            // Both halves, and both are the caller's doing: they asked for it, and they sent
+            // A plan is a document, not a stream of rows: there is nothing to send as it
+            // is read, and this endpoint has no field to have asked with.
+            streaming: false,
+            // Both halves, and both are the caller.s doing: they asked for it, and they sent
             // something to hand back. Asked for with nothing to return writes no field rather
             // than an empty object, which would read as "these are the options" and they are
             // not.
@@ -229,7 +262,10 @@ struct Lowered<'a> {
     format: Option<&'a str>,
     dsv_null_value: Option<&'a str>,
     limit: Option<usize>,
-    /// The caller's own storage options, to be written into every entry of a plan. `Some`
+    /// Whether the rows are sent as they are read. Never set from the plan endpoint: a
+    /// plan is a document rather than a stream of rows.
+    streaming: bool,
+    /// The caller.s own storage options, to be written into every entry of a plan. `Some`
     /// only from an endpoint that has a `return_storage` to have asked with.
     echo: Option<serde_json::Value>,
 }
@@ -308,6 +344,47 @@ pub(in crate::app) async fn query_hats(
     };
 
     let selection = params.selection();
+    // Streamed, where the caller asked for it: each partition's rows leave as it lands,
+    // so nothing here holds the answer and the body starts before the last partition is
+    // read. The fan-out is the same fan-out — `max_concurrent_partitions` reads in flight,
+    // yielded in the catalog's order.
+    //
+    // What a stream gives up is the work list. A bound reached here cannot become the
+    // `422` below, the rows before it having gone already, so it is said in the body
+    // instead and the caller who wants the plan asks the plan route for it.
+    if params.streaming {
+        let catalog_url = search.catalog().dir().url.clone();
+        let chosen = search.chosen().len();
+        let refused = Arc::new(Mutex::new(None));
+        let batches = search.stream(
+            (&selection).into(),
+            service.data_files_for(&url).clone(),
+            service.sql_limits,
+            service.catalog_limits,
+            Arc::clone(&refused),
+        );
+        // The first batch, read here rather than inside the body: the answer's columns are
+        // a partition's, so nothing can describe them until one has been read. It goes back
+        // in front of the rest, so the rows are all still there and in the catalog's order.
+        let (first, rest) = Box::pin(batches).into_future().await;
+        let first = first.transpose().map_err(&hide_the_path)?;
+        let schema = first
+            .as_ref()
+            .map_or_else(|| Arc::new(Schema::empty()), RecordBatch::schema);
+        let batches = futures::stream::iter(first.map(Ok)).chain(rest);
+
+        tracing::info!(
+            url = %catalog_url,
+            chosen,
+            selected = params.columns.is_some(),
+            filtered = params.filters.is_some(),
+            format = output.format.name(),
+            streaming = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog query"
+        );
+        return streamed_rows(schema, batches, refused, &output, started);
+    }
     let outcome = search
         .run(
             &selection,
@@ -591,7 +668,9 @@ mod tests {
     use crate::access::AccessPolicy;
     use crate::access::mount::Mounts;
     use crate::app::router;
-    use crate::app::testing::{SECRET, ask, ask_hats, body_of, mounted, post_json, serving};
+    use crate::app::testing::{
+        SECRET, ask, ask_hats, body_of, mounted, post_json, serving, with_limits,
+    };
     use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig};
     use crate::engine::query;
     use crate::hats;
@@ -604,6 +683,89 @@ mod tests {
     /// What `hats::query` tests is which partitions get read and which rows come back. What
     /// this adds is that the request shape reaches it — the same body the parquet route
     /// takes, with the column names left to the catalog.
+    /// A streamed catalog answer is the same answer: the same rows, in the catalog's own
+    /// order, from the same partitions.
+    ///
+    /// What moves is the counts — out of the headers, which are gone before the first
+    /// partition is read, and into the end of the JSON body. `num_partitions` goes
+    /// altogether: a streamed answer does not know how many partitions it will read until
+    /// it has read them, and by then the head of the document is sent.
+    #[tokio::test]
+    async fn a_streamed_catalog_answer_is_the_answer() {
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+
+        for format in ["json", "csv", "tsv", "votable"] {
+            let body = |streaming: bool| {
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id"],
+                    "region": [region],
+                    "format": format,
+                    "streaming": streaming,
+                })
+            };
+            let (whole_status, whole) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(false)).await;
+            let (streamed_status, streamed) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(true)).await;
+            assert_eq!(whole_status, StatusCode::OK, "{format}: {whole}");
+            assert_eq!(streamed_status, StatusCode::OK, "{format}: {streamed}");
+
+            match format {
+                "json" => {
+                    let whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+                    let streamed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+                    assert_eq!(whole["rows"], streamed["rows"], "{format}");
+                    assert_eq!(whole["schema"], streamed["schema"], "{format}");
+                    assert_eq!(whole["num_rows"], streamed["num_rows"], "{format}");
+                    assert!(streamed["refused"].is_null(), "{streamed}");
+                }
+                "votable" => {
+                    let rows = whole.matches("<TR>").count();
+                    assert_eq!(streamed.matches("<TR>").count(), rows, "{streamed}");
+                    assert!(streamed.contains("<TABLE>"), "{streamed}");
+                }
+                _ => assert_eq!(whole, streamed, "{format}"),
+            }
+        }
+    }
+
+    /// A bound reached mid-stream cannot become the `422` and the work list a collected
+    /// answer gives, the status having gone with the first row. So the body says it: JSON
+    /// ends with a `refused` naming the bound, and a caller who wants the work list asks
+    /// the plan route, which is what the message says.
+    #[tokio::test]
+    async fn a_streamed_answer_says_when_a_bound_stopped_it() {
+        let dir = hats::query::tests::fixture(true);
+        let api = ApiConfig::default();
+        // One row, over a catalog whose partitions hold more than that.
+        let limits = LimitsConfig {
+            max_rows: 1,
+            ..LimitsConfig::default()
+        };
+        let service = || with_limits(serving(dir.path()), &api, &limits);
+
+        let (status, streamed) = ask_hats(
+            service(),
+            serde_json::json!({"url": "file:///", "columns": ["id"], "streaming": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+        let answer: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+        let refused = answer["refused"].as_str().unwrap_or_default();
+        assert!(refused.contains("rows"), "{streamed}");
+
+        // The collected answer to the same request is the work list, which is what a
+        // stream gives up and what the refusal points at.
+        let (status, whole) = ask_hats(
+            service(),
+            serde_json::json!({"url": "file:///", "columns": ["id"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{whole}");
+    }
+
     #[tokio::test]
     async fn the_hats_route_answers_a_region_over_a_catalog() {
         let dir = hats::query::tests::fixture(true);
@@ -983,6 +1145,7 @@ mod tests {
             format: None,
             dsv_null_value: None,
             limit: None,
+            streaming: false,
             unknown: BTreeMap::new(),
         };
         let url = parse_url(params.url.as_str()).unwrap();

@@ -154,7 +154,9 @@ impl stream::Encoder for Document {
 
     fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
         let mut out = String::from("</TABLEDATA>\n</DATA>\n</TABLE>\n");
-        if ending.overflow {
+        // DALI has one marker for "the rows stop before the answer does", and a bound
+        // reached mid-stream is that.
+        if ending.overflow || ending.refused.is_some() {
             out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
         }
         out.push_str("</RESOURCE>\n</VOTABLE>\n");
