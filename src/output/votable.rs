@@ -39,13 +39,13 @@ use std::fmt::Write as _;
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Float16Type, Float32Type, Float64Type, Int8Type,
-    Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+    Int16Type, Int32Type, Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type,
 };
 use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::output::instant;
+use crate::output::{instant, stream};
 
 /// The media type IVOA registers for a VOTable document.
 pub const CONTENT_TYPE: &str = "application/x-votable+xml";
@@ -77,42 +77,89 @@ pub fn encode_truncated(result: &QueryResult) -> Result<String, ApiError> {
 }
 
 fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
-    let mut out = String::new();
-    prologue(&mut out);
-    // DALI's spelling of "the query ran", which is what a client that reads VOTables from
-    // an IVOA service looks for before it looks at the rows.
-    out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OK\"/>\n");
-    let _ = writeln!(out, "<TABLE nrows=\"{}\">", result.num_rows());
-    // An `ID` has to be unique in the document, and two columns may share a name — a
-    // statement can select one twice. The second one keeps its name and goes without.
-    let mut identified = Vec::new();
-    for field in result.schema.fields() {
-        let spelled = spelling(field)?;
-        let name = attribute(field.name())?;
-        let _ = write!(out, "<FIELD name=\"{name}\"");
-        if is_xml_name(field.name()) && !identified.contains(&field.name()) {
-            identified.push(field.name());
-            let _ = write!(out, " ID=\"{name}\"");
-        }
-        let _ = write!(out, " datatype=\"{}\"", spelled.datatype);
-        if let Some(size) = spelled.arraysize {
-            let _ = write!(out, " arraysize=\"{size}\"");
-        }
-        if let Some(xtype) = spelled.xtype {
-            let _ = write!(out, " xtype=\"{xtype}\"");
-        }
-        out.push_str("/>\n");
+    let mut encoder = Document::new(Some(result.num_rows()));
+    let bytes = stream::collected(
+        &mut encoder,
+        result,
+        stream::Ending {
+            overflow,
+            ..stream::Ending::default()
+        },
+    )?;
+    String::from_utf8(bytes).map_err(|_| ApiError::internal("votable output was not UTF-8"))
+}
+
+/// A VOTable, written a batch of rows at a time.
+///
+/// **`nrows` is the one thing a streamed document leaves out.** It is an attribute of the
+/// opening `TABLE` tag, so a document that has not read its rows yet cannot say it; the
+/// attribute is optional in VOTable 1.4 for that reason, and a reader that wants the count
+/// counts the `TR`s. A collected answer still carries it, which is what `Some(rows)` is.
+///
+/// What does *not* move is `OVERFLOW`: DALI §4.4.1 puts it after the table precisely
+/// because the `OK` at the top was written before the row count was known.
+#[derive(Debug)]
+pub struct Document {
+    rows: Option<usize>,
+}
+
+impl Document {
+    pub fn new(rows: Option<usize>) -> Self {
+        Self { rows }
     }
-    out.push_str("<DATA>\n<TABLEDATA>\n");
-    for batch in &result.batches {
+}
+
+impl stream::Encoder for Document {
+    fn begin(&mut self, schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+        let mut out = String::new();
+        prologue(&mut out);
+        // DALI's spelling of "the query ran", which is what a client that reads VOTables
+        // from an IVOA service looks for before it looks at the rows.
+        out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OK\"/>\n");
+        match self.rows {
+            Some(rows) => {
+                let _ = writeln!(out, "<TABLE nrows=\"{rows}\">");
+            }
+            None => out.push_str("<TABLE>\n"),
+        }
+        // An `ID` has to be unique in the document, and two columns may share a name — a
+        // statement can select one twice. The second one keeps its name and goes without.
+        let mut identified = Vec::new();
+        for field in schema.fields() {
+            let spelled = spelling(field)?;
+            let name = attribute(field.name())?;
+            let _ = write!(out, "<FIELD name=\"{name}\"");
+            if is_xml_name(field.name()) && !identified.contains(&field.name()) {
+                identified.push(field.name());
+                let _ = write!(out, " ID=\"{name}\"");
+            }
+            let _ = write!(out, " datatype=\"{}\"", spelled.datatype);
+            if let Some(size) = spelled.arraysize {
+                let _ = write!(out, " arraysize=\"{size}\"");
+            }
+            if let Some(xtype) = spelled.xtype {
+                let _ = write!(out, " xtype=\"{xtype}\"");
+            }
+            out.push_str("/>\n");
+        }
+        out.push_str("<DATA>\n<TABLEDATA>\n");
+        Ok(out.into_bytes())
+    }
+
+    fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let mut out = String::new();
         push_rows(batch, &mut out)?;
+        Ok(out.into_bytes())
     }
-    out.push_str("</TABLEDATA>\n</DATA>\n</TABLE>\n");
-    if overflow {
-        out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+
+    fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        let mut out = String::from("</TABLEDATA>\n</DATA>\n</TABLE>\n");
+        if ending.overflow {
+            out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+        }
+        out.push_str("</RESOURCE>\n</VOTABLE>\n");
+        Ok(out.into_bytes())
     }
-    out.push_str("</RESOURCE>\n</VOTABLE>\n");
-    Ok(out)
 }
 
 /// A document saying the query was refused, which is what DALI §4.4.2 asks an error to be.

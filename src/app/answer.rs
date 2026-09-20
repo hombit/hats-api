@@ -1,9 +1,11 @@
 //! What a query answers with: the response bodies, the encodings, and the counts that travel
 //! as headers where a body has no room for them.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::Json;
+use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -11,10 +13,10 @@ use serde::Serialize;
 
 use crate::app::request::{Format, Output};
 use crate::app::service::PARQUET_CONTENT_TYPE;
-use crate::engine::query::QueryResult;
+use crate::engine::query::{self, QueryResult};
 use crate::error::ApiError;
 use crate::hats;
-use crate::output::{dsv, json, parquet, votable};
+use crate::output::{dsv, json, parquet, stream, votable};
 use crate::storage::RemoteFile;
 
 /// One column of the answer. Sent even when no rows matched, so it is where the answer's shape
@@ -271,7 +273,13 @@ fn hats_counters(
 
 /// The columns of an answer, as the schema describes them.
 fn columns_of(result: &QueryResult) -> Vec<Column> {
-    result.schema.fields().iter().map(column_of).collect()
+    columns_of_schema(&result.schema)
+}
+
+/// The same, from the schema alone — which is what a streamed answer has before it has
+/// read a row.
+fn columns_of_schema(schema: &datafusion::arrow::datatypes::SchemaRef) -> Vec<Column> {
+    schema.fields().iter().map(column_of).collect()
 }
 
 /// One field, with a struct's own fields under it.
@@ -347,6 +355,121 @@ pub(in crate::app) fn counters(
         (DATA_BYTES_READ_HEADER, result.data_bytes_read.to_string()),
         (ELAPSED_MS_HEADER, started.elapsed().as_millis().to_string()),
     ]
+}
+
+/// The answer sent as it is read, in whichever of the streamable encodings was asked for.
+///
+/// **What a stream cannot carry is a header it has not earned yet.** The counts are known
+/// only once the last row is in, and the headers go out before the first one, so a streamed
+/// answer has none of them. JSON puts them after its rows instead — a JSON object does not
+/// care what order its keys arrive in — which is why the envelope here is written by hand
+/// rather than serialized from [`SelectResponse`].
+///
+/// Parquet is not streamable and is refused before this is reached: it is read footer-first,
+/// so a body with no length is one `pyarrow` cannot open at all.
+pub(in crate::app) fn streamed(
+    planned: query::Planned,
+    output: &Output,
+    started: Instant,
+) -> Result<Response, ApiError> {
+    let schema = Arc::clone(&planned.schema);
+    let columns = columns_of_schema(&schema);
+    let encoder: Box<dyn stream::Encoder> = match output.format {
+        Format::Json => Box::new(JsonBody::new(columns)),
+        Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, &output.dsv_null)),
+        Format::Votable => Box::new(votable::Document::new(None)),
+        Format::Parquet => {
+            return Err(ApiError::bad_request(
+                "parquet cannot be streamed: it is read from its footer backwards, so a \
+                 reader needs the whole file; ask for json, csv, tsv or votable, or leave \
+                 streaming out",
+            ));
+        }
+    };
+    let content_type = match output.format {
+        Format::Json => "application/json",
+        Format::Dsv(kind) => kind.content_type(),
+        Format::Votable => votable::CONTENT_TYPE,
+        Format::Parquet => PARQUET_CONTENT_TYPE,
+    };
+    let batches = planned.batches()?;
+    // The plan outlives the rows, which is what makes the ending readable: `data_bytes_read`
+    // is a counter on the scan and is final only once the last batch has come off it.
+    let ending = move |rows: usize| stream::Ending {
+        rows,
+        data_bytes_read: planned.data_bytes_read(),
+        elapsed: started.elapsed(),
+        overflow: false,
+    };
+    let body = Body::from_stream(stream::streamed(encoder, schema, batches, ending));
+    Ok((
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            // Said out loud rather than left out: a body with no length is one a client
+            // must not seek in, and the alternative is a client discovering that by
+            // reading the head of the answer where it asked for the tail.
+            (header::ACCEPT_RANGES, "none".to_owned()),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+/// The same body [`SelectResponse`] is, written around rows that have not arrived yet.
+///
+/// The fields are the same fields and the counts are the same counts; what moves is where
+/// they sit. `schema` is known before the first row and goes first, as it does today, and
+/// the three counts are known only after the last one and go after `rows` — which is a
+/// difference no JSON reader can see, keys in an object being unordered.
+struct JsonBody {
+    columns: Vec<Column>,
+    rows: json::Rows,
+    wrote: bool,
+}
+
+impl JsonBody {
+    fn new(columns: Vec<Column>) -> Self {
+        Self {
+            columns,
+            rows: json::Rows::new(),
+            wrote: false,
+        }
+    }
+}
+
+impl stream::Encoder for JsonBody {
+    fn begin(
+        &mut self,
+        schema: &datafusion::arrow::datatypes::SchemaRef,
+    ) -> Result<Vec<u8>, ApiError> {
+        let columns = serde_json::to_string(&self.columns)?;
+        let mut out = format!("{{\"schema\":{columns},\"rows\":").into_bytes();
+        out.extend_from_slice(&self.rows.begin(schema)?);
+        Ok(out)
+    }
+
+    fn rows(&mut self, batch: &datafusion::arrow::array::RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let bytes = self.rows.rows(batch)?;
+        self.wrote |= !bytes.is_empty();
+        Ok(bytes)
+    }
+
+    fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        let mut out = self.rows.end(ending)?;
+        // An answer of no rows at all: the row writer never opened its array, and an empty
+        // one still has to be there for `rows` to be a list.
+        if !self.wrote {
+            out.extend_from_slice(b"[]");
+        }
+        let counts = format!(
+            ",\"num_rows\":{},\"data_bytes_read\":{},\"elapsed_ms\":{}}}",
+            ending.rows,
+            ending.data_bytes_read,
+            ending.elapsed.as_millis(),
+        );
+        out.extend_from_slice(counts.as_bytes());
+        Ok(out)
+    }
 }
 
 pub(in crate::app) fn json_response(

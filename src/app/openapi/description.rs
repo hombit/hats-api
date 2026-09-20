@@ -267,7 +267,7 @@ mod tests {
         let file = [
             &["url", "storage", "region"][..],
             &["ra_column", "dec_column", "healpix_column", "healpix_order"],
-            &["columns", "filters", "format", "dsv_null_value", "limit"],
+            &["columns", "filters", "format", "dsv_null_value", "limit", "streaming"],
         ]
         .concat();
         let plan = [common.as_slice(), &["return_storage"]].concat();

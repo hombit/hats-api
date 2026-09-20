@@ -11,7 +11,7 @@ use serde::de::IgnoredAny;
 
 use futures::future::OptionFuture;
 
-use crate::app::answer::answer;
+use crate::app::answer::{answer, streamed};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
@@ -103,6 +103,20 @@ pub(in crate::app) struct ParquetQuery {
     /// same rows.
     #[schema(example = 100)]
     limit: Option<usize>,
+    /// Send the answer as it is read, rather than reading it all and then sending it.
+    ///
+    /// The rows are the same rows. What changes is that the body starts arriving sooner and
+    /// this service holds less of it at once — and that the answer arrives without the
+    /// `x-hats-*` counts, which are headers and so are sent before the first row is known.
+    /// `json` reports them at the end of its body instead; a streamed `votable` leaves
+    /// `nrows` off its `TABLE`, which is optional for this reason.
+    ///
+    /// Not for `parquet`, which is read footer-first: a body with no length is one a
+    /// reader cannot seek in, so asking for both is refused rather than quietly answered
+    /// whole.
+    #[serde(default)]
+    #[schema(example = false)]
+    streaming: bool,
     /// Every key the body carried that this endpoint has no field for.
     #[serde(flatten)]
     #[schema(ignore)]
@@ -127,6 +141,7 @@ impl ParquetQuery {
             "format",
             "dsv_null_value",
             "limit",
+            "streaming",
         ]
     }
 
@@ -254,6 +269,26 @@ pub(in crate::app) async fn query_parquet(
     // rather than after it — the two round trips overlap instead of adding up. Fetched
     // only when the answer will actually be parquet, there being nothing to copy for
     // any other encoding.
+    // Streamed, where the caller asked for it: the rows go out as they come off the scan,
+    // so nothing here holds the whole answer and the body starts before the last row is
+    // read. The log line is the one thing that suffers — what a streamed answer cost is
+    // known only once it has been sent, and by then this handler has returned.
+    if params.streaming {
+        let planned = query::plan(&file, &selection, service.sql_limits, Order::Unspecified)
+            .await
+            .map_err(hide_the_path)?;
+        tracing::info!(
+            url = %file.url,
+            selected = params.columns.is_some(),
+            filtered = params.filters.is_some(),
+            regions = params.region.as_ref().map_or(0, Vec::len),
+            format = output.format.name(),
+            streaming = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            "query"
+        );
+        return streamed(planned, &output, started).map_err(hide_the_path);
+    }
     let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
         .then(|| parquet::read_layout(&file))
         .into();
@@ -431,6 +466,7 @@ mod tests {
             format: None,
             dsv_null_value: None,
             limit: None,
+            streaming: false,
             unknown: BTreeMap::new(),
         };
         let shown = format!("{params:?}");
@@ -442,6 +478,81 @@ mod tests {
     /// The single-file route never produces a plan, so a field about what a plan carries is
     /// not one of its fields, and a body carrying it is refused rather than quietly doing
     /// nothing.
+    /// A streamed answer is the same answer, in every format that streams.
+    ///
+    /// The rows are the point: what streaming changes is when the bytes leave, not which
+    /// ones. The counts move rather than disappear — out of the headers, which are gone by
+    /// the time the first row is read, and into the end of the JSON body, where a reader
+    /// finds them by name rather than by position.
+    #[tokio::test]
+    async fn a_streamed_answer_is_the_answer() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for format in ["json", "csv", "tsv", "votable"] {
+            let body = |streaming: bool| {
+                serde_json::json!({
+                    "url": "file:///part0.parquet",
+                    "columns": ["objectid", "band"],
+                    "filters": "objectid >= 4",
+                    "format": format,
+                    "streaming": streaming,
+                })
+            };
+            let (whole_status, whole) = ask(service(), body(false)).await;
+            let (streamed_status, streamed) = ask(service(), body(true)).await;
+            assert_eq!(whole_status, StatusCode::OK, "{format}: {whole}");
+            assert_eq!(streamed_status, StatusCode::OK, "{format}: {streamed}");
+
+            match format {
+                // Key order is not what a JSON reader reads, so the two are compared as
+                // documents: same schema, same rows, same counts, wherever they sit.
+                "json" => {
+                    let whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+                    let streamed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+                    assert_eq!(whole["rows"], streamed["rows"]);
+                    assert_eq!(whole["schema"], streamed["schema"]);
+                    assert_eq!(whole["num_rows"], streamed["num_rows"]);
+                    assert_eq!(
+                        whole["data_bytes_read"], streamed["data_bytes_read"],
+                        "a streamed read cost something else: {streamed}"
+                    );
+                }
+                // `nrows` is the one thing a streamed VOTable leaves out, being an
+                // attribute of the tag that opens before the rows are known.
+                "votable" => {
+                    assert!(streamed.contains("<TABLE>"), "{streamed}");
+                    assert_eq!(
+                        whole.replace(&format!("<TABLE nrows=\"{}\">", 6), "<TABLE>"),
+                        streamed,
+                    );
+                }
+                _ => assert_eq!(whole, streamed, "{format}"),
+            }
+        }
+    }
+
+    /// Parquet is read footer-first, so a body with no length is one no reader can open.
+    /// Refused rather than answered whole: a caller who asked for both said something this
+    /// service cannot do, and doing the other thing silently is how they find out late.
+    #[tokio::test]
+    async fn parquet_and_streaming_together_are_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let (status, body) = ask(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///part0.parquet",
+                "format": "parquet",
+                "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("streaming"), "{body}");
+    }
+
     #[tokio::test]
     async fn return_storage_is_refused_where_there_is_no_plan() {
         let dir = tempfile::TempDir::new().unwrap();

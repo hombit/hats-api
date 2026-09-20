@@ -4,18 +4,19 @@ use std::fmt;
 use std::io::Write as _;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, AsArray, PrimitiveArray};
+use datafusion::arrow::array::{Array, AsArray, PrimitiveArray, RecordBatch};
 use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, DataType, FieldRef, Float16Type, Float32Type, Float64Type,
+    ArrowPrimitiveType, DataType, FieldRef, Float16Type, Float32Type, Float64Type, SchemaRef,
 };
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::json::WriterBuilder;
 use datafusion::arrow::json::writer::{
-    Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder,
+    Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder, Writer,
 };
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::stream;
 
 /// Serialize the result as a JSON array of row objects, nested columns included.
 ///
@@ -31,19 +32,70 @@ use crate::error::ApiError;
 ///   zero flux — and reading one back as "no measurement" is a wrong answer rather than
 ///   an error.
 pub fn to_json(result: &QueryResult) -> Result<Vec<serde_json::Value>, ApiError> {
-    let mut buf = Vec::new();
-    let mut writer = WriterBuilder::new()
-        .with_explicit_nulls(true)
-        .with_encoder_factory(Arc::new(NotANumber))
-        .build::<_, JsonArray>(&mut buf);
-    for batch in &result.batches {
-        writer.write(batch)?;
-    }
-    writer.finish()?;
+    let mut rows = Rows::new();
+    let buf = stream::collected(&mut rows, result, stream::Ending::default())?;
     if buf.is_empty() {
         return Ok(Vec::new());
     }
     Ok(serde_json::from_slice(&buf)?)
+}
+
+/// The rows as a JSON array, written batch by batch.
+///
+/// `arrow`'s array writer opens the bracket on its first batch, puts a comma between
+/// records and closes on `finish`, all into the sink it was built over — so taking the
+/// bytes out between batches is the whole of what makes it a stream.
+#[derive(Debug)]
+pub struct Rows {
+    writer: Option<Writer<stream::Pipe, JsonArray>>,
+    pipe: stream::Pipe,
+}
+
+impl Default for Rows {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Rows {
+    pub fn new() -> Self {
+        Self {
+            writer: None,
+            pipe: stream::Pipe::default(),
+        }
+    }
+
+    fn writer(&mut self) -> &mut Writer<stream::Pipe, JsonArray> {
+        let pipe = self.pipe.clone();
+        self.writer.get_or_insert_with(|| {
+            WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .with_encoder_factory(Arc::new(NotANumber))
+                .build::<_, JsonArray>(pipe)
+        })
+    }
+}
+
+impl stream::Encoder for Rows {
+    fn begin(&mut self, _schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+        Ok(Vec::new())
+    }
+
+    fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let pipe = self.pipe.clone();
+        self.writer().write(batch)?;
+        Ok(pipe.take())
+    }
+
+    fn end(&mut self, _ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // Only where something was written: `finish` on a writer that never opened its
+        // bracket writes one that no reader asked for, and an answer of no rows is
+        // rendered by whatever holds this rather than here.
+        if self.writer.is_some() {
+            self.writer().finish()?;
+        }
+        Ok(self.pipe.take())
+    }
 }
 
 /// Writes `NaN` and the two infinities the way `float()` in Python and `Number()` in

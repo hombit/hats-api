@@ -11,11 +11,12 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::TaskContext;
 use datafusion::physical_plan::{
-    ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned,
+    ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned, execute_stream,
     execute_stream_partitioned,
 };
 use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
 use futures::StreamExt;
+use futures::stream::BoxStream;
 
 use crate::engine::sql;
 use crate::error::ApiError;
@@ -211,6 +212,89 @@ pub async fn run(
         .map(|(result, _)| result)
 }
 
+/// The rows of one query, as they come off the scan.
+///
+/// What a collected answer and a streamed one share is everything up to the first batch:
+/// the same context, the same plan, the same decision about order. They part company at
+/// how the batches are taken — [`execute`] takes them all and this hands them over one at
+/// a time — so the planning is here, once, and each of the two says only what it does with
+/// what comes out.
+/// `SessionContext` has no `Debug`, and what this holds is a plan rather than an answer.
+pub struct Planned {
+    pub schema: SchemaRef,
+    /// Kept alive for as long as the rows are: a plan runs on its context's task pool, and
+    /// a stream still being polled after the context went would be reading from nothing.
+    context: SessionContext,
+    plan: Arc<dyn ExecutionPlan>,
+    reproducible: bool,
+    limit: Option<usize>,
+}
+
+impl fmt::Debug for Planned {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Planned")
+            .field("schema", &self.schema)
+            .field("partitions", &self.partitions())
+            .field("reproducible", &self.reproducible)
+            .field("limit", &self.limit)
+            .finish()
+    }
+}
+
+impl Planned {
+    /// How many partitions the scan was split into.
+    pub fn partitions(&self) -> usize {
+        self.plan.output_partitioning().partition_count()
+    }
+
+    /// What the scan fetched. Final once the last batch is in, and zero before the first.
+    pub fn data_bytes_read(&self) -> u64 {
+        data_bytes_read(self.plan.as_ref())
+    }
+
+    /// The batches, in whatever order this query promised.
+    ///
+    /// Three shapes, and they are the streaming counterparts of what [`execute`] collects:
+    ///
+    /// - **Nothing promised**: the merged stream, every partition polled at once, which is
+    ///   what `collect` does without the collecting.
+    /// - **The file's order**: the partitions chained in index order. That is the cost of
+    ///   streaming rather than collecting — `collect_partitioned` runs them concurrently
+    ///   and puts them back in order afterwards, which needs them all in memory, and this
+    ///   does not. A partition is not polled until the one before it is done, so a
+    ///   streamed answer in file order is read serially.
+    /// - **The file's order, with a limit**: the same chain, stopped. A stream that is
+    ///   never polled reads no bytes, so the partitions past the limit cost nothing.
+    pub fn batches(&self) -> Result<BoxStream<'static, Result<RecordBatch, ApiError>>, ApiError> {
+        let task = self.context.task_ctx();
+        let plan = Arc::clone(&self.plan);
+        Ok(match (self.reproducible, self.limit) {
+            (false, _) => execute_stream(plan, task)?
+                .map(|batch| batch.map_err(ApiError::from))
+                .boxed(),
+            (true, None) => in_index_order(plan, task, None)?,
+            (true, Some(rows)) => in_index_order(plan, task, Some(rows))?,
+        })
+    }
+}
+
+/// Plan the query and stop there, with nothing read.
+pub async fn plan(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+    order: Order,
+) -> Result<Planned, ApiError> {
+    let (context, plan, schema) = planned(file, selection, limits, order).await?;
+    Ok(Planned {
+        schema,
+        context,
+        plan,
+        reproducible: reproducible(selection, order),
+        limit: selection.limit,
+    })
+}
+
 /// The same, and how many partitions the scan was split into.
 ///
 /// The count is what tells a test that a file was actually read in parallel. Without it a
@@ -222,6 +306,44 @@ pub(crate) async fn execute(
     limits: sql::Limits,
     order: Order,
 ) -> Result<(QueryResult, usize), ApiError> {
+    let reproducible = reproducible(selection, order);
+    let (ctx, plan, schema) = planned(file, selection, limits, order).await?;
+    let partitions = plan.output_partitioning().partition_count();
+    let task = ctx.task_ctx();
+    // Every arm hands the plan on by clone rather than by value: the metrics are read off
+    // it once it has run, so it has to outlive the execution.
+    let batches = match (reproducible, selection.limit) {
+        (false, _) => collect(Arc::clone(&plan), task).await?,
+        // Every partition at once, then put back in index order: the read is as parallel
+        // as it ever was, and nothing is merged on completion.
+        (true, None) => collect_partitioned(Arc::clone(&plan), task)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect(),
+        (true, Some(rows)) => first_rows_in_order(Arc::clone(&plan), task, rows).await?,
+    };
+    let data_bytes_read = data_bytes_read(plan.as_ref());
+    Ok((
+        QueryResult {
+            schema,
+            batches,
+            data_bytes_read,
+        },
+        partitions,
+    ))
+}
+
+/// The context and the physical plan, with nothing read.
+///
+/// Both ways of taking the rows start here, so what a query *means* — the region, the
+/// predicate, the projection, whether the limit goes into the plan — is decided once.
+async fn planned(
+    file: &RemoteFile,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+    order: Order,
+) -> Result<(SessionContext, Arc<dyn ExecutionPlan>, SchemaRef), ApiError> {
     let reproducible = reproducible(selection, order);
     let ctx = session_context(reproducible);
     ctx.register_object_store(&file.base, Arc::clone(&file.store));
@@ -295,30 +417,50 @@ pub(crate) async fn execute(
 
     let schema = Arc::new(df.schema().as_arrow().clone());
     let plan = df.create_physical_plan().await?;
-    let partitions = plan.output_partitioning().partition_count();
-    let task = ctx.task_ctx();
-    // Every arm hands the plan on by clone rather than by value: the metrics are read off
-    // it once it has run, so it has to outlive the execution.
-    let batches = match (reproducible, selection.limit) {
-        (false, _) => collect(Arc::clone(&plan), task).await?,
-        // Every partition at once, then put back in index order: the read is as parallel
-        // as it ever was, and nothing is merged on completion.
-        (true, None) => collect_partitioned(Arc::clone(&plan), task)
-            .await?
-            .into_iter()
-            .flatten()
-            .collect(),
-        (true, Some(rows)) => first_rows_in_order(Arc::clone(&plan), task, rows).await?,
-    };
-    let data_bytes_read = data_bytes_read(plan.as_ref());
-    Ok((
-        QueryResult {
-            schema,
-            batches,
-            data_bytes_read,
-        },
-        partitions,
-    ))
+    Ok((ctx, plan, schema))
+}
+
+/// The partitions chained in index order, stopping at `limit` rows where there is one.
+///
+/// One partition at a time, on purpose, which is the same reason [`first_rows_in_order`]
+/// has: the front of the file is the front of partition zero, so a partition covering the
+/// middle contributes nothing until everything before it is exhausted, and a stream that
+/// is never polled never reads its byte range.
+fn in_index_order(
+    plan: Arc<dyn ExecutionPlan>,
+    task: Arc<TaskContext>,
+    limit: Option<usize>,
+) -> Result<BoxStream<'static, Result<RecordBatch, ApiError>>, ApiError> {
+    // No rows wanted, so no partition is polled and no byte of the file is read.
+    if limit == Some(0) {
+        return Ok(futures::stream::empty().boxed());
+    }
+    let streams = execute_stream_partitioned(plan, task)?;
+    Ok(futures::stream::iter(streams)
+        .flatten()
+        .map(|batch| batch.map_err(ApiError::from))
+        // `scan` rather than `take_while`, because the batch that reaches the limit is cut
+        // to it rather than dropped: a limit is how many rows, and the batch boundaries
+        // are the file's business rather than the caller's.
+        .scan(0_usize, move |taken, batch| {
+            let sent = match (limit, batch) {
+                (None, batch) => Some(batch),
+                (Some(_), Err(error)) => Some(Err(error)),
+                (Some(limit), Ok(batch)) if *taken < limit => {
+                    let room = limit - *taken;
+                    *taken += batch.num_rows();
+                    Some(Ok(match batch.num_rows() > room {
+                        true => batch.slice(0, room),
+                        false => batch,
+                    }))
+                }
+                // Enough rows already: the partitions after this one are never polled, so
+                // their byte ranges are never read.
+                (Some(_), Ok(_)) => None,
+            };
+            futures::future::ready(sent)
+        })
+        .boxed())
 }
 
 /// How many bytes the scan fetched, read off the plan once it has finished running.
