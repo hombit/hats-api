@@ -1,0 +1,60 @@
+name: LSDB conformance
+
+# Unlike the TAP suite, a failing check here is red: both routes read the same public
+# catalog, so a difference between them is a bug rather than a measurement of how much of
+# a standard is implemented. It reads S3 over the public internet, so a bucket having a
+# bad day is also red.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  conformance:
+    name: lsdb vs s3
+    runs-on: ubuntu-latest
+    # The suite's own clock is per check. This one is the whole job's, and it is what
+    # stops a hung read from holding a runner for six hours.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: lsdb-conformance/uv.lock
+
+      # The suite starts this itself, and will not start one it cannot find.
+      - name: cargo build
+        run: cargo build --bin hats-api
+
+      - name: uv run pytest
+        working-directory: lsdb-conformance
+        run: uv run pytest -c pyproject.toml -v
+
+      # The service's configuration and its own output, which is where a failure that is
+      # the service's rather than the check's says so.
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: lsdb-conformance
+          path: lsdb-conformance/report/
+          if-no-files-found: ignore
