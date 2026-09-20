@@ -2142,6 +2142,7 @@ dependencies = [
  "percent-encoding",
  "quick-xml 0.42.0",
  "reqwest",
+ "rustix",
  "s3s",
  "s3s-fs",
  "secrecy",

@@ -778,17 +778,29 @@ What the files need, each rule a failure that has a name elsewhere in this docum
 - **A file's presence means a complete result.** Written under a temporary name and renamed
   on completion, so a crash mid-write leaves nothing a later request can read as an answer —
   a truncated document being one a client cannot tell from a whole one.
-- **The directory is a private temporary one, and there is no sweep at all.** A `TempDir`
-  under `[limits] scratch_dir`, which removes itself and its contents when the service shuts
-  down. Sweeping a fixed directory was the first answer and is wrong: it cannot tell a dead
-  process's leftovers from a live process's working files, so a restart overlapping a
-  draining old one — a rolling update, or any graceful shutdown — deletes results that
-  process is still serving. Giving each run a directory of its own does not fix it, since
-  the newcomer still cannot tell which of the other names is alive; what would is a lock file
-  per run, and a private temporary directory is that guarantee with none of the machinery.
-  What it costs is that a crash leaks one directory — the leak `NamedTempFile` already has
-  here for a materialized copy, and handled the same way.
-- **Making that directory is the check that results can be written**, and it happens at
+- **Each run holds a lock beside its directory, and the sweep is `flock` and not a
+  heuristic.** A starting service takes a non-blocking exclusive lock on every other run's
+  lock file; one it can take is held by no live process, so that run is dead and its
+  directory goes. The kernel releases a lock however the process ended — a clean exit,
+  `SIGTERM`, the OOM killer, `kill -9`, the power going out — and a reboot leaves none at
+  all, which is exactly the liveness signal a sweep needs and the one thing a destructor
+  cannot be.
+
+  **A destructor is not the mechanism, and `TempDir` was the wrong answer.** It cleans up
+  only on an orderly `Drop`, which is the case that least needs cleaning; `SIGTERM` is how a
+  container is stopped and runs none, so results would leak on every ordinary deployment
+  rather than only on a crash. Sweeping by age or by "every name that is not mine" is worse
+  than leaking: both destroy the results of a process still serving them, which a restart
+  overlapping a draining old one does every time.
+
+  The lock goes in before the directory, never after, so there is no moment where a
+  directory exists that nothing can prove is dead. A `Drop` still takes this run's own
+  directory on an orderly exit — not what the design rests on, but it leaves the ordinary
+  case with nothing for the next service to find.
+- **Where there is no `flock` the sweep is skipped and the service says so once.** A crash on
+  such a platform leaves a directory nothing reclaims, which is worth a warning at startup
+  and is not worth refusing to run over. Unix has it; nothing else here is tested.
+- **Making the directory is the check that results can be written**, and it happens at
   startup because `/async` is not a resource an operator can decline. It asks exactly what a
   probe file would ask, so there is no probe file.
 - **No mount may publish it.** A results directory served by the file server hands every
@@ -917,7 +929,8 @@ from a slow query. That is the shape to check each of these against.
   choosing the second implementation rather than after.
 - **The process dies.** Everything goes — the record with it, the store being in-process — so
   a client polling gets `404`, which is the destroyed-job case the standard already describes.
-  A clean shutdown takes the results directory with it; a crash leaks it.
+  A clean shutdown takes the results directory with it and a crash does not, which is what
+  the next service's sweep is for.
 - **`DELETE` while running.** Abort the handle, drop the record, delete the file. The
   DataFusion stream unwinds on drop, which is the same mechanism a `limit` already stops a
   catalog read with.

@@ -71,6 +71,11 @@ url = "2"
 # The OpenAPI document, derived from the same serde types the routes deserialize.
 utoipa = { version = "5", features = ["preserve_order"] }
 
+# `flock`, which the kernel releases however a process dies — so a lock a starting service
+# can take belongs to a dead run, and its leftover results can go. Already in the tree.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs"] }
+
 # Package-wide, so `tests/` gets these too. The lints that only suit the service —
 # no `unwrap` in a request path — are crate attributes in `src/lib.rs`.
 [lints.rust]
