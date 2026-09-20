@@ -5,9 +5,13 @@
 //! different life from the file it came out of — that one was written once to be read for
 //! years. So three things are fixed here whatever the source did:
 //!
-//! - **Snappy, always.** A query answer is not compressed by the HTTP layer — parquet is
-//!   excluded from it, being compressed already — so the codec chosen here *is* what
-//!   crosses the network.
+//! - **`zstd` at level 1, always.** A query answer is not compressed by the HTTP layer —
+//!   parquet is excluded from it, being compressed already — so the codec chosen here *is*
+//!   what crosses the network, and the answer is written once and may be read three times
+//!   from the cache. Against snappy it takes 9 to 18 per cent off four published catalogs
+//!   for 20 to 48 per cent more time in the writer: 63 ms against 89 ms for a projection
+//!   of Gaia DR3. The levels above 1 are not worth having — level 3 is another 1 to 5 per
+//!   cent for a third more time again, measured on all four.
 //! - **Page statistics, always**, which is what writes the page index. A reader that seeks
 //!   inside the answer can then skip pages, and a reader that does not pays a few
 //!   kilobytes of metadata.
@@ -44,7 +48,7 @@ use bytes::Bytes;
 use datafusion::arrow::datatypes::Schema;
 use datafusion::parquet::arrow::async_reader::{MetadataFetch, MetadataSuffixFetch};
 use datafusion::parquet::arrow::{ArrowSchemaConverter, ArrowWriter};
-use datafusion::parquet::basic::{Compression, Encoding, Type as PhysicalType};
+use datafusion::parquet::basic::{Compression, Encoding, Type as PhysicalType, ZstdLevel};
 use datafusion::parquet::errors::ParquetError;
 use datafusion::parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use datafusion::parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
@@ -198,7 +202,9 @@ impl SourceLayout {
 
         let mut builder = WriterProperties::builder()
             .set_writer_version(self.writer_version)
-            .set_compression(Compression::SNAPPY)
+            .set_compression(Compression::ZSTD(
+                ZstdLevel::try_new(ZSTD_LEVEL).map_err(ApiError::ParquetWrite)?,
+            ))
             // The writer's own default, said out loud: it is what writes the page index,
             // and an answer this service generates is meant to be seekable.
             .set_statistics_enabled(EnabledStatistics::Page)
@@ -223,6 +229,13 @@ impl SourceLayout {
         Ok(builder.build())
     }
 }
+
+/// Which `zstd` level an answer is compressed at.
+///
+/// Written out rather than taken from `ZstdLevel::default()`, which is also 1: this is a
+/// measured decision — the levels above it buy one to five per cent for a third more time
+/// again — and a library default that moved would move it without anyone deciding.
+const ZSTD_LEVEL: i32 = 1;
 
 /// How many rows one row group holds, at most.
 ///
