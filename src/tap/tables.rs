@@ -34,6 +34,20 @@ use crate::storage::{self, StorageOptions};
 /// knows the meaning of.
 pub const RESERVED_SCHEMAS: [&str; 2] = ["TAP_SCHEMA", "TAP_UPLOAD"];
 
+/// One query this service offers against a published table.
+///
+/// The operator's, where they wrote any; otherwise one generated from what the catalog says
+/// about itself. Either way it is a query a client puts in front of a user and a user then
+/// sends back, so the only thing this type carries is what the `/examples` document needs:
+/// a label and the statement itself.
+#[derive(Debug, Clone)]
+pub struct TapExample {
+    /// What a client's menu shows.
+    pub name: String,
+    /// The statement, as a client would send it.
+    pub query: String,
+}
+
 /// One published table: the name a query writes, and the catalog behind it.
 #[derive(Debug)]
 pub struct TapTable {
@@ -49,6 +63,9 @@ pub struct TapTable {
     /// mount's own options reach this resource without being repeated — the url resolves
     /// through the mounts like any other.
     url: Url,
+    /// What `[[tap.table.example]]` said, and empty where it said nothing. Empty is what
+    /// makes `/examples` generate one instead, so this is the whole of the override.
+    examples: Vec<TapExample>,
 }
 
 impl TapTable {
@@ -67,6 +84,11 @@ impl TapTable {
 
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    /// The queries the operator wrote for this table, and nothing where they wrote none.
+    pub fn examples(&self) -> &[TapExample] {
+        &self.examples
     }
 }
 
@@ -126,6 +148,7 @@ impl TapTableList {
                 table: table.to_owned(),
                 qualified: entry.name.clone(),
                 url,
+                examples: examples(&entry.examples).map_err(&refuse)?,
             });
         }
         Ok(Self(tables))
@@ -158,6 +181,39 @@ impl TapTableList {
     pub fn names(&self) -> Vec<&str> {
         self.0.iter().map(TapTable::qualified).collect()
     }
+}
+
+/// The operator's own examples for one table, checked for the two ways they are useless.
+///
+/// Whether the query *runs* is not checked and cannot usefully be: it would mean planning a
+/// statement against a catalog at startup, which is the read this service does per request
+/// and declines to do per process. What checks that is the conformance suite, which fetches
+/// the published document and sends every query in it.
+fn examples(configured: &[crate::config::TapExampleConfig]) -> Result<Vec<TapExample>, String> {
+    configured
+        .iter()
+        .map(|example| {
+            let name = example.name.trim();
+            let query = example.query.trim();
+            // A menu entry with no label, and a label that does nothing. Neither is
+            // something a client can render into anything a user could act on.
+            if name.is_empty() || query.is_empty() {
+                return Err(format!(
+                    "an example needs a name and a query, and {:?} has {}",
+                    example.name,
+                    if name.is_empty() {
+                        "no name"
+                    } else {
+                        "no query"
+                    }
+                ));
+            }
+            Ok(TapExample {
+                name: name.to_owned(),
+                query: query.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// The url a path in this service's own url space is named by, which is the same thing an
@@ -251,6 +307,7 @@ mod tests {
             .map(|(name, path)| TapTableConfig {
                 name: (*name).to_owned(),
                 path: (*path).to_owned(),
+                examples: Vec::new(),
             })
             .collect::<Vec<_>>();
         TapTableList::new(&configured, &policy, &transfers).map_err(|error| error.to_string())
@@ -352,6 +409,30 @@ mod tests {
         for written in ["s3://ipac-irsa-ztf/ztf", "file:///hats/gaia", "hats/gaia"] {
             let refused = published(dir.path(), &[("a.b", written)]).unwrap_err();
             assert!(refused.contains("a.b"), "{written}: {refused}");
+        }
+    }
+
+    /// An example missing either half is refused where it is written, and the whole of
+    /// what a valid one costs is being carried.
+    #[test]
+    fn an_example_needs_both_halves() {
+        let wrote = |name: &str, query: &str| {
+            examples(&[crate::config::TapExampleConfig {
+                name: name.to_owned(),
+                query: query.to_owned(),
+            }])
+        };
+        let carried = wrote("  Bright stars  ", "\nSELECT TOP 1 ra FROM a.b\n").unwrap();
+        assert_eq!(carried[0].name, "Bright stars");
+        assert_eq!(carried[0].query, "SELECT TOP 1 ra FROM a.b");
+
+        for (name, query) in [
+            ("", "SELECT 1"),
+            ("n", ""),
+            ("   ", "SELECT 1"),
+            ("n", "\t"),
+        ] {
+            assert!(wrote(name, query).is_err(), "{name:?}/{query:?}");
         }
     }
 

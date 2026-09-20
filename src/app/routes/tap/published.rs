@@ -1,9 +1,9 @@
-//! Reading what this service publishes, for the two resources that describe it.
+//! Reading what this service publishes, for the resources that describe it.
 //!
-//! `TAP_SCHEMA` and VOSI's `/tables` are the same facts in two documents, so both are
-//! built from this. It costs a few small reads per published catalog — its properties, its
-//! partition list and the one `dataset/_common_metadata` that holds every partition's
-//! columns and no rows — and no partition is opened.
+//! `TAP_SCHEMA`, VOSI's `/tables` and `/examples` are built from this. It costs a few small
+//! reads per published catalog — its properties, its partition list and the one
+//! `dataset/_common_metadata` that holds every partition's columns and no rows — and no
+//! partition is opened.
 //!
 //! **Read per request rather than held.** Nothing in this service is a registry that
 //! accumulates across requests, and a catalog an operator republished is then described as
@@ -15,18 +15,37 @@ use datafusion::prelude::SessionContext;
 use crate::app::service::Service;
 use crate::error::ApiError;
 use crate::hats::table::HatsTable;
+use crate::hats::{HatsPartition, HatsPartitionList};
 use crate::storage::{self, StorageOptions};
 use crate::tap::metadata::{self, Marks, TableMetadata};
-use crate::tap::schema;
+use crate::tap::{TapTable, schema};
 
-/// Every table this service publishes, described — `TAP_SCHEMA`'s own five first, since
-/// that is what a client queries before it knows any other name.
+/// One published table, opened, as the resources that describe it need it.
+///
+/// Everything here comes from one opening of the catalog. Two resources want overlapping
+/// halves of it — the metadata documents want the columns, `/examples` wants a position and
+/// four column names — and reading it twice would be reading it twice.
+pub(super) struct Published<'a> {
+    /// What the operator published it as.
+    pub table: &'a TapTable,
+    /// What the two metadata documents say about it.
+    pub metadata: TableMetadata,
+    /// The two columns holding a position, as the catalog names them. `None` where the
+    /// catalog names neither, which is a catalog no cone can be written against.
+    pub coordinates: Option<(String, String)>,
+    /// The catalog's deepest partition — see [`deepest`]. A partition exists because rows
+    /// are there, so a cone covering this cell holds some of them, and that is known
+    /// without reading a data file.
+    pub cell: Option<HatsPartition>,
+}
+
+/// Every table this service publishes, opened and described.
 ///
 /// **A catalog that cannot be read fails the whole document.** Leaving it out would tell a
 /// client the table does not exist, which is the one thing it cannot tell from the truth;
 /// a refusal naming the table is something an operator can act on and a client can retry.
-pub(super) async fn describe(service: &Service) -> Result<Vec<TableMetadata>, ApiError> {
-    let mut described = schema::self_description();
+pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, ApiError> {
+    let mut published = Vec::new();
     for table in service.tap_tables.iter() {
         // A context per table, because a context is what a store is registered into and
         // DataFusion keys one by authority — see "One store per authority". Two published
@@ -46,7 +65,7 @@ pub(super) async fn describe(service: &Service) -> Result<Vec<TableMetadata>, Ap
             .await
             .map_err(|error| describing(table.qualified(), &error))?;
         let coordinates = catalog.coordinates();
-        described.push(metadata::describe(
+        let metadata = metadata::describe(
             table.qualified(),
             table.schema(),
             &TableProvider::schema(&catalog),
@@ -56,8 +75,45 @@ pub(super) async fn describe(service: &Service) -> Result<Vec<TableMetadata>, Ap
                 healpix: catalog.index(),
             },
             None,
-        ));
+        );
+        published.push(Published {
+            table,
+            metadata,
+            coordinates: coordinates.map(|(ra, dec)| (ra.to_owned(), dec.to_owned())),
+            cell: deepest(catalog.partitions()),
+        });
     }
+    Ok(published)
+}
+
+/// The catalog's deepest partition — the first of them, so that the same catalog answers
+/// the same way twice.
+///
+/// **The deepest rather than the first, because that is where the rows are.** HATS splits a
+/// cell when it holds too many rows, so the deepest order in the list is the most crowded
+/// part of the sky this catalog covers; the front of the list is wherever HEALPix numbering
+/// happens to start, which for a catalog covering one patch of sky is as likely to be its
+/// emptiest cell as its fullest. It also makes the cell small, and a cell a cone has to
+/// cover is a cone as wide as the cell.
+fn deepest(partitions: &HatsPartitionList) -> Option<HatsPartition> {
+    let order = partitions.order()?;
+    partitions
+        .cells()
+        .iter()
+        .find(|cell| cell.order == order)
+        .cloned()
+}
+
+/// Every table this service publishes, described — `TAP_SCHEMA`'s own five first, since
+/// that is what a client queries before it knows any other name.
+pub(super) async fn describe(service: &Service) -> Result<Vec<TableMetadata>, ApiError> {
+    let mut described = schema::self_description();
+    described.extend(
+        open_each(service)
+            .await?
+            .into_iter()
+            .map(|published| published.metadata),
+    );
     Ok(described)
 }
 

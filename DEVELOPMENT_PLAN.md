@@ -58,7 +58,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.13 | a region over `Float32` coordinates | done | |
 | 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it, adds `TABLE`, and fixes the names of its own resources. `VERB` and the id column are settled; the url space, the circle's spelling and the row bound are not |
 | 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. Inline `UPLOAD` is still §11.11's, and a job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
-| 11.9 | `/examples` | deferred | waits for §6.1's catalog metadata cache. A menu TOPCAT offers, not something a client needs to work, and every example in it is generated from a published catalog |
+| 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
 | 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
@@ -189,7 +189,7 @@ can miss an update — §6.6's watcher — is an optimization on top of that, so
 costs `ttl`-bounded staleness rather than a permanently wrong answer.
 
 **The catalog metadata layer has a reader that answers no query.** `/tables`, `TAP_SCHEMA`
-and §11.9's examples page are each built out of the properties, the partition list and
+and `/examples` are each built out of the properties, the partition list and
 `dataset/_common_metadata` of every published table, and a client fetches all three before
 it has asked for a row. Those reads are the whole cost of those resources, so the layer is
 what makes them cheap rather than what makes them faster.
@@ -606,10 +606,9 @@ it and each piece has to argue for itself.
 the only way a TAP client can ask about a catalog this service does not publish, and
 `/adql` already answered it in its own body. Inline upload stays later, IRSA offering none
 and MAST half, so the ecosystem has not settled it and the four agree only on *declaring*
-what they have. `/examples` is a menu TOPCAT offers rather than something a client needs to
-work. The formats this service has of its own — `parquet`, `json` — and how a nested column
-is declared are questions no reference service can be asked, because none of them has such
-a column.
+what they have. The formats this service has of its own — `parquet`, `json` — and how a
+nested column is declared are questions no reference service can be asked, because none of
+them has such a column.
 
 **What a job still cannot do is carry an operator's credential**, which is not a gap in the
 job model but the same one `/sync` has: a `[[tap.table]]` takes no storage options, and a
@@ -773,52 +772,6 @@ The `VERB` tiers are what the new checks are mostly about, and they are checked 
 rather than by naming columns: 1 is fewer than 2 is no more than 3, the three mandatory UCDs
 are present at every tier, and a catalog with a nested column is refused at 2 and 3 with a
 message naming where such a column is answered.
-
-### 11.9 `/examples`
-
-A DALI-examples page of queries that run: TOPCAT reads it and offers them in a menu. All
-four reference services publish one, but a client works without it, and TAP §2.6 asks for it
-as a SHOULD; DALI §2.3 makes an absent one a 404, which is what the url answers while there
-is no page.
-
-**It is a resource of its own, and nothing it costs is shared.** A client fetches
-`/examples` before it has asked anything, so whatever the page reads is read to draw a menu,
-and read again for the next client's menu. That makes the cost the question this step turns
-on rather than a detail of it.
-
-**Every example is generated, because `[[tap.table]]` is a name and a url.** Which columns a
-table has, which two hold a position, and where on the sky it holds rows are the catalog's
-to answer, so the page reads what `/tables` reads: the properties, the partition list and
-`dataset/_common_metadata`, per published table, per fetch. **So it waits for §6.1's catalog
-metadata cache**, where those are in memory already and the page is assembled out of them.
-
-**A good example wants more than metadata, and that is the part to bound.** A cone needs a
-position the catalog holds rows at, which one of its own partition cells gives without
-reading data. A predicate that matches anything needs to know what the values are like,
-which nothing short of a partition's statistics says, and a page that opens a partition per
-table per fetch is one nobody can afford. What a query says has to come from what the
-catalog already says about itself.
-
-Three things the generated queries have to avoid, none of them visible from a table name:
-
-- **`SELECT *` is not an example.** These catalogs are 150 to 370 columns wide, which is ten
-  to seventy seconds against about one for four named columns, the same rule
-  `app/openapi/` already follows.
-- **A nested column is refused by the format the menu is read in.** `votable` has no form for
-  `lightcurve.mag` (§7.5), so a projection chosen blindly is a 400 in the first query a new
-  user runs.
-- **A `TOP n` beside the cone is what keeps the read to the partitions the cone names.**
-
-The document is well-formed XML and so is authored as XHTML (DALI §2.3), carries one `vocab`
-attribute for the whole page, and gives each example an `id`, a `resource` pointing at
-itself, `typeof="example"`, a plain-text `name` and exactly one plain-text `query`, with the
-fully qualified table names as `table` (TAP §2.6). It is declared in `/capabilities` as
-`ivo://ivoa.net/std/DALI#examples`. It is a page this service serves, so: no CDN, complete
-without JavaScript.
-
-Left to decide: whether an operator may write examples of their own beside the generated
-ones. It is what makes a real archive's menu worth reading, and it puts caller-facing ADQL
-in a config file with nothing checking that it still runs.
 
 ### 11.10 What a caller gets told
 

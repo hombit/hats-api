@@ -149,6 +149,26 @@ pub struct TapTableConfig {
     /// Where the catalog is, as a path under a `[[mount]]` — the same address the file
     /// server publishes it at and an API request names it by, e.g. `/hats/gaia_dr3`.
     pub path: String,
+    /// Queries to offer against this table, as `[[tap.table.example]]` sections. With none,
+    /// this service writes one of its own from what the catalog says about itself; with
+    /// any, they replace it.
+    #[serde(rename = "example", default)]
+    pub examples: Vec<TapExampleConfig>,
+}
+
+/// One query offered against a published table, for a client to put in front of a user.
+///
+/// What it buys over the generated one is that somebody looked at the data: a predicate
+/// that matches something, and a position worth looking at, are things no amount of
+/// metadata says. What it costs is caller-facing ADQL in a config file, so the
+/// conformance suite runs every query this resource publishes.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TapExampleConfig {
+    /// What a client shows in its menu, e.g. `"Bright stars near M13"`.
+    pub name: String,
+    /// The query, as a client would send it.
+    pub query: String,
 }
 
 /// Which files this service will read as data, in both modes.
@@ -937,6 +957,8 @@ mod tests {
         assert_eq!(first.name, "gaia_dr3.gaia_source");
         assert_eq!(first.path, "/hats/gaia_dr3");
         assert_eq!(second.name, "ztf.dr24_lc");
+        // No examples is the ordinary case, and is what makes the generated one the default.
+        assert!(first.examples.is_empty());
 
         assert!(parse("[[tap.table]]\nname = \"a.b\"").is_err());
         assert!(parse("[[tap.table]]\npath = \"/a\"").is_err());
@@ -946,6 +968,42 @@ mod tests {
         assert!(parse("[[tap.table]]\nname = \"a.b\"\nurl = \"file:///a\"").is_err());
         // No tables is the default, and is a service with no TAP surface.
         assert!(parse("").unwrap().tap.tables.is_empty());
+    }
+
+    /// An operator's own examples, which replace the generated one for that table. Both
+    /// halves are required: a query with no name is one a client has nothing to label in
+    /// its menu, and a name with no query is a menu entry that does nothing.
+    #[test]
+    fn a_table_may_carry_examples_of_its_own() {
+        let config = parse(
+            "[[tap.table]]\nname = \"gaia_dr3.gaia_source\"\npath = \"/hats/gaia_dr3\"\n\
+             [[tap.table.example]]\nname = \"Bright stars\"\nquery = \"SELECT TOP 1 ra\"\n\
+             [[tap.table.example]]\nname = \"Nearby\"\nquery = \"SELECT TOP 1 dec\"",
+        )
+        .unwrap();
+        let [table] = config.tap.tables.as_slice() else {
+            panic!("expected one table, got {:?}", config.tap.tables)
+        };
+        let names: Vec<&str> = table
+            .examples
+            .iter()
+            .map(|example| example.name.as_str())
+            .collect();
+        assert_eq!(names, ["Bright stars", "Nearby"]);
+        assert_eq!(table.examples[0].query, "SELECT TOP 1 ra");
+
+        let table = "[[tap.table]]\nname = \"a.b\"\npath = \"/a\"\n";
+        assert!(parse(&format!("{table}[[tap.table.example]]\nname = \"n\"")).is_err());
+        assert!(parse(&format!("{table}[[tap.table.example]]\nquery = \"q\"")).is_err());
+        assert!(
+            parse(&format!(
+                "{table}[[tap.table.example]]\nname = \"n\"\nquery = \"q\"\ntable = \"a.b\""
+            ))
+            .is_err()
+        );
+        // One section rather than a list of them, which would be a different shape with the
+        // same spelling.
+        assert!(parse(&format!("{table}[tap.table.example]\nname = \"n\"")).is_err());
     }
 
     #[test]
