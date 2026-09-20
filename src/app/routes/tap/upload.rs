@@ -71,7 +71,6 @@ const HEADER: &str = "header";
 pub(super) struct Uploads(Vec<Upload>);
 
 /// One uploaded table.
-#[derive(Debug)]
 pub(super) struct Upload {
     /// The name it answers to under `TAP_UPLOAD`, as the request spelled it.
     pub name: String,
@@ -82,6 +81,23 @@ pub(super) struct Upload {
     pub kind: Option<Kind>,
     /// How to reach the store.
     pub storage: StorageOptions,
+}
+
+/// `Url`'s own `Debug` prints its `password` field, and this url is the caller's.
+///
+/// `refuse_userinfo` is what rejects `s3://key:secret@bucket/object`, and it runs where the
+/// url is opened rather than where it is read — so between the two an `Upload` holds one
+/// that a derive would print in full. [`storage::file_url`] is the same stripping every
+/// message about an unopened url already goes through.
+impl std::fmt::Debug for Upload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upload")
+            .field("name", &self.name)
+            .field("url", &storage::file_url(&self.url).as_str())
+            .field("kind", &self.kind)
+            .field("storage", &self.storage)
+            .finish()
+    }
 }
 
 /// The two things an upload's url may name, which are the `/adql` body's two table types.
@@ -455,6 +471,27 @@ mod tests {
         // And a name under any other schema is not an upload at all.
         assert!(uploads.named("gaia_dr3.c").is_none());
         assert!(uploads.named("c").is_none());
+    }
+
+    /// A url carrying userinfo is refused where it is opened, which is after it is read —
+    /// so in between an `Upload` holds one, and printing it must not print the password.
+    ///
+    /// The window is what makes this worth a test rather than a derive: nothing between
+    /// `Uploads::read` and `storage::open` has established that the url is clean, and a
+    /// `Debug` reached from a log line, a panic or a job document would print whatever the
+    /// caller wrote.
+    #[test]
+    fn a_debug_of_an_upload_does_not_print_the_url_s_password() {
+        let uploads = read(
+            &["a,https://reader:hunter2@example.org/a.parquet"],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let shown = format!("{uploads:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        // The name of the thing is still there, or the Debug has stopped being useful.
+        assert!(shown.contains("example.org/a.parquet"), "{shown}");
     }
 
     /// One option to a value and the parameter repeated for more, which is DALI §3.2's rule
