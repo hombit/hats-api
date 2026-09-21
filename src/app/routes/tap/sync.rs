@@ -84,7 +84,11 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
 }
 
 /// The bytes, labelled, and said to be cut where the format cannot say it itself.
-fn response(body: String, answer: &Answered) -> Response {
+///
+/// Bytes rather than text, parquet being a format that is not one — and the body is built
+/// whole here whatever the format, so every answer this resource gives carries a
+/// `Content-Length`. That is what a parquet reader opening the url needs.
+fn response(body: Vec<u8>, answer: &Answered) -> Response {
     (
         [
             (header::CONTENT_TYPE, answer.content_type.to_owned()),

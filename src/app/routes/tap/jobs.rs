@@ -603,8 +603,9 @@ pub(in crate::app) async fn result(
         if let Ok(value) = product.content_type.parse() {
             headers.insert(header::CONTENT_TYPE, value);
         }
-        // The same thing `/sync` says, for the same reason: `csv` and `tsv` have nowhere in
-        // the document to say they were cut, and this client did not see the request.
+        // The same thing `/sync` says, for the same reason: `csv`, `tsv` and `parquet` have
+        // nowhere in the document to say they were cut, and this client did not see the
+        // request.
         if let Ok(value) = product.overflow.to_string().parse() {
             headers.insert(header::HeaderName::from_static(OVERFLOW_HEADER), value);
         }

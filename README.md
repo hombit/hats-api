@@ -866,12 +866,27 @@ The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables
 `TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
 
 `sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
-`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv` and `tsv`. `UPLOAD`,
-with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a catalog URL as
-[above](#querying-a-catalog-the-service-does-not-publish).
+`RUNID` and `REQUEST=doQuery`. Formats: `votable` (the default), `csv`, `tsv` and
+`parquet`. `UPLOAD`, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a
+catalog URL as [above](#querying-a-catalog-the-service-does-not-publish).
+
+`parquet` is this service's own, declared in `capabilities` beside the rest, and it is the
+only format here that carries a **nested column** — a light curve or a spectrum held as one
+column of one row. VOTable, `csv` and `tsv` each refuse such a column by name, so a query
+touching one is a query to ask for parquet back. Both resources answer it: `/sync` sends the
+whole file with its length, and a job writes one you can fetch by range.
+
+```sh
+curl -o rows.parquet --data-urlencode \
+  'QUERY=SELECT TOP 100 ra, dec, lightcurve.mag FROM sky.objects' \
+  -d LANG=ADQL -d RESPONSEFORMAT=parquet \
+  http://localhost:8080/api/v1/tap/sync
+```
 
 `MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
-table. `MAXREC=0` returns the columns alone, which is how a client inspects a table.
+table; `csv`, `tsv` and `parquet` have nowhere in the document to say so and carry an
+`x-hats-overflow` header instead. `MAXREC=0` returns the columns alone, which is how a
+client inspects a table.
 
 `/sync` answers inside `max_request_seconds`. A query that will not fit goes to `/async`
 instead: `POST` the same parameters, follow the `303` to the job, poll `…/phase` until it

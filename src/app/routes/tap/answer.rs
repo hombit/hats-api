@@ -36,10 +36,12 @@ pub(super) fn answered(outcome: Result<Response, ApiError>) -> Response {
 
 /// Whether the answer stopped at the row bound, for the formats with nowhere to say it.
 ///
-/// **Only a VOTable can say it was truncated**, `OVERFLOW` being a VOTable marker — so `csv`
-/// and `tsv` carry this instead. It is this service's own and no client reads it; what it is
-/// for is that the fact is stated somewhere rather than nowhere, a delimited body having no
-/// room for it and TAP defining nothing for one.
+/// **Only a VOTable can say it was truncated**, `OVERFLOW` being a VOTable marker — so `csv`,
+/// `tsv` and `parquet` carry this instead. It is this service's own and no client reads it;
+/// what it is for is that the fact is stated somewhere rather than nowhere, a delimited body
+/// having no room for it and TAP defining nothing for one. Parquet has a place it could go —
+/// the footer's key/value metadata — and that is worse than nowhere: no reader surfaces it,
+/// so a truncation said there is one a caller cannot find while the file looks whole.
 ///
 /// Both query resources send it, from the same const: a job's answer is collected later and
 /// by a client that did not see the request, so it is if anything the one that needs it more.

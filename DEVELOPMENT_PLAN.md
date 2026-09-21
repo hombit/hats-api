@@ -61,7 +61,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
-| 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
+| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | what a JSON answer's own shape means over TAP is undecided; the nested half waits on §7.5. No reference service can be asked about either |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -717,13 +717,13 @@ a description and no UCD — there is no UCD1 word for a HEALPix index, and 1.03
 data-type, and UCD" for an extra field is a SHOULD.
 
 **A tier that reaches a nested column is refused, at 2 as at 3.** No format either version can
-answer in carries one — not VOTable, not `csv`, not `tsv` — so the alternative is a column
-silently absent from a request that asked for all of them. The refusal points at
-`POST {api.prefix}/v1/hats` with `format: parquet`, which is where a nested column is answered
-today; it cannot point at `RESPONSEFORMAT`, `parquet` and `json` being deliberately absent
-from the TAP format table until §11.12. What it costs is that a cone over a catalog with a
-nested column does not answer at all until an operator writes `hats_cols_default`, ZTF DR24
-being the one here.
+answer in carries one — VOTable is the only one a cone search has — so the alternative is a
+column silently absent from a request that asked for all of them. The refusal points at
+`{api.prefix}/tap/sync` with `RESPONSEFORMAT=parquet`, which is the same query in a protocol
+that can answer it, and at `POST {api.prefix}/v1/hats` with `format: parquet` for a caller
+already writing against this service's own API. What it costs is that a cone over a catalog
+with a nested column does not answer at all until an operator writes `hats_cols_default`,
+ZTF DR24 being the one here.
 
 #### Still to settle
 
@@ -827,17 +827,22 @@ this way is bounded by the same three bounds; `[[tap.table]]` stays credential-f
 operator's secret having no place in a published surface. The two reserved schemas are already
 reserved. The suite's upload checks are inline VOTable and stay red.
 
-### 11.12 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
+### 11.12 `json` over TAP, and a nested column in `TAP_SCHEMA`
 
-The formats this service has of its own, advertised in `/capabilities` as what they are, and
-the only way a nested column can be answered at all — `votable`, `csv` and `tsv` each refuse
-one.
+`json` is the other format this service has of its own, to be advertised in `/capabilities`
+the way `parquet` is. Nothing in the format table stands in its way; what does is that a JSON
+answer's shape is this service's own document — `schema`, `rows` and the counts — and TAP
+defines no such thing, so what a TAP client is handed is a decision rather than a rendering.
 
-Both halves are here because no reference service can be asked about either. None of them
-publishes a nested column, so there is no practice to follow and no check that can be
-calibrated against anybody: what `TAP_SCHEMA.columns` should say about `lightcurve.mag` is a
-decision to make alone, and it waits on §7.5 deciding what a nested column is in a VOTable
-first.
+The nested half is what neither format settles. A column reaching a light curve is answerable
+in `parquet` today and says nothing about itself in the metadata: `TAP_SCHEMA.columns` has one
+row per column with one `datatype`, and what that row should say about `lightcurve.mag` — one
+row per leaf, one row for the column, an `arraysize`, a `xtype` — is undecided. It waits on
+§7.5 deciding what a nested column is in a VOTable first, since a name published in
+`TAP_SCHEMA` is one a client may then write into a query and ask for in any format.
+
+No reference service can be asked about either. None of them publishes a nested column, so
+there is no practice to follow and no check that can be calibrated against anybody.
 
 ### 11.14 A DALI parameter value, read once and typed
 

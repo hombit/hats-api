@@ -24,6 +24,9 @@
 //! collected answer, which is why `streaming` is off unless a request asks. A reader that
 //! saves the bytes first, which is `curl` and `requests` and every client writing a file to
 //! disk, never needed either.
+//!
+//! The pieces have a second consumer with no response in it at all: a TAP job's answer is a
+//! file on disk, written as it is encoded and served afterwards with a length and ranges.
 
 use std::io;
 use std::sync::{Arc, Mutex};

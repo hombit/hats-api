@@ -1452,6 +1452,19 @@ and the parameter rules are §3.
   so `adql::query::Rows` carries which a request wants. `csv` and `tsv` have nowhere to put
   it and carry `x-hats-overflow` instead, which is this service's own and better than
   nothing being said.
+- **`parquet` is a TAP format here, and it is the one a nested column has.** VOTable, `csv`
+  and `tsv` each refuse such a column by name, so a catalog carrying a light curve had no TAP
+  answer at all and those refusals' "ask for json or parquet" named nothing a TAP client could
+  write. DALI §3.4.3 provides for a format beyond the standard's list, and a client that has
+  not heard of this one reads the media type out of `/capabilities` and skips it. `json` is
+  still absent, and deliberately: its shape is this service's own document rather than a
+  rendering TAP defines.
+
+  Two things go with it. **A TAP answer is bytes, not text** — `run::run` and `run::encode`
+  hand back a `Vec<u8>`, and nothing between them and the response may assume UTF-8. And
+  **every resource answers it through one writer**: `output::parquet::Writing` driven
+  collected for a `/sync` body, and driven a piece at a time for a job's file and for a
+  streamed `/sync` body. Two writers per format is the thing that drifts.
 - **`MAXREC` truncates after the query's own `TOP`, never over it.** TAP §2.7.4: the
   truncation "occurs after any limitations imposed by the query", so `TOP 2` with `MAXREC=10`
   is two rows and no overflow. `MAXREC=0` is the columns, no rows, and the marker whether or

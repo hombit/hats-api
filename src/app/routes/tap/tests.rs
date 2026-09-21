@@ -87,6 +87,20 @@ async fn post(service: Service, pairs: &[(&str, &str)]) -> (StatusCode, String, 
 
 /// The status, the content type, and the body.
 async fn send(service: Service, request: Request<Body>) -> (StatusCode, String, String) {
+    let (status, content_type, body) = send_bytes(service, request).await;
+    (
+        status,
+        content_type,
+        String::from_utf8_lossy(&body).into_owned(),
+    )
+}
+
+/// The same, keeping the bytes that came off the wire.
+///
+/// Parquet is a format that is not text, so a body read through `from_utf8_lossy` is one
+/// that has already been changed by the reading — every byte outside ASCII becomes a
+/// replacement character, and what is left will not open.
+async fn send_bytes(service: Service, request: Request<Body>) -> (StatusCode, String, Vec<u8>) {
     let response = router(service).oneshot(request).await.unwrap();
     let status = response.status();
     let content_type = response
@@ -96,11 +110,42 @@ async fn send(service: Service, request: Request<Body>) -> (StatusCode, String, 
         .unwrap_or_default()
         .to_owned();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    (
-        status,
-        content_type,
-        String::from_utf8_lossy(&body).into_owned(),
+    (status, content_type, body.to_vec())
+}
+
+/// A `GET` to `/tap/sync`, answered in bytes.
+async fn ask_bytes(service: Service, pairs: &[(&str, &str)]) -> (StatusCode, String, Vec<u8>) {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .extend_pairs(pairs)
+        .finish();
+    send_bytes(
+        service,
+        Request::builder()
+            .uri(format!("/api/v1/tap/sync?{query}"))
+            .body(Body::empty())
+            .unwrap(),
     )
+    .await
+}
+
+/// One parquet answer, read back the way a client reads it.
+///
+/// Reading it is the assertion: a body that is not a parquet file fails here rather than
+/// at a byte comparison that says nothing about why.
+fn read_parquet(bytes: &[u8]) -> (Vec<String>, usize) {
+    let reader =
+        datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            bytes::Bytes::copy_from_slice(bytes),
+        )
+        .expect("the answer is a parquet file");
+    let columns = reader
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect();
+    let rows = reader.metadata().file_metadata().num_rows();
+    (columns, usize::try_from(rows).expect("a row count"))
 }
 
 /// The examples document, as a client fetches it.
@@ -690,6 +735,117 @@ async fn a_truncated_delimited_answer_says_so_in_a_header() {
     assert_eq!(response.headers()["x-hats-overflow"], "true");
 }
 
+/// The format this service added to TAP, answered as a file a parquet reader opens.
+///
+/// Both spellings, because a client picks one out of the capabilities document — where the
+/// media type is what is published — and a person writing a url by hand picks the other.
+#[tokio::test]
+async fn a_parquet_answer_is_a_parquet_file() {
+    let dir = hats::query::tests::fixture(true);
+    for asked in ["parquet", "application/vnd.apache.parquet"] {
+        let (status, content_type, body) = ask_bytes(
+            published(dir.path(), &LimitsConfig::default()),
+            &[
+                ("QUERY", "SELECT TOP 2 id, ra FROM sky.objects ORDER BY id"),
+                ("LANG", "ADQL"),
+                ("RESPONSEFORMAT", asked),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{asked}");
+        assert_eq!(content_type, "application/vnd.apache.parquet", "{asked}");
+        let (columns, rows) = read_parquet(&body);
+        assert_eq!(columns, ["id", "ra"], "{asked}");
+        assert_eq!(rows, 2, "{asked}");
+    }
+}
+
+/// **A parquet body is never compressed and always carries its length.**
+///
+/// Both are what make the answer openable rather than merely correct: a parquet file is
+/// read from its footer backwards, so a reader needs the length to find the footer and
+/// ranges to fetch it. The compression layer excludes the body by its content type, which
+/// is one rule covering a file off a mount, a query answer and now a TAP answer — so this
+/// asks for `gzip` the way every HTTP client does and checks it was declined.
+#[tokio::test]
+async fn a_parquet_answer_is_not_compressed_and_says_how_long_it_is() {
+    let dir = hats::query::tests::fixture(true);
+    let request = Request::builder()
+        .uri(
+            "/api/v1/tap/sync?LANG=ADQL&RESPONSEFORMAT=parquet\
+             &QUERY=SELECT+id+FROM+sky.objects",
+        )
+        .header(header::ACCEPT_ENCODING, "gzip, deflate, br")
+        .body(Body::empty())
+        .unwrap();
+    let response = router(published(dir.path(), &LimitsConfig::default()))
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !response.headers().contains_key(header::CONTENT_ENCODING),
+        "a parquet answer was compressed: {:?}",
+        response.headers()
+    );
+    let length: usize = response.headers()[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.len(), length);
+    read_parquet(&body);
+}
+
+/// A parquet file has nowhere to say its rows were cut, so the fact is stated in the same
+/// header `csv` and `tsv` carry it in — and the file itself is still whole and readable,
+/// which is what a truncation must not cost.
+#[tokio::test]
+async fn a_truncated_parquet_answer_says_so_in_a_header() {
+    let dir = hats::query::tests::fixture(true);
+    let request = Request::builder()
+        .uri(
+            "/api/v1/tap/sync?LANG=ADQL&RESPONSEFORMAT=parquet&MAXREC=1\
+             &QUERY=SELECT+id+FROM+sky.objects",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = router(published(dir.path(), &LimitsConfig::default()))
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-hats-overflow"], "true");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(read_parquet(&body).1, 1);
+}
+
+/// `MAXREC=0` is the columns and no rows, which for parquet is a file holding a schema —
+/// the shape a client asks for when it wants to know what it would get.
+#[tokio::test]
+async fn a_parquet_answer_with_no_rows_is_still_a_file() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, body) = ask_bytes(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT id, ra, dec FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("RESPONSEFORMAT", "parquet"),
+            ("MAXREC", "0"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let (columns, rows) = read_parquet(&body);
+    assert_eq!(columns, ["id", "ra", "dec"]);
+    assert_eq!(rows, 0);
+}
+
 /// A `GET` to one of the resources that describe the service.
 async fn fetch(service: Service, path: &str) -> (StatusCode, String, String) {
     send(
@@ -765,14 +921,21 @@ async fn capabilities_declare_what_is_there_and_nothing_else() {
     ] {
         assert!(!body.contains(absent), "{absent} is declared: {body}");
     }
-    // Every format the query resource answers, and no other.
+    // Every format the query resource answers, and no other. Parquet is this service's
+    // own — DALI §3.4.3 provides for one beyond the standard's list — and it is here
+    // because a client that never heard of it reads the media type and skips it, while one
+    // that did has no other way to find out this is where a nested column is answered.
     for mime in [
         "application/x-votable+xml",
         "text/csv;header=present",
         "text/tab-separated-values",
+        "application/vnd.apache.parquet",
     ] {
         assert!(body.contains(mime), "{mime} is not declared: {body}");
     }
+    assert!(body.contains("<alias>parquet</alias>"), "{body}");
+    // Still deliberately absent: what a nested column looks like in JSON is not settled.
+    assert!(!body.contains("application/json"), "{body}");
     assert!(!body.to_lowercase().contains("fits"), "{body}");
     // Not implemented, so not offered: a client told about one has no way back.
     assert!(!body.contains("uploadMethod"), "{body}");
@@ -1212,6 +1375,77 @@ async fn a_job_result_is_served_by_range() {
     let part = text_of(response).await;
     assert_eq!(part.len(), 20, "{part:?}");
     assert!(whole.starts_with(&part), "{part:?}");
+}
+
+/// A job answers parquet, and this is the path the row-group writer is on.
+///
+/// `/sync` builds its body whole; a job's answer is written into the file as the rows
+/// arrive, so this is the only place the three encoder calls run over batches that had not
+/// been read when the first of them was made. What the file being openable proves is that
+/// the footer was written last and the pieces before it were written in order — a parquet
+/// file assembled out of order reads as corrupt rather than as short.
+///
+/// The headers are the other half. A parquet reader opening this url needs the length and
+/// the ranges the file gives it, which is the same thing that made the result a file in the
+/// first place.
+#[tokio::test]
+async fn a_job_answers_parquet_as_a_file_a_reader_opens() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id, ra FROM sky.objects ORDER BY id"),
+            ("LANG", "ADQL"),
+            ("RESPONSEFORMAT", "parquet"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+
+    let response = harness.get(&format!("{job}/results/result")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(
+        headers[header::CONTENT_TYPE],
+        "application/vnd.apache.parquet"
+    );
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    assert!(headers.contains_key(header::CONTENT_LENGTH));
+    assert_eq!(headers["x-hats-overflow"], "false");
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let (columns, rows) = read_parquet(&body);
+    assert_eq!(columns, ["id", "ra"]);
+    assert_eq!(rows, hats::query::tests::fixture_rows());
+}
+
+/// One statement, two resources, one file.
+///
+/// The collected writer and the written one are the same encoder driven two ways, and two
+/// drivers over one format is exactly the thing that drifts. VOTable's own version of this
+/// allows for `nrows`, which a streamed document cannot know; parquet has no such
+/// difference — the footer is written last either way — so the bytes are the same bytes.
+#[tokio::test]
+async fn a_job_writes_the_parquet_sync_would_have_built() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let statement = &[
+        ("QUERY", "SELECT id, ra, dec FROM sky.objects ORDER BY id"),
+        ("LANG", "ADQL"),
+        ("RESPONSEFORMAT", "parquet"),
+    ];
+
+    let synced = harness.form("/api/v1/tap/sync", statement).await;
+    let synced = synced.into_body().collect().await.unwrap().to_bytes();
+    let job = harness
+        .submit(&[statement.as_slice(), &[("PHASE", "RUN")]].concat())
+        .await;
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+    let written = harness.get(&format!("{job}/results/result")).await;
+    let written = written.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(written, synced);
+    assert_eq!(read_parquet(&written).1, hats::query::tests::fixture_rows());
 }
 
 /// TAP §2.7: a parameter is enforced when the query runs, not when the job is made.
