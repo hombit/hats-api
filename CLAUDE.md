@@ -1569,6 +1569,27 @@ parts of TAP, DALI, VOSI and ADQL answer. It is a uv project with its own lock, 
   column was produced by the same checks; a changed check makes a row mean different things
   in different columns, and the disagreements are the entire value of having them.
 
+## Timing a query
+
+`query-benchmark/` times one cone search per catalog through `/simple/hats`, against a
+service it starts itself. It is a uv project with its own lock, run with
+`uv run query-benchmark` from that directory.
+
+- **The column lists are the benchmark as much as the cone is.** These catalogs are 150 to
+  370 columns wide and what a query costs is overwhelmingly what it projects, so widening
+  one list does not make the benchmark broader — it makes it measure something else, and
+  makes the number incomparable with every number taken before.
+- **A time is only a time beside the row count and the byte count**, which is why all three
+  are in the table. A build that returns fewer rows, or reads fewer bytes, is a different
+  answer rather than a faster one, and nothing else in the output would say so.
+- **CI reads no time.** A shared runner's numbers are its network's, so the job asserts
+  that a cone over one catalog comes back with rows and nothing about how long it took. A
+  check that put a threshold on a duration there would fail on a slow morning and say
+  nothing on a fast one.
+- **The times are the network's unless the catalog is local.** A question about compiled
+  code — `target-cpu`, an allocator, a codec — is asked with `--catalog NAME=LOCATION`
+  pointing at a copy on the machine, or it is not being asked at all.
+
 ## Before committing
 
 `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test

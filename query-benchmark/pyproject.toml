@@ -1,0 +1,27 @@
+[project]
+name = "query-benchmark"
+version = "0.0.0"
+description = "What a cone search costs through this service, one catalog at a time"
+requires-python = ">=3.14"
+# The benchmark itself has none: it starts a process and speaks HTTP, both of which are
+# in the standard library, and a dependency here would be one more thing between the
+# clock and the request.
+dependencies = [
+    "pytest>=8.0",
+    "pytest-timeout>=2.3",
+]
+
+[project.scripts]
+query-benchmark = "query_benchmark.run:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --tb=short -p no:cacheprovider"
+# One cold read of a real catalog over the public internet, and no longer: a service that
+# stops answering costs the check rather than the run.
+timeout = 600
+timeout_method = "thread"
