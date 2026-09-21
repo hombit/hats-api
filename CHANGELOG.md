@@ -8,14 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `streaming` as a file-server query-string parameter, on a data file's url and on a catalog's: `true` sends the rows as they are read. A `Range` alongside it is refused, and the answer is neither held in the query cache nor served from it.
+--
 
 ### Changed
 
-- `streaming` accepts `format = "parquet"`, written a row group at a time with its footer last, instead of refusing the two together.
-- The directory page runs its preview with `streaming=true`, and reports a `refused` that stopped one part-way.
-- The page's request body carries `streaming`, so every snippet that posts it sends it; the url written for `lsdb` and `nested_pandas` does not.
-- `query-benchmark` sends `streaming`, and reports a run stopped part-way as an error rather than timing it.
+--
 
 ### Deprecated
 
@@ -27,12 +24,29 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A streamed answer no longer panics the worker when the body is polled after it has ended, which was every streamed answer to a client sending `accept-encoding`.
-- The page's Python snippets write `True` rather than `true`, which was a `NameError` where a body carried a boolean.
+--
 
 ### Security
 
 --
+
+## [0.0.11] - 2026-09-21
+
+### Added
+
+- `streaming` as a file-server query-string parameter, on a data file's url and on a catalog's: `true` sends the rows as they are read. A `Range` alongside it is refused, and the answer is neither held in the query cache nor served from it. [#98](https://github.com/hombit/hats-api/pull/98)
+
+### Changed
+
+- `streaming` accepts `format = "parquet"`, written a row group at a time with its footer last, instead of refusing the two together. [#98](https://github.com/hombit/hats-api/pull/98)
+- The directory page runs its preview with `streaming=true`, and reports a `refused` that stopped one part-way. [#98](https://github.com/hombit/hats-api/pull/98)
+- The page's request body carries `streaming`, so every snippet that posts it sends it; the url written for `lsdb` and `nested_pandas` does not. [#100](https://github.com/hombit/hats-api/pull/100)
+- `query-benchmark` sends `streaming`, and reports a run stopped part-way as an error rather than timing it. [#100](https://github.com/hombit/hats-api/pull/100)
+
+### Fixed
+
+- A streamed answer no longer panics the worker when the body is polled after it has ended, which was every streamed answer to a client sending `accept-encoding`. [#100](https://github.com/hombit/hats-api/pull/100)
+- The page's Python snippets write `True` rather than `true`, which was a `NameError` where a body carried a boolean. [#100](https://github.com/hombit/hats-api/pull/100)
 
 ## [0.0.10] - 2026-09-21
 
@@ -176,7 +190,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.10...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.11...HEAD
+[0.0.11]: https://github.com/hombit/hats-api/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/hombit/hats-api/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/hombit/hats-api/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/hombit/hats-api/compare/v0.0.7...v0.0.8
