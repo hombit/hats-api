@@ -1578,6 +1578,101 @@ mod tests {
         assert_eq!(ids, expected);
     }
 
+    /// A cone that reaches no partition still answers with the catalog's columns.
+    ///
+    /// This is the case that has nothing to learn them from: with no partition chosen, no
+    /// file is opened, so the schema every other answer takes from the one it read is not
+    /// there. `limit=0` has the same problem and solves it from `dataset/_common_metadata`,
+    /// and a region that selects nothing is the same kind of answer — no rows, and the
+    /// columns known regardless.
+    ///
+    /// What a caller gets otherwise is a document that is empty in the wrong way: a parquet
+    /// file with no columns, or a `csv` with no header line, which reads as a projection
+    /// they got wrong rather than as a search that found nothing.
+    #[tokio::test]
+    async fn a_cone_over_no_partitions_answers_with_the_catalogs_columns() {
+        let dir = hats::query::tests::fixture(true);
+        let (ra, dec) = centre();
+        // The other side of the sky from the fixture's rows, so no partition is chosen.
+        let (empty_ra, empty_dec) = ((ra + 180.0) % 360.0, -dec);
+        let service = || catalog_server(dir.path(), 3600.0);
+
+        for format in ["parquet", "csv", "tsv", "votable"] {
+            let nothing_there = respond(
+                service(),
+                Request::builder().uri(format!(
+                    "/?ra={empty_ra}&dec={empty_dec}&radius_arcsec=60&columns=id&format={format}"
+                )),
+            )
+            .await;
+            assert_eq!(nothing_there.status(), StatusCode::OK, "{format}");
+            let nothing_there = nothing_there
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+
+            // The same answer `limit=0` gives, which is the one that already describes the
+            // catalog rather than describing nothing.
+            let none_asked_for = respond(
+                service(),
+                Request::builder().uri(format!("/?limit=0&columns=id&format={format}")),
+            )
+            .await;
+            assert_eq!(none_asked_for.status(), StatusCode::OK, "{format}");
+            let none_asked_for = none_asked_for
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+
+            assert_eq!(
+                nothing_there, none_asked_for,
+                "{format}: a cone that found nothing answered differently from limit=0"
+            );
+        }
+    }
+
+    /// The same, streamed. The columns are wanted before the first byte goes out, and a
+    /// stream that read no partition has nothing to have learned them from.
+    #[tokio::test]
+    async fn a_streamed_cone_over_no_partitions_still_names_the_columns() {
+        let dir = hats::query::tests::fixture(true);
+        let (ra, dec) = centre();
+        let (empty_ra, empty_dec) = ((ra + 180.0) % 360.0, -dec);
+        let service = || catalog_server(dir.path(), 3600.0);
+
+        for format in ["parquet", "csv", "tsv", "votable"] {
+            let response = respond(
+                service(),
+                Request::builder().uri(format!(
+                    "/?ra={empty_ra}&dec={empty_dec}&radius_arcsec=60&columns=id\
+                     &format={format}&streaming=true"
+                )),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let text = String::from_utf8_lossy(&body);
+            match format {
+                "parquet" => {
+                    let reader = ParquetRecordBatchReaderBuilder::try_new(body.clone())
+                        .unwrap_or_else(|why| panic!("{format}: not a parquet file: {why}"));
+                    assert_eq!(
+                        reader.schema().fields().len(),
+                        1,
+                        "{format}: the column went missing"
+                    );
+                }
+                "csv" => assert!(text.starts_with("id"), "{format}: {text:?}"),
+                "tsv" => assert!(text.starts_with("id"), "{format}: {text:?}"),
+                _ => assert!(text.contains("<FIELD"), "{format}: {text:?}"),
+            }
+        }
+    }
+
     /// A catalog's answer is a parquet body like any other, so it is sliced like one.
     #[tokio::test]
     async fn a_catalog_query_answer_serves_a_range() {
@@ -2183,6 +2278,110 @@ mod tests {
                 .unwrap()
                 > 0
         );
+    }
+
+    /// A predicate that matches nothing answers the same document `limit=0` does.
+    ///
+    /// Both are an answer with no rows in it, and neither is an absence of an answer: the
+    /// columns are known from the file whether or not a row survived, so what comes back is
+    /// a file, a table or a document with a header and nothing under it. A caller cannot act
+    /// on a body that is empty in some other way — an unreadable parquet file reads as a
+    /// broken answer, and a `csv` with no header line as a column list they got wrong.
+    #[tokio::test]
+    async fn a_query_that_matches_nothing_answers_the_way_limit_zero_does() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for format in ["parquet", "csv", "tsv", "votable", "json"] {
+            // The same two columns either way, so the only difference is which of the two
+            // ways of having no rows was asked for.
+            let empty = format!("/part0.parquet?columns=objectid,band&format={format}");
+            let matched_nothing = respond(
+                service(),
+                Request::builder().uri(format!("{empty}&filters=objectid%3C0")),
+            )
+            .await;
+            let none_asked_for = respond(
+                service(),
+                Request::builder().uri(format!("{empty}&limit=0")),
+            )
+            .await;
+
+            assert_eq!(matched_nothing.status(), StatusCode::OK, "{format}");
+            assert_eq!(none_asked_for.status(), StatusCode::OK, "{format}");
+            let matched_nothing = matched_nothing
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            let none_asked_for = none_asked_for
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes();
+            assert!(!matched_nothing.is_empty(), "{format}: an empty body");
+            // `json` carries how long the request took, which is not part of the answer
+            // being the same answer — the other four have nowhere to put it.
+            if format == "json" {
+                let without_timing = |bytes: &[u8]| {
+                    let mut body: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                    body.as_object_mut().unwrap().remove("elapsed_ms");
+                    body
+                };
+                assert_eq!(
+                    without_timing(&matched_nothing),
+                    without_timing(&none_asked_for),
+                    "{format}: a predicate that matched nothing answered differently from limit=0"
+                );
+                continue;
+            }
+            assert_eq!(
+                matched_nothing, none_asked_for,
+                "{format}: a predicate that matched nothing answered differently from limit=0"
+            );
+        }
+    }
+
+    /// The same, streamed. A stream has no rows to learn the columns from, so this is where
+    /// a document with nothing in it is most likely to have nothing in it at all.
+    #[tokio::test]
+    async fn a_streamed_query_that_matches_nothing_still_answers_a_document() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for format in ["parquet", "csv", "tsv", "votable", "json"] {
+            let asked = format!(
+                "/part0.parquet?columns=objectid,band&format={format}\
+                 &filters=objectid%3C0&streaming=true"
+            );
+            let response = respond(service(), Request::builder().uri(&asked)).await;
+            assert_eq!(response.status(), StatusCode::OK, "{format}");
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert!(
+                !body.is_empty(),
+                "{format}: a streamed answer with no rows sent nothing at all"
+            );
+            let text = String::from_utf8_lossy(&body);
+            match format {
+                // A file, with the columns in it and no rows under them.
+                "parquet" => {
+                    let reader = ParquetRecordBatchReaderBuilder::try_new(body.clone())
+                        .unwrap_or_else(|why| panic!("{format}: not a parquet file: {why}"));
+                    let fields = reader.schema().fields().len();
+                    assert_eq!(fields, 2, "{format}: the columns went missing");
+                }
+                // The header row names the columns, which is the whole of what an empty
+                // table has to say.
+                "csv" => assert!(text.starts_with("objectid,band"), "{format}: {text:?}"),
+                "tsv" => assert!(text.starts_with("objectid\tband"), "{format}: {text:?}"),
+                "votable" => assert!(text.contains("<FIELD"), "{format}: {text:?}"),
+                _ => assert!(text.contains("\"rows\":[]"), "{format}: {text:?}"),
+            }
+        }
     }
 
     /// A query that cannot run says so. Telling a caller their file is not parquet, when

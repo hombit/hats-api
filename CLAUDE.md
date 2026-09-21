@@ -928,6 +928,19 @@ request in front of it.
 - **A partition the region contains gets no spatial test at all.** That is what the inner
   covering is for, and it is why `Coverage` is computed from both sides. `Selection.spatial`
   is `None` for such a partition — not an empty region, which means something else.
+- **An answer with no rows still names its columns.** A region reaching no partition opens no
+  file, so nothing has said what they are — and a document carrying none reads as a
+  projection the caller got wrong rather than as a search that found nothing.
+  `columns_without_rows` answers it from `dataset/_common_metadata`, or from one partition's
+  footer where the catalog has no such file. That is what `limit=0` already pays, and the two
+  are one answer reached two ways.
+
+  `limit=0` keeps `_common_metadata` alone and does not fall back to a partition: the read
+  below it already does, and counts the partition it opens, so answering from one here would
+  report a partition read as none. A stream cannot ask afterwards — `Search::stream` takes
+  `self` — so the read is chained onto the end of the stream, where it runs only if no
+  partition set a schema and records it for the ending rather than yielding a row. Anything
+  that streams a catalog gets it from there rather than deriving it again.
 - **Partitions are read in the catalog's own order**, which is HEALPix order, and that is a
   promise the catalog routes make and the single-file route does not — with one exception,
   a streamed answer with no `limit`, where the partitions are sent as they land. Every

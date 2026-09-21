@@ -24,7 +24,7 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- A catalog query that matches nothing returns its column names: a header row in `csv`, a schema in `parquet`, `FIELD`s in a VOTable.
 
 ### Security
 
