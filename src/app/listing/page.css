@@ -330,3 +330,6 @@ section.catalog .panel-body.output {
 .result td.special { font-style: italic; color: var(--muted); }
 .result tbody tr:nth-child(even) { background: var(--bg); }
 .failed { color: var(--failed); font-weight: 600; }
+/* A body that stopped before its rows ran out. The table above it is part of an answer,
+   and nothing else on the page would say so. */
+.refused { color: var(--failed); font-weight: 600; }

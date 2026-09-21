@@ -8,11 +8,12 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `streaming` as a file-server query-string parameter, on a data file's url and on a catalog's: `true` sends the rows as they are read. A `Range` alongside it is refused, and the answer is neither held in the query cache nor served from it.
 
 ### Changed
 
 - `streaming` accepts `format = "parquet"`, written a row group at a time with its footer last, instead of refusing the two together.
+- The directory page runs its preview with `streaming=true`, and reports a `refused` that stopped one part-way.
 
 ### Deprecated
 

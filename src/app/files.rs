@@ -9,6 +9,8 @@ use axum::extract::{Request, State};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header, request::Parts};
 use axum::response::{Html, IntoResponse, Json, Response};
 use bytes::Bytes;
+use datafusion::arrow::datatypes::Schema;
+use futures::{StreamExt, TryStreamExt};
 use object_store::{GetOptions, GetRange, ObjectMeta};
 use tower_http::services::ServeFile;
 // The query-string reading of percent encoding, which is not the path's: `+` is a space
@@ -472,6 +474,52 @@ impl Hide<'_> {
             Self::Store(url) => error.from_mounted_store(url),
         }
     }
+
+    /// The same rule with the borrow given up, for a body that outlives this handler.
+    fn owned(&self) -> Hidden {
+        match self {
+            Self::Local(path) => Hidden::Local((*path).to_owned()),
+            Self::Store(url) => Hidden::Store((*url).clone()),
+        }
+    }
+}
+
+/// [`Hide`], for a streamed body.
+///
+/// A stream sends its rows after the handler has returned, so what it may say about a
+/// failure cannot borrow the mount it came from. The rule is the same rule — a message
+/// naming the operator's own path or bucket is replaced before it leaves.
+#[derive(Debug, Clone)]
+enum Hidden {
+    Local(std::path::PathBuf),
+    Store(Url),
+}
+
+impl Hidden {
+    fn apply(&self, error: ApiError) -> ApiError {
+        match self {
+            Self::Local(path) => error.from_mount(path),
+            Self::Store(url) => error.from_mounted_store(url),
+        }
+    }
+}
+
+/// A streamed answer has no length, so a `Range` has nothing to be a range of.
+///
+/// Refused rather than settled either way. A reader sends `Range` because it means to seek,
+/// which is the one thing streaming takes away, so the two parameters ask for answers that
+/// cannot both be given — and either way of choosing between them silently hands a caller
+/// something they cannot tell from what they asked for: a streamed body where a `206` was
+/// wanted, or a collected one where `streaming` was written and did nothing.
+fn no_ranges_while_streaming(request: &Parts) -> Result<(), ApiError> {
+    match request.headers.contains_key(header::RANGE) {
+        true => Err(ApiError::bad_request(
+            "a streamed answer has no length to range over; leave streaming out to read it \
+             by range"
+                .to_owned(),
+        )),
+        false => Ok(()),
+    }
 }
 
 /// The question a file-server request asks about a file, if it asks one.
@@ -509,6 +557,10 @@ struct FileQuery {
     /// its own.
     ra_column: Option<String>,
     dec_column: Option<String>,
+    /// `true` to send the rows as they are read rather than to collect them first. What it
+    /// gives up is everything a length buys — the `x-hats-*` counts, and the ranges a
+    /// parquet reader seeks in — so it is for a caller downloading the whole answer.
+    streaming: Option<String>,
 }
 
 impl FileQuery {
@@ -535,6 +587,7 @@ impl FileQuery {
                 "limit" => &mut query.limit,
                 "ra_column" => &mut query.ra_column,
                 "dec_column" => &mut query.dec_column,
+                "streaming" => &mut query.streaming,
                 "ra" => &mut circle.ra,
                 "dec" => &mut circle.dec,
                 "radius_deg" => &mut circle.radius_deg,
@@ -549,6 +602,24 @@ impl FileQuery {
         }
         query.region = circle.region(max_radius_arcsec)?;
         Ok(Some(query))
+    }
+
+    /// Whether the answer is sent as it is read.
+    ///
+    /// Spelled the way the API's body spells it — `true` or `false` and nothing else. A bare
+    /// `streaming` with no value is refused rather than read as either: presence meaning true
+    /// is a convention some clients follow and some do not, and a caller who meant one and
+    /// got the other has no way to tell from the answer, a streamed body differing from a
+    /// collected one only in headers they may never look at.
+    fn streaming(&self) -> Result<bool, ApiError> {
+        match self.streaming.as_deref() {
+            None => Ok(false),
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            Some(_) => Err(ApiError::bad_request(
+                "streaming takes true or false".to_owned(),
+            )),
+        }
     }
 
     /// The projection, the predicate and the limit, which every route reads the same way.
@@ -764,6 +835,40 @@ async fn query_file(
         _ => None,
     };
 
+    // Sent as it is read, where the caller asked for it. The whole-file answer above is
+    // taken first either way: a query that narrows nothing is the object itself, which is
+    // better than streaming a re-encode of it.
+    //
+    // **A streamed answer is neither held nor answered from the cache.** What the cache
+    // holds is a whole body, which is the one thing this does not have; and reading from it
+    // would make the answer's shape depend on whether something else had warmed it — a
+    // length and ranges for one caller, neither for the next, on the same url.
+    if query.streaming()? {
+        no_ranges_while_streaming(request)?;
+        let planned = query::plan(opened, &selection, service.sql_limits, Order::File)
+            .await
+            .map_err(|error| hide.apply(error))?;
+        // What the body may say about a failure is what a refusal here would have said, and
+        // it outlives this handler, so it carries its own copy of the rule.
+        let hidden = hide.owned();
+        let batches = planned
+            .batches()
+            .map_err(|error| hide.apply(error))?
+            .map_err(move |error| hidden.apply(error));
+        tracing::info!(
+            path = request.uri.path(),
+            projected = query.columns.is_some(),
+            filtered = query.filters.is_some(),
+            format = output.format.name(),
+            streaming = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            "query"
+        );
+        return answer::streamed(planned, batches, &output, started, layout, opened)
+            .map(Some)
+            .map_err(|error| hide.apply(error));
+    }
+
     // The answer this request would make may already have been made: a parquet reader opens
     // one url three times, and without this each of those re-runs the query and re-reads
     // the file. Keyed by the url and bounded by a few minutes — see `app::cache`.
@@ -869,6 +974,53 @@ async fn query_catalog(
     let search = Search::resolve(dir, selection.regions, service.catalog_limits)
         .await
         .map_err(hide_the_path)?;
+    // Each partition's rows leave as it lands, in the catalog's own order. The bound that is
+    // known before anything is read is still taken first — a url has no work list to answer
+    // with, so it is the same refusal the collected path gives rather than a `422` carrying
+    // a plan. A bound reached part-way is said at the end of the body, the rows before it
+    // having gone.
+    if query.streaming()? {
+        no_ranges_while_streaming(request)?;
+        if let Some(why) = search.too_many_partitions(selection.limit, service.catalog_limits) {
+            return Err(too_much_for_a_url(&why));
+        }
+        let chosen = search.chosen().len();
+        let partitions = search.catalog().partitions().len();
+        let streamed = std::sync::Arc::new(hats::query::Streamed::default());
+        let batches = search.stream(
+            (&selection).into(),
+            mount.data_files().clone(),
+            service.sql_limits,
+            service.catalog_limits,
+            std::sync::Arc::clone(&streamed),
+        );
+        // The first batch here rather than inside the body: a bound or a bad column met on
+        // the first partition is still a status at this point, where a refusal from inside
+        // the body would be a dropped connection. It goes back in front of the rest.
+        let (first, rest) = Box::pin(batches).into_future().await;
+        let first = first.transpose().map_err(hide_the_path)?;
+        // From the partition rather than from a batch: a partition says what its columns are
+        // whether or not any of its rows matched.
+        let schema = streamed
+            .schema()
+            .unwrap_or_else(|| std::sync::Arc::new(Schema::empty()));
+        let hidden = hide.owned();
+        let batches = futures::stream::iter(first.map(Ok))
+            .chain(rest)
+            .map_err(move |error| hidden.apply(error));
+        tracing::info!(
+            path = request.uri.path(),
+            partitions,
+            chosen,
+            projected = query.columns.is_some(),
+            filtered = query.filters.is_some(),
+            format = output.format.name(),
+            streaming = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog query"
+        );
+        return answer::streamed_rows(&schema, batches, streamed, &output, started);
+    }
     let outcome = search
         .run(
             &selection,
@@ -1043,6 +1195,7 @@ fn render(
 #[cfg(test)]
 mod tests {
     use axum::http::{Request, StatusCode};
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use http_body_util::BodyExt;
 
     use crate::app::answer::{DATA_BYTES_READ_HEADER, NUM_ROWS_HEADER};
@@ -1378,6 +1531,44 @@ mod tests {
             answer["num_partitions"], 1,
             "a cone inside one partition read others: {body}"
         );
+        let ids: Vec<i64> = answer["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, expected);
+    }
+
+    /// A catalog url streams the same rows, in the same order, as the collected answer.
+    ///
+    /// The order is the promise the catalog routes make and the thing a stream is most
+    /// likely to lose, the partitions being read several at a time — so it is the rows
+    /// themselves that are compared and not their number.
+    #[tokio::test]
+    async fn a_catalog_url_streams_its_partitions_in_order() {
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+        let expected = hats::query::tests::inside(&region);
+        assert!(!expected.is_empty(), "the cone selects nothing");
+        let (ra, dec) = centre();
+        let asked =
+            format!("/?ra={ra}&dec={dec}&radius_arcsec=3600&columns=id&format=json&streaming=true");
+
+        let response = respond(
+            catalog_server(dir.path(), 3600.0),
+            Request::builder().uri(&asked),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+        let body = body_of(response).await;
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // The counts a collected answer puts in headers or in a status are in the document,
+        // which is the only place a stream has left to say them.
+        assert_eq!(answer["num_rows"], expected.len(), "{body}");
+        assert_eq!(answer["num_partitions"], 1, "{body}");
         let ids: Vec<i64> = answer["rows"]
             .as_array()
             .unwrap()
@@ -1827,6 +2018,171 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+    }
+
+    /// A streamed answer holds the same rows as a collected one and says none of the things
+    /// a length buys.
+    ///
+    /// The rows are the point: what streaming changes is when the bytes leave, not which
+    /// ones. So the two answers are read back and compared, rather than the streamed one
+    /// being checked for merely being parquet — a truncated file is parquet-shaped right up
+    /// to the footer it has not got.
+    #[tokio::test]
+    async fn a_streamed_query_sends_its_rows_without_a_length() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+        let asked = "/part0.parquet?columns=objectid&filters=objectid%3C3";
+
+        let collected = respond(service(), Request::builder().uri(asked)).await;
+        assert_eq!(collected.status(), StatusCode::OK);
+        assert_eq!(collected.headers()[header::ACCEPT_RANGES], "bytes");
+        assert!(collected.headers().get(header::CONTENT_LENGTH).is_some());
+        let collected = collected.into_body().collect().await.unwrap().to_bytes();
+
+        let response = respond(
+            service(),
+            Request::builder().uri(format!("{asked}&streaming=true")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            PARQUET_CONTENT_TYPE
+        );
+        // Everything a length would have carried is gone, and says so rather than being
+        // left out: a body a client must not seek in is one that has to announce it.
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+        assert!(response.headers().get(NUM_ROWS_HEADER).is_none());
+        assert!(response.headers().get(DATA_BYTES_READ_HEADER).is_none());
+        // A download by construction: nothing to seek in and nothing to render.
+        assert!(
+            response.headers()[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("part0.parquet")
+        );
+        let streamed = response.into_body().collect().await.unwrap().to_bytes();
+
+        let rows = |bytes: &[u8]| {
+            let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
+                .unwrap()
+                .build()
+                .unwrap();
+            reader.map(|batch| batch.unwrap().num_rows()).sum::<usize>()
+        };
+        assert_eq!(rows(&streamed), 3);
+        assert_eq!(rows(&streamed), rows(&collected));
+    }
+
+    /// A `Range` and `streaming` ask for answers that cannot both be given, so the pair is
+    /// refused rather than settled by dropping one of them.
+    ///
+    /// Either way of choosing would hand back something the caller cannot tell from what
+    /// they asked for: a body with no length where a `206` was wanted, or the collected
+    /// answer with `streaming` having quietly done nothing.
+    #[tokio::test]
+    async fn a_streamed_answer_refuses_a_range() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/part0.parquet?columns=objectid&streaming=true")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Without the streaming it is the ordinary ranged read, so what is refused is the
+        // combination and not the header.
+        let response = respond(
+            mounted(dir.path(), &ApiConfig::default()),
+            Request::builder()
+                .uri("/part0.parquet?columns=objectid")
+                .header(header::RANGE, "bytes=-4"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    }
+
+    /// `streaming` is read as the body spells it and refused otherwise.
+    ///
+    /// A value nobody can predict the reading of is the parameter that gets dropped: a
+    /// streamed answer differs from a collected one in headers a caller may never look at,
+    /// so guessing wrong is not something the answer would reveal.
+    #[tokio::test]
+    async fn streaming_takes_true_or_false() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let service = || mounted(dir.path(), &ApiConfig::default());
+
+        for value in ["1", "yes", "", "TRUE"] {
+            let response = respond(
+                service(),
+                Request::builder()
+                    .uri(format!("/part0.parquet?columns=objectid&streaming={value}")),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "streaming={value} was read as something"
+            );
+        }
+
+        // `false` is the default said out loud, and answers the collected body.
+        let response = respond(
+            service(),
+            Request::builder().uri("/part0.parquet?columns=objectid&streaming=false"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+    }
+
+    /// A streamed answer is never held, and never answered from what is held.
+    ///
+    /// The cache holds a whole body, which a streamed answer does not have; and were it read
+    /// from, the same url would answer with a length for one caller and without for the next
+    /// depending on what had warmed it — a shape that depends on history rather than on what
+    /// was asked.
+    #[tokio::test]
+    async fn a_streamed_answer_is_neither_cached_nor_served_from_the_cache() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        // One service across the three requests, the cache being its own and on by default.
+        let service = mounted(dir.path(), &ApiConfig::default());
+        let asked = "/part0.parquet?columns=objectid&filters=objectid%3C3";
+
+        // Collected first, which fills the cache; then the same question streamed, which
+        // must not be answered out of it.
+        let warmed = respond(service.clone(), Request::builder().uri(asked)).await;
+        assert_eq!(warmed.status(), StatusCode::OK);
+        assert!(warmed.headers().get(header::CONTENT_LENGTH).is_some());
+
+        let response = respond(
+            service.clone(),
+            Request::builder().uri(format!("{asked}&streaming=true")),
+        )
+        .await;
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "none");
+        assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+        let _ = response.into_body().collect().await.unwrap();
+
+        // And the streamed one left nothing behind that the collected form would pick up:
+        // its answer still reports what reading actually cost.
+        let after = respond(service, Request::builder().uri(asked)).await;
+        assert_eq!(after.status(), StatusCode::OK);
+        assert!(
+            after.headers()[DATA_BYTES_READ_HEADER]
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
     }
 
     /// A query that cannot run says so. Telling a caller their file is not parquet, when

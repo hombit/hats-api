@@ -81,6 +81,7 @@ GET /gaia?ra=348.077&dec=-29.339&radius_arcsec=30&columns=source_id,phot_g_mean_
 | `ra`, `dec` | the centre of a cone, in degrees. |
 | `radius_arcsec`, `radius_deg` | its radius; exactly one of the two. |
 | `ra_column`, `dec_column` | which columns hold the position. Refused against a catalog, which names its own; required with a cone against a parquet file. |
+| `streaming` | `true` to send the rows as they are read. |
 
 A cone is the only shape a URL takes; the API's [`region`](#selecting-a-region-of-the-sky)
 also has a zone and a MOC.
@@ -115,6 +116,18 @@ GET /gaia/dataset/Norder=1/Dir=0/Npix=44.parquet?columns=source_id,ra,dec&limit=
 
 The response is a parquet file, with the row count, the bytes read out of the source file
 and the timing in `x-hats-num-rows`, `x-hats-data-bytes-read` and `x-hats-elapsed-ms`.
+
+**`streaming=true` sends the rows as they are read**, so nothing waits for the whole answer
+to be built. The counts above are not sent — none of them is known until the last row has
+gone — and neither is a `Content-Length`, so the answer carries `Accept-Ranges: none` and a
+`Range` alongside `streaming=true` is refused rather than answered either way. A `json`
+answer says its counts in the body instead, and adds `refused` where a bound stopped it
+part-way.
+
+Use it when you are downloading the whole answer — `curl -o`, `requests`, anything that
+saves to disk or reads the body into memory. Leave it out for a reader that opens the URL
+over HTTP, such as `lsdb`, `nested-pandas` or `pyarrow` through `fsspec`: those read a
+parquet file footer-first and need the length and the ranges a collected answer carries.
 
 Listing the columns you need, e.g. `columns=source_id,ra,dec`, is what makes a query cheap.
 Parquet is fetched a column chunk at a time, so even a small `limit` reads every chunk
