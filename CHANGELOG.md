@@ -8,23 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `[[mount]] source` takes a url in any scheme this service reads — `s3://`, `gs://`, `az://`, `https://`, `webdav://`, `hf://` — as well as a local path.
-- `[[mount]] storage`, the options that reach a `source` in a store: the same names a request writes beside its url.
-- A served mount over a store answers `Range`, `If-None-Match` and `HEAD` against the origin, and lists a directory one level at a time.
-- `[limits] query_cache_seconds` and `[limits] max_query_cache_bytes`: an answer is held for the requests that read it. `0` seconds is off.
-- `/api/v1/tap/async`: ADQL queries as UWS jobs — submit, poll, collect, abort, destroy. TAP's one remaining MUST.
-- `[tap.async]`, and `[tap.async.limits]` for the `[limits]` fields a job answers to differently.
-- `/api/v1/tap/examples`: a cone search per published table, declared in `/capabilities` as `ivo://ivoa.net/std/DALI#examples`. [#93](https://github.com/hombit/hats-api/pull/93)
-- `[[tap.table.example]]`, with `name` and `query`, offering queries of your own in place of a table's generated one. [#93](https://github.com/hombit/hats-api/pull/93)
-- `streaming` on `POST {api.prefix}/simple/parquet` and `/simple/hats`: the answer is sent as it is read, in `json`, `csv`, `tsv` and `votable`. `false` by default; refused with `parquet`.
-- A streamed answer carries no `x-hats-*` headers and a streamed `votable` no `nrows`; a streamed `json` body ends with the same counts the collected one carries and, where the rows stopped short, `refused`.
+--
 
 ### Changed
 
-- **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries.
-- A parquet answer is written with `zstd(1)`, a page index, `BYTE_STREAM_SPLIT` on float columns, row groups of 128k rows and pages of 16k rows or 256 KiB, instead of copying the source file's codec, encodings, statistics and row group size.
-- `[limits] scratch_dir` also holds `/tap/async` results, which live until a job is destroyed rather than until a request ends.
-- A job's answer is written to its file as the rows arrive, instead of built whole in memory and written at the end; `[tap.async] max_result_bytes` refuses at the byte that passes it rather than once the whole answer exists. A job's VOTable carries no `nrows` attribute, the count not being known when the document's head is written.
+--
 
 ### Deprecated
 
@@ -36,14 +24,41 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A query on a file-server url that narrows nothing answers with the file, instead of a re-encoded copy of it.
-- A parquet query answer answers `Range`, instead of `Accept-Ranges: none`.
-- A name with nothing under it in a store-backed mount answers `404`, instead of `200` and an empty listing.
-- `SIGTERM` shuts the service down gracefully, instead of terminating it and cutting requests in flight.
+--
 
 ### Security
 
 --
+
+## [0.0.10] - 2026-09-21
+
+### Added
+
+- `[[mount]] source` takes a url in any scheme this service reads — `s3://`, `gs://`, `az://`, `https://`, `webdav://`, `hf://` — as well as a local path. [#85](https://github.com/hombit/hats-api/pull/85)
+- `[[mount]] storage`, the options that reach a `source` in a store: the same names a request writes beside its url. [#85](https://github.com/hombit/hats-api/pull/85)
+- A served mount over a store answers `Range`, `If-None-Match` and `HEAD` against the origin, and lists a directory one level at a time. [#85](https://github.com/hombit/hats-api/pull/85)
+- `[limits] query_cache_seconds` and `[limits] max_query_cache_bytes`: an answer is held for the requests that read it. `0` seconds is off. [#87](https://github.com/hombit/hats-api/pull/87)
+- `/api/v1/tap/async`: ADQL queries as UWS jobs — submit, poll, collect, abort, destroy. TAP's one remaining MUST. [#90](https://github.com/hombit/hats-api/pull/90)
+- `[tap.async]`, and `[tap.async.limits]` for the `[limits]` fields a job answers to differently. [#90](https://github.com/hombit/hats-api/pull/90)
+- `/api/v1/tap/examples`: a cone search per published table, declared in `/capabilities` as `ivo://ivoa.net/std/DALI#examples`. [#93](https://github.com/hombit/hats-api/pull/93)
+- `[[tap.table.example]]`, with `name` and `query`, offering queries of your own in place of a table's generated one. [#93](https://github.com/hombit/hats-api/pull/93)
+- `streaming` on `POST {api.prefix}/simple/parquet` and `/simple/hats`: the answer is sent as it is read, in `json`, `csv`, `tsv` and `votable`. `false` by default; refused with `parquet`. [#91](https://github.com/hombit/hats-api/pull/91)
+- A streamed answer carries no `x-hats-*` headers and a streamed `votable` no `nrows`; a streamed `json` body ends with the same counts the collected one carries and, where the rows stopped short, `refused`. [#91](https://github.com/hombit/hats-api/pull/91)
+
+### Changed
+
+- **Breaking** `[[tap.table]]` takes `path`, a path under a `[[mount]]`, in place of `url`; a published catalog may now need a credential, which the mount carries. [#85](https://github.com/hombit/hats-api/pull/85)
+- A parquet answer is written with `zstd(1)`, a page index, `BYTE_STREAM_SPLIT` on float columns, row groups of 128k rows and pages of 16k rows or 256 KiB, instead of copying the source file's codec, encodings, statistics and row group size. [#89](https://github.com/hombit/hats-api/pull/89)
+- `[limits] scratch_dir` also holds `/tap/async` results, which live until a job is destroyed rather than until a request ends. [#90](https://github.com/hombit/hats-api/pull/90)
+- A job's answer is written to its file as the rows arrive, instead of built whole in memory and written at the end; `[tap.async] max_result_bytes` refuses at the byte that passes it rather than once the whole answer exists. A job's VOTable carries no `nrows` attribute, the count not being known when the document's head is written. [#91](https://github.com/hombit/hats-api/pull/91)
+- `[limits] max_request_seconds` covers a streamed body as well as the handler that answered it. [#91](https://github.com/hombit/hats-api/pull/91)
+
+### Fixed
+
+- A query on a file-server url that narrows nothing answers with the file, instead of a re-encoded copy of it. [#87](https://github.com/hombit/hats-api/pull/87)
+- A parquet query answer answers `Range`, instead of `Accept-Ranges: none`. [#87](https://github.com/hombit/hats-api/pull/87)
+- A name with nothing under it in a store-backed mount answers `404`, instead of `200` and an empty listing. [#87](https://github.com/hombit/hats-api/pull/87)
+- `SIGTERM` shuts the service down gracefully, instead of terminating it and cutting requests in flight. [#90](https://github.com/hombit/hats-api/pull/90)
 
 ## [0.0.9] - 2026-09-18
 
@@ -157,7 +172,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.9...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.10...HEAD
+[0.0.10]: https://github.com/hombit/hats-api/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/hombit/hats-api/compare/v0.0.8...v0.0.9
 [0.0.8]: https://github.com/hombit/hats-api/compare/v0.0.7...v0.0.8
 [0.0.7]: https://github.com/hombit/hats-api/compare/v0.0.6...v0.0.7
