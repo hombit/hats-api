@@ -504,20 +504,11 @@ impl Search {
         limits: sql::Limits,
         bounds: CatalogLimits,
     ) -> Result<Outcome, ApiError> {
+        // `_common_metadata` alone here, and no fallback to a partition: falling back is what
+        // the read below already does for a `limit` of zero, and it counts the partition it
+        // opens. Answering from one here instead would report a partition read as none.
         if selection.limit == Some(0)
-            && let Ok(common) = self.catalog.dir().child(COMMON_METADATA)
-            && let Ok(result) = query::run(
-                &common,
-                &Selection {
-                    projection: selection.projection,
-                    predicate: selection.predicate,
-                    spatial: self.spatial_for_schema(selection.regions),
-                    limit: Some(0),
-                },
-                limits,
-                Order::Unspecified,
-            )
-            .await
+            && let Some(result) = self.common_metadata_columns(selection, limits).await
         {
             return Ok(Outcome::Rows(Box::new(CatalogResult {
                 rows: QueryResult {
@@ -596,9 +587,21 @@ impl Search {
             truncate(&mut batches, limit);
         }
 
+        // No partition was read, so nothing here knows the columns — a region that reached
+        // none, which is the same position `limit=0` is in and is answered the same way. An
+        // answer naming no columns reads as a projection the caller got wrong rather than as
+        // a search that found nothing.
+        let (schema, data_bytes_read) = match schema {
+            Some(schema) => (schema, data_bytes_read),
+            None => match self.columns_without_rows(selection, data, limits).await {
+                Some(result) => (result.schema, data_bytes_read + result.data_bytes_read),
+                None => (Arc::new(Schema::empty()), data_bytes_read),
+            },
+        };
+
         Ok(Outcome::Rows(Box::new(CatalogResult {
             rows: QueryResult {
-                schema: schema.unwrap_or_else(|| Arc::new(Schema::empty())),
+                schema,
                 batches,
                 data_bytes_read,
             },
@@ -678,6 +681,31 @@ impl Search {
                 .buffer_unordered(concurrency)
                 .right_stream(),
         };
+        // Read after the rows rather than beside them, and only where there were none: a
+        // region reaching no partition leaves nothing to say what the columns were, and the
+        // encoder is handed the schema once the first batch has been asked for. Yields no
+        // item of its own — what it does is record the schema for the ending to read.
+        let describing = {
+            let search = Arc::clone(&search);
+            let selection = Arc::clone(&selection);
+            let data = Arc::clone(&data);
+            let streamed = Arc::clone(&streamed);
+            stream::once(async move {
+                if streamed.schema.get().is_none()
+                    && let Some(result) = search
+                        .columns_without_rows(&selection.view(), &data, limits)
+                        .await
+                {
+                    let _ = streamed.schema.set(result.schema);
+                    streamed
+                        .data_bytes_read
+                        .fetch_add(result.data_bytes_read, Ordering::Relaxed);
+                }
+                None::<Result<RecordBatch, ApiError>>
+            })
+            .filter_map(future::ready)
+        };
+
         landing
             // `scan` rather than `take_while`: the partition that reaches the limit still
             // has rows to send, so the stop happens after them rather than instead of them.
@@ -690,6 +718,7 @@ impl Search {
                 future::ready(Some(stream::iter(batches)))
             })
             .flatten()
+            .chain(describing)
     }
 
     async fn read(
@@ -916,6 +945,86 @@ impl Search {
     /// `_common_metadata` rather than pruning a real partition's rows with it. `_common_metadata`
     /// carries no HEALPix values of its own to accelerate the test with, and there are no rows
     /// behind it to prune anyway.
+    /// The columns an answer with no rows has, taken from the catalog rather than from a
+    /// partition.
+    ///
+    /// **Two answers reach this and they are the same answer.** A `limit` of zero asks for
+    /// no rows, and a region that reaches no partition finds none; neither opens a partition,
+    /// so neither has the thing every other answer takes its columns from. What is left is
+    /// `dataset/_common_metadata` — the schema every partition shares, and no rows.
+    ///
+    /// The caller's own projection, predicate and region are planned against it exactly as
+    /// they would be against a real partition, so the columns are the ones that were asked
+    /// for and a request bad against a partition is bad against this too.
+    ///
+    /// Failing that, one partition of the catalog read for no rows — a footer, and the
+    /// columns every partition shares. That is what `limit=0` has always paid where a
+    /// catalog carries no `_common_metadata`, and it is the same cost here: a request that
+    /// read no partition reads one file's footer to say what it was looking at.
+    ///
+    /// `None` where the catalog has neither — no such file and no partition — or where
+    /// neither will plan. Nothing then knows what the columns were, and an answer naming
+    /// none is the truth rather than a guess.
+    async fn columns_without_rows(
+        &self,
+        selection: &CatalogSelection<'_>,
+        data: &DataFiles,
+        limits: sql::Limits,
+    ) -> Option<QueryResult> {
+        if let Some(result) = self.common_metadata_columns(selection, limits).await {
+            return Some(result);
+        }
+        // The first by the catalog's own order, so which partition answers does not depend
+        // on what the request asked for — two empty answers over one catalog describe it the
+        // same way.
+        let partition = self.catalog.partitions().cells().first()?;
+        let file = self
+            .catalog
+            .partition(partition)
+            .ok()?
+            .files(data)
+            .await
+            .ok()?
+            .into_iter()
+            .next()?;
+        query::run(
+            &file,
+            &self.describing(selection),
+            limits,
+            Order::Unspecified,
+        )
+        .await
+        .ok()
+    }
+
+    /// `dataset/_common_metadata` read for its columns, where the catalog has one.
+    async fn common_metadata_columns(
+        &self,
+        selection: &CatalogSelection<'_>,
+        limits: sql::Limits,
+    ) -> Option<QueryResult> {
+        let common = self.catalog.dir().child(COMMON_METADATA).ok()?;
+        query::run(
+            &common,
+            &self.describing(selection),
+            limits,
+            Order::Unspecified,
+        )
+        .await
+        .ok()
+    }
+
+    /// The caller's own request, asking for no rows: what makes the columns the ones they
+    /// asked for, and a request bad against a partition bad against this too.
+    fn describing<'a>(&'a self, selection: &'a CatalogSelection<'a>) -> Selection<'a> {
+        Selection {
+            projection: selection.projection,
+            predicate: selection.predicate,
+            spatial: self.spatial_for_schema(selection.regions),
+            limit: Some(0),
+        }
+    }
+
     fn spatial_for_schema<'a>(&'a self, regions: Option<&'a [Region]>) -> Option<Spatial<'a>> {
         let regions = regions?;
         let columns = self.columns.as_ref()?;
