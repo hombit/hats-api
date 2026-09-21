@@ -10,6 +10,7 @@ Release dates are in the UTC time zone.
 
 - `RESPONSEFORMAT=parquet` (or `application/vnd.apache.parquet`) on `/api/v1/tap/sync` and `/api/v1/tap/async`, declared in `/api/v1/tap/capabilities`. The one TAP format here that carries a nested column.
 - `x-hats-overflow` on a parquet TAP answer cut short by `MAXREC`, as `csv` and `tsv` already carry.
+- `STREAMING=true` on `/api/v1/tap/sync`: the answer is sent as it is read, in every format. The answer then carries no `Content-Length`, `Accept-Ranges: none` and no `x-hats-overflow`. Refused on `/api/v1/tap/async`, whose answer is a file either way.
 
 ### Changed
 

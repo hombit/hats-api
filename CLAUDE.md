@@ -1465,6 +1465,28 @@ and the parameter rules are §3.
   **every resource answers it through one writer**: `output::parquet::Writing` driven
   collected for a `/sync` body, and driven a piece at a time for a job's file and for a
   streamed `/sync` body. Two writers per format is the thing that drifts.
+- **`STREAMING` is `/sync`'s, it is off unless asked for, and `/async` refuses it.** It is
+  this service's own rather than TAP's or DALI's, spelled and defaulted like the file-server
+  mode's `streaming` so the two are one parameter. Off is the decision and not an oversight:
+  a collected answer carries a `Content-Length` — which is what a parquet reader opening the
+  url needs — and the `x-hats-overflow` a format with nowhere to say it depends on, and a
+  streamed one has neither, its headers having gone before the first row was read. A job
+  refuses it because a job's answer is written as it is read whatever the parameter says and
+  comes back as a file with a length; accepting it would promise a different answer than the
+  one that arrives, which is the dropped-parameter failure under another name.
+
+  **A streamed answer that reached the row bound ends rather than closes.** `run::stream`
+  puts `stream::Stopped::Bound` in the ending where `overflow` is set, so VOTable writes
+  `OVERFLOW` after the table and `csv`, `tsv` and parquet end without their terminator — no
+  closing footer on a parquet file. A reader refuses all three, which is the point: the
+  header that would have said so is gone, and a parquet file closed over a truncation is one
+  that looks whole and holds fewer rows than the query matched with nothing in it saying so.
+  Do not "fix" that by closing the footer and putting the fact in key/value metadata; no
+  reader surfaces it, which is worse than nowhere for looking like somewhere.
+
+  `run::stream` marks its response `app::answer::Generated`. The rows are read as the body is
+  sent, so without it a streamed TAP query is the one request `max_request_seconds` does not
+  bound.
 - **`MAXREC` truncates after the query's own `TOP`, never over it.** TAP §2.7.4: the
   truncation "occurs after any limitations imposed by the query", so `TOP 2` with `MAXREC=10`
   is two rows and no overflow. `MAXREC=0` is the columns, no rows, and the marker whether or

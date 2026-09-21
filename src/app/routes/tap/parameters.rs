@@ -66,7 +66,7 @@ pub(super) fn posted(
 }
 
 /// Every name this service reads.
-const TAKEN: [&str; 10] = [
+const TAKEN: [&str; 11] = [
     "QUERY",
     "LANG",
     "RESPONSEFORMAT",
@@ -77,6 +77,7 @@ const TAKEN: [&str; 10] = [
     "UPLOAD",
     "UPLOAD_TYPE",
     "UPLOAD_STORAGE_OPTION",
+    "STREAMING",
 ];
 
 /// The ones a request may give more than once.
@@ -109,6 +110,8 @@ pub(super) struct Parameters {
     pub runid: Option<String>,
     /// The tables the request named by url, queried as `TAP_UPLOAD.<name>`.
     pub uploads: Uploads,
+    /// Whether the answer is sent as it is read rather than built and measured first.
+    pub streaming: bool,
 }
 
 impl Parameters {
@@ -153,6 +156,7 @@ impl Parameters {
                 &every("UPLOAD_TYPE"),
                 &every("UPLOAD_STORAGE_OPTION"),
             )?,
+            streaming: streaming(one("STREAMING"))?,
         })
     }
 }
@@ -221,6 +225,36 @@ fn maxrec(asked: Option<&str>) -> Result<Option<usize>, ApiError> {
              columns and no rows"
         ))
     })
+}
+
+/// `STREAMING`, which is this service's own and not TAP's or DALI's.
+///
+/// **It is off unless a request writes it, and that is the decision rather than a default.**
+/// A collected answer carries a `Content-Length` and, where the format cannot say it in the
+/// document, an `x-hats-overflow`; a streamed one has neither, the headers having gone before
+/// the first row was read. So a reader that opens the url — `pyarrow` through `fsspec` — has
+/// to keep working without writing anything, and a client downloading the whole answer asks
+/// for the streaming it wants. The same spelling and the same default as the file-server
+/// mode's `streaming`, so the two are one parameter with one meaning.
+///
+/// Neither standard defines it, so a service that has not got it ignores it and answers the
+/// query — which is what this service does with every other name nobody defines, and is why
+/// the parameter can be written to any TAP service without breaking the request.
+///
+/// The value is read as the request spells it. Presence alone is not `true`: `STREAMING` with
+/// no value reads equally as "yes" and as a client that meant to say `false` and lost the
+/// value somewhere, and a whole answer built where a stream was wanted — or the reverse — is
+/// not something to guess at.
+fn streaming(asked: Option<&str>) -> Result<bool, ApiError> {
+    match asked.map(str::trim) {
+        None => Ok(false),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(other) => Err(ApiError::bad_request(format!(
+            "STREAMING {other:?} is not true or false; leave it out for an answer built \
+             whole, which is what a reader that opens this url over HTTP needs"
+        ))),
+    }
 }
 
 /// `RUNID`, which goes to the log and nowhere else.
@@ -292,6 +326,9 @@ mod tests {
         assert_eq!(taken.query, "SELECT 1");
         // And the misspelling really was not read as the parameter it resembles.
         assert_eq!(taken.maxrec, None);
+        // A request that wrote no `STREAMING` gets the answer built whole, which is the one
+        // a reader can open at this url.
+        assert!(!taken.streaming);
 
         // The half of a standard parameter this service has not got says so, rather than
         // being ignored into a refusal about a table nobody mentioned.

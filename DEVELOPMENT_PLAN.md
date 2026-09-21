@@ -292,20 +292,15 @@ job to be given.
 | a slow or distant origin | no | the clock, and a message that says which bound |
 
 Raising the clock is not an alternative: nginx's `proxy_read_timeout` defaults to 60
-seconds, shorter than this service's own default. Two things to build instead:
+seconds, shorter than this service's own default. Streaming is what answers the first three
+rows of that table and is built, on every route that answers rows — `streaming` in the
+file-server and API modes, `STREAMING` on `/tap/sync`. What is left:
 
-1. **Stream the response** — parquet in row-group chunks, JSON element by element — which
-   keeps time-to-first-byte short, keeps bytes flowing so intermediaries do not drop the
-   connection, and caps memory on a large result. Under the file-server's order it is
-   available a partition at a time. It moves two trades already shipped: compression
-   buffers before it emits, so fewer bytes cost time-to-first-byte; and the clock bounds
-   the response future rather than the body, so a request that has begun streaming is one
-   the clock stops measuring.
-2. **A prefetch primitive.** `POST /api/v1/prefetch` returns `202` and warms the object
-   cache; `GET` reports residency. A cache operation and not a job: no result to store, no
-   per-user state, idempotent, a no-op if never called. Document the limitation it exists
-   for — against a non-ranging origin holding a huge object, the first request after a cold
-   start runs out the clock.
+**A prefetch primitive.** `POST /api/v1/prefetch` returns `202` and warms the object
+cache; `GET` reports residency. A cache operation and not a job: no result to store, no
+per-user state, idempotent, a no-op if never called. Document the limitation it exists
+for — against a non-ranging origin holding a huge object, the first request after a cold
+start runs out the clock.
 
 ### 7.3 The API description, as it changes
 
@@ -906,8 +901,9 @@ left:
   **The ceiling is per format, not one number**: a row costs far more as JSON than as
   parquet, so a count generous for one is wrong for the other in both directions. Bytes
   written is what the two have in common and a row count is what a caller can predict, so it
-  likely wants both. This and §7.2's streaming are one piece of work, `collect` building the
-  whole answer before either writer starts.
+  likely wants both. Streaming narrows this rather than answering it: a request that asks for
+  it holds a chunk instead of the answer, but nothing makes a caller ask, so a `POST` naming
+  only a url is still `collect` building the whole answer before either writer starts.
 - **A `POST` body size limit.** The expression depth and node caps bound the caller's text
   only. The projection needs no cap of its own, being bounded by the schema.
 - **Reject pathological parquet early** — a footer claiming implausible row-group or column

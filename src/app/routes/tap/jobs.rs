@@ -177,6 +177,19 @@ impl Work for Query {
                 .map(|value| (CREDENTIAL.to_owned(), value)),
         );
         let parameters = Parameters::read(&pairs)?;
+        // Refused rather than ignored, and refused rather than accepted as a no-op. A job's
+        // answer is already written as it is read — that is what `Writing` is — so what
+        // `STREAMING` asks for on `/sync`, a job does by construction and cannot stop doing.
+        // Accepting it would say the answer comes back differently, and it does not: the
+        // result is a file either way, served with the length and the ranges a stream gives
+        // up. A parameter this service acts on is honoured or refused, never dropped.
+        if parameters.streaming {
+            return Err(ApiError::bad_request(
+                "STREAMING is the /sync resource's; a job's answer is written as it is read \
+                 whatever this says, and is served from its result resource as a file with a \
+                 length and ranged reads",
+            ));
+        }
         let answering = format::resolve(parameters.format.as_deref())?;
         // Into the file as it is encoded, rather than built whole and handed over: a job's
         // answer is a file at the end of it either way, and this way the rows and the

@@ -11,6 +11,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use bytesize::ByteSize;
+use futures::StreamExt as _;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -846,6 +847,181 @@ async fn a_parquet_answer_with_no_rows_is_still_a_file() {
     assert_eq!(rows, 0);
 }
 
+/// `STREAMING=true` sends the same file, without waiting for it to be built.
+///
+/// The bytes are the assertion: one writer drives both, so a streamed answer and a collected
+/// one over the same statement are the same parquet file. What differs is only when it
+/// leaves, which the headers below are how a client can tell.
+#[tokio::test]
+async fn a_streamed_parquet_answer_is_the_file_a_collected_one_would_have_sent() {
+    let dir = hats::query::tests::fixture(true);
+    let statement: &[(&str, &str)] = &[
+        ("QUERY", "SELECT id, ra FROM sky.objects ORDER BY id"),
+        ("LANG", "ADQL"),
+        ("RESPONSEFORMAT", "parquet"),
+    ];
+    let asked = async |streaming: bool| {
+        let pairs: Vec<(&str, &str)> = statement
+            .iter()
+            .copied()
+            .chain(streaming.then_some(("STREAMING", "true")))
+            .collect();
+        ask_bytes(published(dir.path(), &LimitsConfig::default()), &pairs).await
+    };
+
+    let (status, content_type, streamed) = asked(true).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content_type, "application/vnd.apache.parquet");
+    let (_, _, collected) = asked(false).await;
+
+    assert_eq!(streamed, collected);
+    let (columns, rows) = read_parquet(&streamed);
+    assert_eq!(columns, ["id", "ra"]);
+    assert_eq!(rows, hats::query::tests::fixture_rows());
+}
+
+/// What a streamed answer gives up, said in the headers rather than left to be discovered.
+///
+/// No `Content-Length`, because the rows had not been read when the headers went; therefore
+/// `Accept-Ranges: none`, because a client that sends a `Range` and gets a plain `200` may
+/// otherwise read that many bytes off the front and treat them as the range it asked for. And
+/// no `x-hats-overflow`, which is the same fact one step further in: whether the bound cut
+/// the answer is known once the rows have run out.
+#[tokio::test]
+async fn a_streamed_answer_has_no_length_no_ranges_and_no_overflow_header() {
+    let dir = hats::query::tests::fixture(true);
+    let request = Request::builder()
+        .uri(
+            "/api/v1/tap/sync?LANG=ADQL&RESPONSEFORMAT=parquet&STREAMING=true\
+             &QUERY=SELECT+id+FROM+sky.objects",
+        )
+        // What a browser sends, and the only thing the compression layer acts on. A parquet
+        // body is excluded from it by content type rather than by route, so the exclusion has
+        // to hold for a streamed answer as it does for a collected one — a compressed body is
+        // one whose bytes are not the file the reader was told it was getting.
+        .header(header::ACCEPT_ENCODING, "gzip, deflate, br")
+        .body(Body::empty())
+        .unwrap();
+    let response = router(published(dir.path(), &LimitsConfig::default()))
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::ACCEPT_RANGES], "none");
+    assert!(!headers.contains_key(header::CONTENT_LENGTH), "{headers:?}");
+    assert!(!headers.contains_key("x-hats-overflow"), "{headers:?}");
+    assert!(
+        !headers.contains_key(header::CONTENT_ENCODING),
+        "a streamed parquet answer was compressed: {headers:?}"
+    );
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    read_parquet(&body);
+}
+
+/// A streamed answer the row bound cut is a body that stops, never a file that looks whole.
+///
+/// The collected answer says it was cut in `x-hats-overflow`; a streamed one sent its headers
+/// before it knew. Parquet has nowhere in the document to say it either, so what is left is
+/// to end without the footer — which every reader refuses. A file closed over a truncation
+/// would hold fewer rows than the query matched with nothing in it saying so, which is the
+/// one failure a caller cannot tell from data.
+#[tokio::test]
+async fn a_streamed_parquet_answer_cut_by_maxrec_will_not_open() {
+    let dir = hats::query::tests::fixture(true);
+    let request = Request::builder()
+        .uri(
+            "/api/v1/tap/sync?LANG=ADQL&RESPONSEFORMAT=parquet&STREAMING=true&MAXREC=1\
+             &QUERY=SELECT+id+FROM+sky.objects",
+        )
+        .body(Body::empty())
+        .unwrap();
+    let response = router(published(dir.path(), &LimitsConfig::default()))
+        .oneshot(request)
+        .await
+        .unwrap();
+
+    // The status and the head of the document are long gone by the time the bound is known,
+    // so this is a `200` whose body does not finish.
+    assert_eq!(response.status(), StatusCode::OK);
+    // Collected a frame at a time rather than in one call, because the transfer is meant to
+    // fail: a body that ends in an error is the whole point, and anything that unwraps the
+    // collection asserts nothing about what a reader is left holding.
+    let mut frames = response.into_body().into_data_stream();
+    let mut cut = Vec::new();
+    let mut broke = false;
+    while let Some(frame) = frames.next().await {
+        match frame {
+            Ok(chunk) => cut.extend_from_slice(&chunk),
+            Err(_) => {
+                broke = true;
+                break;
+            }
+        }
+    }
+    assert!(broke, "the body ended cleanly on a cut answer");
+    assert!(
+        datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+            bytes::Bytes::from(cut.clone())
+        )
+        .is_err(),
+        "a cut answer was readable as a whole file: {} bytes",
+        cut.len()
+    );
+
+    // And the same request with room to finish is the file it claims to be, so what the
+    // refusal above proves is the bound and not that a streamed TAP answer cannot be parquet.
+    let (status, _, whole) = ask_bytes(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("RESPONSEFORMAT", "parquet"),
+            ("STREAMING", "true"),
+            ("MAXREC", "1000"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read_parquet(&whole).1, hats::query::tests::fixture_rows());
+}
+
+/// `STREAMING` is read as the request spells it, and presence alone is not `true`.
+///
+/// A whole answer built where a stream was wanted, or a stream where a seekable body was,
+/// are both answers the caller cannot tell from the one they asked for — so a value that is
+/// neither word is refused rather than resolved.
+#[tokio::test]
+async fn streaming_takes_true_or_false() {
+    let dir = hats::query::tests::fixture(true);
+    for value in ["", "yes", "1", "TRUE", "on"] {
+        let (status, _, body) = ask(
+            published(dir.path(), &LimitsConfig::default()),
+            &[
+                ("QUERY", "SELECT TOP 1 id FROM sky.objects"),
+                ("LANG", "ADQL"),
+                ("STREAMING", value),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "STREAMING={value}: {body}");
+        // A refusal is a document a TAP client reads, whatever it is refusing.
+        assert!(body.contains("QUERY_STATUS"), "{body}");
+    }
+
+    let (status, _, _) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT TOP 1 id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("STREAMING", "false"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 /// A `GET` to one of the resources that describe the service.
 async fn fetch(service: Service, path: &str) -> (StatusCode, String, String) {
     send(
@@ -1446,6 +1622,32 @@ async fn a_job_writes_the_parquet_sync_would_have_built() {
 
     assert_eq!(written, synced);
     assert_eq!(read_parquet(&written).1, hats::query::tests::fixture_rows());
+}
+
+/// `STREAMING` is `/sync`'s, and a job says so rather than accepting it as a no-op.
+///
+/// A job's answer is written as it is read whatever the parameter says, and comes back as a
+/// file with a length and ranged reads — so accepting it would promise a different answer
+/// than the one that arrives. The refusal is the job's own, TAP §2.7 having a parameter
+/// enforced when the query runs rather than at submission.
+#[tokio::test]
+async fn a_job_refuses_the_streaming_parameter() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("RESPONSEFORMAT", "parquet"),
+            ("STREAMING", "true"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+
+    assert_eq!(harness.settled(&job).await, "ERROR");
+    let why = text_of(harness.get(&format!("{job}/error")).await).await;
+    assert!(why.contains("STREAMING"), "{why}");
+    assert!(why.contains("/sync"), "{why}");
 }
 
 /// TAP §2.7: a parameter is enforced when the query runs, not when the job is made.
