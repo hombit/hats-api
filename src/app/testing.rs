@@ -168,6 +168,33 @@ pub(in crate::app) async fn ask(service: Service, body: serde_json::Value) -> (S
     post_json(service, "/api/v1/simple/parquet", body).await
 }
 
+/// The same, for an answer that is not text: a parquet body is read back as a file.
+pub(in crate::app) async fn ask_bytes(
+    service: Service,
+    path: &str,
+    body: serde_json::Value,
+) -> (StatusCode, bytes::Bytes) {
+    let response = respond_to(service, path, body).await;
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, body)
+}
+
+/// The whole response, for a test that is about the headers.
+pub(in crate::app) async fn respond_to(
+    service: Service,
+    path: &str,
+    body: serde_json::Value,
+) -> Response {
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    router(service).oneshot(request).await.unwrap()
+}
+
 pub(in crate::app) async fn ask_hats(
     service: Service,
     body: serde_json::Value,

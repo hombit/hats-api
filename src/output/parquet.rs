@@ -45,7 +45,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use datafusion::arrow::datatypes::Schema;
+use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use datafusion::parquet::arrow::async_reader::{MetadataFetch, MetadataSuffixFetch};
 use datafusion::parquet::arrow::{ArrowSchemaConverter, ArrowWriter};
 use datafusion::parquet::basic::{Compression, Encoding, Type as PhysicalType, ZstdLevel};
@@ -58,6 +59,7 @@ use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::stream;
 use crate::storage::RemoteFile;
 
 /// What an answer keeps from the file it came out of.
@@ -280,21 +282,97 @@ fn uses_data_page_v2_encoding(encodings: &[Encoding]) -> bool {
     })
 }
 
+/// A parquet file written as its rows arrive.
+///
+/// **A parquet body is not seekable and a parquet file is read by seeking** — which is a
+/// fact about the reader and not a reason to refuse. A client that saves the bytes and
+/// opens the file afterwards, which is what `curl -o` and `requests` do, reads it like any
+/// other; one that reads over HTTP with `fsspec` needs the length and the ranges a
+/// collected answer carries, and asks for that by leaving `streaming` out.
+///
+/// What is held while it is written is one row group rather than the whole file: the writer
+/// buffers a group, flushes it to the sink when it is full, and writes the footer at the
+/// end. So the peak is the row group size, which is the same thing the collected writer
+/// holds on its way through — with the rest of the file no longer beside it.
+pub struct Writing {
+    writer: Option<ArrowWriter<stream::Pipe>>,
+    sink: stream::Pipe,
+    layout: SourceLayout,
+}
+
+impl Writing {
+    /// A writer that keeps what the source file is still the authority on.
+    ///
+    /// A streamed answer over a catalog has no one source to take a layout from, and passes
+    /// [`SourceLayout::default`] — the same thing a collected catalog answer that read no
+    /// file writes with.
+    pub fn new(layout: SourceLayout) -> Self {
+        Self {
+            writer: None,
+            sink: stream::Pipe::default(),
+            layout,
+        }
+    }
+}
+
+/// `ArrowWriter` has no `Debug`, and what a reader of a log wants here is whether the
+/// writing has begun rather than the state of a parquet writer.
+impl std::fmt::Debug for Writing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Writing")
+            .field("writing", &self.writer.is_some())
+            .finish()
+    }
+}
+
+impl stream::Encoder for Writing {
+    fn begin(&mut self, schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+        let properties = self.layout.writer_properties(schema)?;
+        let writer = ArrowWriter::try_new(self.sink.clone(), Arc::clone(schema), Some(properties))
+            .map_err(ApiError::ParquetWrite)?;
+        self.writer = Some(writer);
+        // Ordinarily nothing: the writer emits its magic bytes with the first row group.
+        Ok(self.sink.take())
+    }
+
+    fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| ApiError::internal("a parquet answer was written before it began"))?;
+        writer.write(batch).map_err(ApiError::ParquetWrite)?;
+        // Whatever the last row group's flush put there, which is nothing until one fills.
+        Ok(self.sink.take())
+    }
+
+    fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // A file that stops part-way has nowhere to say so — parquet has no marker for
+        // "these are not all the rows", and a file that looks whole is one a reader cannot
+        // tell from the answer. So the body ends without its footer, which every reader
+        // refuses, rather than as a file that lies about what it holds. The same choice
+        // `dsv` makes, for the same reason.
+        if let Some(stopped) = ending.stopped {
+            return Err(ApiError::internal(format!(
+                "this answer stopped part-way and parquet has no way to say so: {}",
+                stopped.why()
+            )));
+        }
+        let Some(writer) = self.writer.take() else {
+            return Ok(Vec::new());
+        };
+        writer.close().map_err(ApiError::ParquetWrite)?;
+        Ok(self.sink.take())
+    }
+}
+
 /// Serialize the result as a parquet file in memory.
 ///
-/// The whole file is buffered: it holds the rows of one point lookup, which is the
-/// same thing the JSON response already holds in memory.
-pub fn encode(result: &QueryResult, layout: &SourceLayout) -> Result<Vec<u8>, ApiError> {
-    let properties = layout.writer_properties(&result.schema)?;
-    let mut buffer = Vec::new();
-    let mut writer =
-        ArrowWriter::try_new(&mut buffer, Arc::clone(&result.schema), Some(properties))
-            .map_err(ApiError::ParquetWrite)?;
-    for batch in &result.batches {
-        writer.write(batch).map_err(ApiError::ParquetWrite)?;
-    }
-    writer.close().map_err(ApiError::ParquetWrite)?;
-    Ok(buffer)
+/// The same writer a streamed answer is written by, driven over rows that are all in hand —
+/// one encoder, two drivers, as every other format here is. What the whole file buffered
+/// costs is what a JSON response already costs, and what it buys is a body with a length,
+/// which is the only kind a reader can seek in.
+pub fn encode(result: &QueryResult, layout: SourceLayout) -> Result<Vec<u8>, ApiError> {
+    stream::collected(&mut Writing::new(layout), result, stream::Ending::default())
 }
 
 #[cfg(test)]
@@ -463,7 +541,7 @@ mod tests {
 
     fn round_trip(source: WriterProperties) -> Arc<ParquetMetaData> {
         let layout = SourceLayout::from_metadata(&write_source(source));
-        let bytes = encode(&result(sample_batch()), &layout).unwrap();
+        let bytes = encode(&result(sample_batch()), layout).unwrap();
         ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
             .unwrap()
             .metadata()
@@ -540,7 +618,7 @@ mod tests {
                 batches: Vec::new(),
                 data_bytes_read: 0,
             },
-            &layout,
+            layout,
         )
         .unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
@@ -552,7 +630,7 @@ mod tests {
     fn a_column_the_source_does_not_have_keeps_the_defaults() {
         // Nothing to inherit: the write must still succeed.
         let layout = SourceLayout::default();
-        let bytes = encode(&result(sample_batch()), &layout).unwrap();
+        let bytes = encode(&result(sample_batch()), layout).unwrap();
         let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
         assert_eq!(reader.metadata().file_metadata().num_rows(), 3);
     }

@@ -12,7 +12,7 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::app::answer::{hats_answer, streamable, streamed_rows};
+use crate::app::answer::{hats_answer, streamed_rows};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
@@ -107,8 +107,11 @@ pub(in crate::app) struct CatalogQuery {
     /// `ERROR` for a failure, and `csv` and `tsv` — which have nowhere to put either — end
     /// without the transfer completing. Ask `/simple/hats/plan` for the work list.
     ///
-    /// Not for `parquet`, which is read footer-first: a body with no length is one a reader
-    /// cannot seek in.
+    /// **`parquet` streams too**, a row group at a time with its footer last. What the body
+    /// no longer has is a length, so a reader that seeks in it over HTTP wants the collected
+    /// answer; one that saves the bytes and opens the file reads it like any other. A bound
+    /// reached mid-file ends the body without a footer, since a parquet file has nowhere to
+    /// say it holds less than was asked for.
     #[serde(default)]
     #[schema(example = false)]
     streaming: bool,
@@ -307,11 +310,6 @@ struct Opened {
 
 async fn open_catalog(service: &Service, params: &Lowered<'_>) -> Result<Opened, ApiError> {
     let output = Output::parse(params.format, params.dsv_null_value, Format::Json)?;
-    // Before the catalog is opened: a format with no streamed form is a fault in the
-    // request itself, so nothing is read to discover it.
-    if params.streaming {
-        streamable(&output)?;
-    }
     let url = parse_url(params.url.as_str())?;
     // A directory rather than an object: `open_dir` drops only the refusal of a url naming
     // no object, and every policy check `open` makes still runs. There is no `[data]`

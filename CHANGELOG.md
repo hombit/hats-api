@@ -12,7 +12,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- `streaming` accepts `format = "parquet"`, written a row group at a time with its footer last, instead of refusing the two together.
 
 ### Deprecated
 

@@ -791,7 +791,7 @@ async fn query_file(
     let data_bytes_read = result.data_bytes_read;
     let response = match output.format {
         Format::Parquet => {
-            let body = parquet::encode(&result, &layout.unwrap_or_default())
+            let body = parquet::encode(&result, layout.unwrap_or_default())
                 .map_err(|error| hide.apply(error))?;
             let counts = answer::Counts {
                 num_rows,
