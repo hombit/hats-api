@@ -68,7 +68,7 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
     // Unlike the job resource, which cannot refuse here: TAP §2.7 enforces a parameter's
     // value only when the query is run, and for a job that is after the redirect.
     let answering = format::resolve(parameters.format.as_deref())?;
-    let answer = run::run(service, &parameters, answering, service.adql_limits).await?;
+    let (body, answer) = run::run(service, &parameters, answering, service.adql_limits).await?;
     tracing::info!(
         tables = %answer.tables.join(","),
         query_bytes = parameters.query.len(),
@@ -80,11 +80,11 @@ async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response,
         elapsed_ms = started.elapsed().as_millis(),
         "tap sync"
     );
-    Ok(response(answer))
+    Ok(response(body, &answer))
 }
 
 /// The bytes, labelled, and said to be cut where the format cannot say it itself.
-fn response(answer: Answered) -> Response {
+fn response(body: String, answer: &Answered) -> Response {
     (
         [
             (header::CONTENT_TYPE, answer.content_type.to_owned()),
@@ -93,7 +93,7 @@ fn response(answer: Answered) -> Response {
                 answer.overflow.to_string(),
             ),
         ],
-        answer.body,
+        body,
     )
         .into_response()
 }

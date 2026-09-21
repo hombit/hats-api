@@ -17,6 +17,7 @@
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::{MemorySchemaProvider, TableProvider};
 use datafusion::common::TableReference;
@@ -120,7 +121,109 @@ pub enum Source {
     Memory(Arc<dyn TableProvider>),
 }
 
-/// Run a translated statement over these tables.
+/// One statement, planned and executing, its rows not yet read.
+///
+/// **What this is for is the answer that does not have to exist all at once.** A job writes
+/// its document to a file as the batches land, so nothing here holds them: the rows go
+/// through the encoder and onto the disk, and what is left in memory is one batch. Collected
+/// into an [`Answer`] is the same reading with the batches kept, which is what a `/sync`
+/// request needs — its body has a length, so there is a whole document either way.
+///
+/// The row bound lives here rather than in either caller, so that `MAXREC` truncates and
+/// `max_rows` refuses in one place, whichever way the rows are read.
+pub struct Execution {
+    pub schema: SchemaRef,
+    /// Kept for its metrics: `data_bytes_read` is a counter on the scan, and it is final
+    /// only once the last batch has come off it.
+    physical: Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
+    /// Dropped where the bound is reached, unpolled, so the rows past it are never read.
+    stream: Option<datafusion::execution::SendableRecordBatchStream>,
+    /// What the statement was planned against, alive for as long as it is being read.
+    #[expect(dead_code, reason = "held to be dropped with the rows, never read")]
+    context: Option<SessionContext>,
+    limits: Limits,
+    rows: usize,
+    overflow: bool,
+}
+
+impl std::fmt::Debug for Execution {
+    /// By hand: neither the plan nor the stream has one, and what is worth printing is how
+    /// far the reading got.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Execution")
+            .field("schema", &self.schema)
+            .field("rows", &self.rows)
+            .field("overflow", &self.overflow)
+            .field("reading", &self.stream.is_some())
+            .finish()
+    }
+}
+
+impl Execution {
+    /// The next batch, cut where the row bound is.
+    ///
+    /// `None` is the end of the rows, whether they ran out or the bound stopped them —
+    /// [`Self::overflow`] is which.
+    pub async fn next(&mut self) -> Option<Result<RecordBatch, ApiError>> {
+        let batch = match self.stream.as_mut()?.next().await? {
+            Ok(batch) => batch,
+            Err(error) => {
+                self.stream = None;
+                return Some(Err(refusal(&error)));
+            }
+        };
+        self.rows += batch.num_rows();
+        if self.rows <= self.limits.max_rows {
+            return Some(Ok(batch));
+        }
+        self.stream = None;
+        if self.limits.rows == Rows::Refuse {
+            return Some(Err(ApiError::too_much_work(format!(
+                "this query returns more than {} rows; this server returns at most that in \
+                 one request",
+                self.limits.max_rows
+            ))));
+        }
+        // The batch that crossed the bound is cut where the bound is.
+        let kept = self.limits.max_rows + batch.num_rows() - self.rows;
+        self.rows = self.limits.max_rows;
+        self.overflow = true;
+        (kept > 0).then(|| Ok(batch.slice(0, kept)))
+    }
+
+    /// Whether the row bound cut the answer short. Known once the rows have run out.
+    pub fn overflow(&self) -> bool {
+        self.overflow
+    }
+
+    /// How many rows have been read.
+    pub fn num_rows(&self) -> usize {
+        self.rows
+    }
+
+    /// What the scan has read from storage. Final once the rows have run out.
+    pub fn data_bytes_read(&self) -> u64 {
+        self.physical.as_deref().map_or(0, data_bytes_read)
+    }
+
+    /// Read every batch and keep it, which is the whole answer in memory.
+    pub async fn collect(mut self) -> Result<Answer, ApiError> {
+        let mut batches = Vec::new();
+        while let Some(batch) = self.next().await {
+            batches.push(batch?);
+        }
+        Ok(Answer {
+            result: QueryResult {
+                schema: Arc::clone(&self.schema),
+                batches,
+                data_bytes_read: self.data_bytes_read(),
+            },
+            overflow: self.overflow,
+        })
+    }
+}
+
+/// Run a translated statement over these tables, and keep the whole answer.
 ///
 /// `data` is which names inside a catalog are read as rows, which a catalog whose partitions
 /// are directories needs in order to list one. It is not a bound and so not one of `limits`:
@@ -131,6 +234,19 @@ pub async fn run(
     data: &DataFiles,
     limits: Limits,
 ) -> Result<Answer, ApiError> {
+    plan(translated, tables, data, limits)
+        .await?
+        .collect()
+        .await
+}
+
+/// The same statement, set going and left for the caller to read.
+pub async fn plan(
+    translated: &Translated,
+    tables: &[Table],
+    data: &DataFiles,
+    limits: Limits,
+) -> Result<Execution, ApiError> {
     let ctx = context(limits)?;
     // The region functions go on this context and not on the one every other route shares:
     // `contains` prunes row groups inside a file, and a catalog route chooses its partitions
@@ -211,12 +327,13 @@ pub async fn run(
     // required to execute the query — which is what makes this the cheap way a client
     // inspects a table rather than a scan whose rows are thrown away.
     if limits.rows == Rows::Truncate && limits.max_rows == 0 {
-        return Ok(Answer {
-            result: QueryResult {
-                schema,
-                batches: Vec::new(),
-                data_bytes_read: 0,
-            },
+        return Ok(Execution {
+            schema,
+            physical: None,
+            stream: None,
+            context: None,
+            limits,
+            rows: 0,
             overflow: true,
         });
     }
@@ -224,44 +341,22 @@ pub async fn run(
         .create_physical_plan()
         .await
         .map_err(|error| refusal(&error))?;
-    let mut stream =
-        execute_stream(Arc::clone(&physical), ctx.task_ctx()).map_err(|error| refusal(&error))?;
-
     // Read as it arrives and stop at the cap, rather than collecting and measuring. The
     // memory pool bounds the query's working set and not its output, so an answer larger
     // than this service will send is refused while it is still being made.
-    let mut batches = Vec::new();
-    let mut rows = 0usize;
-    let mut overflow = false;
-    while let Some(batch) = stream.next().await {
-        let batch = batch.map_err(|error| refusal(&error))?;
-        rows += batch.num_rows();
-        if rows > limits.max_rows {
-            if limits.rows == Rows::Refuse {
-                return Err(ApiError::too_much_work(format!(
-                    "this query returns more than {} rows; this server returns at most that in \
-                     one request",
-                    limits.max_rows
-                )));
-            }
-            // The batch that crossed the bound is cut where the bound is, and the stream is
-            // dropped unpolled — so the rows past it are never read.
-            let kept = limits.max_rows + batch.num_rows() - rows;
-            if kept > 0 {
-                batches.push(batch.slice(0, kept));
-            }
-            overflow = true;
-            break;
-        }
-        batches.push(batch);
-    }
-    Ok(Answer {
-        result: QueryResult {
-            schema,
-            batches,
-            data_bytes_read: data_bytes_read(physical.as_ref()),
-        },
-        overflow,
+    let stream =
+        execute_stream(Arc::clone(&physical), ctx.task_ctx()).map_err(|error| refusal(&error))?;
+    Ok(Execution {
+        schema,
+        physical: Some(physical),
+        stream: Some(stream),
+        // The context holds every table this statement registered and every object store it
+        // reads through. The rows are read after this function returns now, so it is kept
+        // here rather than dropped at the end of the planning that made it.
+        context: Some(ctx),
+        limits,
+        rows: 0,
+        overflow: false,
     })
 }
 

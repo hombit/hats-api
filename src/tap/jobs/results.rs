@@ -32,7 +32,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use tempfile::NamedTempFile;
+use tokio::io::AsyncWriteExt as _;
 
 use crate::error::ApiError;
 use crate::tap::jobs::id::JobId;
@@ -47,6 +47,15 @@ const PARENT: &str = "hats-api-jobs";
 /// What a lock file is called, given its run's name.
 fn lock_name(run: &str) -> String {
     format!("{run}.lock")
+}
+
+/// What an answer is called while it is still being written.
+///
+/// Beside the answer rather than elsewhere, so the rename into place cannot cross a
+/// filesystem and stop being atomic — and under a name derived from the job's, so a run that
+/// died mid-write leaves something its own cleanup can name.
+fn partial(file: &str) -> String {
+    format!("{file}.partial")
 }
 
 /// One run's results directory.
@@ -104,34 +113,37 @@ impl Results {
         self.directory.join(file)
     }
 
-    /// Write one job's answer.
+    /// Start writing one job's answer, a piece at a time.
+    ///
+    /// **What this is for is the peak.** An answer built whole and then written holds the
+    /// document and the rows it was built from at once, and `max_result_bytes` — a gigabyte
+    /// by default — could only be applied once all of it was in memory, so a job too large
+    /// to keep cost that memory before anything could say so. Written as it is encoded, a
+    /// job holds a batch, and the ceiling refuses at the byte that passes it.
     ///
     /// **Written under a temporary name and renamed into place**, so that a file existing
     /// means a whole answer. A crash midway leaves a partial file under a name no record
     /// points at, where the alternative is a truncated document served as a complete one —
     /// which a client cannot tell from the rows really ending there.
-    ///
-    /// On the blocking pool: the body can be hundreds of megabytes, and writing it is the
-    /// one genuinely blocking thing a job does.
-    pub async fn write(&self, id: &JobId, body: String) -> Result<Written, ApiError> {
-        let directory = self.directory.clone();
+    pub fn writing(&self, id: &JobId, ceiling: u64) -> Writing {
         let file = id.to_string();
-        let destination = directory.join(&file);
-        let bytes = tokio::task::spawn_blocking(move || {
-            use std::io::Write as _;
+        Writing {
+            destination: self.directory.join(&file),
+            scratch: self.directory.join(partial(&file)),
+            file,
+            handle: None,
+            bytes: 0,
+            ceiling,
+        }
+    }
 
-            let mut scratch = NamedTempFile::new_in(&directory)?;
-            scratch.write_all(body.as_bytes())?;
-            scratch.flush()?;
-            // Renamed rather than written in place, and within the same directory so the
-            // rename cannot cross a filesystem and stop being atomic.
-            scratch.persist(&destination).map_err(|error| error.error)?;
-            Ok::<_, std::io::Error>(body.len() as u64)
-        })
-        .await
-        .map_err(|error| ApiError::internal(format!("writing a job's result failed: {error}")))?
-        .map_err(|error| ApiError::internal(format!("cannot write a job's result: {error}")))?;
-        Ok(Written { file, bytes })
+    /// Drop what a run that did not finish left half-written.
+    ///
+    /// Every ending but a kept answer comes through here, including the two that keep no
+    /// [`Writing`] to speak for them: an aborted task and a panicked one are gone with
+    /// their sink, and the bytes they had written are still on the disk.
+    pub async fn abandon(&self, id: &JobId) {
+        self.remove(&partial(&id.to_string())).await;
     }
 
     /// Drop one job's answer, a destroyed job's file going with it.
@@ -240,13 +252,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let results = under(root.path());
         let id = JobId::new().unwrap();
-        let written = results.write(&id, "<VOTABLE/>".to_owned()).await.unwrap();
-        assert_eq!(written.bytes, 10);
+        let mut writing = results.writing(&id, 1 << 20);
+        writing.write(b"<VOTABLE>").await.unwrap();
+        writing.write(b"</VOTABLE>").await.unwrap();
+        // Nothing is under the job's own name until the last piece is in: a file that is
+        // there is a whole answer.
+        assert!(!results.path(&id.to_string()).exists());
+
+        let written = writing.finish().await.unwrap();
+        assert_eq!(written.bytes, 19);
         // Named after the job, which is what makes the file findable from the record alone.
         assert_eq!(written.file, id.to_string());
         assert_eq!(
             std::fs::read_to_string(results.path(&written.file)).unwrap(),
-            "<VOTABLE/>"
+            "<VOTABLE></VOTABLE>"
         );
     }
 
@@ -257,22 +276,56 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let results = under(root.path());
         for _ in 0..3 {
-            results
-                .write(&JobId::new().unwrap(), "rows".to_owned())
-                .await
-                .unwrap();
+            let mut writing = results.writing(&JobId::new().unwrap(), 1 << 20);
+            writing.write(b"rows").await.unwrap();
+            writing.finish().await.unwrap();
         }
         assert_eq!(std::fs::read_dir(&results.directory).unwrap().count(), 3);
+    }
+
+    /// The ceiling stops the write at the piece that would pass it, rather than once the
+    /// whole answer exists — which is the point of writing it as it is encoded.
+    #[tokio::test]
+    async fn a_write_over_the_ceiling_is_refused_where_it_passes_it() {
+        let root = tempfile::tempdir().unwrap();
+        let results = under(root.path());
+        let id = JobId::new().unwrap();
+        let mut writing = results.writing(&id, 6);
+        writing.write(b"rows\n").await.unwrap();
+        let refused = writing.write(b"and more rows\n").await.unwrap_err();
+        assert!(refused.to_string().contains("6 bytes"), "{refused}");
+
+        // What it had written is under a name no record points at, and goes when the run
+        // that did not finish is swept.
+        assert!(!results.path(&id.to_string()).exists());
+        results.abandon(&id).await;
+        assert_eq!(std::fs::read_dir(&results.directory).unwrap().count(), 0);
+        // A job that never wrote a byte has nothing to sweep, which is not a failure.
+        results.abandon(&JobId::new().unwrap()).await;
+    }
+
+    /// An answer of no bytes is still an answer: an empty table is a document with a header
+    /// and no rows, and the record points at a file either way.
+    #[tokio::test]
+    async fn an_answer_of_no_bytes_is_still_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let results = under(root.path());
+        let written = results
+            .writing(&JobId::new().unwrap(), 1 << 20)
+            .finish()
+            .await
+            .unwrap();
+        assert_eq!(written.bytes, 0);
+        assert!(results.path(&written.file).is_file());
     }
 
     #[tokio::test]
     async fn a_removed_answer_is_gone_and_removing_it_twice_is_quiet() {
         let root = tempfile::tempdir().unwrap();
         let results = under(root.path());
-        let written = results
-            .write(&JobId::new().unwrap(), "rows".to_owned())
-            .await
-            .unwrap();
+        let mut writing = results.writing(&JobId::new().unwrap(), 1 << 20);
+        writing.write(b"rows").await.unwrap();
+        let written = writing.finish().await.unwrap();
         results.remove(&written.file).await;
         assert!(!results.path(&written.file).exists());
         // A destroyed job whose file has already gone is not a failure to report.
@@ -342,5 +395,91 @@ mod tests {
             http::StatusCode::INTERNAL_SERVER_ERROR,
             "{refused}"
         );
+    }
+}
+
+/// One job's answer, being written.
+///
+/// Opened lazily: a job that fails before its first byte leaves no file at all, which is
+/// what a failed job should leave. Every write counts against the ceiling, and the first one
+/// past it refuses — what was written by then is the runner's to sweep, with
+/// [`Results::abandon`].
+#[derive(Debug)]
+pub struct Writing {
+    /// The name a finished answer is served under.
+    file: String,
+    destination: PathBuf,
+    /// Where the bytes go until they are all there.
+    scratch: PathBuf,
+    handle: Option<tokio::fs::File>,
+    bytes: u64,
+    ceiling: u64,
+}
+
+impl Writing {
+    /// Add a piece of the document.
+    ///
+    /// The ceiling is checked before the bytes are written rather than after: what it
+    /// bounds is what a job may leave on disk, and a file that went over it and was then
+    /// deleted still cost the disk it was written to.
+    pub async fn write(&mut self, chunk: &[u8]) -> Result<(), ApiError> {
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        let would_be = self.bytes.saturating_add(chunk.len() as u64);
+        if would_be > self.ceiling {
+            return Err(ApiError::too_much_work(format!(
+                "this job's answer is over {} bytes and this service keeps at most that per \
+                 job; ask for fewer columns or fewer rows",
+                self.ceiling
+            )));
+        }
+        let failed = |error: std::io::Error| {
+            ApiError::internal(format!("cannot write a job's result: {error}"))
+        };
+        let handle = match &mut self.handle {
+            Some(handle) => handle,
+            // Made on the first piece, which is why a job that fails before one leaves no
+            // file at all rather than an empty one.
+            none => none.insert(
+                tokio::fs::File::create(&self.scratch)
+                    .await
+                    .map_err(failed)?,
+            ),
+        };
+        handle.write_all(chunk).await.map_err(failed)?;
+        self.bytes = would_be;
+        Ok(())
+    }
+
+    /// Put the finished answer under its own name.
+    ///
+    /// Taking `&mut self` rather than `self` so that the sink is still there to be swept
+    /// when this fails: the rename is the last thing that can go wrong, and what it leaves
+    /// behind when it does is the same partial file every other ending leaves.
+    pub async fn finish(&mut self) -> Result<Written, ApiError> {
+        let failed = |error: std::io::Error| {
+            ApiError::internal(format!("cannot keep a job's result: {error}"))
+        };
+        // An answer of no bytes is still an answer — an empty table is a document with a
+        // header and no rows, and for a format that writes nothing at all it is a file of
+        // no bytes rather than no file.
+        let mut handle = match self.handle.take() {
+            Some(handle) => handle,
+            None => tokio::fs::File::create(&self.scratch)
+                .await
+                .map_err(failed)?,
+        };
+        handle.flush().await.map_err(failed)?;
+        drop(handle);
+        // Within the directory, so the rename cannot cross a filesystem and stop being
+        // atomic.
+        tokio::fs::rename(&self.scratch, &self.destination)
+            .await
+            .map_err(failed)?;
+        Ok(Written {
+            file: self.file.clone(),
+            bytes: self.bytes,
+        })
     }
 }

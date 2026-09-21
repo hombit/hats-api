@@ -32,6 +32,7 @@ use crate::error::ApiError;
 use crate::output::votable;
 use crate::tap::jobs::{
     Bounds, Change, Job, JobId, JobStore, MemoryJobStore, Rendered, Results, Runner, Slots, Work,
+    Writing,
 };
 use crate::tap::uws;
 
@@ -160,7 +161,12 @@ struct Query {
 
 #[async_trait]
 impl Work for Query {
-    async fn run(&self, job: Job, credentials: Vec<String>) -> Result<Rendered, ApiError> {
+    async fn run(
+        &self,
+        job: Job,
+        credentials: Vec<String>,
+        into: &mut Writing,
+    ) -> Result<Rendered, ApiError> {
         // The credentials go back where the caller wrote them, so that what is read here is
         // the request they sent rather than a second arrangement of it. They were taken out
         // on the way in, and only so that the store never holds one.
@@ -172,7 +178,10 @@ impl Work for Query {
         );
         let parameters = Parameters::read(&pairs)?;
         let answering = format::resolve(parameters.format.as_deref())?;
-        let answer = run::run(&self.service, &parameters, answering, self.ceiling).await?;
+        // Into the file as it is encoded, rather than built whole and handed over: a job's
+        // answer is a file at the end of it either way, and this way the rows and the
+        // document are never both in memory.
+        let answer = run::write(&self.service, &parameters, answering, self.ceiling, into).await?;
         tracing::info!(
             job = %job.id,
             tables = %answer.tables.join(","),
@@ -184,7 +193,6 @@ impl Work for Query {
             "tap async"
         );
         Ok(Rendered {
-            body: answer.body,
             content_type: answer.content_type.to_owned(),
             rows: answer.num_rows,
             overflow: answer.overflow,

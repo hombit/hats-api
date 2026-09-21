@@ -4,4 +4,5 @@ pub mod dsv;
 pub mod instant;
 pub mod json;
 pub mod parquet;
+pub mod stream;
 pub mod votable;

@@ -26,13 +26,16 @@ use tokio::task::AbortHandle;
 use crate::error::ApiError;
 use crate::tap::jobs::id::JobId;
 use crate::tap::jobs::job::{Change, Job, Product};
-use crate::tap::jobs::results::Results;
+use crate::tap::jobs::results::{Results, Writing};
 use crate::tap::jobs::store::JobStore;
 
-/// What a job's work produced, before it is a file.
+/// What a job's work produced, beside the bytes it wrote.
+///
+/// **The document is not here.** It has gone into the file as it was made, which is what
+/// keeps a large answer from existing twice — once as rows and once as a `String` — before
+/// anything can say it is too large. What is left is what the record holds about it.
 #[derive(Debug)]
 pub struct Rendered {
-    pub body: String,
     pub content_type: String,
     pub rows: usize,
     pub overflow: bool,
@@ -40,11 +43,18 @@ pub struct Rendered {
 
 /// Whatever it is that a job does.
 ///
-/// One method, taking the job and the credentials held for it. The credentials arrive as an
-/// argument rather than off the record precisely because they are not on the record.
+/// One method, taking the job, the credentials held for it, and the sink its answer goes
+/// into. The credentials arrive as an argument rather than off the record precisely because
+/// they are not on the record; the sink arrives as one because where a job's answer is kept
+/// is the runner's business and not the work's.
 #[async_trait]
 pub trait Work: std::fmt::Debug + Send + Sync + 'static {
-    async fn run(&self, job: Job, credentials: Vec<String>) -> Result<Rendered, ApiError>;
+    async fn run(
+        &self,
+        job: Job,
+        credentials: Vec<String>,
+        into: &mut Writing,
+    ) -> Result<Rendered, ApiError>;
 }
 
 /// What the runner will spend.
@@ -79,7 +89,8 @@ pub struct Runner {
 
 /// How one run ended, which is the whole of what decides the phase.
 enum Ending {
-    Done(Rendered),
+    /// The answer is written, and the sink is handed back to be put into place.
+    Done(Rendered, Writing),
     Failed(ApiError),
     /// The execution duration ran out.
     Clock,
@@ -166,9 +177,16 @@ impl Runner {
             .unwrap_or_default();
 
         let work = Arc::clone(&self.work);
-        let running = tokio::spawn({
+        // Made here rather than inside the work, because the ceiling and the directory are
+        // the runner's; handed back with the answer, so that what is put into place is the
+        // same sink the rows went into.
+        let mut into = self.results.writing(&id, self.limits.max_result_bytes);
+        let mut running = tokio::spawn({
             let job = job.clone();
-            async move { work.run(job, credentials).await }
+            async move {
+                let rendered = work.run(job, credentials, &mut into).await;
+                (rendered, into)
+            }
         });
         locked(&self.running).insert(id.clone(), running.abort_handle());
 
@@ -178,10 +196,19 @@ impl Runner {
             .execution_duration
             .to_std()
             .unwrap_or(std::time::Duration::MAX);
-        let ending = match tokio::time::timeout(duration, running).await {
-            Err(_elapsed) => Ending::Clock,
-            Ok(Ok(Ok(rendered))) => Ending::Done(rendered),
-            Ok(Ok(Err(refused))) => Ending::Failed(refused),
+        let ending = match tokio::time::timeout(duration, &mut running).await {
+            Err(_elapsed) => {
+                // Stopped, and waited for: a timeout drops the handle rather than the task,
+                // and a task still holding its sink would write again after what it had
+                // written was swept.
+                running.abort();
+                let _ = running.await;
+                Ending::Clock
+            }
+            Ok(Ok((Ok(rendered), into))) => Ending::Done(rendered, into),
+            // The sink is dropped here and what it had written is swept below, as it is for
+            // every other ending that keeps nothing.
+            Ok(Ok((Err(refused), _))) => Ending::Failed(refused),
             // A task that was aborted and one that panicked are both a `JoinError`, and the
             // difference is the whole reason this is not one arm: a cancelled job has
             // already recorded why it stopped, and a panicked one has recorded nothing.
@@ -195,7 +222,7 @@ impl Runner {
     /// Turn how the run ended into the phase it leaves behind.
     async fn finish(&self, id: &JobId, ending: Ending, job: &Job) {
         let change = match ending {
-            Ending::Done(rendered) => match self.keep(id, rendered).await {
+            Ending::Done(rendered, into) => match self.keep(rendered, into).await {
                 Ok(product) => Change::Complete(product),
                 Err(refused) => Change::Fail(refused.to_string()),
             },
@@ -208,8 +235,12 @@ impl Runner {
                     job.execution_duration.num_seconds()
                 )),
             },
-            // Already recorded by whoever cancelled it.
-            Ending::Cancelled => return,
+            // Already recorded by whoever cancelled it. The sink went with the aborted
+            // task, so what it had written is swept here rather than by it.
+            Ending::Cancelled => {
+                self.results.abandon(id).await;
+                return;
+            }
             Ending::Panicked(how) => {
                 // The message a caller gets says nothing about this machine; the log says
                 // everything. A panic reaching here is a bug in this service, and the one
@@ -218,10 +249,15 @@ impl Runner {
                 Change::Fail("this job failed unexpectedly".to_owned())
             }
         };
+        // Every ending but a kept answer leaves a half-written file under a name no record
+        // points at — the ceiling refused part-way, the clock ran out, the work failed.
+        let kept = matches!(change, Change::Complete(_));
+        if !kept {
+            self.results.abandon(id).await;
+        }
         // A job destroyed or aborted while it was finishing refuses this, which is right —
         // a terminal phase is never left. What it leaves behind is a file nothing points at,
         // so that goes too.
-        let kept = matches!(change, Change::Complete(_));
         if let Err(refused) = self.store.apply(id, change).await {
             tracing::debug!(job = %id, %refused, "a finished job was already gone");
             if kept {
@@ -234,17 +270,13 @@ impl Runner {
         }
     }
 
-    /// Write the answer out, refusing one too large to keep.
-    async fn keep(&self, id: &JobId, rendered: Rendered) -> Result<Product, ApiError> {
-        let size = rendered.body.len() as u64;
-        if size > self.limits.max_result_bytes {
-            return Err(ApiError::too_much_work(format!(
-                "this job's answer is {size} bytes and this service keeps at most {} per job; \
-                 ask for fewer columns or fewer rows",
-                self.limits.max_result_bytes
-            )));
-        }
-        let written = self.results.write(id, rendered.body).await?;
+    /// Put the written answer under the job's own name.
+    ///
+    /// Nothing is measured here: the bytes went through the sink, which holds the ceiling
+    /// and refuses at the byte that passes it — while the answer is being made rather than
+    /// once all of it exists.
+    async fn keep(&self, rendered: Rendered, mut into: Writing) -> Result<Product, ApiError> {
+        let written = into.finish().await?;
         Ok(Product {
             file: written.file,
             content_type: rendered.content_type,
@@ -331,15 +363,26 @@ mod tests {
 
     #[async_trait]
     impl Work for Fake {
-        async fn run(&self, _job: Job, credentials: Vec<String>) -> Result<Rendered, ApiError> {
+        async fn run(
+            &self,
+            _job: Job,
+            credentials: Vec<String>,
+            into: &mut Writing,
+        ) -> Result<Rendered, ApiError> {
             locked(&self.seen).extend(credentials);
             match self.doing {
-                Doing::Answer(body) => Ok(Rendered {
-                    body: body.to_owned(),
-                    content_type: "text/csv".to_owned(),
-                    rows: 1,
-                    overflow: false,
-                }),
+                // A byte at a time, so that a ceiling reached part-way is reached where a
+                // real answer would reach it rather than on one whole write.
+                Doing::Answer(body) => {
+                    for byte in body.as_bytes() {
+                        into.write(&[*byte]).await?;
+                    }
+                    Ok(Rendered {
+                        content_type: "text/csv".to_owned(),
+                        rows: 1,
+                        overflow: false,
+                    })
+                }
                 Doing::Refuse => Err(ApiError::bad_request("that column is not there")),
                 #[expect(
                     clippy::panic,
@@ -353,8 +396,8 @@ mod tests {
                 }
                 Doing::Slowly => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
+                    into.write(b"slow").await?;
                     Ok(Rendered {
-                        body: "slow".to_owned(),
                         content_type: "text/csv".to_owned(),
                         rows: 1,
                         overflow: false,
@@ -541,7 +584,8 @@ mod tests {
         assert_eq!(settled(&harness, &second).await.phase, Phase::Completed);
     }
 
-    /// An answer too large to keep is the job's failure and not a file left on disk.
+    /// An answer too large to keep is the job's failure and not a file left on disk — and
+    /// it is refused at the byte that passes the ceiling, so the rest is never written.
     #[tokio::test]
     async fn an_answer_over_the_ceiling_is_refused_and_written_nowhere() {
         let harness = harness(Doing::Answer("a,b\n1,2\n"), 2, 4);
@@ -550,7 +594,7 @@ mod tests {
 
         let job = settled(&harness, &id).await;
         assert_eq!(job.phase, Phase::Error);
-        assert!(job.error.unwrap().contains("8 bytes"));
+        assert!(job.error.unwrap().contains("4 bytes"));
         assert!(job.product.is_none());
         assert_eq!(
             std::fs::read_dir(harness.results.path("")).unwrap().count(),

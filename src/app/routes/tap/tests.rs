@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use bytesize::ByteSize;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -1003,10 +1004,14 @@ struct Jobbed {
 
 impl Jobbed {
     fn new(dir: &std::path::Path) -> Self {
+        Self::keeping(dir, &AsyncConfig::default())
+    }
+
+    /// The same, with what a job may keep spelled out.
+    fn keeping(dir: &std::path::Path, config: &AsyncConfig) -> Self {
         let limits = LimitsConfig::default();
         let service = published(dir, &limits);
-        let jobs =
-            Jobs::new(service.clone(), &limits, &AsyncConfig::default()).expect("the job resource");
+        let jobs = Jobs::new(service.clone(), &limits, config).expect("the job resource");
         Self {
             service,
             jobs: Arc::new(jobs),
@@ -1114,6 +1119,65 @@ async fn a_job_answers_its_rows_as_a_file() {
     let rows = text_of(response).await;
     assert!(rows.contains("<FIELD name=\"id\" ID=\"id\""), "{rows}");
     assert!(rows.contains("<TR>"), "{rows}");
+}
+
+/// One statement, two resources, one document.
+///
+/// `/sync` builds its answer and measures it; a job writes its own into the file as the
+/// rows arrive. Both drive the same encoder, and two drivers over one format is exactly the
+/// thing that drifts — so what is checked here is that they have not. The one difference is
+/// `nrows`: it is an attribute at the head of the `TABLE` and the count is known only once
+/// the rows have run out, so a written document leaves it out, which VOTable allows.
+#[tokio::test]
+async fn a_job_writes_the_document_sync_would_have_built() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let statement = &[
+        ("QUERY", "SELECT id, ra, dec FROM sky.objects ORDER BY id"),
+        ("LANG", "ADQL"),
+    ];
+
+    let synced = text_of(harness.form("/api/v1/tap/sync", statement).await).await;
+    let job = harness
+        .submit(&[statement.as_slice(), &[("PHASE", "RUN")]].concat())
+        .await;
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+    let written = text_of(harness.get(&format!("{job}/results/result")).await).await;
+
+    let counted = synced
+        .split_once("<TABLE nrows=")
+        .and_then(|(_, rest)| rest.split_once('>'))
+        .map(|(count, _)| format!("<TABLE nrows={count}>"))
+        .expect("a built document says how many rows it holds");
+    assert_eq!(written, synced.replace(&counted, "<TABLE>"));
+}
+
+/// An answer larger than a job may keep is that job's failure, and it is refused while the
+/// document is being written rather than once all of it is in memory.
+#[tokio::test]
+async fn a_job_over_what_it_may_keep_fails_and_says_so() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::keeping(
+        dir.path(),
+        &AsyncConfig {
+            max_result_bytes: ByteSize::b(200),
+            ..AsyncConfig::default()
+        },
+    );
+    let job = harness
+        .submit(&[
+            ("QUERY", "SELECT id, ra, dec FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("PHASE", "RUN"),
+        ])
+        .await;
+
+    assert_eq!(harness.settled(&job).await, "ERROR");
+    let document = text_of(harness.get(&format!("{job}/error")).await).await;
+    assert!(document.contains("200 bytes"), "{document}");
+    // And nothing is left pointing at half an answer.
+    let id = job.rsplit('/').next().expect("an id");
+    assert!(harness.jobs.result_path(id).await.is_none());
 }
 
 /// The half a body built in memory could not offer.

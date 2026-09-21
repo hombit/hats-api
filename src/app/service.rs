@@ -6,12 +6,14 @@ use std::time::Duration;
 
 use axum::{
     Router,
+    body::Body,
     extract::{DefaultBodyLimit, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
 };
+use futures::StreamExt as _;
 use http::{HeaderValue, header};
 use serde::Serialize;
 use tower_http::compression::CompressionLayer;
@@ -27,6 +29,7 @@ use crate::access::data::DataFiles;
 use crate::access::mount::{self, Mount, MountSource, Mounts};
 use crate::access::{self, AccessPolicy};
 use crate::adql;
+use crate::app::answer;
 use crate::app::cache;
 use crate::app::files::serve_mounted;
 use crate::app::openapi::{self, description::describe};
@@ -314,25 +317,60 @@ pub fn router_with(service: Service, jobs: Option<Arc<Jobs>>) -> Router {
 
 /// Give up on a request that has run past `[limits] max_request_seconds`.
 ///
-/// The clock covers producing the response and not sending it. That is the whole of why
-/// this sits here rather than over the body: every query is collected before it answers,
-/// so a handler's own future is the work, while a mounted file's is already finished when
-/// the first byte goes out. A bound over the body would cut a slow download of a file this
-/// service would happily serve, and bound nothing a query does.
+/// **The clock covers the query and not the sending of a file.** Which of those a body is
+/// decides whether it is under the clock, and the body says so itself: `app::answer` marks
+/// one it is still generating with [`answer::Generated`], and only those are read under
+/// what is left of the deadline. A mounted file's bytes are not work — the handler's future
+/// was finished before the first one went out — and bounding them would cut a slow download
+/// this service is happy to serve.
 ///
-/// Dropping the future is what stops the work. The reads below it are DataFusion streams
-/// and object-store requests, none of which is polled again once this returns, so a request
-/// nobody is waiting for stops costing the origin as well.
+/// A collected query is therefore bounded by the handler's own future, and a streamed one
+/// by that future and then its body, which together are the whole of the request. The two
+/// are one clock: the deadline is an instant taken when the request arrives, so time spent
+/// planning is time the rows do not get.
+///
+/// Dropping the future is what stops the work, before the response and after it alike. The
+/// reads below are DataFusion streams and object-store requests, none of which is polled
+/// again once this returns, so a request nobody is waiting for stops costing the origin.
+///
+/// **A body cut here ends mid-chunk**, with the error the stream yields. The status and the
+/// head of the document have gone, so there is no `504` left to send, and a truncated
+/// transfer is the one thing a reader cannot mistake for a whole answer.
 async fn deadline(State(limit): State<Duration>, request: Request, next: Next) -> Response {
-    match tokio::time::timeout(limit, next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => ApiError::timeout(format!(
-            "the request took longer than {} s; narrow the region, the columns or the \
-             limit, or send it to the plan route",
-            limit.as_secs()
-        ))
-        .into_response(),
+    let until = tokio::time::Instant::now() + limit;
+    let Ok(mut response) = tokio::time::timeout_at(until, next.run(request)).await else {
+        return expired(limit).into_response();
+    };
+    if response
+        .extensions_mut()
+        .remove::<answer::Generated>()
+        .is_none()
+    {
+        return response;
     }
+    let (parts, body) = response.into_parts();
+    let rest = futures::stream::unfold(
+        Some(Box::pin(body.into_data_stream())),
+        move |state| async move {
+            let mut chunks = state?;
+            match tokio::time::timeout_at(until, chunks.next()).await {
+                Ok(Some(Ok(bytes))) => Some((Ok(bytes), Some(chunks))),
+                Ok(Some(Err(error))) => Some((Err(ApiError::internal(error.to_string())), None)),
+                Ok(None) => None,
+                Err(_) => Some((Err(expired(limit)), None)),
+            }
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(rest))
+}
+
+/// What a request that ran out of time is told, wherever it ran out.
+fn expired(limit: Duration) -> ApiError {
+    ApiError::timeout(format!(
+        "the request took longer than {} s; narrow the region, the columns or the limit, or \
+         send it to the plan route",
+        limit.as_secs()
+    ))
 }
 
 /// Compress what is worth compressing, which is everything this service answers with
@@ -1325,11 +1363,86 @@ mod tests {
     /// A handler that never finishes, behind the deadline. Nothing this service answers
     /// can be made slow to order, so the middleware is exercised over a route of the
     /// test's own — what is being checked is the layer and the status it produces.
+    ///
+    /// The last two are bodies rather than handlers: one this service is still generating
+    /// and one it is only sending, both of which answer at once and then stall.
     fn timed(limit: Duration) -> Router {
         Router::new()
             .route("/slow", axum::routing::get(std::future::pending::<&str>))
             .route("/fast", axum::routing::get(|| async { "answered" }))
+            .route(
+                "/generated",
+                axum::routing::get(|| async { stalling(true) }),
+            )
+            .route(
+                "/download",
+                axum::routing::get(|| async { stalling(false) }),
+            )
             .layer(middleware::from_fn_with_state(limit, deadline))
+    }
+
+    /// A body that sends one chunk and then never sends another.
+    fn stalling(generated: bool) -> Response {
+        let chunks =
+            futures::stream::once(async { Ok::<_, ApiError>(bytes::Bytes::from_static(b"rows")) })
+                .chain(futures::stream::pending());
+        let mut response = Body::from_stream(chunks).into_response();
+        if generated {
+            response.extensions_mut().insert(answer::Generated);
+        }
+        response
+    }
+
+    /// The clock covers the rows of a streamed answer, which is the whole of the work a
+    /// request of that shape came to do.
+    ///
+    /// A handler that streams returns as soon as it has a plan, so a deadline over the
+    /// handler alone would bound the planning and leave the reading unbounded — the one
+    /// request with no time limit at all. The body is cut instead, mid-chunk: the `200` and
+    /// the head of the document have gone, so a truncated transfer is what is left to say
+    /// it with.
+    #[tokio::test]
+    async fn the_clock_covers_a_body_this_service_is_still_generating() {
+        let response = timed(Duration::from_millis(10))
+            .oneshot(
+                Request::builder()
+                    .uri("/generated")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Answered: the status went out with the first chunk, long before the clock ran.
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.into_body().collect().await.is_err(),
+            "a streamed body past the deadline has to end as a failure, not as an answer"
+        );
+    }
+
+    /// And not the bytes of a file, which are not work.
+    ///
+    /// A mounted file's handler was finished before its first byte went out, so the clock
+    /// has nothing left to bound — and cutting a slow download this service is happy to
+    /// serve is what a bound over every body would do.
+    #[tokio::test]
+    async fn the_clock_does_not_cut_a_download() {
+        let response = timed(Duration::from_millis(10))
+            .oneshot(
+                Request::builder()
+                    .uri("/download")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), response.into_body().collect())
+                .await
+                .is_err(),
+            "the deadline reached into a body it has no business bounding"
+        );
     }
 
     async fn hit(router: Router, uri: &str) -> (StatusCode, String) {

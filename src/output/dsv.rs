@@ -50,11 +50,13 @@
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::csv::WriterBuilder;
-use datafusion::arrow::datatypes::Schema;
+use std::sync::Arc;
+
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::output::instant;
+use crate::output::{instant, stream};
 
 /// Which of the two, which is a delimiter and the names that go with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,42 +94,111 @@ impl Dsv {
 }
 
 /// Serialize the result as delimited text.
-///
-/// The whole body is built in memory, which is what the other three encodings already do
-/// with the same rows.
 pub fn encode(result: &QueryResult, kind: Dsv, null: &str) -> Result<String, ApiError> {
-    refuse_nested(&result.schema)?;
-
-    let mut out = Vec::new();
-    let mut writer = WriterBuilder::new()
-        .with_header(true)
-        .with_delimiter(kind.delimiter())
-        .with_null(null.to_owned())
-        // DALI §3.3.3's form, the same one the VOTable carries: the requirement is about
-        // the values a service returns, and §3.4.3 lists `csv` and `tsv` among the formats
-        // it returns them in. Left to the writer's own defaults, a zoned column would come
-        // out with the offset of whatever zone it names, which that section has no form
-        // for — `instant::in_utc` below is the other half of that.
-        .with_date_format(instant::DATE.to_owned())
-        .with_datetime_format(instant::DATE_TIME.to_owned())
-        .with_timestamp_format(instant::DATE_TIME.to_owned())
-        .with_timestamp_tz_format(instant::ZONED.to_owned())
-        .build(&mut out);
-
-    if result.batches.is_empty() {
-        let empty = RecordBatch::new_empty(result.schema.clone());
-        write_batch(&mut writer, &empty)?;
-    } else {
-        for batch in &result.batches {
-            write_batch(&mut writer, &instant::in_utc(batch)?)?;
-        }
-    }
-    drop(writer);
-
+    let mut encoder = Delimited::new(kind, null);
+    let bytes = stream::collected(&mut encoder, result, stream::Ending::default())?;
     // The writer formats through `arrow-cast`'s display, which produces `str` throughout, so
     // the bytes cannot be invalid UTF-8 — but building the body out of an assumption rather
     // than a check is how that stops being true without anything saying so.
-    String::from_utf8(out).map_err(|_| ApiError::internal("delimited output was not UTF-8"))
+    String::from_utf8(bytes).map_err(|_| ApiError::internal("delimited output was not UTF-8"))
+}
+
+/// Delimited text, written batch by batch.
+///
+/// The header belongs to the writer rather than to this: `arrow`'s writer emits it with
+/// the first batch it is given, so a stream gets it with the first batch and a collected
+/// answer gets it in the same place.
+#[derive(Debug)]
+pub struct Delimited {
+    kind: Dsv,
+    null: String,
+    writer: Option<datafusion::arrow::csv::Writer<stream::Pipe>>,
+    pipe: stream::Pipe,
+    /// Kept for the answer that has no rows at all, which still has columns to name.
+    schema: Option<SchemaRef>,
+    wrote: bool,
+}
+
+impl Delimited {
+    pub fn new(kind: Dsv, null: &str) -> Self {
+        Self {
+            kind,
+            null: null.to_owned(),
+            writer: None,
+            pipe: stream::Pipe::default(),
+            schema: None,
+            wrote: false,
+        }
+    }
+
+    fn writer(&mut self) -> &mut datafusion::arrow::csv::Writer<stream::Pipe> {
+        let pipe = self.pipe.clone();
+        let kind = self.kind;
+        let null = self.null.clone();
+        self.writer.get_or_insert_with(|| {
+            WriterBuilder::new()
+                .with_header(true)
+                .with_delimiter(kind.delimiter())
+                .with_null(null)
+                // DALI §3.3.3's form, the same one the VOTable carries: the requirement is
+                // about the values a service returns, and §3.4.3 lists `csv` and `tsv`
+                // among the formats it returns them in. Left to the writer's own defaults,
+                // a zoned column would come out with the offset of whatever zone it names,
+                // which that section has no form for — `instant::in_utc` is the other half.
+                .with_date_format(instant::DATE.to_owned())
+                .with_datetime_format(instant::DATE_TIME.to_owned())
+                .with_timestamp_format(instant::DATE_TIME.to_owned())
+                .with_timestamp_tz_format(instant::ZONED.to_owned())
+                .build(pipe)
+        })
+    }
+}
+
+impl stream::Encoder for Delimited {
+    /// Nothing before the rows: the header is the writer's, and it writes it with the
+    /// first batch. An answer with no rows at all still gets one, from the empty batch
+    /// `end` writes in that case.
+    fn begin(&mut self, schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+        refuse_nested(schema)?;
+        self.schema = Some(Arc::clone(schema));
+        Ok(Vec::new())
+    }
+
+    fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let batch = instant::in_utc(batch)?;
+        let pipe = self.pipe.clone();
+        self.wrote = true;
+        write_batch(self.writer(), &batch)?;
+        Ok(pipe.take())
+    }
+
+    /// The header, where there were no rows to carry it.
+    ///
+    /// A body of no bytes at all is a different answer from one naming the columns and
+    /// holding no rows: the first says nothing about what was asked for, and this format
+    /// has nowhere else to say it. An empty batch is how the writer is made to emit it.
+    fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // Delimited text has nowhere to say "this is not the whole answer" — no trailer,
+        // no comment, nothing a reader of a table would look at. So an answer that stopped
+        // short ends the body here instead, and what a client sees is a transfer that
+        // stopped rather than a table that finished.
+        if let Some(stopped) = ending.stopped {
+            return Err(ApiError::internal(format!(
+                "this answer stopped part-way and {} has no way to say so: {}",
+                self.kind.name(),
+                stopped.why()
+            )));
+        }
+        if !self.wrote
+            && let Some(schema) = self.schema.clone()
+        {
+            let empty = RecordBatch::new_empty(schema);
+            let pipe = self.pipe.clone();
+            write_batch(self.writer(), &empty)?;
+            return Ok(pipe.take());
+        }
+        Ok(self.pipe.take())
+    }
 }
 
 fn write_batch<W: std::io::Write>(

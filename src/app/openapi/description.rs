@@ -267,16 +267,26 @@ mod tests {
         let file = [
             &["url", "storage", "region"][..],
             &["ra_column", "dec_column", "healpix_column", "healpix_order"],
-            &["columns", "filters", "format", "dsv_null_value", "limit"],
+            &[
+                "columns",
+                "filters",
+                "format",
+                "dsv_null_value",
+                "limit",
+                "streaming",
+            ],
         ]
         .concat();
+        // The rows endpoint streams and the plan endpoint does not: a plan is a document
+        // rather than a stream of rows, so the field is not one of its fields.
+        let rows = [common.as_slice(), &["streaming"]].concat();
         let plan = [common.as_slice(), &["return_storage"]].concat();
         assert_eq!(fields("/api/v1/simple/parquet"), file);
-        assert_eq!(fields("/api/v1/simple/hats"), common);
+        assert_eq!(fields("/api/v1/simple/hats"), rows);
         assert_eq!(fields("/api/v1/simple/hats/plan"), plan);
         // And a refusal names them in the same order the description lists them.
         assert_eq!(ParquetQuery::fields(), file);
-        assert_eq!(CatalogQuery::fields(), common);
+        assert_eq!(CatalogQuery::fields(), rows);
         assert_eq!(CatalogPlanQuery::fields(), plan);
     }
 

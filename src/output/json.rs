@@ -4,20 +4,29 @@ use std::fmt;
 use std::io::Write as _;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, AsArray, PrimitiveArray};
+use datafusion::arrow::array::{Array, AsArray, PrimitiveArray, RecordBatch};
 use datafusion::arrow::datatypes::{
-    ArrowPrimitiveType, DataType, FieldRef, Float16Type, Float32Type, Float64Type,
+    ArrowPrimitiveType, DataType, FieldRef, Float16Type, Float32Type, Float64Type, SchemaRef,
 };
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::json::WriterBuilder;
 use datafusion::arrow::json::writer::{
-    Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder,
+    Encoder, EncoderFactory, EncoderOptions, JsonArray, NullableEncoder, Writer,
 };
 
-use crate::engine::query::QueryResult;
 use crate::error::ApiError;
+use crate::output::stream;
 
-/// Serialize the result as a JSON array of row objects, nested columns included.
+/// The rows as a JSON array, written batch by batch.
+///
+/// `arrow`'s array writer opens the bracket on its first batch, puts a comma between
+/// records and closes on `finish`, all into the sink it was built over — so taking the
+/// bytes out between batches is the whole of what makes it a stream.
+///
+/// **What comes out is a whole JSON array, always.** A batch of no rows leaves the writer's
+/// bracket unopened, so whether anything has been written is not the same question as
+/// whether a writer exists — and answering the second where the first was meant wrote the
+/// empty array twice. One flag answers it here, and nothing above has a second one.
 ///
 /// Two things here are not the arrow writer's defaults, and both are about a value a
 /// caller cannot otherwise tell apart from another one:
@@ -30,20 +39,62 @@ use crate::error::ApiError;
 ///   fourth. In a photometric column they are ordinary — a non-detection, a magnitude of
 ///   zero flux — and reading one back as "no measurement" is a wrong answer rather than
 ///   an error.
-pub fn to_json(result: &QueryResult) -> Result<Vec<serde_json::Value>, ApiError> {
-    let mut buf = Vec::new();
-    let mut writer = WriterBuilder::new()
-        .with_explicit_nulls(true)
-        .with_encoder_factory(Arc::new(NotANumber))
-        .build::<_, JsonArray>(&mut buf);
-    for batch in &result.batches {
-        writer.write(batch)?;
+#[derive(Debug)]
+pub struct Rows {
+    writer: Option<Writer<stream::Pipe, JsonArray>>,
+    pipe: stream::Pipe,
+    wrote: bool,
+}
+
+impl Default for Rows {
+    fn default() -> Self {
+        Self::new()
     }
-    writer.finish()?;
-    if buf.is_empty() {
-        return Ok(Vec::new());
+}
+
+impl Rows {
+    pub fn new() -> Self {
+        Self {
+            writer: None,
+            pipe: stream::Pipe::default(),
+            wrote: false,
+        }
     }
-    Ok(serde_json::from_slice(&buf)?)
+
+    fn writer(&mut self) -> &mut Writer<stream::Pipe, JsonArray> {
+        let pipe = self.pipe.clone();
+        self.writer.get_or_insert_with(|| {
+            WriterBuilder::new()
+                .with_explicit_nulls(true)
+                .with_encoder_factory(Arc::new(NotANumber))
+                .build::<_, JsonArray>(pipe)
+        })
+    }
+}
+
+impl stream::Encoder for Rows {
+    fn begin(&mut self, _schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+        Ok(Vec::new())
+    }
+
+    fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+        let pipe = self.pipe.clone();
+        self.writer().write(batch)?;
+        let bytes = pipe.take();
+        self.wrote |= !bytes.is_empty();
+        Ok(bytes)
+    }
+
+    fn end(&mut self, _ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // A writer that opened its bracket closes it; one that never did — no batches at
+        // all, or only batches of no rows, which `arrow` skips without opening anything —
+        // has the empty array written for it, since `rows` is a list either way.
+        if !self.wrote {
+            return Ok(b"[]".to_vec());
+        }
+        self.writer().finish()?;
+        Ok(self.pipe.take())
+    }
 }
 
 /// Writes `NaN` and the two infinities the way `float()` in Python and `Number()` in
@@ -153,7 +204,18 @@ mod tests {
     use datafusion::arrow::array::{ArrayRef, Float32Array, Float64Array, Int64Array, RecordBatch};
     use datafusion::arrow::datatypes::{Field, Schema};
 
+    use crate::engine::query::QueryResult;
+
     use super::*;
+
+    /// The rows as values, which is what these read the document back as. The service
+    /// itself never parses what it wrote — [`Rows`] goes straight into the body — so this
+    /// is a test's way of asking what the bytes say and not a second way of making them.
+    fn to_json(result: &QueryResult) -> Result<Vec<serde_json::Value>, ApiError> {
+        let mut rows = Rows::new();
+        let buf = stream::collected(&mut rows, result, stream::Ending::default())?;
+        Ok(serde_json::from_slice(&buf)?)
+    }
 
     /// The four values a float column can hold that JSON has no number for, and a null
     /// beside them, since telling those five apart is the whole of what this is about.

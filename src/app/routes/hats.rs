@@ -2,6 +2,7 @@
 //! against a whole HATS catalog, answered with the rows or with the work that would read them.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::extract::{State, rejection::JsonRejection};
@@ -11,16 +12,19 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::app::answer::hats_answer;
+use crate::app::answer::{hats_answer, streamable, streamed_rows};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
 use crate::app::service::{QUERY_SEGMENT, Service, route};
 use crate::error::ApiError;
+use crate::hats;
 use crate::hats::query::{CatalogSelection, Exceeded, Outcome, Search};
 use crate::sky::healpix::Cover;
 use crate::sky::region::Region;
 use crate::storage::{self, SourceUrl, StorageOptions, parse_url};
+use datafusion::arrow::datatypes::Schema;
+use futures::{StreamExt, TryStreamExt};
 
 /// A query against a whole HATS catalog: the url names the catalog and the partitions to
 /// read are chosen from the region.
@@ -79,6 +83,35 @@ pub(in crate::app) struct CatalogQuery {
     /// request returns the same rows.
     #[schema(example = 100)]
     limit: Option<usize>,
+    /// Send the answer as it is read, rather than reading every partition and then sending
+    /// it.
+    ///
+    /// The rows are the same rows, read the same number of partitions at a time. What
+    /// changes is that a partition's rows leave as it lands, so the body starts sooner and
+    /// this service holds less of it — and that the `x-hats-*` counts are gone, headers
+    /// being sent before the first row is read. `json` reports them at the end of its body.
+    ///
+    /// **Without a `limit`, the order is whatever the partitions land in.** Waiting to send
+    /// them in the catalog's order costs the read its slowest partition at every step: over
+    /// S3, a cone across 31 partitions took 2.7 s in order and 2.0 s as they landed. Every
+    /// matching row still comes back. **With a `limit` the catalog's order is kept**, since
+    /// there it decides which rows come back at all.
+    ///
+    /// **A bound reached before the first row is still a `422` and a work list.** A request
+    /// naming more than `max_partitions` of them is refused that way whether or not it asked
+    /// for a stream, the count being known before anything is read.
+    ///
+    /// **A bound reached part-way is said at the end of the body.** `max_bytes_fetched` and
+    /// `max_rows` are met while the rows are already going out, and so is a read that fails:
+    /// `json` ends with a `refused` naming it, `votable` with `OVERFLOW` for a bound and
+    /// `ERROR` for a failure, and `csv` and `tsv` — which have nowhere to put either — end
+    /// without the transfer completing. Ask `/simple/hats/plan` for the work list.
+    ///
+    /// Not for `parquet`, which is read footer-first: a body with no length is one a reader
+    /// cannot seek in.
+    #[serde(default)]
+    #[schema(example = false)]
+    streaming: bool,
     /// Every key the body carried that this endpoint has no field for.
     #[serde(flatten)]
     #[schema(ignore)]
@@ -97,6 +130,7 @@ impl CatalogQuery {
             "format",
             "dsv_null_value",
             "limit",
+            "streaming",
         ]
     }
 
@@ -117,6 +151,7 @@ impl CatalogQuery {
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
+            streaming: self.streaming,
             echo: None,
         }
     }
@@ -183,9 +218,13 @@ pub(in crate::app) struct CatalogPlanQuery {
 
 impl CatalogPlanQuery {
     /// Every field this endpoint takes, in the order a body is written in: the catalog
-    /// query's, and last the one field that is this endpoint's own.
+    /// query's, less the one that means nothing here, and last the one that is this
+    /// endpoint's own.
     pub(in crate::app) fn fields() -> Vec<&'static str> {
         let mut fields = CatalogQuery::fields();
+        // A plan is a document rather than a stream of rows, so there is nothing here to
+        // send as it is read and no field to have asked with.
+        fields.retain(|field| *field != "streaming");
         fields.push("return_storage");
         fields
     }
@@ -206,6 +245,9 @@ impl CatalogPlanQuery {
             region: self.region.as_deref(),
             format: self.format.as_deref(),
             limit: self.limit,
+            // A plan is a document, not a stream of rows: there is nothing to send as it
+            // is read, and this endpoint has no field to have asked with.
+            streaming: false,
             // Both halves, and both are the caller's doing: they asked for it, and they sent
             // something to hand back. Asked for with nothing to return writes no field rather
             // than an empty object, which would read as "these are the options" and they are
@@ -229,6 +271,9 @@ struct Lowered<'a> {
     format: Option<&'a str>,
     dsv_null_value: Option<&'a str>,
     limit: Option<usize>,
+    /// Whether the rows are sent as they are read. Never set from the plan endpoint: a
+    /// plan is a document rather than a stream of rows.
+    streaming: bool,
     /// The caller's own storage options, to be written into every entry of a plan. `Some`
     /// only from an endpoint that has a `return_storage` to have asked with.
     echo: Option<serde_json::Value>,
@@ -262,6 +307,11 @@ struct Opened {
 
 async fn open_catalog(service: &Service, params: &Lowered<'_>) -> Result<Opened, ApiError> {
     let output = Output::parse(params.format, params.dsv_null_value, Format::Json)?;
+    // Before the catalog is opened: a format with no streamed form is a fault in the
+    // request itself, so nothing is read to discover it.
+    if params.streaming {
+        streamable(&output)?;
+    }
     let url = parse_url(params.url.as_str())?;
     // A directory rather than an object: `open_dir` drops only the refusal of a url naming
     // no object, and every policy check `open` makes still runs. There is no `[data]`
@@ -308,6 +358,68 @@ pub(in crate::app) async fn query_hats(
     };
 
     let selection = params.selection();
+    // Streamed, where the caller asked for it: each partition's rows leave as it lands,
+    // so nothing here holds the answer and the body starts before the last partition is
+    // read. The fan-out is the same fan-out — `max_concurrent_partitions` reads in flight,
+    // yielded in the catalog's order.
+    //
+    // What a stream gives up is the work list for a bound reached *part-way*: the rows
+    // before it have gone, so it is said at the end of the body instead and the caller who
+    // wants the plan asks the plan route for it. The bound that is known before any of that
+    // is still the `422` it is on the collected route, and is taken first.
+    if params.streaming {
+        if let Some(why) = search.too_many_partitions(selection.limit, service.catalog_limits) {
+            let plan = plan_of(&service, &search, &params, Some(why)).await?;
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(plan)).into_response());
+        }
+        let catalog_url = search.catalog().dir().url.clone();
+        let chosen = search.chosen().len();
+        let streamed = Arc::new(hats::query::Streamed::default());
+        let batches = search.stream(
+            (&selection).into(),
+            service.data_files_for(&url).clone(),
+            service.sql_limits,
+            service.catalog_limits,
+            Arc::clone(&streamed),
+        );
+        // The first batch, read here rather than inside the body: a bound or a bad column
+        // reached on the first partition is still a status here, and a refusal from inside
+        // the body would be a dropped connection instead. It goes back in front of the
+        // rest, so the rows are all still there and in the catalog's order.
+        let (first, rest) = Box::pin(batches).into_future().await;
+        let first = first.transpose().map_err(&hide_the_path)?;
+        // From the partition rather than from the batch: a partition says what its columns
+        // are whether or not any of its rows matched, and a query that matched nothing
+        // still has a schema to answer with — which is what says what was looked at.
+        let schema = streamed
+            .schema()
+            .unwrap_or_else(|| Arc::new(Schema::empty()));
+        // What the body may say about a failure is what a refusal here would have said: the
+        // message a store raises about a mounted file names the operator's own path, and a
+        // stream outlives this handler, so it carries its own copy of what to hide.
+        let hide_in_body = {
+            let on_disk = on_disk.clone();
+            move |error: ApiError| match &on_disk {
+                Some(path) => error.from_mount(path),
+                None => error,
+            }
+        };
+        let batches = futures::stream::iter(first.map(Ok))
+            .chain(rest)
+            .map_err(hide_in_body);
+
+        tracing::info!(
+            url = %catalog_url,
+            chosen,
+            selected = params.columns.is_some(),
+            filtered = params.filters.is_some(),
+            format = output.format.name(),
+            streaming = true,
+            elapsed_ms = started.elapsed().as_millis(),
+            "catalog query"
+        );
+        return streamed_rows(&schema, batches, streamed, &output, started);
+    }
     let outcome = search
         .run(
             &selection,
@@ -591,12 +703,379 @@ mod tests {
     use crate::access::AccessPolicy;
     use crate::access::mount::Mounts;
     use crate::app::router;
-    use crate::app::testing::{SECRET, ask, ask_hats, body_of, mounted, post_json, serving};
+    use crate::app::testing::{
+        SECRET, ask, ask_hats, body_of, mounted, post_json, serving, with_limits,
+    };
     use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig};
     use crate::engine::query;
     use crate::hats;
 
     use super::*;
+
+    /// A streamed catalog answer is the same answer: the same rows, in the catalog's own
+    /// order, from the same partitions.
+    ///
+    /// What moves is the counts — out of the headers, which are gone before the first
+    /// partition is read, and into the end of the JSON body, where they are the same
+    /// numbers. `num_partitions` goes altogether: it is a header and there is nowhere in a
+    /// `SelectResponse` to put it.
+    #[tokio::test]
+    async fn a_streamed_catalog_answer_is_the_answer() {
+        let dir = hats::query::tests::fixture(true);
+        let region = hats::query::tests::regions()[0].clone();
+
+        for format in ["json", "csv", "tsv", "votable"] {
+            let body = |streaming: bool| {
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id"],
+                    "region": [region],
+                    "format": format,
+                    "streaming": streaming,
+                })
+            };
+            let (whole_status, whole) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(false)).await;
+            let (streamed_status, streamed) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(true)).await;
+            assert_eq!(whole_status, StatusCode::OK, "{format}: {whole}");
+            assert_eq!(streamed_status, StatusCode::OK, "{format}: {streamed}");
+
+            match format {
+                "json" => {
+                    let whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+                    let streamed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+                    assert_eq!(whole["rows"], streamed["rows"], "{format}");
+                    assert_eq!(whole["schema"], streamed["schema"], "{format}");
+                    assert_eq!(whole["num_rows"], streamed["num_rows"], "{format}");
+                    // Summed across the partitions rather than left at zero, which is a
+                    // number a caller cannot tell from a read that fetched nothing.
+                    assert_eq!(
+                        whole["data_bytes_read"], streamed["data_bytes_read"],
+                        "a streamed read cost something else: {streamed}"
+                    );
+                    assert!(
+                        streamed["data_bytes_read"].as_u64().unwrap_or_default() > 0,
+                        "{streamed}"
+                    );
+                    assert_eq!(
+                        whole["num_partitions"], streamed["num_partitions"],
+                        "{streamed}"
+                    );
+                    assert!(streamed["refused"].is_null(), "{streamed}");
+                    // Both drive the same encoder, so what differs is nothing: the two
+                    // bodies are one document with `elapsed_ms` left out of the comparison,
+                    // being the one number that is a measurement rather than an answer.
+                    let without_timing = |mut body: serde_json::Value| {
+                        body.as_object_mut().map(|body| body.remove("elapsed_ms"));
+                        body
+                    };
+                    assert_eq!(without_timing(whole), without_timing(streamed));
+                }
+                "votable" => {
+                    let rows = whole.matches("<TR>").count();
+                    assert_eq!(streamed.matches("<TR>").count(), rows, "{streamed}");
+                    assert!(streamed.contains("<TABLE>"), "{streamed}");
+                }
+                _ => assert_eq!(whole, streamed, "{format}"),
+            }
+        }
+    }
+
+    /// A streamed answer with a `limit` is still the catalog's order, because there the
+    /// order decides *which* rows come back.
+    ///
+    /// Without one the partitions are sent as they land — every matching row comes back
+    /// whatever order they arrive in, and waiting for position costs the read its slowest
+    /// partition at every step. With one, that would make the answer a different set of
+    /// rows each time, which is the thing a limit is not allowed to be.
+    #[tokio::test]
+    async fn a_limit_keeps_a_streamed_answer_in_the_catalogs_order() {
+        let dir = hats::query::tests::fixture(true);
+        let ask = |streaming: bool| {
+            ask_hats(
+                mounted(dir.path(), &ApiConfig::default()),
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id"],
+                    "limit": 5,
+                    "streaming": streaming,
+                }),
+            )
+        };
+        let (status, whole) = ask(false).await;
+        assert_eq!(status, StatusCode::OK, "{whole}");
+        let (status, streamed) = ask(true).await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+
+        let rows =
+            |body: &str| serde_json::from_str::<serde_json::Value>(body).unwrap()["rows"].clone();
+        // The same five rows in the same places: a limit under a stream is answered the
+        // way it is answered collected, and twice the same.
+        assert_eq!(rows(&whole), rows(&streamed));
+        let (_, again) = ask(true).await;
+        assert_eq!(rows(&streamed), rows(&again));
+    }
+
+    /// A format that cannot carry a column says so with a status, not by hanging up.
+    ///
+    /// `csv` refuses a nested column, and that refusal comes from the head of the
+    /// document — which a streamed answer writes before the `200` for this reason. Written
+    /// inside the body instead, the caller gets a dropped connection and nothing naming the
+    /// column, which is what this catches.
+    #[tokio::test]
+    async fn a_column_a_format_cannot_write_is_refused_before_the_status() {
+        let dir = hats::query::tests::fixture(true);
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///",
+                "columns": ["lightcurve"],
+                "format": "csv",
+                "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("lightcurve"), "{body}");
+    }
+
+    /// A bound reached mid-stream cannot become the `422` and the work list a collected
+    /// answer gives, the status having gone with the first row. So the body says it: JSON
+    /// ends with a `refused` naming the bound, and a caller who wants the work list asks
+    /// the plan route, which is what the message says.
+    #[tokio::test]
+    async fn a_streamed_answer_says_when_a_bound_stopped_it() {
+        let dir = hats::query::tests::fixture(true);
+        let api = ApiConfig::default();
+        // One row, over a catalog whose partitions hold more than that.
+        let limits = LimitsConfig {
+            max_rows: 1,
+            ..LimitsConfig::default()
+        };
+        let service = || with_limits(serving(dir.path()), &api, &limits);
+
+        let (status, streamed) = ask_hats(
+            service(),
+            serde_json::json!({"url": "file:///", "columns": ["id"], "streaming": true}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+        let answer: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+        let refused = answer["refused"].as_str().unwrap_or_default();
+        assert!(refused.contains("rows"), "{streamed}");
+
+        // The collected answer to the same request is the work list, which is what a
+        // stream gives up and what the refusal points at.
+        let (status, whole) = ask_hats(
+            service(),
+            serde_json::json!({"url": "file:///", "columns": ["id"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{whole}");
+    }
+
+    /// The partition count is the bound that acts before work happens, and a stream does not
+    /// get out of it.
+    ///
+    /// Without a `limit` the chosen list is the whole of what will be read, so it is known
+    /// before a byte is fetched — and a request over the bound is the same `422` and the
+    /// same work list on both routes, nothing having been sent yet. What a stream gives up
+    /// is only the bound it meets *part-way*.
+    #[tokio::test]
+    async fn a_streamed_answer_is_refused_up_front_for_too_many_partitions() {
+        let dir = hats::query::tests::fixture(true);
+        let api = ApiConfig::default();
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            ..LimitsConfig::default()
+        };
+        let service = || with_limits(serving(dir.path()), &api, &limits);
+        let body = |streaming: bool| serde_json::json!({"url": "file:///", "columns": ["id"], "streaming": streaming});
+
+        let (streamed_status, streamed) = ask_hats(service(), body(true)).await;
+        let (whole_status, whole) = ask_hats(service(), body(false)).await;
+        assert_eq!(
+            streamed_status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{streamed}"
+        );
+        assert_eq!(whole_status, StatusCode::UNPROCESSABLE_ENTITY, "{whole}");
+        // The same document: a work list the caller can act on, with the bound that
+        // produced it.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&streamed).unwrap()["reason"],
+            serde_json::from_str::<serde_json::Value>(&whole).unwrap()["reason"],
+        );
+
+        // With a `limit` the read stops itself, so the count is watched as the partitions
+        // land instead and the request is answered rather than refused.
+        let (status, answered) = ask_hats(
+            service(),
+            serde_json::json!({
+                "url": "file:///", "columns": ["id"], "limit": 1, "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{answered}");
+    }
+
+    /// A streamed answer with no rows still says what its columns were.
+    ///
+    /// The schema is a partition's rather than the request's, and a partition says what its
+    /// columns are whether or not any of its rows matched — so it comes off the read and
+    /// not off the first batch, which a query that matched nothing never produces. Taken
+    /// from the batch it was an answer describing no columns at all, which a caller cannot
+    /// tell from a catalog that has none.
+    #[tokio::test]
+    async fn a_streamed_answer_that_matched_nothing_still_names_its_columns() {
+        let dir = hats::query::tests::fixture(true);
+        for format in ["json", "csv"] {
+            let body = |streaming: bool| {
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id"],
+                    // True of nothing in the fixture, so every partition is read and none
+                    // of them yields a batch.
+                    "filters": "id < 0",
+                    "format": format,
+                    "streaming": streaming,
+                })
+            };
+            let (status, streamed) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(true)).await;
+            let (_, whole) =
+                ask_hats(mounted(dir.path(), &ApiConfig::default()), body(false)).await;
+            assert_eq!(status, StatusCode::OK, "{format}: {streamed}");
+            match format {
+                "json" => {
+                    let streamed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+                    let whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+                    assert_eq!(streamed["schema"], whole["schema"], "{streamed}");
+                    assert_eq!(streamed["rows"], serde_json::json!([]), "{streamed}");
+                    assert_eq!(streamed["num_rows"], 0, "{streamed}");
+                }
+                // The header names the columns, and it is the whole of what this answer
+                // has to say.
+                _ => assert_eq!(streamed, whole, "{format}"),
+            }
+        }
+    }
+
+    /// A read that fails after the first row says so at the end of the document.
+    ///
+    /// The status went out with that row, so there is no `502` left to send — but the end
+    /// of the answer is still to be written, and a format with somewhere to put a reason
+    /// puts it there. Without that the caller gets a dropped connection and has to guess
+    /// whether the rows really ended, which is the one thing this service does not let an
+    /// answer be ambiguous about.
+    #[tokio::test]
+    async fn a_read_that_fails_mid_stream_says_so_in_the_body() {
+        let dir = hats::query::tests::fixture(true);
+        // The second partition in the catalog's order, gone from under a search that has
+        // already listed it. The first is read and its rows are sent; the second is the
+        // failure, and by then the head of the document has gone.
+        let missing = dir
+            .path()
+            .join(hats::HatsPartition::new(3, 65).path(".parquet"));
+        std::fs::remove_file(&missing).unwrap();
+
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            // Over one partition's worth, so the read goes on to the one that is gone.
+            serde_json::json!({
+                "url": "file:///", "columns": ["id"], "limit": 100, "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["num_rows"], 64, "{body}");
+        assert!(!answer["refused"].is_null(), "{body}");
+        // And what it says is the caller's own url, never the mount's source on this disk.
+        let refused = answer["refused"].as_str().unwrap_or_default();
+        assert!(!refused.contains(&*dir.path().to_string_lossy()), "{body}");
+
+        // A VOTable says it as DALI §4.4 does, and says the right one of the two: `ERROR`
+        // for a read that stopped, never the `OVERFLOW` that means a whole answer was cut
+        // at a bound and would have a client retrying with a narrower query.
+        let (status, body) = ask_hats(
+            mounted(dir.path(), &ApiConfig::default()),
+            serde_json::json!({
+                "url": "file:///",
+                "columns": ["id"],
+                "limit": 100,
+                "format": "votable",
+                "streaming": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("<INFO name=\"QUERY_STATUS\" value=\"ERROR\">"),
+            "{body}"
+        );
+        assert!(!body.contains("value=\"OVERFLOW\""), "{body}");
+    }
+
+    /// `max_rows` is charged the rows the partitions matched, and a `limit` does not lower
+    /// the bill.
+    ///
+    /// The two reads reach that number differently — the collected one sums what it read
+    /// and trims at the end, the streamed one trims as it sends — so what each charges the
+    /// bound is what each has to be held to. A request over it is refused whichever way it
+    /// was asked for, and one under it is answered the same way twice.
+    #[tokio::test]
+    async fn a_limit_does_not_lower_what_a_read_charges_max_rows() {
+        let dir = hats::query::tests::fixture(true);
+        let api = ApiConfig::default();
+        // The fixture's partitions hold 64 rows apiece, so a limit of 100 reads two of them
+        // and the bound sees all 128 rows they matched — never the 100 that survive.
+        let body = |streaming: bool| {
+            serde_json::json!({
+                "url": "file:///", "columns": ["id"], "limit": 100, "streaming": streaming,
+            })
+        };
+        let over = LimitsConfig {
+            max_rows: 110,
+            ..LimitsConfig::default()
+        };
+        let under = LimitsConfig {
+            max_rows: 200,
+            ..LimitsConfig::default()
+        };
+
+        let (status, whole) =
+            ask_hats(with_limits(serving(dir.path()), &api, &over), body(false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{whole}");
+        // The same bound, said the way a stream can say it: the rows that had already gone
+        // and then the reason there are no more.
+        let (status, streamed) =
+            ask_hats(with_limits(serving(dir.path()), &api, &over), body(true)).await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+        let answer: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+        assert_eq!(answer["num_rows"], 64, "{streamed}");
+        assert!(
+            answer["refused"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rows"),
+            "the bound the collected read refused on: {streamed}"
+        );
+
+        // Room for what the partitions matched, so both answer — and with the same rows.
+        let (status, whole) =
+            ask_hats(with_limits(serving(dir.path()), &api, &under), body(false)).await;
+        assert_eq!(status, StatusCode::OK, "{whole}");
+        let (status, streamed) =
+            ask_hats(with_limits(serving(dir.path()), &api, &under), body(true)).await;
+        assert_eq!(status, StatusCode::OK, "{streamed}");
+        let whole: serde_json::Value = serde_json::from_str(&whole).unwrap();
+        let streamed: serde_json::Value = serde_json::from_str(&streamed).unwrap();
+        assert_eq!(whole["rows"], streamed["rows"]);
+        assert_eq!(streamed["num_rows"], 100);
+        assert!(streamed["refused"].is_null(), "{streamed}");
+    }
 
     /// The route end to end: a body naming a catalog by a mount's path comes back with the
     /// rows the region holds, and with the count of partitions they came out of.
@@ -983,6 +1462,7 @@ mod tests {
             format: None,
             dsv_null_value: None,
             limit: None,
+            streaming: false,
             unknown: BTreeMap::new(),
         };
         let url = parse_url(params.url.as_str()).unwrap();

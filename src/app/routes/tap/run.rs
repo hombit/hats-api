@@ -1,13 +1,22 @@
 //! One statement, from the parameters to the bytes of the answer.
 //!
-//! Both TAP query resources run this and differ only in what becomes of what it returns:
-//! `/sync` puts the bytes in the response, `/async` will put them in a file. Keeping it one
-//! callable is what makes the uploads, `MAXREC`, the `TAP_SCHEMA` tables and the format table
-//! answer the same on both — by construction, rather than by a test that the two have not
-//! drifted.
+//! Both TAP query resources run this and differ only in where the bytes go: `/sync` puts
+//! them in the response and `/async` puts them in a file. Everything up to the rows is one
+//! callable, which is what makes the uploads, `MAXREC`, the `TAP_SCHEMA` tables and the
+//! format table answer the same on both — by construction, rather than by a test that the
+//! two have not drifted.
+//!
+//! **What differs after that is whether the answer has to exist all at once.** A `/sync`
+//! body carries a length, so the document is built and measured; a job's answer is a file,
+//! so it is written as it is encoded and never held. The second is why [`write()`] exists
+//! beside [`run`]: the peak of a job is then one batch and one chunk rather than the rows
+//! and the whole document, and the ceiling on what a job may keep refuses at the byte that
+//! passes it instead of once all of it is in memory.
 //!
 //! Nothing here knows it is inside a request future. The caller supplies the ceiling a route
 //! allows and reads the answer out; the clock over the router is the sync route's alone.
+
+use std::time::Instant;
 
 use crate::access::data::DataFiles;
 use crate::adql;
@@ -19,8 +28,9 @@ use crate::app::routes::tap::published::describe;
 use crate::app::routes::tap::upload::{Kind, UPLOAD_SCHEMA, Upload};
 use crate::app::service::Service;
 use crate::error::ApiError;
-use crate::output::{dsv, votable};
+use crate::output::{dsv, stream, votable};
 use crate::storage::{self, Authorities, StorageOptions};
+use crate::tap::jobs::Writing;
 use crate::tap::schema;
 
 /// What a null is written as in `csv` and `tsv` here.
@@ -29,15 +39,14 @@ use crate::tap::schema;
 /// caller to choose and no reason to answer differently from the writer's default.
 const DSV_NULL: &str = "";
 
-/// One statement's answer: the bytes, what they are, and what is worth saying about them.
+/// What one statement's answer turned out to be, beside the bytes of it.
 ///
-/// The rows are gone by the time this exists — the encoders take a collected result and
-/// build the whole document, so carrying both would hold two copies of one answer. What is
-/// kept beside the bytes is the two numbers a log line wants and the overflow flag a body
-/// cannot always carry.
+/// The bytes are not here: they are the response body on one resource and a file on the
+/// other, and both are large enough that carrying them through a struct nobody needs them
+/// in would be a second copy of one answer. What is kept is the two numbers a log line
+/// wants and the overflow flag a body cannot always carry.
 #[derive(Debug)]
 pub(super) struct Answered {
-    pub body: String,
     pub content_type: &'static str,
     /// Whether the answer stopped at the row bound. Only a VOTable can say so in the
     /// document; the delimited formats have nowhere to put it.
@@ -48,17 +57,116 @@ pub(super) struct Answered {
     pub tables: Vec<String>,
 }
 
-/// Run one request's statement against the tables it names.
-///
-/// `ceiling` is what the route allows; `MAXREC` narrows it and never widens it. The row
-/// bound truncates rather than refusing — on the TAP resources alone, `OVERFLOW` being the
-/// in-band statement whose absence makes a cut answer indistinguishable from a whole one.
+/// Run one request's statement and keep the whole answer, which is what a `/sync` body is.
 pub(super) async fn run(
     service: &Service,
     parameters: &Parameters,
     answering: Answering,
     ceiling: adql::query::Limits,
+) -> Result<(String, Answered), ApiError> {
+    let prepared = prepare(service, parameters, ceiling).await?;
+    let answer = adql::query::run(
+        &prepared.translated,
+        &prepared.tables,
+        &prepared.data_files,
+        prepared.limits,
+    )
+    .await?;
+    let body = encode(&answer, answering)?;
+    Ok((
+        body,
+        Answered {
+            content_type: answering.content_type,
+            overflow: answer.overflow,
+            num_rows: answer.result.num_rows(),
+            data_bytes_read: answer.result.data_bytes_read,
+            tables: prepared
+                .tables
+                .iter()
+                .map(|table| table.name.clone())
+                .collect(),
+        },
+    ))
+}
+
+/// The same statement, written into a sink as its rows arrive.
+///
+/// Nothing between the first byte and the last is held: each batch becomes a piece of the
+/// document, the piece goes to the sink, and both are dropped. What the sink does with a
+/// piece — count it against a ceiling, refuse — is the sink's, and a refusal ends the
+/// reading where it stands.
+///
+/// **A streamed document has no `nrows`.** The count is known only once the rows have run
+/// out and the attribute sits at the head of the `TABLE`, so it is left out — which VOTable
+/// allows, it being optional, and which the job record answers anyway.
+pub(super) async fn write(
+    service: &Service,
+    parameters: &Parameters,
+    answering: Answering,
+    ceiling: adql::query::Limits,
+    into: &mut Writing,
 ) -> Result<Answered, ApiError> {
+    let started = Instant::now();
+    let prepared = prepare(service, parameters, ceiling).await?;
+    let mut encoder = encoder(answering)?;
+    let mut execution = adql::query::plan(
+        &prepared.translated,
+        &prepared.tables,
+        &prepared.data_files,
+        prepared.limits,
+    )
+    .await?;
+
+    into.write(&encoder.begin(&execution.schema)?).await?;
+    while let Some(batch) = execution.next().await {
+        into.write(&encoder.rows(&batch?)?).await?;
+    }
+    let ending = stream::Ending {
+        rows: execution.num_rows(),
+        data_bytes_read: execution.data_bytes_read(),
+        // A statement's scan, whatever it read, is not a count this document has a place
+        // for: VOTable and the delimited formats say nothing about either.
+        partitions: None,
+        elapsed: started.elapsed(),
+        overflow: execution.overflow(),
+        // A bound that stopped this part-way is the row bound, which `overflow` already
+        // says; a read that fails leaves the job in error with nothing kept, so there is
+        // no half-written document here to explain itself.
+        stopped: None,
+    };
+    into.write(&encoder.end(ending)?).await?;
+    Ok(Answered {
+        content_type: answering.content_type,
+        overflow: execution.overflow(),
+        num_rows: execution.num_rows(),
+        data_bytes_read: execution.data_bytes_read(),
+        tables: prepared
+            .tables
+            .iter()
+            .map(|table| table.name.clone())
+            .collect(),
+    })
+}
+
+/// A statement and the tables it names, opened and ready to be planned.
+#[derive(Debug)]
+struct Prepared {
+    translated: adql::Translated,
+    tables: Vec<Table>,
+    data_files: DataFiles,
+    limits: adql::query::Limits,
+}
+
+/// Read one request's parameters and open every table its statement names.
+///
+/// `ceiling` is what the route allows; `MAXREC` narrows it and never widens it. The row
+/// bound truncates rather than refusing — on the TAP resources alone, `OVERFLOW` being the
+/// in-band statement whose absence makes a cut answer indistinguishable from a whole one.
+async fn prepare(
+    service: &Service,
+    parameters: &Parameters,
+    ceiling: adql::query::Limits,
+) -> Result<Prepared, ApiError> {
     let translated = adql::translate(&parameters.query, service.sql_limits)?;
 
     // Read once, and only where the statement names one of TAP_SCHEMA's tables: describing
@@ -142,14 +250,11 @@ pub(super) async fn run(
         rows: Rows::Truncate,
         ..ceiling
     };
-    let answer = adql::query::run(&translated, &tables, &data_files, limits).await?;
-    Ok(Answered {
-        body: encode(&answer, answering)?,
-        content_type: answering.content_type,
-        overflow: answer.overflow,
-        num_rows: answer.result.num_rows(),
-        data_bytes_read: answer.result.data_bytes_read,
-        tables: translated.tables.iter().cloned().collect(),
+    Ok(Prepared {
+        translated,
+        tables,
+        data_files,
+        limits,
     })
 }
 
@@ -212,6 +317,25 @@ fn uploaded<'a>(
             Ok((Source::Catalog(dir), Some(files)))
         }
     }
+}
+
+/// The format the request asked for, as something a batch at a time goes through.
+///
+/// The same encoders the collected writers are built on — [`encode`] drives them over rows
+/// that are all in hand, and this drives them over rows that are not. Two ways of writing
+/// one format would be two things to keep saying the same.
+fn encoder(answering: Answering) -> Result<Box<dyn stream::Encoder>, ApiError> {
+    Ok(match answering.format {
+        Format::Votable => Box::new(votable::Document::new(None)),
+        Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, DSV_NULL)),
+        // The spelling table is the only source of a format here, and it holds these two.
+        other => {
+            return Err(ApiError::internal(format!(
+                "{} is not a format this resource writes",
+                other.name()
+            )));
+        }
+    })
 }
 
 /// The rows, in the format the request asked for.
