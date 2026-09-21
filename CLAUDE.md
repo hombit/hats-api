@@ -1609,6 +1609,14 @@ else builds from has the change on it.
 Six steps, in this order. The first three are one commit, and the tag is what turns it
 into a release.
 
+**The branch is `release-vx.y.z`, never `vx.y.z`.** A branch and a tag of the same name
+make every ref naming it ambiguous, and git resolves that ambiguity differently depending
+on the command: `git push origin vx.y.z` refuses outright, and `git push origin --delete
+vx.y.z` — meant for the merged branch — takes the tag instead. That deletes the release
+mid-flight, and the Docker build that the tag started fails on `couldn't find remote ref`
+having already begun checking it out. Naming the branch apart is the whole of the fix;
+pushing a tag as `refs/tags/vx.y.z` only works around it.
+
 1. **`version` in `Cargo.toml`.** This is the number the release is; everything below
    reads it rather than restating it.
 2. **`cargo update`.** A release is the moment to take the dependency updates that need no
@@ -1645,10 +1653,15 @@ into a release.
    placeholders where they are, and the new section carries only the headings it filled.
 4. **Commit it as `vx.y.z`**, the version alone as the subject. That is what makes the
    release commit findable among the ones that describe changes.
-5. **Tag `vx.y.z`** on that commit and push it. The tag is the trigger: pushing it builds
-   and publishes the release image, and the Docker workflow checks the tag against
-   `Cargo.toml`'s `version`, so a tag that disagrees with step 1 fails rather than
-   publishing a mislabelled image.
+5. **Tag `vx.y.z`** and push it. The tag is the trigger: pushing it builds and publishes
+   the release image, and the Docker workflow checks the tag against `Cargo.toml`'s
+   `version`, so a tag that disagrees with step 1 fails rather than publishing a
+   mislabelled image.
+
+   It goes on `main` after the merge, not on the `vx.y.z` commit itself. Anything else
+   merged while the release was in review is on `main` and not on that commit, so tagging
+   the commit publishes an image that is not what `main` says it is — and the difference
+   is invisible afterwards, the tag naming a commit that looks like the release.
 6. **The GitHub release**, titled `Release vx.y.z`, with GitHub's own generated notes as
    its body:
 
