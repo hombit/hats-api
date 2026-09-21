@@ -12,4 +12,4 @@ pub mod tables;
 pub mod uws;
 
 pub use metadata::{ColumnMetadata, Marks, TableMetadata};
-pub use tables::{TapTable, TapTableList};
+pub use tables::{TapExample, TapTable, TapTableList};

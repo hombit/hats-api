@@ -72,6 +72,7 @@ fn mounted(server: &TestS3, tables: &[(&str, &str)]) -> Service {
             .map(|(name, path)| TapTableConfig {
                 name: (*name).to_owned(),
                 path: (*path).to_owned(),
+                examples: Vec::new(),
             })
             .collect(),
         jobs: Default::default(),

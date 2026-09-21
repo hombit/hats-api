@@ -26,10 +26,20 @@ use crate::hats;
 /// One mount at `/`, one table over it, which is the smallest deployment that has a TAP
 /// surface at all.
 fn published(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
+    published_with(dir, limits, Vec::new())
+}
+
+/// The same, with examples the operator wrote for the table.
+fn published_with(
+    dir: &std::path::Path,
+    limits: &LimitsConfig,
+    examples: Vec<crate::config::TapExampleConfig>,
+) -> Service {
     let tap = TapConfig {
         tables: vec![TapTableConfig {
             name: "sky.objects".to_owned(),
             path: "/".to_owned(),
+            examples,
         }],
         jobs: Default::default(),
     };
@@ -90,6 +100,202 @@ async fn send(service: Service, request: Request<Body>) -> (StatusCode, String, 
         content_type,
         String::from_utf8_lossy(&body).into_owned(),
     )
+}
+
+/// The examples document, as a client fetches it.
+async fn fetch_examples(service: Service) -> (StatusCode, String, String) {
+    send(
+        service,
+        Request::builder()
+            .uri("/api/v1/tap/examples")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+}
+
+/// The document, read by a strict XML parser.
+///
+/// Which is what a client uses: `pyvo` runs `xml.etree.ElementTree` over the bytes, with no
+/// HTML tolerance anywhere in it, and `taplint` validates it as a document. So a page a
+/// browser renders happily and an XML parser rejects is one that reaches an astronomer as
+/// an empty menu rather than as a complaint — the failure this whole resource is for.
+fn parsed_as_xml(page: &str) {
+    let mut reader = quick_xml::Reader::from_str(page);
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Eof) => return,
+            Ok(_) => {}
+            Err(error) => panic!(
+                "not well-formed XML at byte {}: {error}\n{page}",
+                reader.buffer_position()
+            ),
+        }
+    }
+}
+
+/// The queries a document publishes, read out of it the way a client reads them.
+fn queries(page: &str) -> Vec<String> {
+    page.split("<pre property=\"query\">")
+        .skip(1)
+        .map(|rest| {
+            let text = rest.split("</pre>").next().expect("a closed query element");
+            quick_xml::escape::unescape(text).unwrap().into_owned()
+        })
+        .collect()
+}
+
+/// One example per published table, written from what the catalog says about itself.
+///
+/// Every attribute asserted here is one a client matches on — DALI §2.3's `vocab`,
+/// `typeof`, `resource` and `name`, TAP §2.6's `query` and `table` — so a document missing
+/// any of them is one TOPCAT shows an empty menu for rather than one it complains about.
+#[tokio::test]
+async fn the_examples_document_offers_a_cone_per_published_table() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, content_type, page) =
+        fetch_examples(published(dir.path(), &LimitsConfig::default())).await;
+
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(content_type, "text/html; charset=utf-8");
+    parsed_as_xml(&page);
+    assert!(
+        page.contains("vocab=\"http://www.ivoa.net/rdf/examples#\""),
+        "{page}"
+    );
+    assert!(page.contains("typeof=\"example\""), "{page}");
+    assert!(
+        page.contains("<div id=\"sky.objects\" resource=\"#sky.objects\""),
+        "{page}"
+    );
+    assert!(page.contains("property=\"name\""), "{page}");
+    assert!(
+        page.contains("<span property=\"table\">sky.objects</span>"),
+        "{page}"
+    );
+
+    let found = queries(&page);
+    let [query] = found.as_slice() else {
+        panic!("expected one example, got {found:?}")
+    };
+    // A line per clause, asserted as lines rather than by searching in them: this is the
+    // text a reader sees and then edits, so the layout is part of what is published.
+    //
+    // Named columns and a row bound are what keep it from being the slow query a reader
+    // concludes the service is broken by; the cone is the spelling nobody guesses. The
+    // position leads, this being a cone search whose answer has to say where its rows are,
+    // and the HEALPix index is absent — the importer's machinery rather than the catalog's
+    // content, which nobody opening a menu asked for.
+    let lines: Vec<&str> = query.lines().collect();
+    let [select, from, where_] = lines.as_slice() else {
+        panic!("expected three lines:\n{query}")
+    };
+    assert_eq!(*select, "SELECT TOP 10 ra, dec, id");
+    assert_eq!(*from, "FROM sky.objects");
+    assert!(
+        where_.starts_with("WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE("),
+        "{query}"
+    );
+    assert!(where_.ends_with("))"), "{query}");
+}
+
+/// **The generated example runs, and returns rows.** That is the whole of what this
+/// resource is worth: a menu entry that 400s, or that comes back empty, is worse than no
+/// menu — a new user reads either as the service being broken rather than as the example
+/// being wrong.
+///
+/// The position is what this really holds. It is the centre of one of the catalog's own
+/// partition cells, which is a place the catalog has rows by construction; a position
+/// guessed from anything else is one that happens to work on the catalog it was written
+/// against.
+#[tokio::test]
+async fn the_generated_example_is_a_query_that_returns_rows() {
+    let dir = hats::query::tests::fixture(true);
+    let (_, _, page) = fetch_examples(published(dir.path(), &LimitsConfig::default())).await;
+    let found = queries(&page);
+    let [query] = found.as_slice() else {
+        panic!("expected one example, got {found:?}")
+    };
+
+    let (status, content_type, answer) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[("QUERY", query), ("LANG", "ADQL")],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{query}\n{answer}");
+    assert_eq!(content_type, "application/x-votable+xml");
+    assert!(
+        answer.contains("<INFO name=\"QUERY_STATUS\" value=\"OK\"/>"),
+        "{answer}"
+    );
+    assert!(answer.contains("<TR>"), "{query}\n{answer}");
+}
+
+/// An operator who wrote examples for a table has said what that table's examples are, so
+/// the generated one is gone rather than sitting underneath them.
+#[tokio::test]
+async fn an_operators_examples_replace_the_generated_one() {
+    let dir = hats::query::tests::fixture(true);
+    let wrote = |name: &str, query: &str| crate::config::TapExampleConfig {
+        name: name.to_owned(),
+        query: query.to_owned(),
+    };
+    let service = published_with(
+        dir.path(),
+        &LimitsConfig::default(),
+        vec![
+            wrote("Lowest ids", "SELECT TOP 3 id FROM sky.objects ORDER BY id"),
+            // A name and a query carrying markup, both of which come out of a file this
+            // service did not write.
+            wrote("Ampersand & <angle>", "SELECT TOP 1 id FROM sky.objects"),
+        ],
+    );
+
+    let (status, _, page) = fetch_examples(service).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    parsed_as_xml(&page);
+    assert_eq!(
+        queries(&page),
+        [
+            "SELECT TOP 3 id FROM sky.objects ORDER BY id",
+            "SELECT TOP 1 id FROM sky.objects",
+        ]
+    );
+    // Nothing of the generated one is left.
+    assert!(!page.contains("CONTAINS"), "{page}");
+    // Two examples under one table need two fragments, or a client referencing one reaches
+    // whichever the parser saw first.
+    assert!(page.contains("id=\"sky.objects-1\""), "{page}");
+    assert!(page.contains("id=\"sky.objects-2\""), "{page}");
+    // A configured string is markup until it is escaped.
+    assert!(page.contains("Ampersand &amp; &lt;angle&gt;"), "{page}");
+}
+
+/// A client picks the resource out of `/capabilities` and has no other way to find it, so
+/// the declaration and the route are one change. DALI §2.3 puts it the other way round too:
+/// a service that does not implement `/examples` answers 404 there.
+#[tokio::test]
+async fn the_examples_resource_is_declared() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, document) = send(
+        published(dir.path(), &LimitsConfig::default()),
+        Request::builder()
+            .uri("/api/v1/tap/capabilities")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert!(
+        document.contains("standardID=\"ivo://ivoa.net/std/DALI#examples\""),
+        "{document}"
+    );
+    assert!(
+        document
+            .contains("<accessURL use=\"full\">http://localhost/api/v1/tap/examples</accessURL>"),
+        "{document}"
+    );
 }
 
 /// A statement naming the published table, answered as a VOTable on both verbs.

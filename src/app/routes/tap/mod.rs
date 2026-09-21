@@ -1,6 +1,7 @@
 //! The TAP resources, siblings under `{api.prefix}/tap`.
 
 mod answer;
+mod examples;
 mod format;
 mod jobs;
 mod parameters;
@@ -13,6 +14,7 @@ mod vosi;
 #[cfg(test)]
 mod tests;
 
+pub(in crate::app) use examples::examples;
 pub use jobs::Jobs;
 pub(in crate::app) use jobs::{
     act, create, destroy, destruction, error, execution_duration, job_parameters, list, owner,

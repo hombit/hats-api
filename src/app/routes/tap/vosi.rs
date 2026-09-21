@@ -15,8 +15,8 @@ use serde::Deserialize;
 
 use crate::adql::language;
 use crate::app::routes::tap::answer::{answered, base_url, document};
-use crate::app::routes::tap::format;
 use crate::app::routes::tap::published::describe;
+use crate::app::routes::tap::{examples, format};
 use crate::app::service::Service;
 use crate::error::ApiError;
 use crate::tap::metadata::TableMetadata;
@@ -127,6 +127,11 @@ pub(in crate::app) async fn capabilities(
         ("ivo://ivoa.net/std/VOSI#capabilities", "capabilities"),
         ("ivo://ivoa.net/std/VOSI#availability", "availability"),
         ("ivo://ivoa.net/std/VOSI#tables-1.1", "tables"),
+        // Not VOSI's, and declared beside them because it is the same shape: one standard
+        // id and one url. A client that does not find it here does not look for the
+        // resource, and DALI §2.3 has an absent one answer 404 — so the declaration and the
+        // route go together.
+        (examples::EXAMPLES_STANDARD, examples::EXAMPLES_RESOURCE),
     ] {
         let _ = write!(out, "<capability standardID=\"{standard}\">");
         interface(&mut out, &format!("{base}/{resource}"), "full", None);

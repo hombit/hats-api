@@ -436,6 +436,9 @@ fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
         .route(&route(prefix, "tap/availability"), get(tap::availability))
         .route(&route(prefix, "tap/capabilities"), get(tap::capabilities))
         .route(&route(prefix, "tap/tables"), get(tap::tables))
+        // Queries a client offers a user, which is the one resource here that exists to be
+        // read by a person rather than by a program.
+        .route(&route(prefix, "tap/examples"), get(tap::examples))
         // One table by name, which is how a client that has the name already avoids
         // fetching every column of every table.
         .route(&route(prefix, "tap/tables/{name}"), get(tap::table))
@@ -1285,6 +1288,7 @@ mod tests {
             tables: vec![crate::config::TapTableConfig {
                 name: "gaia_dr3.gaia_source".to_owned(),
                 path: "/gaia".to_owned(),
+                examples: Vec::new(),
             }],
             jobs: Default::default(),
         };

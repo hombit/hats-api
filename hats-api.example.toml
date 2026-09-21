@@ -146,6 +146,19 @@ filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 # name = "ztf.dr24_lc"
 # path = "/hats/ztf_dr24_lc"
 
+# Queries to offer against a published table, published at /tap/examples — TOPCAT shows them
+# under Examples -> Service Provided, and pyvo returns them from TAPService.examples. The
+# default is one cone search per table, written from the catalog; any written here replace it.
+#
+# [[tap.table.example]]
+# name = "Bright stars near M13"
+# query = """
+# SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag
+# FROM gaia_dr3.gaia_source
+# WHERE phot_g_mean_mag < 15
+#   AND 1 = CONTAINS(POINT(ra, dec), CIRCLE(250.42, 36.46, 0.1))
+# """
+
 # What a query submitted to /tap/async may spend. There is no switch for it: TAP requires
 # /sync and /async both, so publishing a table publishes a job resource too.
 [tap.async]

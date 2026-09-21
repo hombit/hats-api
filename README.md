@@ -706,6 +706,32 @@ In TOPCAT: *VO → Table Access Protocol (TAP) Query*, then paste the URL.
 [ADQL](#adql) says what the query language answers, and how a query over a large catalog is
 bounded.
 
+### Example queries
+
+The service publishes a working query per table at `/api/v1/tap/examples`. TOPCAT offers
+them under *Examples → Service Provided*; `pyvo` reads them as `TAPService.examples`; a
+browser shows the page.
+
+Each is a cone search over the catalog's own position columns, centred on one of its rows,
+selecting a few of its columns.
+
+To offer your own instead, add them to the table. They replace the generated one:
+
+```toml
+[[tap.table]]
+name = "gaia_dr3.gaia_source"
+path = "/hats/gaia"
+
+[[tap.table.example]]
+name = "Bright stars near M13"
+query = """
+SELECT TOP 10 source_id, ra, dec, phot_g_mean_mag
+FROM gaia_dr3.gaia_source
+WHERE phot_g_mean_mag < 15
+  AND 1 = CONTAINS(POINT(ra, dec), CIRCLE(250.42, 36.46, 0.1))
+"""
+```
+
 ### Querying a catalog the service does not publish
 
 `UPLOAD` gives a name to a catalog URL, and the query reads that catalog as
@@ -821,6 +847,7 @@ VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for
 | `/api/v1/tap/capabilities` | what the service supports |
 | `/api/v1/tap/availability` | whether it is up |
 | `/api/v1/tap/tables` | tables and columns; `?detail=min` for names only, `…/tables/{name}` for one |
+| `/api/v1/tap/examples` | [example queries](#example-queries), which clients offer in a menu |
 
 The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables`,
 `TAP_SCHEMA.columns`, `TAP_SCHEMA.keys` and `TAP_SCHEMA.key_columns`.
@@ -840,7 +867,7 @@ reads `COMPLETED`, and collect the rows from `…/results/result`. That is UWS, 
 range and resumed, and `[tap.async]` is where an operator lets one read more than a `/sync`
 request may.
 
-`/examples` and uploading a table in the request itself are still to come.
+Uploading a table in the request itself is still to come.
 
 ## What a request may spend
 
@@ -983,7 +1010,8 @@ answered as usual. Two mounts may not claim overlapping URL prefixes, served or 
 ### Published tables
 
 `[[tap.table]]` lists the catalogs [TAP](#publishing-catalogs) serves. The TAP resources
-answer once at least one is listed.
+answer once at least one is listed. `[[tap.table.example]]` under an entry offers
+[queries of your own](#example-queries) in place of the generated one.
 
 ### Which files are data
 

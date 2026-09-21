@@ -1451,6 +1451,27 @@ and the parameter rules are §3.
 - **Every answer is a document a TAP client can read, refusals included.** `ApiError` renders
   JSON, which a client looking for `QUERY_STATUS` has nothing to say about — so the status is
   kept and the body is replaced, by `app::routes::tap::answer::answered`.
+- **An example is a query that runs, and its centre is a row.** `/examples` publishes one
+  cone per table, and the only thing that reliably makes it return rows is centring it on a
+  position the catalog actually holds — read from `data_thumbnail.parquet`, or from the first
+  row group of two columns of the smallest partition where a catalog has no thumbnail. It is
+  the one read here that touches data, and it is worth it: a cell's centre is empty wherever
+  the data fills a corner of it, which is every catalog covering a patch of sky rather than
+  the whole of it. `hats`'s own `io/summary_file.py` settles it the same way. The radius is a
+  tenth of the deepest partition's size capped at ten arcminutes, the cell alone spanning
+  four orders of magnitude between catalogs.
+
+  Three things it may not do, each the same failure as a menu entry that 400s: `SELECT *`,
+  these catalogs being 150 to 370 columns wide; name a nested column, which no format the
+  answer can be read in carries; and leave off the `TOP`, which is what keeps the read to the
+  partitions the cone names. The position columns lead the projection — a cone whose answer
+  does not say where its rows are demonstrates the wrong thing.
+
+  `[[tap.table.example]]` **replaces** that table's generated example rather than adding to
+  it, an operator who wrote one having said what their table's example is. Nothing in this
+  crate checks that such a query still runs, and nothing should: it would mean planning a
+  statement against a catalog at startup. What checks it is `tap-conformance`, which fetches
+  the published document and sends every query in it.
 
 ## Measuring the TAP surface
 

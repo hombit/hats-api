@@ -39,6 +39,13 @@ pub const COMMON_METADATA: &str = "dataset/_common_metadata";
 /// The one-line-per-partition listing at the catalog root.
 pub const PARTITION_INFO: &str = "partition_info.csv";
 
+/// A handful of the catalog's own rows, at its root, written by `hats` so that something
+/// wanting a representative row need not open a partition to get one.
+///
+/// Not every catalog has it — it is recent, and the ones published today largely predate it
+/// — so whatever reads it needs an answer for its absence rather than a requirement.
+pub const DATA_THUMBNAIL: &str = "data_thumbnail.parquet";
+
 /// One partition: a HEALPix cell, and what the source that found it could say about its
 /// size.
 #[derive(Debug, Clone, PartialEq, Eq)]

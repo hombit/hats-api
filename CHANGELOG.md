@@ -14,6 +14,8 @@ Release dates are in the UTC time zone.
 - `[limits] query_cache_seconds` and `[limits] max_query_cache_bytes`: an answer is held for the requests that read it. `0` seconds is off.
 - `/api/v1/tap/async`: ADQL queries as UWS jobs — submit, poll, collect, abort, destroy. TAP's one remaining MUST.
 - `[tap.async]`, and `[tap.async.limits]` for the `[limits]` fields a job answers to differently.
+- `/api/v1/tap/examples`: a cone search per published table, declared in `/capabilities` as `ivo://ivoa.net/std/DALI#examples`. [#93](https://github.com/hombit/hats-api/pull/93)
+- `[[tap.table.example]]`, with `name` and `query`, offering queries of your own in place of a table's generated one. [#93](https://github.com/hombit/hats-api/pull/93)
 
 ### Changed
 

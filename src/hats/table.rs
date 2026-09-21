@@ -133,6 +133,14 @@ impl HatsTable {
         self.index.as_deref()
     }
 
+    /// The catalog behind the table: its partition list, its own files, its properties.
+    ///
+    /// What reads it besides the scan is the `/examples` resource, which wants a partition
+    /// to take a row's position out of and the catalog's own layout to find that file by.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
+    }
+
     /// The partitions a filter cannot rule out.
     ///
     /// Every partition where there is nothing to prune on — no index column, or no filter that
