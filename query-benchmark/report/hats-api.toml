@@ -1,0 +1,36 @@
+# Written by query-benchmark. Every run overwrites it.
+
+[server]
+address = "127.0.0.1"
+port = 52260
+
+[api]
+enabled = true
+
+[limits]
+max_request_seconds = 600
+max_bytes_fetched = "50GiB"
+max_rows = 10000000
+max_partitions = 4096
+
+[[mount]]
+path = "/tess"
+source = "https://data.lsdb.io/hats/tess/tess_lightcurve"
+serve = false
+
+[[mount]]
+path = "/gaia"
+source = "https://data.lsdb.io/hats/gaia_dr3_epoch_phot"
+serve = false
+
+[[mount]]
+path = "/ztf"
+source = "s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats"
+serve = false
+storage = { region = "us-east-1" }
+
+[[mount]]
+path = "/ps1"
+source = "s3://stpubdata/panstarrs/ps1/public/hats/detection"
+serve = false
+storage = { region = "us-east-1" }

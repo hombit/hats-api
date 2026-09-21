@@ -2,7 +2,7 @@
 name = "lsdb-conformance"
 version = "0.0.0"
 description = "What LSDB makes of this service, against what it makes of S3 directly"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "lsdb>=0.10",
     # What the direct route reads S3 with; named here because `anon=True` is its option.
