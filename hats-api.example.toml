@@ -146,11 +146,9 @@ filenames = ["*.parq", "*.parquet", "*.pq", "_metadata", "_common_metadata"]
 # name = "ztf.dr24_lc"
 # path = "/hats/ztf_dr24_lc"
 
-# Queries to offer against a published table, which clients show in a menu and which this
-# service publishes at /tap/examples. With none, it writes one cone search per table from
-# what the catalog says about itself; with any, they replace it — so this is where somebody
-# who has looked at the data puts a position and a predicate worth looking at. Nothing
-# checks that a query still runs, so an example is worth keeping as short as it can be.
+# Queries to offer against a published table, published at /tap/examples — TOPCAT shows them
+# under Examples -> Service Provided, and pyvo returns them from TAPService.examples. The
+# default is one cone search per table, written from the catalog; any written here replace it.
 #
 # [[tap.table.example]]
 # name = "Bright stars near M13"

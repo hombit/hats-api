@@ -133,13 +133,12 @@ impl HatsTable {
         self.index.as_deref()
     }
 
-    /// Which cells the catalog is cut into, read while it was opened.
+    /// The catalog behind the table: its partition list, its own files, its properties.
     ///
-    /// What reads it besides the scan is the `/examples` resource: a partition exists
-    /// because rows are there, so one of these cells is a position the catalog holds rows
-    /// at — and it is known without opening a file.
-    pub fn partitions(&self) -> &crate::hats::HatsPartitionList {
-        self.catalog.partitions()
+    /// What reads it besides the scan is the `/examples` resource, which wants a partition
+    /// to take a row's position out of and the catalog's own layout to find that file by.
+    pub fn catalog(&self) -> &Catalog {
+        &self.catalog
     }
 
     /// The partitions a filter cannot rule out.

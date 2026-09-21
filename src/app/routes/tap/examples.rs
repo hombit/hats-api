@@ -12,10 +12,10 @@
 //! an example replaces the generated one, which is what keeps an operator from having to
 //! work around a query they did not write.
 //!
-//! **Nothing here reads a data file.** The position is the centre of one of the catalog's own
-//! partitions, which exists because rows are there, and the columns come from the schema
-//! `/tables` already read. So the page costs what `/tables` costs and no more — which
-//! matters, a client fetching this before it has asked for a row.
+//! **The cone is centred on a row the catalog holds**, which is the one thing that makes the
+//! answer reliably non-empty; `published::example_position` reads it, and says why nothing
+//! cheaper does. Everything else — the columns, the position columns, the length scale — is
+//! metadata `/tables` reads anyway.
 //!
 //! Three things a generated query has to avoid, and each is a way to make the menu useless:
 //! `SELECT *`, these catalogs being 150 to 370 columns wide; a nested column, which no
@@ -63,10 +63,23 @@ const EXAMPLE_ROWS: usize = 10;
 
 /// The narrowest cone a generated query will ask for, in degrees.
 ///
-/// One arcsecond. The radius follows the partition's own size, and a catalog partitioned
-/// deeply enough has cells too small to write a legible number for — at which point the
-/// cone has stopped being an example of anything.
+/// One arcsecond. Widening cannot make the answer empty — the centre is a row — and a cone
+/// narrower than this is a number nobody reads as a field on the sky.
 const NARROWEST_RADIUS_DEG: f64 = 1.0 / 3600.0;
+
+/// The widest, in degrees: ten arcminutes.
+///
+/// The same figure `[limits] max_query_radius_arcsec` defaults to, and for the same reason —
+/// it is the size of question somebody browsing actually asks, a field around a source
+/// rather than a survey of the sky. A reader who wants more widens it themselves.
+const WIDEST_RADIUS_DEG: f64 = 600.0 / 3600.0;
+
+/// What fraction of the deepest partition's own size a cone spans.
+///
+/// The cell is the one length scale a catalog offers, and a tenth of it is comfortably
+/// inside one partition — so the example reads about one file, whether the catalog is
+/// partitioned at order 3 or order 12.
+const CELL_FRACTION: f64 = 0.1;
 
 /// The examples document.
 pub(in crate::app) async fn examples(State(service): State<Service>) -> Response {
@@ -226,32 +239,28 @@ fn projection(table: &Published<'_>) -> Vec<String> {
 /// Where a generated cone looks and how wide it is: the two position columns as a query
 /// writes them, then the centre and the radius in degrees.
 ///
-/// **The cone covers one whole partition of the catalog, and that is what makes the example
-/// return rows.** A partition exists because rows are there, so a shape containing the cell
-/// contains some of them — and the cell is in the partition list already, so knowing it
-/// costs nothing. The containment is the load-bearing half: a cone merely centred *in* the
-/// cell comes back empty on a catalog whose data fills only a corner of it, which is every
-/// catalog covering one patch of sky rather than the whole of it. That failure is the one
-/// this resource exists to avoid — a new user reads an empty answer as the service being
-/// broken rather than as the example being badly chosen.
+/// **The centre is a row the catalog holds, so the answer cannot be empty.** That is the
+/// whole of it, and nothing cheaper works: a partition's centre is empty wherever the data
+/// fills a corner of its cell. `published::example_position` is where the row is read.
 ///
-/// So the radius is the cell's own largest centre-to-vertex distance, every point of the
-/// cell being within that of its centre, and it follows the cell rather than being a fixed
-/// number: a catalog's cells run from tens of degrees across where the sky is empty to under
-/// an arcminute where it is crowded, so any one radius covers a whole base cell on one
-/// catalog and nothing at all on the next. `deepest` is what keeps it small — the crowded
-/// part of the catalog is the part with the smallest cells.
+/// The radius is a tenth of the deepest partition's own size, capped at ten arcminutes. Two
+/// numbers rather than one because the cell alone spans four orders of magnitude between a
+/// catalog partitioned at order 0 and one at order 12 — the fraction keeps the read inside
+/// about one partition, and the cap keeps a shallow catalog's example from being a cone over
+/// a quarter of the sky. The floor is legibility and costs nothing, the centre being a row.
 fn circle(table: &Published<'_>) -> Option<(String, String, f64, f64, f64)> {
     let (ra, dec) = table.coordinates.as_ref()?;
+    let (centre_ra, centre_dec) = table.position?;
     let cell = table.cell.as_ref()?;
     let (lon, lat) = cdshealpix::nested::center(cell.order, cell.pixel);
-    let radius = cdshealpix::largest_center_to_vertex_distance(cell.order, lon, lat);
+    let span = cdshealpix::largest_center_to_vertex_distance(cell.order, lon, lat).to_degrees();
+    let radius = (CELL_FRACTION * span).clamp(NARROWEST_RADIUS_DEG, WIDEST_RADIUS_DEG);
     Some((
         names::as_written(ra),
         names::as_written(dec),
-        lon.to_degrees(),
-        lat.to_degrees(),
-        radius.to_degrees().max(NARROWEST_RADIUS_DEG),
+        centre_ra,
+        centre_dec,
+        radius,
     ))
 }
 

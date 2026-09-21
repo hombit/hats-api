@@ -149,9 +149,9 @@ pub struct TapTableConfig {
     /// Where the catalog is, as a path under a `[[mount]]` — the same address the file
     /// server publishes it at and an API request names it by, e.g. `/hats/gaia_dr3`.
     pub path: String,
-    /// Queries to offer against this table, as `[[tap.table.example]]` sections. With none,
-    /// this service writes one of its own from what the catalog says about itself; with
-    /// any, they replace it.
+    /// Queries to offer against this table, as `[[tap.table.example]]` sections. The
+    /// default is one cone search per table, written from the catalog; any written here
+    /// replace it.
     #[serde(rename = "example", default)]
     pub examples: Vec<TapExampleConfig>,
 }
@@ -160,8 +160,7 @@ pub struct TapTableConfig {
 ///
 /// What it buys over the generated one is that somebody looked at the data: a predicate
 /// that matches something, and a position worth looking at, are things no amount of
-/// metadata says. What it costs is caller-facing ADQL in a config file, so the
-/// conformance suite runs every query this resource publishes.
+/// metadata says.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TapExampleConfig {

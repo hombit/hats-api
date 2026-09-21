@@ -712,8 +712,8 @@ The service publishes a working query per table at `/api/v1/tap/examples`. TOPCA
 them under *Examples → Service Provided*; `pyvo` reads them as `TAPService.examples`; a
 browser shows the page.
 
-Each is a cone search, written from the catalog itself — a few of its columns, its own
-position columns, and a centre taken from one of its partitions, so the query returns rows.
+Each is a cone search over the catalog's own position columns, centred on one of its rows,
+selecting a few of its columns.
 
 To offer your own instead, add them to the table. They replace the generated one:
 
@@ -731,9 +731,6 @@ WHERE phot_g_mean_mag < 15
   AND 1 = CONTAINS(POINT(ra, dec), CIRCLE(250.42, 36.46, 0.1))
 """
 ```
-
-Nothing checks that a query you write still runs, so keep one narrow enough to answer
-quickly — a few named columns and a `TOP`.
 
 ### Querying a catalog the service does not publish
 
