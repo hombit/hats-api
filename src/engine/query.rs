@@ -279,7 +279,7 @@ pub async fn run(
 ///
 /// What a collected answer and a streamed one share is everything up to the first batch:
 /// the same context, the same plan, the same decision about order. They part company at
-/// how the batches are taken — [`execute`] takes them all and this hands them over one at
+/// how the batches are taken — `execute` takes them all and this hands them over one at
 /// a time — so the planning is here, once, and each of the two says only what it does with
 /// what comes out.
 /// `SessionContext` has no `Debug`, and what this holds is a plan rather than an answer.
@@ -317,7 +317,7 @@ impl Planned {
 
     /// The batches, in whatever order this query promised.
     ///
-    /// Three shapes, and they are the streaming counterparts of what [`execute`] collects:
+    /// Three shapes, and they are the streaming counterparts of what `execute` collects:
     ///
     /// - **Nothing promised**: the merged stream, every partition polled at once, which is
     ///   what `collect` does without the collecting.

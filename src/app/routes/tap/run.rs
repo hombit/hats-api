@@ -8,7 +8,7 @@
 //!
 //! **What differs after that is whether the answer has to exist all at once.** A `/sync`
 //! body carries a length, so the document is built and measured; a job's answer is a file,
-//! so it is written as it is encoded and never held. The second is why [`write`] exists
+//! so it is written as it is encoded and never held. The second is why [`write()`] exists
 //! beside [`run`]: the peak of a job is then one batch and one chunk rather than the rows
 //! and the whole document, and the ceiling on what a job may keep refuses at the byte that
 //! passes it instead of once all of it is in memory.
