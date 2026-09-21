@@ -5,6 +5,10 @@ and writes what they made of it. What it does not do is decide whether the resul
 acceptable — a conformance run is a report, so by default it exits zero however much
 of the standard is unanswered. `--strict-conformance` is for whoever wants the other
 behaviour.
+
+What it does decide is whether the report can be read at all. See [`BROKEN`]: a run
+that never reached the service it was meant for is not a service with nothing
+implemented, and the two are the same page of skips unless the suite says which it is.
 """
 
 from __future__ import annotations
@@ -265,10 +269,11 @@ DESCRIPTION_OF: dict[str, str] = {}
 #: Why this run cannot be believed, if it cannot.
 #:
 #: A check that fails is the output of this suite and never a reason to go red — a
-#: service is expected to be some way short of the whole of TAP. Two things are not
-#: that, and both have to be loud: the service under test falling over, and the suite
-#: itself failing to run. Either leaves a report that reads like a service missing
-#: features when what happened is that nobody asked it anything.
+#: service is expected to be some way short of the whole of TAP. Four things are not
+#: that, and each has to be loud: the service under test falling over, the suite itself
+#: failing to run, the service starting on less than the suite configured, and a run
+#: where nothing at all passed. Every one of them leaves a report that reads like a
+#: service missing features when what happened is that nobody asked it anything.
 BROKEN: list[str] = []
 
 
@@ -440,6 +445,17 @@ def pytest_sessionfinish(session, exitstatus):
     if run is not None:
         tools["stilts"] = run.version
 
+    # Nothing passing is not a service that implements nothing. VOSI availability and
+    # capabilities are answered by anything that speaks HTTP at the base url, and a
+    # refusal is still an answer several checks here accept — so a clean sweep means the
+    # questions never reached the service they were meant for. A report of ninety
+    # unanswered checks looks the same either way, and this is the difference.
+    if not any(result.outcome == "pass" for result in COLLECTED.values()):
+        BROKEN.append(
+            f"not one of {len(COLLECTED)} checks passed, which is a suite that never "
+            "reached a service rather than a service that implements none of TAP"
+        )
+
     built = reporting.Report(
         target=getattr(config, "_target", "?"),
         tools=tools,
@@ -454,8 +470,9 @@ def pytest_sessionfinish(session, exitstatus):
     # A failing check is this suite's output, so the run is green however many of them
     # there are — nobody expects the whole of TAP, and a red mark that is always there
     # is one everybody learns to scroll past. What must go red is a run whose report
-    # cannot be believed: the service fell over, a fixture raised, or pytest never got
-    # to the questions at all. Those look identical to "implements nothing" in the
+    # cannot be believed: the service fell over, a fixture raised, the service started
+    # on less than was configured, nothing passed, or pytest never got to the questions
+    # at all. Those look identical to "implements nothing" in the
     # report, and telling them apart is the whole reason this is not just `|| true` in
     # the workflow.
     if BROKEN or exitstatus in COULD_NOT_RUN:
@@ -474,15 +491,22 @@ def record_run(pytestconfig, service, manifest, taplint_run):
             f"reference answers from {manifest.get('reference_service_name', '?')}, "
             f"fetched {manifest.get('fetched_utc', '?')}"
         )
-    for identifier, note in service.notes:
-        COLLECTED[identifier] = reporting.Result(
-            id=identifier,
+    for note in service.notes:
+        COLLECTED[note.id] = reporting.Result(
+            id=note.id,
             area="the service under test",
             asks=["standard"],
-            outcome="pass" if "published" in note else "fail",
+            outcome="pass" if note.as_asked else "fail",
             description="the service starts with the tables the suite publishes",
-            detail=note,
+            detail=note.detail,
         )
+        # A check of its own in the report, and a broken run as well. The service
+        # answered every question that follows — about a service started on less than
+        # the suite configured, whose missing tables take most of TAP with them. That
+        # is not a service that implements less; it is a run that asked the wrong
+        # service, and nothing in a report of skips and xfails says so.
+        if not note.as_asked:
+            BROKEN.append(note.detail)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
