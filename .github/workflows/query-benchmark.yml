@@ -1,0 +1,55 @@
+name: Query benchmark
+
+# A smoke test and not a measurement. The times a shared runner produces are its network's
+# rather than the code's, so nothing here reads one — what it says is that the benchmark
+# still runs: a configuration is written, a service starts over it, and a real catalog
+# answers a cone with rows.
+#
+# One catalog, one request. It reads S3 over the public internet, so a bucket having a bad
+# day is red here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: one cone over ps1
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: debug
+          save-if: false
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: query-benchmark/uv.lock
+
+      # Debug, and the test is pointed at it below. A release build is what the benchmark
+      # is for and is minutes this job has no use for: nothing here looks at a time.
+      - name: cargo build
+        run: cargo build --bin hats-api
+
+      - name: uv run pytest
+        working-directory: query-benchmark
+        env:
+          QUERY_BENCHMARK_BINARY: ../target/debug/hats-api
+        run: uv run pytest -c pyproject.toml -v
