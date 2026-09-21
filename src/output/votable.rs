@@ -154,10 +154,29 @@ impl stream::Encoder for Document {
 
     fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
         let mut out = String::from("</TABLEDATA>\n</DATA>\n</TABLE>\n");
-        // DALI has one marker for "the rows stop before the answer does", and a bound
-        // reached mid-stream is that.
-        if ending.overflow || ending.refused.is_some() {
-            out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+        // DALI §4.4 has both of these after the table, and they are not the same statement:
+        // `OVERFLOW` is a whole answer cut at a bound, `ERROR` is a read that stopped. A
+        // client that retries an overflow with a narrower query would retry the second
+        // identically and get the same failure.
+        match &ending.stopped {
+            Some(stream::Stopped::Failed(why)) => {
+                let readable = why
+                    .chars()
+                    .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+                    .collect::<String>();
+                let _ = writeln!(
+                    out,
+                    "<INFO name=\"QUERY_STATUS\" value=\"ERROR\">{}</INFO>",
+                    quick_xml::escape::escape(&readable)
+                );
+            }
+            Some(stream::Stopped::Bound(_)) => {
+                out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+            }
+            None if ending.overflow => {
+                out.push_str("<INFO name=\"QUERY_STATUS\" value=\"OVERFLOW\"/>\n");
+            }
+            None => {}
         }
         out.push_str("</RESOURCE>\n</VOTABLE>\n");
         Ok(out.into_bytes())

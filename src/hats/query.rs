@@ -15,7 +15,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
@@ -216,6 +217,49 @@ impl From<&CatalogSelection<'_>> for OwnedCatalogSelection {
     }
 }
 
+/// What a streamed read has to say for itself once the rows have stopped.
+///
+/// A collected read returns all of this; a streamed one has sent its rows by the time any
+/// of it is known, so it is written here as the partitions land and read at the end of the
+/// document — which is where the counts a JSON answer carries now sit.
+///
+/// Every field is written by the read and read by whoever ends the document, once each: the
+/// counters are atomics rather than a lock, and the two facts that are settled once and do
+/// not change are `OnceLock`s that say so.
+#[derive(Debug, Default)]
+pub struct Streamed {
+    data_bytes_read: AtomicU64,
+    partitions: AtomicUsize,
+    /// The columns, which are a partition's and so are not known until one is read. Set by
+    /// the first partition that lands whether or not it matched a row, so an answer of no
+    /// rows still names what it was looking at.
+    schema: OnceLock<SchemaRef>,
+    /// Which bound stopped the rows, where one did.
+    refused: OnceLock<Exceeded>,
+}
+
+impl Streamed {
+    /// What the partitions read so far fetched from storage.
+    pub fn data_bytes_read(&self) -> u64 {
+        self.data_bytes_read.load(Ordering::Relaxed)
+    }
+
+    /// How many partitions were read.
+    pub fn partitions(&self) -> usize {
+        self.partitions.load(Ordering::Relaxed)
+    }
+
+    /// The answer's columns, once a partition has said what they are.
+    pub fn schema(&self) -> Option<SchemaRef> {
+        self.schema.get().map(Arc::clone)
+    }
+
+    /// Which bound stopped the rows, where one did.
+    pub fn refused(&self) -> Option<&Exceeded> {
+        self.refused.get()
+    }
+}
+
 /// What a streamed read has spent so far, and what it does when that is too much.
 ///
 /// The same three bounds the collected read watches, checked in the same place — between
@@ -223,7 +267,14 @@ impl From<&CatalogSelection<'_>> for OwnedCatalogSelection {
 /// scans and read often enough to stop one mid-file would serialize the thing it bounds.
 #[derive(Debug, Default)]
 struct Counted {
-    rows: usize,
+    /// Rows the partitions matched, before any trim to a `limit`. This is what
+    /// [`CatalogLimits::max_rows`] is about — what the read cost — and it is what the
+    /// collected read counts, so the two refuse the same requests.
+    matched: usize,
+    /// Rows actually sent, which is what a `limit` leaves room for and what says when to
+    /// stop. Never more than the limit; the collected read reaches the same number by
+    /// trimming the batches once they are all in.
+    sent: usize,
     data_bytes_read: u64,
     partitions: usize,
 }
@@ -239,7 +290,7 @@ impl Counted {
         read: Result<Read, ApiError>,
         limit: Option<usize>,
         bounds: CatalogLimits,
-        refused: &Arc<Mutex<Option<Exceeded>>>,
+        streamed: &Arc<Streamed>,
     ) -> (Vec<Result<RecordBatch, ApiError>>, bool) {
         let read = match read {
             Ok(read) => read,
@@ -247,13 +298,24 @@ impl Counted {
         };
         self.partitions += 1;
         self.data_bytes_read += read.data_bytes_read;
+        streamed
+            .data_bytes_read
+            .store(self.data_bytes_read, Ordering::Relaxed);
+        streamed
+            .partitions
+            .store(self.partitions, Ordering::Relaxed);
+        // Whether or not this partition matched a row: the columns are what the answer is
+        // about, and an answer of no rows has to name them too.
+        if let Some(schema) = read.schema {
+            let _ = streamed.schema.set(schema);
+        }
 
         let exceeded = if self.data_bytes_read > bounds.max_bytes_fetched {
             Some(Exceeded::Bytes {
                 reached: self.data_bytes_read,
                 allowed: bounds.max_bytes_fetched,
             })
-        } else if self.rows + read.rows > bounds.max_rows {
+        } else if self.matched + read.rows > bounds.max_rows {
             Some(Exceeded::Rows {
                 allowed: bounds.max_rows,
             })
@@ -270,29 +332,28 @@ impl Counted {
             // document saying it is not whole, which is the format's business and not
             // this loop's. The rows of the partition that went over are left out, the
             // same as the collected read leaves out everything past the bound.
-            if let Ok(mut held) = refused.lock() {
-                *held = Some(exceeded);
-            }
+            let _ = streamed.refused.set(exceeded);
             return (Vec::new(), false);
         }
+        self.matched += read.rows;
 
         // Each partition was read with the whole `limit` as its own, so the rows that
         // arrive can exceed what is left. Trimming here is the same trim the collected
         // read does at the end, and lands on the same rows: the order is the catalog's.
         let mut batches = Vec::with_capacity(read.batches.len());
         for batch in read.batches {
-            let room = limit.map(|limit| limit.saturating_sub(self.rows));
+            let room = limit.map(|limit| limit.saturating_sub(self.sent));
             let batch = match room {
                 Some(0) => break,
                 Some(room) if batch.num_rows() > room => batch.slice(0, room),
                 _ => batch,
             };
-            self.rows += batch.num_rows();
+            self.sent += batch.num_rows();
             batches.push(Ok(batch));
         }
         // Enough rows are in, so the partitions after this one are never polled — and a
         // stream that is never polled reads nothing.
-        let more = !limit.is_some_and(|limit| self.rows >= limit);
+        let more = !limit.is_some_and(|limit| self.sent >= limit);
         (batches, more)
     }
 }
@@ -381,6 +442,29 @@ impl Search {
         &self.chosen
     }
 
+    /// The one bound that can be answered before a byte is read, where it applies.
+    ///
+    /// Without a `limit` the chosen list is the whole of what will be read, so the count is
+    /// known now and a request over [`CatalogLimits::max_partitions`] is refused before any
+    /// work happens. With one, the read stops itself and the partition count joins the
+    /// counters [`Self::stream`] and [`Self::run`] watch as the partitions land.
+    ///
+    /// Both ways of reading owe this call: a streamed read has nothing but rows to answer
+    /// with once it starts, so the refusal has to happen while a `422` and a work list are
+    /// still what the caller gets.
+    pub fn too_many_partitions(
+        &self,
+        limit: Option<usize>,
+        bounds: CatalogLimits,
+    ) -> Option<Exceeded> {
+        (limit.is_none() && self.chosen.len() > bounds.max_partitions).then_some(
+            Exceeded::Partitions {
+                reached: self.chosen.len(),
+                allowed: bounds.max_partitions,
+            },
+        )
+    }
+
     /// Read the chosen partitions and gather their rows.
     ///
     /// **Several at a time, and the answer is still in the catalog's order.** `buffered`
@@ -445,11 +529,8 @@ impl Search {
                 source: None,
             })));
         }
-        if selection.limit.is_none() && self.chosen.len() > bounds.max_partitions {
-            return Ok(Outcome::TooMuchWork(Exceeded::Partitions {
-                reached: self.chosen.len(),
-                allowed: bounds.max_partitions,
-            }));
+        if let Some(exceeded) = self.too_many_partitions(selection.limit, bounds) {
+            return Ok(Outcome::TooMuchWork(exceeded));
         }
         // Built before the stream rather than inside a closure it calls: a closure returning
         // a future that borrows its argument has to satisfy a higher-ranked bound the
@@ -536,18 +617,22 @@ impl Search {
     /// more than the reads in flight.
     ///
     /// **A bound reached cannot become a `422` here**, the status and the rows before it
-    /// having gone already. So it is recorded in `refused` instead and the rows stop, and
+    /// having gone already. So it is recorded in `streamed` instead and the rows stop, and
     /// what the caller sees is the format's own way of saying an answer is not whole: a
     /// `refused` at the end of a JSON body, `OVERFLOW` after a VOTable's table, and for
     /// the delimited formats — which have nowhere to put it — a body that ends without its
     /// terminating chunk. Nothing is ever quietly short.
+    ///
+    /// The bound that can still be a `422` is [`Self::too_many_partitions`], which is
+    /// answered from the chosen list before any of this is polled. The caller owes that
+    /// check: this function cannot make it, having nothing but rows to answer with.
     pub fn stream(
         self,
         selection: OwnedCatalogSelection,
         data: DataFiles,
         limits: sql::Limits,
         bounds: CatalogLimits,
-        refused: Arc<Mutex<Option<Exceeded>>>,
+        streamed: Arc<Streamed>,
     ) -> impl Stream<Item = Result<RecordBatch, ApiError>> + Send + 'static {
         let search = Arc::new(self);
         let selection = Arc::new(selection);
@@ -600,7 +685,7 @@ impl Search {
                 if walk.done {
                     return future::ready(None);
                 }
-                let (batches, more) = walk.counted.take(read, limit, bounds, &refused);
+                let (batches, more) = walk.counted.take(read, limit, bounds, &streamed);
                 walk.done = !more;
                 future::ready(Some(stream::iter(batches)))
             })

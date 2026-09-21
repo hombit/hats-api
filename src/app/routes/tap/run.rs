@@ -124,11 +124,15 @@ pub(super) async fn write(
     let ending = stream::Ending {
         rows: execution.num_rows(),
         data_bytes_read: execution.data_bytes_read(),
+        // A statement's scan, whatever it read, is not a count this document has a place
+        // for: VOTable and the delimited formats say nothing about either.
+        partitions: None,
         elapsed: started.elapsed(),
         overflow: execution.overflow(),
         // A bound that stopped this part-way is the row bound, which `overflow` already
-        // says; nothing else here refuses after the first byte.
-        refused: None,
+        // says; a read that fails leaves the job in error with nothing kept, so there is
+        // no half-written document here to explain itself.
+        stopped: None,
     };
     into.write(&encoder.end(ending)?).await?;
     Ok(Answered {

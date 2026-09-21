@@ -5,7 +5,6 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::Json;
 use axum::body::Body;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
@@ -111,18 +110,29 @@ pub(in crate::app) async fn hats_answer(
 ) -> Result<Response, ApiError> {
     let num_rows = result.rows.num_rows();
     let response = match output.format {
+        // Through the same encoder a streamed answer drives, so the two are one document
+        // and neither pays the `serde_json::Value` per cell that building it as a struct
+        // would. [`HatsResponse`] stays as the type the description publishes: it is what
+        // the body *is*, and `utoipa` reads it to say so.
         Format::Json => {
-            let rows = json::to_json(&result.rows)?;
-            let schema = columns_of(&result.rows);
-            Json(HatsResponse {
-                num_rows: rows.len(),
-                num_partitions: result.partitions_read,
-                schema,
-                data_bytes_read: result.rows.data_bytes_read,
-                elapsed_ms: started.elapsed().as_millis(),
-                rows,
-            })
-            .into_response()
+            let mut body = JsonBody::new(columns_of(&result.rows));
+            let bytes = stream::collected(
+                &mut body,
+                &result.rows,
+                stream::Ending {
+                    rows: num_rows,
+                    data_bytes_read: result.rows.data_bytes_read,
+                    partitions: Some(result.partitions_read),
+                    elapsed: started.elapsed(),
+                    overflow: false,
+                    stopped: None,
+                },
+            )?;
+            (
+                [(header::CONTENT_TYPE, "application/json")],
+                Body::from(bytes),
+            )
+                .into_response()
         }
         Format::Parquet => {
             let layout = match &result.source {
@@ -366,55 +376,15 @@ pub(in crate::app) fn counters(
 /// care what order its keys arrive in — which is why the envelope here is written by hand
 /// rather than serialized from [`SelectResponse`].
 ///
-/// Parquet is not streamable and is refused before this is reached: it is read footer-first,
-/// so a body with no length is one `pyarrow` cannot open at all.
-pub(in crate::app) fn streamed(
-    planned: query::Planned,
-    output: &Output,
-    started: Instant,
-) -> Result<Response, ApiError> {
-    let schema = Arc::clone(&planned.schema);
-    let batches = planned.batches()?;
-    let mut encoder = encoder_for(output, &schema)?;
-    // While a status can still be chosen: `csv` refuses a nested column here, and a
-    // refusal after the `200` is a dropped connection rather than a message.
-    let head = encoder.begin(&schema)?;
-    let content_type = content_type_for(output);
-    // The plan outlives the rows, which is what makes the ending readable: `data_bytes_read`
-    // is a counter on the scan and is final only once the last batch has come off it.
-    let ending = move |rows: usize| stream::Ending {
-        rows,
-        data_bytes_read: planned.data_bytes_read(),
-        elapsed: started.elapsed(),
-        overflow: false,
-        // One file, and its bounds are the expression limits, which are checked before
-        // anything is read. There is nothing here that can stop part-way.
-        refused: None,
-    };
-    let body = Body::from_stream(stream::streamed(encoder, head, batches, ending));
-    Ok((
-        [
-            (header::CONTENT_TYPE, content_type.to_owned()),
-            // Said out loud rather than left out: a body with no length is one a client
-            // must not seek in, and the alternative is a client discovering that by
-            // reading the head of the answer where it asked for the tail.
-            (header::ACCEPT_RANGES, "none".to_owned()),
-        ],
-        body,
-    )
-        .into_response())
-}
-
-/// A catalog's rows, sent as its partitions land.
+/// Parquet is not streamable and is refused by [`streamable`] before a url is opened: it is
+/// read footer-first, so a body with no length is one `pyarrow` cannot open at all.
 ///
-/// The counterpart of [`streamed`] for the route whose rows come from many files rather
-/// than one — so what the ending costs is not one plan's counter but what the read
-/// accumulated, and a bound reached part-way is a `refused` the encoder renders rather
-/// than the `422` with a work list a collected answer would have given.
-pub(in crate::app) fn streamed_rows<S>(
-    schema: &datafusion::arrow::datatypes::SchemaRef,
+/// The batches are the caller's to build, because they are also the caller's to shape: what
+/// a failed read says reaches the caller at the end of the document now, so a route hands
+/// over a stream whose errors are already safe to say.
+pub(in crate::app) fn streamed<S>(
+    planned: query::Planned,
     batches: S,
-    refused: Arc<std::sync::Mutex<Option<hats::query::Exceeded>>>,
     output: &Output,
     started: Instant,
 ) -> Result<Response, ApiError>
@@ -423,50 +393,133 @@ where
         + Send
         + 'static,
 {
-    let mut encoder = encoder_for(output, schema)?;
-    // While a status can still be chosen, for the reason [`streamed`] gives.
-    let head = encoder.begin(schema)?;
-    let content_type = content_type_for(output);
+    let schema = Arc::clone(&planned.schema);
+    // The plan outlives the rows, which is what makes the ending readable: `data_bytes_read`
+    // is a counter on the scan and is final only once the last batch has come off it.
     let ending = move |rows: usize| stream::Ending {
         rows,
-        // A streamed catalog read reports no byte count: it is summed as the partitions
-        // land, and the sum belongs to the read rather than to any one plan. What it cost
-        // is in the log line, which is the operator's rather than the caller's.
-        data_bytes_read: 0,
+        data_bytes_read: planned.data_bytes_read(),
+        // One file, which is not a partition of anything.
+        partitions: None,
         elapsed: started.elapsed(),
         overflow: false,
-        refused: refused
-            .lock()
-            .ok()
-            .and_then(|held| held.map(|why| why.to_string())),
+        // One file, and its bounds are the expression limits, which are checked before
+        // anything is read. Nothing here stops part-way but a read that fails, and the
+        // driver fills that in.
+        stopped: None,
     };
-    let body = Body::from_stream(stream::streamed(encoder, head, batches, ending));
-    Ok((
-        [
-            (header::CONTENT_TYPE, content_type.to_owned()),
-            (header::ACCEPT_RANGES, "none".to_owned()),
-        ],
-        body,
-    )
-        .into_response())
+    sending(&schema, batches, ending, output)
 }
 
-/// Which encoder writes this answer, and the one format that has no streamed form.
+/// A catalog's rows, sent as its partitions land.
+///
+/// The counterpart of [`streamed`] for the route whose rows come from many files rather
+/// than one. What the ending costs is not one plan's counter but what the read accumulated
+/// across its partitions, and a bound reached part-way is said at the end of the document
+/// rather than in the `422` with a work list a collected answer would have given.
+pub(in crate::app) fn streamed_rows<S>(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    batches: S,
+    streamed: Arc<hats::query::Streamed>,
+    output: &Output,
+    started: Instant,
+) -> Result<Response, ApiError>
+where
+    S: futures::Stream<Item = Result<datafusion::arrow::array::RecordBatch, ApiError>>
+        + Send
+        + 'static,
+{
+    let ending = move |rows: usize| stream::Ending {
+        rows,
+        // Summed as the partitions land rather than read off one plan, and final here for
+        // the same reason the single file's is: the last partition is in. A zero would be a
+        // number the caller cannot tell from a read that fetched nothing.
+        data_bytes_read: streamed.data_bytes_read(),
+        partitions: Some(streamed.partitions()),
+        elapsed: started.elapsed(),
+        overflow: false,
+        stopped: streamed
+            .refused()
+            .map(|why| stream::Stopped::Bound(why.to_string())),
+    };
+    sending(schema, batches, ending, output)
+}
+
+/// One streamed body: the head written while a status can still be chosen, the rows as they
+/// arrive, and the mark that says the request clock is still running on it.
+fn sending<S, F>(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    batches: S,
+    ending: F,
+    output: &Output,
+) -> Result<Response, ApiError>
+where
+    S: futures::Stream<Item = Result<datafusion::arrow::array::RecordBatch, ApiError>>
+        + Send
+        + 'static,
+    F: FnOnce(usize) -> stream::Ending + Send + 'static,
+{
+    let mut encoder = encoder_for(output, schema)?;
+    // While a status can still be chosen: `csv` refuses a nested column here, and a refusal
+    // after the `200` is a document that stops rather than a message naming the column.
+    let head = encoder.begin(schema)?;
+    let content_type = content_type_for(output);
+    let chunks = stream::streamed(encoder, head, batches, ending);
+    let mut response = (
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            // Said out loud rather than left out: a body with no length is one a client
+            // must not seek in, and the alternative is a client discovering that by
+            // reading the head of the answer where it asked for the tail.
+            (header::ACCEPT_RANGES, "none".to_owned()),
+        ],
+        Body::from_stream(chunks),
+    )
+        .into_response();
+    // The rows are read as this body is sent, so the work this request came to do is not
+    // over when the handler returns. `app::service::deadline` reads this and keeps its clock
+    // running over the body; without it a streamed query would be the one request with no
+    // time bound at all.
+    response.extensions_mut().insert(Generated);
+    Ok(response)
+}
+
+/// A body this service is still generating as it sends it.
+///
+/// A marker rather than a header: it says something to the layers above this one and
+/// nothing to a client, and what it governs — how long the request may go on — is not the
+/// caller's to read or to set.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::app) struct Generated;
+
+/// Whether this format can be sent as it is read at all.
+///
+/// Asked before a url is opened, so that a request naming both `streaming` and a format
+/// that cannot be streamed is refused without reading anything. [`encoder_for`] asks the
+/// same question again where the answer becomes an encoder; the rule is written once and
+/// the second call is what makes it unrepresentable rather than merely checked.
+pub(in crate::app) fn streamable(output: &Output) -> Result<(), ApiError> {
+    match output.format {
+        Format::Parquet => Err(ApiError::bad_request(
+            "parquet cannot be streamed: it is read from its footer backwards, so a reader \
+             needs the whole file; ask for json, csv, tsv or votable, or leave streaming out",
+        )),
+        Format::Json | Format::Dsv(_) | Format::Votable => Ok(()),
+    }
+}
+
+/// Which encoder writes this answer.
 fn encoder_for(
     output: &Output,
     schema: &datafusion::arrow::datatypes::SchemaRef,
 ) -> Result<Box<dyn stream::Encoder>, ApiError> {
+    streamable(output)?;
     Ok(match output.format {
         Format::Json => Box::new(JsonBody::new(columns_of_schema(schema))),
         Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, &output.dsv_null)),
         Format::Votable => Box::new(votable::Document::new(None)),
-        Format::Parquet => {
-            return Err(ApiError::bad_request(
-                "parquet cannot be streamed: it is read from its footer backwards, so a \
-                 reader needs the whole file; ask for json, csv, tsv or votable, or leave \
-                 streaming out",
-            ));
-        }
+        // Refused by `streamable` above, which is the one statement of the rule.
+        Format::Parquet => return Err(ApiError::internal("parquet has no streamed form")),
     })
 }
 
@@ -488,7 +541,6 @@ fn content_type_for(output: &Output) -> &'static str {
 struct JsonBody {
     columns: Vec<Column>,
     rows: json::Rows,
-    wrote: bool,
 }
 
 impl JsonBody {
@@ -496,7 +548,6 @@ impl JsonBody {
         Self {
             columns,
             rows: json::Rows::new(),
-            wrote: false,
         }
     }
 }
@@ -513,33 +564,38 @@ impl stream::Encoder for JsonBody {
     }
 
     fn rows(&mut self, batch: &datafusion::arrow::array::RecordBatch) -> Result<Vec<u8>, ApiError> {
-        let bytes = self.rows.rows(batch)?;
-        self.wrote |= !bytes.is_empty();
-        Ok(bytes)
+        self.rows.rows(batch)
     }
 
     fn end(&mut self, ending: stream::Ending) -> Result<Vec<u8>, ApiError> {
+        // Whatever closes the array, including the whole of an empty one: whether `rows` is
+        // a list is the row writer's question and it answers it in one place, so there is no
+        // second condition here to disagree with it.
         let mut out = self.rows.end(ending.clone())?;
-        // An answer of no rows at all: the row writer never opened its array, and an empty
-        // one still has to be there for `rows` to be a list.
-        if !self.wrote {
-            out.extend_from_slice(b"[]");
+        // The same counts a collected answer carries, in the same names. A catalog's
+        // `num_partitions` is written only where there were partitions to count, that being
+        // the one of them a single file has no answer for.
+        let mut counts = String::new();
+        if let Some(partitions) = ending.partitions {
+            let _ = write!(counts, ",\"num_partitions\":{partitions}");
         }
-        let mut counts = format!(
+        let _ = write!(
+            counts,
             ",\"num_rows\":{},\"data_bytes_read\":{},\"elapsed_ms\":{}",
             ending.rows,
             ending.data_bytes_read,
             ending.elapsed.as_millis(),
         );
-        // Where a bound stopped the rows, the body says so rather than ending as though
-        // it were whole. A collected answer never reaches here: there, a bound is a `422`
-        // carrying the work list, which is what a caller can act on and what a stream that
-        // has already sent its status cannot go back and offer.
-        if let Some(why) = &ending.refused {
+        // Where the rows stopped before the answer did, the body says so rather than ending
+        // as though it were whole — a bound this service reached, or a read that failed
+        // after the status had gone. A collected answer never reaches either: there a bound
+        // is a `422` carrying the work list and a failure is the response's own status,
+        // which is what a caller can act on and what a stream cannot go back and offer.
+        if let Some(stopped) = &ending.stopped {
             let _ = write!(
                 counts,
                 ",\"refused\":{}",
-                serde_json::Value::from(why.as_str())
+                serde_json::Value::from(stopped.why())
             );
         }
         counts.push('}');
@@ -568,9 +624,12 @@ pub(in crate::app) fn json_response(
         stream::Ending {
             rows: result.num_rows(),
             data_bytes_read: result.data_bytes_read,
+            // One file, which is not a partition of anything.
+            partitions: None,
             elapsed: started.elapsed(),
             overflow: false,
-            refused: None,
+            // A collected answer is whole or it is a status: nothing it could say here.
+            stopped: None,
         },
     )?;
     Ok((

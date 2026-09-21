@@ -962,6 +962,12 @@ request in front of it.
   `?limit=10` for naming a thousand partitions refuses a request that would have read one,
   and dropping the up-front check for a request with no limit leaves nothing acting early.
 
+  `Search::too_many_partitions` is that up-front check, and **every way of reading owes it**.
+  A streamed read cannot make it for itself — it has nothing but rows to answer with once it
+  starts — so the route makes it first, while a `422` and a work list are still what the
+  caller gets. A second way of reading a catalog that reaches for `Search::stream` and not
+  for this is one where the bound that acts before work happens does not act at all.
+
   **A partition's declared size is not the pre-check the counters are missing.** It is the
   whole file's compressed size and a query fetches a pruned projection, so it runs one to
   two orders of magnitude high — refusing on it would refuse requests that go on to read a
@@ -1012,10 +1018,19 @@ request in front of it.
   round of catalog reads for a request that has already been given up on, and the caller
   who wants a plan has a route that answers without doing any of the work.
 
-  It bounds the response future and not the body, which is what makes a large mounted file
-  stream freely: every query is collected before it answers, so the handler's own future is
-  the work. A bound over the body would cut a download this service is happy to serve and
-  bound nothing a query does.
+  **What it bounds is the query and not the sending of a file**, and the body says which it
+  is rather than the layer guessing. `app::answer` marks a body it is still generating with
+  `answer::Generated`, and `deadline` reads what is left of the clock over exactly those. A
+  collected query is bounded by the handler's future, since that is where its work is; a
+  streamed one is bounded by that future and then its body, which together are the request.
+  One deadline covers both halves, so planning spends the rows' time. A mounted file's bytes
+  are not work — its handler was finished before the first one went out — and a bound over
+  every body would cut a download this service is happy to serve.
+
+  A body cut this way ends mid-chunk. The `504` is only available while the status has not
+  gone; after that, a transfer that stops is the one thing a reader cannot mistake for a
+  whole answer. **Anything that answers with a body it goes on generating owes the mark**,
+  or it is the one request shape with no time bound at all.
 
 ## What a caller's file is like
 
@@ -1057,6 +1072,26 @@ nothing downstream reports it.
 - **The page sets these apart from the numbers**, italic and muted, rather than leaving a
   blank cell that reads as nothing much. `null` is marked in any column; the three strings
   count only in a float column, since elsewhere a string is just a string.
+
+The same rule is what a streamed answer's `output::stream::Ending` is for. Everything a
+collected answer says in a header or a status is said there instead, because a stream has
+sent both by the time it knows any of it:
+
+- **A count that is not known is not a zero.** `data_bytes_read` for a catalog is summed as
+  the partitions land and reported from that sum; reporting nothing would have been a read
+  that fetched nothing, which is a different answer. A number with nowhere to be counted is
+  left out of the document rather than sent as a number that is not true — `nrows` on a
+  streamed VOTable's `TABLE`, which is optional for exactly this.
+- **`Stopped::Bound` and `Stopped::Failed` are two statements and stay two.** One is this
+  service declining to do more work, and the rows so far are sound; the other is the read
+  failing, and what came before is whatever had arrived. VOTable spells them `OVERFLOW` and
+  `ERROR` (DALI §4.4), and a client that narrows its query and retries on the first would
+  retry the second unchanged. JSON names either in `refused`; `csv` and `tsv` have nowhere
+  to put either, so they end the body without its terminating chunk.
+- **A format decides whether `rows` is a list, once.** `output::json::Rows` closes its array
+  whether or not `arrow` ever opened one — a batch of no rows leaves it unopened, so "has a
+  writer" and "has written" are different questions, and a second answer to the second one
+  above it wrote the empty array twice.
 
 A body is compressed on the way out where the client asked for it, which is one layer over
 the whole router and two rules to keep:

@@ -35,17 +35,43 @@ use crate::error::ApiError;
 pub struct Ending {
     pub rows: usize,
     pub data_bytes_read: u64,
+    /// How many of a catalog's partitions were read, where the answer came from a catalog.
+    /// `None` for one file, which has none to count — not a zero, which would be a catalog
+    /// that answered out of no partition at all.
+    pub partitions: Option<usize>,
     pub elapsed: Duration,
     /// Whether a row bound cut the answer short, which DALI §4.4.1 puts *after* the table.
     pub overflow: bool,
-    /// Why this answer is not the whole answer, where a bound stopped it part-way.
+    /// Why the rows stopped before the answer did, where they did.
     ///
     /// A collected answer never has one — a bound reached there is a `422` and a work list,
-    /// which is what the caller wants and what a stream cannot go back and send. So this is
-    /// the streamed case only, and each format says it the way it can: JSON writes it,
-    /// VOTable turns it into `OVERFLOW`, and the delimited formats, having nowhere to put
-    /// it, end the body without its terminating chunk rather than look complete.
-    pub refused: Option<String>,
+    /// and a read that fails there is the status of the whole response. A stream has sent
+    /// both by the time it knows, so it says it at the end of the document instead, and
+    /// each format says it the way it can.
+    pub stopped: Option<Stopped>,
+}
+
+/// Why an answer stopped before it was whole.
+///
+/// The two are apart because a reader has to tell them apart: one is this service declining
+/// to do more work, and the answer so far is sound as far as it goes; the other is the read
+/// itself failing, and what came before is whatever had arrived. VOTable spells the first
+/// `OVERFLOW` and the second `ERROR` (DALI §4.4), which is the distinction made out loud.
+#[derive(Debug, Clone)]
+pub enum Stopped {
+    /// A bound this service sets was reached, and the rows were cut there.
+    Bound(String),
+    /// The read failed after the first byte of the answer had gone.
+    Failed(String),
+}
+
+impl Stopped {
+    /// What to tell the caller, which is the same sentence either way.
+    pub fn why(&self) -> &str {
+        match self {
+            Self::Bound(why) | Self::Failed(why) => why,
+        }
+    }
 }
 
 /// One format, written in three pieces.
@@ -88,6 +114,13 @@ pub fn collected(
 /// so in `begin`; asked for inside the body, that refusal arrives after the `200` and the
 /// caller sees a dropped connection instead of the `400` naming the column. So the head is
 /// written while a status can still be chosen, and what reaches here cannot fail.
+///
+/// **A read that fails part-way ends the document rather than the connection.** The status
+/// is long gone, but the end of the answer is still to be written, and a format that has
+/// somewhere to name the failure names it — which is a caller reading why their answer is
+/// short instead of guessing at a dropped transfer. Whatever the error says reaches the
+/// caller, so what is handed in here must already be safe to say: the routes map their
+/// streams through the same refusal-shaping a collected answer goes through.
 pub fn streamed<S, F>(
     encoder: Box<dyn Encoder>,
     head: Vec<u8>,
@@ -117,27 +150,18 @@ where
                     writing.rows += batch.num_rows();
                     writing.encoder.rows(&batch)
                 }
-                Some(Err(error)) => Err(error),
-                None => {
-                    writing.phase = Phase::End;
-                    // Taken rather than borrowed: what the ending costs is read off the
-                    // plan, and reading it is the last thing that happens.
-                    match writing.ending.take() {
-                        Some(ending) => {
-                            let ending = ending(writing.rows);
-                            writing.encoder.end(ending)
-                        }
-                        None => Ok(Vec::new()),
-                    }
-                }
+                // The rows end here, and the end of the document says why. A format with
+                // nowhere to say it refuses in `end`, which is the dropped transfer that
+                // was the only answer before.
+                Some(Err(error)) => writing.finish(Some(Stopped::Failed(error.to_string()))),
+                None => writing.finish(None),
             },
             Phase::End => return None,
         };
         match sent {
-            // A failure ends the body where it stands. There is no status left to change
-            // — the `200` and the rows before it are already sent — so what a reader gets
-            // is a document that stops, which is why nothing streams until its rows are
-            // known to be readable.
+            // Nothing left to write it with: the encoder itself failed, or had no form for
+            // what the ending had to say. The body stops mid-chunk, which is what a reader
+            // must not be able to mistake for a whole answer.
             Err(error) => Some((Err(error), Writing::done(writing))),
             Ok(bytes) => Some((Ok(Bytes::from(bytes)), writing)),
         }
@@ -164,7 +188,26 @@ struct Writing<S, F> {
     phase: Phase,
 }
 
-impl<S, F> Writing<S, F> {
+impl<S, F: FnOnce(usize) -> Ending> Writing<S, F> {
+    /// Close the document, saying why the rows stopped where a reason is known.
+    ///
+    /// A failure is the reason whatever else the ending was going to say: it is why there
+    /// are no more rows, and a bound recorded by a read that then failed is not what cut
+    /// the answer short.
+    fn finish(&mut self, stopped: Option<Stopped>) -> Result<Vec<u8>, ApiError> {
+        self.phase = Phase::End;
+        // Taken rather than borrowed: what the ending costs is read off the plan, and
+        // reading it is the last thing that happens.
+        let Some(ending) = self.ending.take() else {
+            return Ok(Vec::new());
+        };
+        let mut ending = ending(self.rows);
+        if stopped.is_some() {
+            ending.stopped = stopped;
+        }
+        self.encoder.end(ending)
+    }
+
     /// The same state, saying there is nothing more to send.
     fn done(mut self) -> Self {
         self.phase = Phase::End;

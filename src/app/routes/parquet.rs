@@ -9,9 +9,10 @@ use axum::response::{Json, Response};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
+use futures::TryStreamExt as _;
 use futures::future::OptionFuture;
 
-use crate::app::answer::{answer, streamed};
+use crate::app::answer::{answer, streamable, streamed};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
@@ -110,6 +111,10 @@ pub(in crate::app) struct ParquetQuery {
     /// `x-hats-*` counts, which are headers and so are sent before the first row is known.
     /// `json` reports them at the end of its body instead; a streamed `votable` leaves
     /// `nrows` off its `TABLE`, which is optional for this reason.
+    ///
+    /// **A read that fails after the first row is said at the end of the body**, there being
+    /// no status left to send it as: `json` ends with a `refused` naming it, `votable` with
+    /// `QUERY_STATUS="ERROR"`, and `csv` and `tsv` end without the transfer completing.
     ///
     /// Not for `parquet`, which is read footer-first: a body with no length is one a
     /// reader cannot seek in, so asking for both is refused rather than quietly answered
@@ -238,6 +243,11 @@ pub(in crate::app) async fn query_parquet(
         params.dsv_null_value.as_deref(),
         Format::Json,
     )?;
+    // A format with no streamed form is a fault in the request itself, so it is answered
+    // here with the rest of what the body alone decides rather than after a file is opened.
+    if params.streaming {
+        streamable(&output)?;
+    }
     let selection = params.selection()?;
     let url = parse_url(params.url.as_str())?;
     // The API has only one thing to do with an object, so a url naming something it does
@@ -277,6 +287,20 @@ pub(in crate::app) async fn query_parquet(
         let planned = query::plan(&file, &selection, service.sql_limits, Order::Unspecified)
             .await
             .map_err(hide_the_path)?;
+        // What a failed read says reaches the caller at the end of the document, so it is
+        // shaped the way a refusal would have been — and by a copy of the rule, the body
+        // outliving this handler.
+        let hide_in_body = {
+            let on_disk = on_disk.clone();
+            move |error: ApiError| match &on_disk {
+                Some(path) => error.from_mount(path),
+                None => error,
+            }
+        };
+        let batches = planned
+            .batches()
+            .map_err(hide_the_path)?
+            .map_err(hide_in_body);
         tracing::info!(
             url = %file.url,
             selected = params.columns.is_some(),
@@ -287,7 +311,7 @@ pub(in crate::app) async fn query_parquet(
             elapsed_ms = started.elapsed().as_millis(),
             "query"
         );
-        return streamed(planned, &output, started).map_err(hide_the_path);
+        return streamed(planned, batches, &output, started).map_err(hide_the_path);
     }
     let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
         .then(|| parquet::read_layout(&file))
@@ -475,9 +499,6 @@ mod tests {
         assert!(shown.contains("us-west-2"), "{shown}");
     }
 
-    /// The single-file route never produces a plan, so a field about what a plan carries is
-    /// not one of its fields, and a body carrying it is refused rather than quietly doing
-    /// nothing.
     /// A streamed answer is the same answer, in every format that streams.
     ///
     /// The rows are the point: what streaming changes is when the bytes leave, not which
@@ -553,6 +574,9 @@ mod tests {
         assert!(body.contains("streaming"), "{body}");
     }
 
+    /// The single-file route never produces a plan, so a field about what a plan carries is
+    /// not one of its fields, and a body carrying it is refused rather than quietly doing
+    /// nothing.
     #[tokio::test]
     async fn return_storage_is_refused_where_there_is_no_plan() {
         let dir = tempfile::TempDir::new().unwrap();
