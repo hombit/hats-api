@@ -104,15 +104,30 @@ def configuration(port: int, catalogs: Path | None, tables: list[Published]) -> 
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class Note:
+    """What the service was started on, where that is not what was asked for.
+
+    `as_asked` is the difference between a finding and a broken run, and it is carried
+    here rather than read out of the wording downstream. A service started on less than
+    the suite configured still answers every question — about a service nobody asked
+    for. That report reads exactly like a service missing the features, which is why the
+    suite has to be told the two apart rather than guessing from a count.
+    """
+
+    id: str
+    detail: str
+    as_asked: bool
+
+
 @dataclass
 class Service:
     """A service the suite can put questions to, however it got there."""
 
     base_url: str
-    #: What had to be given up to get it started, as `(check id, what happened)`. The
-    #: report carries these as checks of their own — a service that would not take its
-    #: table configuration is a finding, not a reason to have no run.
-    notes: list[tuple[str, str]] = field(default_factory=list)
+    #: What had to be given up to get it started. The report carries each as a check of
+    #: its own, and one that is not [`Note.as_asked`] also makes the run unbelievable.
+    notes: list[Note] = field(default_factory=list)
     process: subprocess.Popen | None = None
     log: Path | None = None
 
@@ -144,13 +159,13 @@ def start(binary: Path, catalogs: Path | None, tables: list[tuple[str, str]], re
     the youngest thing in the configuration, and a service that refuses the key exits
     at startup rather than ignoring it. Rather than reporting that as every check
     failing for the same unexplained reason, it is retried without them and recorded
-    once, as itself.
+    once, as itself — and the note says the run is not one to believe.
     """
     report_dir.mkdir(parents=True, exist_ok=True)
     attempts = [("with its tables", tables)] if tables else []
     attempts.append(("with no tables", []))
 
-    notes: list[tuple[str, str]] = []
+    notes: list[Note] = []
     for number, (description, published) in enumerate(attempts, start=1):
         port = free_port()
         config = report_dir / f"hats-api.{number}.toml"
@@ -172,7 +187,11 @@ def start(binary: Path, catalogs: Path | None, tables: list[tuple[str, str]], re
             if answers(f"{root}{API_PREFIX}/"):
                 if published:
                     notes.append(
-                        ("service/published-tables", f"{len(published)} tables published")
+                        Note(
+                            "service/published-tables",
+                            f"{len(published)} tables published",
+                            as_asked=True,
+                        )
                     )
                 return Service(
                     base_url=f"{root}{API_PREFIX}/{TAP_PATH}",
@@ -188,10 +207,11 @@ def start(binary: Path, catalogs: Path | None, tables: list[tuple[str, str]], re
         # why and then prints its usage, so the tail is the usage.
         said = [line for line in log.read_text(errors="replace").splitlines() if line.strip()]
         notes.append(
-            (
+            Note(
                 "service/published-tables",
                 f"the service would not start {description}: "
                 f"{' / '.join(said[:5]) or 'it said nothing'}",
+                as_asked=False,
             )
         )
 

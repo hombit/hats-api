@@ -1,7 +1,10 @@
 name: TAP conformance
 
-# Failing checks are this job's output and leave it green. It goes red only for a crash
-# of the service or of the suite. Questions go to this service and to nothing else.
+# Failing checks are this job's output and leave it green. It goes red only for a run
+# whose report cannot be believed: the service or the suite crashed, the service started
+# on less than the suite configured, or not one check passed — each of which reads in
+# the report exactly like a service implementing nothing.
+# Questions go to this service and to nothing else.
 on:
   push:
     branches: [main]
