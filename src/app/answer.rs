@@ -139,7 +139,7 @@ pub(in crate::app) async fn hats_answer(
                 Some(file) => parquet::read_layout(file).await?,
                 None => parquet::SourceLayout::default(),
             };
-            let body = parquet::encode(&result.rows, &layout)?;
+            let body = parquet::encode(&result.rows, layout)?;
             return Ok(seekable(
                 body,
                 (
@@ -376,8 +376,10 @@ pub(in crate::app) fn counters(
 /// care what order its keys arrive in — which is why the envelope here is written by hand
 /// rather than serialized from [`SelectResponse`].
 ///
-/// Parquet is not streamable and is refused by [`streamable`] before a url is opened: it is
-/// read footer-first, so a body with no length is one `pyarrow` cannot open at all.
+/// Parquet is one of those encodings, written a row group at a time with its footer last.
+/// What it no longer has is a length, so a reader that seeks in it over HTTP needs the
+/// collected answer; `layout` is the source file's, where the caller has already read it,
+/// so the file that arrives is the one a collected answer would have sent.
 ///
 /// The batches are the caller's to build, because they are also the caller's to shape: what
 /// a failed read says reaches the caller at the end of the document now, so a route hands
@@ -387,6 +389,8 @@ pub(in crate::app) fn streamed<S>(
     batches: S,
     output: &Output,
     started: Instant,
+    layout: Option<parquet::SourceLayout>,
+    file: &RemoteFile,
 ) -> Result<Response, ApiError>
 where
     S: futures::Stream<Item = Result<datafusion::arrow::array::RecordBatch, ApiError>>
@@ -408,7 +412,14 @@ where
         // driver fills that in.
         stopped: None,
     };
-    sending(&schema, batches, ending, output)
+    sending(
+        &schema,
+        batches,
+        ending,
+        output,
+        layout,
+        &download_name(file, "parquet"),
+    )
 }
 
 /// A catalog's rows, sent as its partitions land.
@@ -417,6 +428,10 @@ where
 /// than one. What the ending costs is not one plan's counter but what the read accumulated
 /// across its partitions, and a bound reached part-way is said at the end of the document
 /// rather than in the `422` with a work list a collected answer would have given.
+///
+/// A parquet answer from here is written with this service's own settings: a catalog has no
+/// one source file to take a layout from, and its partitions are not read until after the
+/// headers have gone. That is what a collected catalog answer that read no file gets too.
 pub(in crate::app) fn streamed_rows<S>(
     schema: &datafusion::arrow::datatypes::SchemaRef,
     batches: S,
@@ -442,7 +457,9 @@ where
             .refused()
             .map(|why| stream::Stopped::Bound(why.to_string())),
     };
-    sending(schema, batches, ending, output)
+    // No layout and the collected catalog answer's own name: a catalog has no one source
+    // file to take either from.
+    sending(schema, batches, ending, output, None, "selection.parquet")
 }
 
 /// One streamed body: the head written while a status can still be chosen, the rows as they
@@ -452,6 +469,8 @@ fn sending<S, F>(
     batches: S,
     ending: F,
     output: &Output,
+    layout: Option<parquet::SourceLayout>,
+    name: &str,
 ) -> Result<Response, ApiError>
 where
     S: futures::Stream<Item = Result<datafusion::arrow::array::RecordBatch, ApiError>>
@@ -459,7 +478,7 @@ where
         + 'static,
     F: FnOnce(usize) -> stream::Ending + Send + 'static,
 {
-    let mut encoder = encoder_for(output, schema)?;
+    let mut encoder = encoder_for(output, schema, layout)?;
     // While a status can still be chosen: `csv` refuses a nested column here, and a refusal
     // after the `200` is a document that stops rather than a message naming the column.
     let head = encoder.begin(schema)?;
@@ -476,6 +495,16 @@ where
         Body::from_stream(chunks),
     )
         .into_response();
+    // A streamed parquet answer is a download by construction — there is nothing to seek in
+    // and nothing to render — so it carries the name to save it under, as the collected one
+    // does. Only the name: the content type above is every format's.
+    if matches!(output.format, Format::Parquet)
+        && let Ok(value) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+    {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_DISPOSITION, value);
+    }
     // The rows are read as this body is sent, so the work this request came to do is not
     // over when the handler returns. `app::service::deadline` reads this and keeps its clock
     // running over the body; without it a streamed query would be the one request with no
@@ -492,34 +521,21 @@ where
 #[derive(Debug, Clone, Copy)]
 pub(in crate::app) struct Generated;
 
-/// Whether this format can be sent as it is read at all.
-///
-/// Asked before a url is opened, so that a request naming both `streaming` and a format
-/// that cannot be streamed is refused without reading anything. [`encoder_for`] asks the
-/// same question again where the answer becomes an encoder; the rule is written once and
-/// the second call is what makes it unrepresentable rather than merely checked.
-pub(in crate::app) fn streamable(output: &Output) -> Result<(), ApiError> {
-    match output.format {
-        Format::Parquet => Err(ApiError::bad_request(
-            "parquet cannot be streamed: it is read from its footer backwards, so a reader \
-             needs the whole file; ask for json, csv, tsv or votable, or leave streaming out",
-        )),
-        Format::Json | Format::Dsv(_) | Format::Votable => Ok(()),
-    }
-}
-
-/// Which encoder writes this answer.
+/// Which encoder writes this answer. Every format has a streamed form, parquet included.
 fn encoder_for(
     output: &Output,
     schema: &datafusion::arrow::datatypes::SchemaRef,
+    layout: Option<parquet::SourceLayout>,
 ) -> Result<Box<dyn stream::Encoder>, ApiError> {
-    streamable(output)?;
     Ok(match output.format {
         Format::Json => Box::new(JsonBody::new(columns_of_schema(schema))),
         Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, &output.dsv_null)),
         Format::Votable => Box::new(votable::Document::new(None)),
-        // Refused by `streamable` above, which is the one statement of the rule.
-        Format::Parquet => return Err(ApiError::internal("parquet has no streamed form")),
+        // Written a row group at a time with its footer last, which is an ordinary parquet
+        // file by the time the body ends. What it is not is a body a reader can seek in —
+        // see `parquet::Writing`, and the `Accept-Ranges: none` every streamed answer
+        // carries.
+        Format::Parquet => Box::new(parquet::Writing::new(layout.unwrap_or_default())),
     })
 }
 
@@ -649,7 +665,7 @@ fn parquet_response(
     layout: Option<parquet::SourceLayout>,
     parts: Option<&Parts>,
 ) -> Result<Response, ApiError> {
-    let body = parquet::encode(result, &layout.unwrap_or_default())?;
+    let body = parquet::encode(result, layout.unwrap_or_default())?;
     Ok(parquet_answer(
         body,
         file,

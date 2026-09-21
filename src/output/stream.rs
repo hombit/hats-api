@@ -14,9 +14,16 @@
 //! format that can still report them, because a JSON object does not care what order its
 //! keys arrive in — so the counts go after the rows rather than before.
 //!
-//! Parquet is not here. It is read footer-first, so a reader needs the whole object or
-//! ranges into it, and a body with no length is one `fsspec` reports as unseekable — the
-//! failure this service fixed rather than one to reintroduce.
+//! **Parquet is one of them**, and it is the format streaming is most worth having for: an
+//! answer of a few hundred megabytes need not exist twice, once in the writer's buffer and
+//! once in the response. It is written a row group at a time with its footer last, so what
+//! a reader gets at the end is an ordinary parquet file.
+//!
+//! What that file is not is a body anyone can seek in. A reader that opens parquet *over
+//! HTTP* — `pyarrow` through `fsspec` — needs ranges and a length, and gets them from a
+//! collected answer, which is why `streaming` is off unless a request asks. A reader that
+//! saves the bytes first, which is `curl` and `requests` and every client writing a file to
+//! disk, never needed either.
 
 use std::io;
 use std::sync::{Arc, Mutex};

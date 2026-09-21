@@ -345,12 +345,14 @@ function curl(route, body) {
     ' \\\n' +
     "  -H 'content-type: application/json' \\\n" +
     '  -d ' +
-    quoted(JSON.stringify({...body, format: 'json'}))
+    quoted(JSON.stringify({...body, format: 'json', streaming: true}))
   );
 }
 
 function viaRequests(route, body) {
-  return 'import requests\n\n' + post(route, body) + 'rows = answer.json()["rows"]';
+  return (
+    'import requests\n\n' + post(route, {...body, streaming: true}) + 'rows = answer.json()["rows"]'
+  );
 }
 
 /* Parquet back, and read without touching the disk: the answer is a file, and the point
@@ -358,7 +360,7 @@ function viaRequests(route, body) {
 function viaPyarrow(route, body) {
   return (
     'import io\n\nimport pyarrow.parquet as pq\nimport requests\n\n' +
-    post(route, {...body, format: 'parquet'}) +
+    post(route, {...body, format: 'parquet', streaming: true}) +
     'table = pq.read_table(io.BytesIO(answer.content))'
   );
 }
@@ -442,13 +444,21 @@ function viaNestedPandas(route, body, got) {
 function viaAstropy(route, body) {
   return (
     'import io\n\nimport requests\nfrom astropy.table import Table\n\n' +
-    post(route, {...body, format: 'votable'}) +
+    post(route, {...body, format: 'votable', streaming: true}) +
     'table = Table.read(io.BytesIO(answer.content), format="votable")'
   );
 }
 
 /* The POST every reader above makes, and the `raise_for_status` that turns a refusal into
-   an exception rather than into a parse error further down. */
+   an exception rather than into a parse error further down.
+
+   **Which snippets ask for `streaming` is decided by how each one reads the answer, not by
+   its format.** `curl` writes the body to a file and `requests`, `pyarrow` and `astropy`
+   each read the whole of it into memory before parsing, so none of them seeks and none
+   needs the length or the ranges a collected answer carries — what they gain is that the
+   service does not hold the answer while writing it. `nested_pandas` and `lsdb` are handed
+   a url instead of a body and read it by range, footer first, so they are asked for the
+   collected answer and their snippet passes nothing. */
 function post(route, body) {
   return (
     'answer = requests.post(\n' +
@@ -676,6 +686,16 @@ function preview(panel) {
        answers a query in the format the url named, defaulting to parquet. Asking without
        it and reading the body as JSON parses a parquet file. */
     format: 'json',
+    /* The rows are read from the body once it is whole, so what this changes is that the
+       service does not hold the answer while writing it. The document is the same document
+       — the counts sit after `rows` rather than before, which a JSON reader cannot see —
+       except that a read which stopped part-way says so in `refused` instead of in a status
+       that has already gone. `render` reads it.
+
+       Not on the url the snippets hand to a reader: `nested_pandas` and `lsdb` seek in what
+       they are given, and a streamed body is the one thing they cannot. That url is built
+       from `asked` and never from this. */
+    streaming: 'true',
   };
 }
 
@@ -756,6 +776,15 @@ function render(into, answer) {
     answer.elapsed_ms +
     ' ms';
   into.appendChild(summary);
+  /* Where the rows stopped before the answer did. A streamed body has sent its status by
+     the time it knows, so this is the only place it can be said — and rows that were cut
+     off read exactly like the whole answer unless the page says otherwise. */
+  if (answer.refused !== undefined) {
+    const refused = document.createElement('p');
+    refused.className = 'refused';
+    refused.textContent = 'stopped before the end: ' + answer.refused;
+    into.appendChild(refused);
+  }
   if (answer.rows.length === 0) return;
 
   const table = document.createElement('table');

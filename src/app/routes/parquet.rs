@@ -12,7 +12,7 @@ use serde::de::IgnoredAny;
 use futures::TryStreamExt as _;
 use futures::future::OptionFuture;
 
-use crate::app::answer::{answer, streamable, streamed};
+use crate::app::answer::{answer, streamed};
 use crate::app::request::{
     Format, Output, body_error, predicate_of, projection_of, refuse_unknown, takes,
 };
@@ -116,9 +116,12 @@ pub(in crate::app) struct ParquetQuery {
     /// no status left to send it as: `json` ends with a `refused` naming it, `votable` with
     /// `QUERY_STATUS="ERROR"`, and `csv` and `tsv` end without the transfer completing.
     ///
-    /// Not for `parquet`, which is read footer-first: a body with no length is one a
-    /// reader cannot seek in, so asking for both is refused rather than quietly answered
-    /// whole.
+    /// **`parquet` streams too**, a row group at a time with its footer last, and the bytes
+    /// are the file a collected answer would have given. What the body no longer has is a
+    /// length, so a reader that seeks in it over HTTP — `pyarrow` through `fsspec` — wants
+    /// the collected answer; one that saves the bytes and opens the file, which is what
+    /// `curl` and `requests` do, reads it like any other. A read that fails part-way ends
+    /// the body without a footer, parquet having nowhere to say an answer is not whole.
     #[serde(default)]
     #[schema(example = false)]
     streaming: bool,
@@ -243,11 +246,6 @@ pub(in crate::app) async fn query_parquet(
         params.dsv_null_value.as_deref(),
         Format::Json,
     )?;
-    // A format with no streamed form is a fault in the request itself, so it is answered
-    // here with the rest of what the body alone decides rather than after a file is opened.
-    if params.streaming {
-        streamable(&output)?;
-    }
     let selection = params.selection()?;
     let url = parse_url(params.url.as_str())?;
     // The API has only one thing to do with an object, so a url naming something it does
@@ -275,18 +273,24 @@ pub(in crate::app) async fn query_parquet(
     // rule, since which rows come back is a different question from what order they are
     // in.
     //
-    // The layout read needs only `file`, not the rows, so it runs alongside the query
-    // rather than after it — the two round trips overlap instead of adding up. Fetched
-    // only when the answer will actually be parquet, there being nothing to copy for
-    // any other encoding.
     // Streamed, where the caller asked for it: the rows go out as they come off the scan,
     // so nothing here holds the whole answer and the body starts before the last row is
     // read. The log line is the one thing that suffers — what a streamed answer cost is
     // known only once it has been sent, and by then this handler has returned.
     if params.streaming {
-        let planned = query::plan(&file, &selection, service.sql_limits, Order::Unspecified)
-            .await
-            .map_err(hide_the_path)?;
+        // The layout alongside the planning, as it is alongside the query below: a streamed
+        // parquet answer keeps what the source is the authority on, so it is the file a
+        // collected answer would have been, arriving as it is written. The two round trips
+        // overlap rather than adding up, and neither is made for any other encoding.
+        let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
+            .then(|| parquet::read_layout(&file))
+            .into();
+        let (planned, layout) = tokio::join!(
+            query::plan(&file, &selection, service.sql_limits, Order::Unspecified),
+            layout_future,
+        );
+        let planned = planned.map_err(hide_the_path)?;
+        let layout = layout.transpose().map_err(hide_the_path)?;
         // What a failed read says reaches the caller at the end of the document, so it is
         // shaped the way a refusal would have been — and by a copy of the rule, the body
         // outliving this handler.
@@ -311,8 +315,11 @@ pub(in crate::app) async fn query_parquet(
             elapsed_ms = started.elapsed().as_millis(),
             "query"
         );
-        return streamed(planned, batches, &output, started).map_err(hide_the_path);
+        return streamed(planned, batches, &output, started, layout, &file).map_err(hide_the_path);
     }
+    // The layout read needs only `file`, not the rows, so it runs alongside the query rather
+    // than after it — the two round trips overlap instead of adding up. Fetched only when the
+    // answer will actually be parquet, there being nothing to copy for any other encoding.
     let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
         .then(|| parquet::read_layout(&file))
         .into();
@@ -354,9 +361,10 @@ pub(in crate::app) async fn query_parquet(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
 
-    use crate::app::testing::{SECRET, ask, get, mounted, post_parquet};
+    use crate::app::service::PARQUET_CONTENT_TYPE;
+    use crate::app::testing::{SECRET, ask, ask_bytes, get, mounted, post_parquet, respond_to};
     use crate::config::ApiConfig;
 
     use super::*;
@@ -554,15 +562,60 @@ mod tests {
         }
     }
 
-    /// Parquet is read footer-first, so a body with no length is one no reader can open.
-    /// Refused rather than answered whole: a caller who asked for both said something this
-    /// service cannot do, and doing the other thing silently is how they find out late.
+    /// **The format streaming is most worth having for**, and the one whose streamed form
+    /// has to be proved rather than eyeballed: a parquet body arrives as row groups with its
+    /// footer last, so what says it worked is a parquet reader opening it.
+    ///
+    /// The collected answer is the comparison. Same rows, same schema — the file a caller
+    /// would have been sent, sent as it was written.
     #[tokio::test]
-    async fn parquet_and_streaming_together_are_refused() {
+    async fn a_streamed_parquet_answer_is_a_parquet_file() {
+        use datafusion::arrow::array::RecordBatchReader as _;
+        use datafusion::arrow::compute::concat_batches;
+        use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
-        let (status, body) = ask(
+        let service = || mounted(dir.path(), &ApiConfig::default());
+        let body = |streaming: bool| {
+            serde_json::json!({
+                "url": "file:///part0.parquet",
+                "columns": ["objectid", "band"],
+                "filters": "objectid >= 4",
+                "format": "parquet",
+                "streaming": streaming,
+            })
+        };
+        let rows = |bytes: bytes::Bytes| {
+            let reader = ParquetRecordBatchReaderBuilder::try_new(bytes)
+                .expect("a parquet file")
+                .build()
+                .expect("a reader");
+            let schema = reader.schema();
+            let batches: Vec<_> = reader.map(Result::unwrap).collect();
+            concat_batches(&schema, &batches).expect("one batch")
+        };
+
+        let (status, whole) = ask_bytes(service(), "/api/v1/simple/parquet", body(false)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, streamed) = ask_bytes(service(), "/api/v1/simple/parquet", body(true)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let streamed_rows = rows(streamed);
+        assert_eq!(streamed_rows, rows(whole));
+        assert!(streamed_rows.num_rows() > 0);
+    }
+
+    /// What a streamed parquet answer says about itself: a file to save, and no seeking in
+    /// it. The two a stream cannot offer are absent rather than guessed at, and the name is
+    /// the source file's, as it is for a collected answer.
+    #[tokio::test]
+    async fn a_streamed_parquet_answer_is_a_download_with_no_length() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
+        let response = respond_to(
             mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/simple/parquet",
             serde_json::json!({
                 "url": "file:///part0.parquet",
                 "format": "parquet",
@@ -570,8 +623,21 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-        assert!(body.contains("streaming"), "{body}");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers[header::CONTENT_TYPE], PARQUET_CONTENT_TYPE);
+        assert!(
+            headers[header::CONTENT_DISPOSITION]
+                .to_str()
+                .unwrap()
+                .contains("part0.parquet"),
+            "{:?}",
+            headers[header::CONTENT_DISPOSITION]
+        );
+        assert_eq!(headers[header::ACCEPT_RANGES], "none");
+        assert!(!headers.contains_key(header::CONTENT_LENGTH));
+        assert!(!headers.contains_key(crate::app::answer::NUM_ROWS_HEADER));
     }
 
     /// The single-file route never produces a plan, so a field about what a plan carries is

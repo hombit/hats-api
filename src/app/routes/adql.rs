@@ -222,7 +222,7 @@ fn adql_answer(
         Format::Parquet => Ok((
             attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
             counters(result, result.num_rows(), started),
-            parquet::encode(result, &parquet::SourceLayout::default())?,
+            parquet::encode(result, parquet::SourceLayout::default())?,
         )
             .into_response()),
         Format::Votable => Ok((
