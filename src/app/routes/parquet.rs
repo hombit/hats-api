@@ -273,10 +273,6 @@ pub(in crate::app) async fn query_parquet(
     // rule, since which rows come back is a different question from what order they are
     // in.
     //
-    // The layout read needs only `file`, not the rows, so it runs alongside the query
-    // rather than after it — the two round trips overlap instead of adding up. Fetched
-    // only when the answer will actually be parquet, there being nothing to copy for
-    // any other encoding.
     // Streamed, where the caller asked for it: the rows go out as they come off the scan,
     // so nothing here holds the whole answer and the body starts before the last row is
     // read. The log line is the one thing that suffers — what a streamed answer cost is
@@ -321,6 +317,9 @@ pub(in crate::app) async fn query_parquet(
         );
         return streamed(planned, batches, &output, started, layout, &file).map_err(hide_the_path);
     }
+    // The layout read needs only `file`, not the rows, so it runs alongside the query rather
+    // than after it — the two round trips overlap instead of adding up. Fetched only when the
+    // answer will actually be parquet, there being nothing to copy for any other encoding.
     let layout_future: OptionFuture<_> = matches!(output.format, Format::Parquet)
         .then(|| parquet::read_layout(&file))
         .into();

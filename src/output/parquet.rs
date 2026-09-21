@@ -24,12 +24,14 @@
 //!   to 175 MB. The two are exclusive per column: a dictionary is what the writer reaches
 //!   for first, so a float column asking for the split has to say it wants no dictionary
 //!   as well.
-//! - **Row groups of 128k rows, pages of 16k rows or 256 KiB.** An eighth and a quarter of
-//!   what the writer would choose, because what a reader can skip to is bounded by these
-//!   and an astronomy row is not small: one row of SDSS DR7 spectra is over a hundred
-//!   kilobytes, so the writer's million-row group is a single object of gigabytes. It
-//!   costs 2% of the answer's size on thin rows and 5% on heavy ones, and takes the
-//!   smallest thing a ranged reader can fetch from 500 KiB to 139 KiB.
+//! - **Row groups of 128k rows or 64 MiB, pages of 16k rows or 256 KiB.** An eighth and a
+//!   quarter of what the writer would choose, because what a reader can skip to is bounded
+//!   by these and an astronomy row is not small: one row of SDSS DR7 spectra is over a
+//!   hundred kilobytes, so the writer's million-row group is a single object of gigabytes.
+//!   Each is a row count paired with a byte count, whichever is reached first, since a row
+//!   count alone bounds nothing for a row that weighs a hundred kilobytes. It costs 2% of
+//!   the answer's size on thin rows and 5% on heavy ones, and takes the smallest thing a
+//!   ranged reader can fetch from 500 KiB to 139 KiB.
 //!
 //! What is still the source's: the writer version — inferred from the encodings in use,
 //! because parquet does not record it — and which columns carry a bloom filter, which is a
@@ -212,6 +214,7 @@ impl SourceLayout {
             .set_statistics_enabled(EnabledStatistics::Page)
             .set_dictionary_enabled(true)
             .set_max_row_group_row_count(Some(ROW_GROUP_ROWS))
+            .set_max_row_group_bytes(Some(ROW_GROUP_BYTES))
             .set_data_page_row_count_limit(PAGE_ROWS)
             .set_data_page_size_limit(PAGE_BYTES);
         for column in descriptor.columns() {
@@ -239,14 +242,33 @@ impl SourceLayout {
 /// again — and a library default that moved would move it without anyone deciding.
 const ZSTD_LEVEL: i32 = 1;
 
-/// How many rows one row group holds, at most.
+/// How large one row group is allowed to get, in rows and in bytes.
 ///
-/// An eighth of the writer's own million. A row group is the unit a reader cannot read
-/// less than one of when it wants statistics, and what makes that matter is not the row
-/// count but the row's weight: a catalog row carrying a light curve or a spectrum is
-/// kilobytes, so a million of them is a row group of gigabytes — one object a reader has
-/// to hold to get at any of it.
+/// The row count is an eighth of the writer's own million. A row group is the unit a reader
+/// cannot read less than one of when it wants statistics, and what makes that matter is not
+/// the row count but the row's weight: a catalog row carrying a light curve or a spectrum is
+/// kilobytes, so a million of them is a row group of gigabytes — one object a reader has to
+/// hold to get at any of it.
+///
+/// Which is why a row count alone does not bound it. Both are needed for the same reason the
+/// page has two: whichever is reached first ends the group, and the count is what holds for
+/// thin rows while the byte limit is what holds for heavy ones. A projection of four `f64`
+/// columns never reaches 64 MiB in 128k rows, so nothing about an ordinary answer changes;
+/// a row of SDSS DR7 spectra is over a hundred kilobytes, and there the byte limit is the
+/// only thing between the writer and a group of gigabytes. A wide answer is bounded by it
+/// too — 300 columns reach 64 MiB in some tens of thousands of rows — which is the same
+/// trade the row count makes and not a separate one.
+///
+/// The byte limit is measured against the group as it will be written — the writer sums its
+/// compressed pages and the buffers it has yet to compress — so it is the size of the object
+/// a ranged reader fetches, not a figure for the rows in memory.
+///
+/// What a smaller group costs is footer metadata and not compression: the codec, the
+/// dictionary and the byte-stream split all work a page at a time, while the footer carries
+/// an entry — with statistics, and a bloom filter where the source had one — for every column
+/// of every group.
 const ROW_GROUP_ROWS: usize = 128 * 1024;
+const ROW_GROUP_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many rows one data page holds, at most, and how large it is allowed to get.
 ///
@@ -292,8 +314,8 @@ fn uses_data_page_v2_encoding(encodings: &[Encoding]) -> bool {
 ///
 /// What is held while it is written is one row group rather than the whole file: the writer
 /// buffers a group, flushes it to the sink when it is full, and writes the footer at the
-/// end. So the peak is the row group size, which is the same thing the collected writer
-/// holds on its way through — with the rest of the file no longer beside it.
+/// end. `ROW_GROUP_BYTES` is what makes that a ceiling and not just a shape — bounded by
+/// rows alone, a group of heavy rows is as large as the rows are.
 pub struct Writing {
     writer: Option<ArrowWriter<stream::Pipe>>,
     sink: stream::Pipe,
@@ -331,7 +353,9 @@ impl stream::Encoder for Writing {
         let writer = ArrowWriter::try_new(self.sink.clone(), Arc::clone(schema), Some(properties))
             .map_err(ApiError::ParquetWrite)?;
         self.writer = Some(writer);
-        // Ordinarily nothing: the writer emits its magic bytes with the first row group.
+        // Ordinarily nothing. The writer puts its magic bytes down as it is constructed, but
+        // they land in the 8 KiB `BufWriter` every parquet writer keeps over its sink and do
+        // not reach the pipe until something flushes it.
         Ok(self.sink.take())
     }
 
