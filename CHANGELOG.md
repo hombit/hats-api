@@ -14,6 +14,8 @@ Release dates are in the UTC time zone.
 
 - `streaming` accepts `format = "parquet"`, written a row group at a time with its footer last, instead of refusing the two together.
 - The directory page runs its preview with `streaming=true`, and reports a `refused` that stopped one part-way.
+- The page's request body carries `streaming`, so every snippet that posts it sends it; the url written for `lsdb` and `nested_pandas` does not.
+- `query-benchmark` sends `streaming`, and reports a run stopped part-way as an error rather than timing it.
 
 ### Deprecated
 
@@ -25,7 +27,8 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
---
+- A streamed answer no longer panics the worker when the body is polled after it has ended, which was every streamed answer to a client sending `accept-encoding`.
+- The page's Python snippets write `True` rather than `true`, which was a `NameError` where a body carried a boolean.
 
 ### Security
 

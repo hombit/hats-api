@@ -106,10 +106,30 @@ pub fn collected(
 ) -> Result<Vec<u8>, ApiError> {
     let mut out = encoder.begin(&result.schema)?;
     for batch in &result.batches {
-        out.extend_from_slice(&encoder.rows(batch)?);
+        gathered(&mut out, encoder.rows(batch)?);
     }
-    out.extend_from_slice(&encoder.end(ending)?);
+    gathered(&mut out, encoder.end(ending)?);
     Ok(out)
+}
+
+/// Add one encoder chunk to the document, taking it whole where there is nothing to add it
+/// to.
+///
+/// **A chunk arrives owned**, `Pipe::take` being a `mem::take` of the buffer an `arrow`
+/// writer filled, so the first one to arrive becomes the answer rather than being copied
+/// into an empty `Vec` beside it. What that is worth depends on how many chunks a format
+/// produces: a parquet answer under one row group is written entirely by `end`, so the
+/// whole body is adopted and the copy is gone — which is the case the module's own
+/// measurements are of, a 27.6 MB projection of Gaia among them. A format that emits per
+/// batch still pays for the batches after the first.
+///
+/// Removing the rest of it means the encoders writing into a buffer this function owns,
+/// which is the `Encoder` contract and `Pipe`'s rather than this call's.
+fn gathered(out: &mut Vec<u8>, mut chunk: Vec<u8>) {
+    match out.is_empty() {
+        true => *out = chunk,
+        false => out.append(&mut chunk),
+    }
 }
 
 /// The same encoder over batches that have not been read yet.
@@ -175,6 +195,13 @@ where
     })
     // An encoder with nothing to say for a batch is not a chunk of no bytes.
     .filter(|sent| futures::future::ready(sent.as_ref().map_or(true, |bytes| !bytes.is_empty())))
+    // **A body may be polled once more after it has ended.** `StreamBody` does not override
+    // `is_end_stream`, so it answers the default `false` and a layer above it asks again to
+    // find out — `tower_http`'s compression does, which is every answer to a browser, since
+    // that is what sends `accept-encoding`. An `unfold` panics on that poll rather than
+    // answering `None` a second time, and it panics on the worker rather than failing the
+    // request, so nothing in the response says what happened.
+    .fuse()
 }
 
 /// Where a streamed answer has got to.
@@ -254,5 +281,70 @@ impl io::Write for Pipe {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use datafusion::arrow::array::{Int64Array, RecordBatch};
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use futures::StreamExt;
+
+    use super::*;
+
+    /// Enough of an encoder to drive the stream from end to end.
+    struct Bracketed;
+
+    impl Encoder for Bracketed {
+        fn begin(&mut self, _schema: &SchemaRef) -> Result<Vec<u8>, ApiError> {
+            Ok(b"[".to_vec())
+        }
+
+        fn rows(&mut self, _batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
+            Ok(b"row".to_vec())
+        }
+
+        fn end(&mut self, _ending: Ending) -> Result<Vec<u8>, ApiError> {
+            Ok(b"]".to_vec())
+        }
+    }
+
+    fn one_batch() -> impl Stream<Item = Result<RecordBatch, ApiError>> + Send {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1_i64]))]).unwrap();
+        futures::stream::iter(vec![Ok(batch)])
+    }
+
+    /// A finished body answers a further poll instead of panicking.
+    ///
+    /// `StreamBody` does not override `is_end_stream`, so it answers the default `false` and
+    /// whatever wraps it asks once more to find out — `tower_http`'s compression does, which
+    /// is every answer to a browser, that being what sends `accept-encoding`. An `unfold`
+    /// panics on a poll after `Poll::Ready(None)`, and it panics on the worker rather than
+    /// failing the request, so nothing in the response says what happened.
+    #[tokio::test]
+    async fn a_finished_body_answers_a_further_poll() {
+        // The head is the caller's: `sending` writes what `begin` returned while a status
+        // can still be chosen, and hands the bytes in here.
+        let mut body = Box::pin(streamed(
+            Box::new(Bracketed),
+            b"[".to_vec(),
+            one_batch(),
+            |rows| Ending {
+                rows,
+                ..Ending::default()
+            },
+        ));
+
+        let mut written = Vec::new();
+        while let Some(sent) = body.next().await {
+            written.extend_from_slice(&sent.unwrap());
+        }
+        assert_eq!(&written[..], b"[row]");
+
+        // The polls that took the worker down.
+        assert!(body.next().await.is_none());
+        assert!(body.next().await.is_none());
     }
 }

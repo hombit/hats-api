@@ -19,7 +19,14 @@ ps1           1     1.41s    1.41s    1.41s       87     14.2 MiB
 ```
 
 Those are over the public internet from a laptop, and they are mostly the network. `ztf`
-reads its `lightcurve` column whole, which is where its 299 MiB goes.
+reads its `lightcurve` column whole, which is where its 299 MiB goes. They were taken
+before the request asked for `streaming`, so they are not comparable with what it prints
+now — a time is only comparable with one the same request produced.
+
+The request sends `streaming: true`, which is how a client downloading the whole answer
+asks for it: the rows leave as they are read rather than after the service has built the
+whole body. A run that was stopped part-way says so in `refused` instead of in the status,
+and is reported as an error rather than timed — a partial answer is not a fast one.
 
 ## Choosing catalogs, and reading them from elsewhere
 

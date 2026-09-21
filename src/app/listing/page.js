@@ -305,6 +305,12 @@ function request(panel) {
       body.region = [{type: 'circle', ra: circle[0], dec: circle[1], radius_arcsec: circle[2]}];
     }
   }
+  /* Last, where the API describes it: what to read, what to ask of it, then how the answer
+     comes back. It belongs to the body rather than to each client because every client that
+     posts this body wants it — each writes the answer to a file or reads it whole into
+     memory, so none of them seeks in one — and because the `Body` tab is that body. A tab
+     showing a request the tabs beside it do not send is the one thing it must not be. */
+  body.streaming = true;
   return {
     route: new URL(
       API.replace(/\/$/, '') + (catalog ? '/simple/hats' : '/simple/parquet'),
@@ -345,14 +351,12 @@ function curl(route, body) {
     ' \\\n' +
     "  -H 'content-type: application/json' \\\n" +
     '  -d ' +
-    quoted(JSON.stringify({...body, format: 'json', streaming: true}))
+    quoted(JSON.stringify({...body, format: 'json'}))
   );
 }
 
 function viaRequests(route, body) {
-  return (
-    'import requests\n\n' + post(route, {...body, streaming: true}) + 'rows = answer.json()["rows"]'
-  );
+  return 'import requests\n\n' + post(route, body) + 'rows = answer.json()["rows"]';
 }
 
 /* Parquet back, and read without touching the disk: the answer is a file, and the point
@@ -360,7 +364,7 @@ function viaRequests(route, body) {
 function viaPyarrow(route, body) {
   return (
     'import io\n\nimport pyarrow.parquet as pq\nimport requests\n\n' +
-    post(route, {...body, format: 'parquet', streaming: true}) +
+    post(route, {...body, format: 'parquet'}) +
     'table = pq.read_table(io.BytesIO(answer.content))'
   );
 }
@@ -444,7 +448,7 @@ function viaNestedPandas(route, body, got) {
 function viaAstropy(route, body) {
   return (
     'import io\n\nimport requests\nfrom astropy.table import Table\n\n' +
-    post(route, {...body, format: 'votable', streaming: true}) +
+    post(route, {...body, format: 'votable'}) +
     'table = Table.read(io.BytesIO(answer.content), format="votable")'
   );
 }
@@ -452,13 +456,13 @@ function viaAstropy(route, body) {
 /* The POST every reader above makes, and the `raise_for_status` that turns a refusal into
    an exception rather than into a parse error further down.
 
-   **Which snippets ask for `streaming` is decided by how each one reads the answer, not by
-   its format.** `curl` writes the body to a file and `requests`, `pyarrow` and `astropy`
-   each read the whole of it into memory before parsing, so none of them seeks and none
-   needs the length or the ranges a collected answer carries — what they gain is that the
-   service does not hold the answer while writing it. `nested_pandas` and `lsdb` are handed
-   a url instead of a body and read it by range, footer first, so they are asked for the
-   collected answer and their snippet passes nothing. */
+   `streaming` is not added here: it is the body's, set once by `request`, because every
+   client that posts one wants it. What separates them is not the format but how each reads
+   the answer — `curl` writes it to a file and these three read the whole of it into memory
+   before parsing, so none of them seeks and none needs the length a collected answer
+   carries. `nested_pandas` and `lsdb` take a url rather than a body and read it by range,
+   footer first, so the url `snippet` builds for them is made from `asked` and carries
+   none of this. */
 function post(route, body) {
   return (
     'answer = requests.post(\n' +
@@ -466,7 +470,7 @@ function post(route, body) {
     text(route) +
     ',\n' +
     '    json=' +
-    python(JSON.stringify(body, null, 4)) +
+    python(body) +
     ',\n' +
     ')\nanswer.raise_for_status()\n'
   );
@@ -488,8 +492,35 @@ function text(value) {
 /* JSON is very nearly a Python literal, and the difference here is only the indentation:
    the body has no `true`, `false` or `null` in it, since every value is a string this
    panel put there. */
-function python(json) {
-  return json.replace(/\n/g, '\n    ');
+/* The body as a Python literal, indented to sit inside a `requests.post(` call.
+
+   `true`, `false` and `null` are names Python has not got, so a body carrying one is a
+   `NameError` rather than a request — and it cannot be fixed by rewriting the JSON
+   afterwards. A predicate is the caller's own text and may contain anything a value
+   position looks like: `filters` holding `name = '":true'` puts a quote, a colon and the
+   word in that order inside a string, where the escape before the quote does not stop a
+   pattern that matches one. So the literal is written rather than patched.
+
+   Strings still go through `JSON.stringify`, whose escapes Python reads the same way. */
+function python(value, indent) {
+  const pad = indent === undefined ? '    ' : indent;
+  const inner = pad + '    ';
+  if (value === null) return 'None';
+  if (value === true) return 'True';
+  if (value === false) return 'False';
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]';
+    return '[\n' + value.map(item => inner + python(item, inner)).join(',\n') + '\n' + pad + ']';
+  }
+  if (typeof value === 'object') {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return '{}';
+    const written = keys.map(
+      key => inner + JSON.stringify(key) + ': ' + python(value[key], inner),
+    );
+    return '{\n' + written.join(',\n') + '\n' + pad + '}';
+  }
+  return JSON.stringify(value);
 }
 
 function copied(panel) {
@@ -1085,7 +1116,7 @@ function counts(plan) {
    above: `Table.read` takes one on its own, with the types declared in the document. */
 function runners(plan, route, body) {
   const base = new URL('/', location.href).href.replace(/\/$/, '');
-  const asked = python(JSON.stringify(body, null, 4));
+  const asked = python(body);
   return [
     {
       name: 'Response',
@@ -1106,9 +1137,11 @@ function runners(plan, route, body) {
         /* `format` is merged in here for the reason the Python snippets merge it in: an
            entry's body carries what the caller asked for and nothing else, and the API
            answers JSON where nothing says otherwise — so without this the loop writes JSON
-           into files called `.parquet`. */
+           into files called `.parquet`. `streaming` goes in beside it: every runner below
+           writes each partition's answer to a file or reads it whole into memory, so none
+           of them seeks in one and none needs the length a collected answer carries. */
         'jq -r \'.requests[] | "\\(.order)-\\(.pixel)\\t\\(.path)\\t' +
-        '\\(.body + {format: "parquet"} | tojson)"\' plan.json |\n' +
+        '\\(.body + {format: "parquet", streaming: true} | tojson)"\' plan.json |\n' +
         "while IFS=$'\\t' read -r name path request; do\n" +
         '  curl -sS -X POST ' +
         base +
@@ -1136,7 +1169,7 @@ function runners(plan, route, body) {
         'for request in plan.json()["requests"]:\n' +
         '    answer = requests.post(\n' +
         '        BASE + request["path"],\n' +
-        '        json={**request["body"], "format": "json"},\n' +
+        '        json={**request["body"], "format": "json", "streaming": True},\n' +
         '    )\n' +
         '    answer.raise_for_status()\n' +
         '    rows += answer.json()["rows"]\n\n' +
@@ -1162,7 +1195,7 @@ function runners(plan, route, body) {
         'for request in plan.json()["requests"]:\n' +
         '    answer = requests.post(\n' +
         '        BASE + request["path"],\n' +
-        '        json={**request["body"], "format": "parquet"},\n' +
+        '        json={**request["body"], "format": "parquet", "streaming": True},\n' +
         '    )\n' +
         '    answer.raise_for_status()\n' +
         '    frames.append(npd.read_parquet(io.BytesIO(answer.content)))\n\n' +
@@ -1188,7 +1221,7 @@ function runners(plan, route, body) {
         'for request in plan.json()["requests"]:\n' +
         '    answer = requests.post(\n' +
         '        BASE + request["path"],\n' +
-        '        json={**request["body"], "format": "votable"},\n' +
+        '        json={**request["body"], "format": "votable", "streaming": True},\n' +
         '    )\n' +
         '    answer.raise_for_status()\n' +
         '    tables.append(Table.read(io.BytesIO(answer.content), format="votable"))\n\n' +
@@ -1214,7 +1247,7 @@ function runners(plan, route, body) {
         'for request in plan.json()["requests"]:\n' +
         '    answer = requests.post(\n' +
         '        BASE + request["path"],\n' +
-        '        json={**request["body"], "format": "parquet"},\n' +
+        '        json={**request["body"], "format": "parquet", "streaming": True},\n' +
         '    )\n' +
         '    answer.raise_for_status()\n' +
         '    tables.append(pq.read_table(io.BytesIO(answer.content)))\n\n' +

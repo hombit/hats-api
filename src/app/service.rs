@@ -361,7 +361,10 @@ async fn deadline(State(limit): State<Duration>, request: Request, next: Next) -
             }
         },
     );
-    Response::from_parts(parts, Body::from_stream(rest))
+    // Fused for the reason `output::stream::streamed` is: what is above this may poll a body
+    // once more after it has ended, and an `unfold` panics on that rather than answering
+    // `None` twice. This one wraps the other, so both have to say it.
+    Response::from_parts(parts, Body::from_stream(rest.fuse()))
 }
 
 /// What a request that ran out of time is told, wherever it ran out.
