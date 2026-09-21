@@ -83,6 +83,10 @@ def ask(base_url: str, name: str) -> tuple[float, dict]:
                     "radius_arcsec": RADIUS_ARCSEC,
                 }
             ],
+            # The rows leave as they are read, which is how a client that downloads the
+            # whole answer asks for it. What it takes out of the measurement is the wait
+            # while the service holds a finished answer it has not started sending.
+            "streaming": True,
         }
     ).encode()
     request = urllib.request.Request(
@@ -101,6 +105,11 @@ def measure(base_url: str, name: str, source: str, runs: int) -> Measured:
 
     Stopping matters: a request that 400s comes back in milliseconds, and four more of
     them would fill a row of the table with times that look like a very fast query.
+
+    **A streamed answer says it was cut in the body, not in the status.** The rows have
+    gone by the time a bound is reached, so what a collected answer reports as a 422 comes
+    back here as a 200 carrying `refused` — which is a partial answer, and timing one
+    against a whole one is the comparison this module exists to prevent.
     """
     measured = Measured(catalog=name, source=source)
     for _ in range(runs):
@@ -112,6 +121,9 @@ def measure(base_url: str, name: str, source: str, runs: int) -> Measured:
             return measured
         except OSError as unreachable:
             measured.error = str(unreachable)
+            return measured
+        if answer.get("refused") is not None:
+            measured.error = f"stopped part-way: {str(answer['refused'])[:300]}"
             return measured
         measured.seconds.append(seconds)
         measured.num_rows = answer.get("num_rows")

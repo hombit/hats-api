@@ -696,13 +696,15 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::Request;
+    use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use tower::ServiceExt;
 
     use crate::access::AccessPolicy;
     use crate::access::mount::Mounts;
     use crate::app::router;
     use crate::app::testing::{
-        SECRET, ask, ask_hats, body_of, mounted, post_json, serving, with_limits,
+        SECRET, ask, ask_bytes, ask_hats, body_of, mounted, post_json, respond_to, serving,
+        with_limits,
     };
     use crate::config::{ApiConfig, DataConfig, LimitsConfig, ServerConfig};
     use crate::engine::query;
@@ -1073,6 +1075,88 @@ mod tests {
         assert_eq!(whole["rows"], streamed["rows"]);
         assert_eq!(streamed["num_rows"], 100);
         assert!(streamed["refused"].is_null(), "{streamed}");
+    }
+
+    /// A streamed parquet answer stopped by a bound is not a parquet file.
+    ///
+    /// Parquet has no form for "these are not all the rows" — a footer describes what the
+    /// file holds and nothing about what was left out — so closing one properly here would
+    /// produce a file no reader could tell from the whole answer. The body stops without its
+    /// footer instead, which every reader refuses.
+    ///
+    /// The catalog route is the one that reaches this: it is the only caller that sets
+    /// `Ending::stopped`, `max_rows` and `max_bytes_fetched` being counters watched between
+    /// partitions rather than bounds checked before the read. So the check is that a reader
+    /// actually refuses the bytes, not that the answer is short — a truncated parquet body
+    /// is parquet-shaped right up to the footer it has not got.
+    #[tokio::test]
+    async fn a_streamed_catalog_answer_cut_by_a_bound_is_not_a_readable_file() {
+        let dir = hats::query::tests::fixture(true);
+        let api = ApiConfig::default();
+        let body = serde_json::json!({
+            "url": "file:///",
+            "columns": ["id"],
+            // Two partitions' worth, so the read goes past the first and meets the bound.
+            "limit": 100,
+            "format": "parquet",
+            "streaming": true,
+        });
+
+        // The fixture's partitions hold 64 rows apiece, so 110 is reached on the second.
+        let over = LimitsConfig {
+            max_rows: 110,
+            ..LimitsConfig::default()
+        };
+        let response = respond_to(
+            with_limits(serving(dir.path()), &api, &over),
+            "/api/v1/simple/hats",
+            body.clone(),
+        )
+        .await;
+        // The status went with the head of the document, long before the bound was met.
+        assert_eq!(response.status(), StatusCode::OK);
+        // Collected a frame at a time rather than in one call, because the transfer is meant
+        // to fail: a body that ends in an error is the whole point, and anything that unwraps
+        // the collection asserts nothing about what a reader is left holding.
+        let mut stream = response.into_body().into_data_stream();
+        let mut cut = Vec::new();
+        let mut broke = false;
+        while let Some(frame) = stream.next().await {
+            match frame {
+                Ok(chunk) => cut.extend_from_slice(&chunk),
+                Err(_) => {
+                    broke = true;
+                    break;
+                }
+            }
+        }
+        assert!(broke, "the body ended cleanly on a cut answer");
+        assert!(
+            ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(cut.clone())).is_err(),
+            "a cut answer was readable as a whole file: {} bytes",
+            cut.len()
+        );
+
+        // And the same request with room to finish is the file it claims to be, so what the
+        // refusal above proves is the bound and not that this route cannot write parquet.
+        let under = LimitsConfig {
+            max_rows: 200,
+            ..LimitsConfig::default()
+        };
+        let (status, whole) = ask_bytes(
+            with_limits(serving(dir.path()), &api, &under),
+            "/api/v1/simple/hats",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rows: usize = ParquetRecordBatchReaderBuilder::try_new(whole)
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|batch| batch.unwrap().num_rows())
+            .sum();
+        assert_eq!(rows, 100);
     }
 
     /// The route end to end: a body naming a catalog by a mount's path comes back with the
