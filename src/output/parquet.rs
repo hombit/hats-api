@@ -658,4 +658,65 @@ mod tests {
         let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes)).unwrap();
         assert_eq!(reader.metadata().file_metadata().num_rows(), 3);
     }
+
+    /// The three calls, driven over batches one at a time, make the file [`encode`] makes.
+    ///
+    /// Which is the whole claim of there being one writer: a streamed answer and a TAP job
+    /// write their rows this way and a collected answer writes them the other, and a reader
+    /// has no way to tell which produced the bytes it is holding.
+    #[test]
+    fn the_pieces_add_up_to_the_file_the_collected_writer_makes() {
+        use crate::output::stream::Encoder as _;
+
+        let batches = [sample_batch(), sample_batch()];
+        let schema = batches[0].schema();
+
+        let mut writing = Writing::new(SourceLayout::default());
+        let mut piecewise = writing.begin(&schema).unwrap();
+        for batch in &batches {
+            piecewise.extend_from_slice(&writing.rows(batch).unwrap());
+        }
+        piecewise.extend_from_slice(&writing.end(stream::Ending::default()).unwrap());
+
+        let collected = encode(
+            &QueryResult {
+                schema,
+                batches: batches.to_vec(),
+                data_bytes_read: 0,
+            },
+            SourceLayout::default(),
+        )
+        .unwrap();
+
+        assert_eq!(piecewise, collected);
+        let reader = ParquetRecordBatchReaderBuilder::try_new(Bytes::from(piecewise)).unwrap();
+        assert_eq!(reader.metadata().file_metadata().num_rows(), 6);
+    }
+
+    /// A read that stopped part-way leaves no footer, which every reader refuses.
+    ///
+    /// Parquet has no marker for "these are not all the rows", so the alternative is a file
+    /// that looks whole and holds fewer rows than were asked for — the one failure a caller
+    /// cannot tell from data. Refusing in `end` is what makes the body stop mid-chunk
+    /// instead.
+    #[test]
+    fn an_answer_that_stopped_part_way_is_not_closed_into_a_whole_file() {
+        use crate::output::stream::{Encoder as _, Stopped};
+
+        let batch = sample_batch();
+        let mut writing = Writing::new(SourceLayout::default());
+        writing.begin(&batch.schema()).unwrap();
+        writing.rows(&batch).unwrap();
+
+        let refused = writing
+            .end(stream::Ending {
+                stopped: Some(Stopped::Failed("the store went away".to_owned())),
+                ..Default::default()
+            })
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("the store went away"),
+            "{refused}"
+        );
+    }
 }

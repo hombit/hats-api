@@ -1,6 +1,7 @@
 //! What a TAP request may ask its answer to be, and what that answer is labelled.
 
 use crate::app::request::Format;
+use crate::app::service::PARQUET_CONTENT_TYPE;
 use crate::error::ApiError;
 use crate::output::{dsv, votable};
 
@@ -21,9 +22,21 @@ pub(super) struct Answering {
 ///
 /// VOTable is first because it is the default and the one format TAP §2.7.3 requires of
 /// every service; `csv` and `tsv` are a SHOULD there and two of the four reference services
-/// offer neither. `json` and `parquet` are this service's own and are deliberately absent:
-/// what a nested column looks like in them is not settled, and a name published here is one
-/// a client may then ask for.
+/// offer neither.
+///
+/// **`parquet` is an extension format this service declares, and it is here because it is the
+/// only answer to a nested column.** A light curve or a spectrum is one column of one row, and
+/// VOTable, `csv` and `tsv` each refuse such a column by name — so a catalog carrying one had
+/// no TAP answer at all, and the refusal's "ask for json or parquet" named nothing a TAP
+/// client could write. DALI §3.4.3 provides for exactly this, a service declaring formats
+/// beyond the ones the standard names, and a client that has not heard of it reads the media
+/// type off the capabilities document and skips it.
+///
+/// `json` stays absent, and not for want of an encoder. A parquet answer is a file — a shape
+/// nothing here invented — while this service's JSON answer is a document this crate
+/// designed, with a `schema`, a `rows` and its counts, and handing that to a TAP client is
+/// deciding what JSON means over TAP rather than writing the rows out. A name published here
+/// is one a client may then ask for, so it waits until there is an answer to that.
 const SPELLINGS: &[Answering] = &[
     Answering {
         asked: "votable",
@@ -69,6 +82,19 @@ const SPELLINGS: &[Answering] = &[
         asked: dsv::Dsv::Tsv.content_type(),
         format: Format::Dsv(dsv::Dsv::Tsv),
         content_type: dsv::Dsv::Tsv.content_type(),
+    },
+    // The one media type parquet has, and the one this service labels a parquet body with
+    // everywhere else — a TAP answer and a file off a mount are the same bytes and say so
+    // the same way, which is also what keeps them both out of the compression layer.
+    Answering {
+        asked: "parquet",
+        format: Format::Parquet,
+        content_type: PARQUET_CONTENT_TYPE,
+    },
+    Answering {
+        asked: PARQUET_CONTENT_TYPE,
+        format: Format::Parquet,
+        content_type: PARQUET_CONTENT_TYPE,
     },
 ];
 
@@ -158,20 +184,21 @@ mod tests {
             resolve(Some("tsv")).unwrap().format,
             Format::Dsv(dsv::Dsv::Tsv)
         );
+
+        // The alias and the media type reach the same format, and both are labelled with
+        // the media type — parquet having only the one, unlike VOTable's two.
+        for asked in ["parquet", "PARQUET", "application/vnd.apache.parquet"] {
+            let answering = resolve(Some(asked)).unwrap();
+            assert_eq!(answering.format, Format::Parquet, "{asked}");
+            assert_eq!(answering.content_type, PARQUET_CONTENT_TYPE, "{asked}");
+        }
     }
 
     /// DALI §3.4.3 says to fail rather than answer in some other format, which is a body
     /// the client's parser reads as corrupt instead of as a refusal.
     #[test]
     fn a_format_this_service_has_not_got_is_refused() {
-        for asked in [
-            "fits",
-            "html",
-            "text",
-            "application/fits",
-            "json",
-            "parquet",
-        ] {
+        for asked in ["fits", "html", "text", "application/fits", "json"] {
             let refused = resolve(Some(asked)).unwrap_err().to_string();
             assert!(refused.contains(asked), "{asked}: {refused}");
             assert!(refused.contains("votable"), "{asked}: {refused}");
@@ -180,6 +207,17 @@ mod tests {
 
     #[test]
     fn the_names_are_the_short_ones() {
-        assert_eq!(names(), ["votable", "csv", "tsv"]);
+        assert_eq!(names(), ["votable", "csv", "tsv", "parquet"]);
+    }
+
+    /// What the capabilities document publishes is what a request may write, which is the
+    /// whole reason both are read off this one list — a format declared and then refused is
+    /// a client choosing something that does not work.
+    #[test]
+    fn every_declared_format_can_be_asked_for() {
+        for (alias, mime) in declared() {
+            assert_eq!(resolve(Some(alias)).unwrap().content_type, mime, "{alias}");
+            assert!(resolve(Some(mime)).is_ok(), "{mime}");
+        }
     }
 }

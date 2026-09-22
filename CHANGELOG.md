@@ -8,7 +8,8 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `RESPONSEFORMAT=parquet` on `/api/v1/tap/sync` and `/api/v1/tap/async`, declared in `/api/v1/tap/capabilities`, carrying `x-hats-overflow` where `MAXREC` cut it. [#105](https://github.com/hombit/hats-api/pull/105)
+- `STREAMING=true` on `/api/v1/tap/sync`: the answer is sent as it is read, with no `Content-Length`, `Accept-Ranges: none` and no `x-hats-overflow`. [#105](https://github.com/hombit/hats-api/pull/105)
 
 ### Changed
 

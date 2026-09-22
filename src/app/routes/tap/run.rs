@@ -6,21 +6,34 @@
 //! format table answer the same on both — by construction, rather than by a test that the
 //! two have not drifted.
 //!
-//! **What differs after that is whether the answer has to exist all at once.** A `/sync`
-//! body carries a length, so the document is built and measured; a job's answer is a file,
-//! so it is written as it is encoded and never held. The second is why [`write()`] exists
-//! beside [`run`]: the peak of a job is then one batch and one chunk rather than the rows
-//! and the whole document, and the ceiling on what a job may keep refuses at the byte that
-//! passes it instead of once all of it is in memory.
+//! **What differs after that is whether the answer has to exist all at once**, and three
+//! drivers answer that three ways over one set of encoders.
+//!
+//! - [`run`] builds the whole body, which is what a `/sync` answer with a `Content-Length`
+//!   is.
+//! - [`write()`] puts each piece into a job's file: the peak is then one batch and one chunk
+//!   rather than the rows and the whole document, and the ceiling on what a job may keep
+//!   refuses at the byte that passes it instead of once all of it is in memory. Parquet is
+//!   the one format whose chunk is a row group rather than a batch — the writer cannot emit
+//!   a group before it is full — which is bounded and is still not the answer.
+//! - [`stream()`] sends each piece as the rows arrive, which is `STREAMING=true`. The same
+//!   peak as a job's, and nothing on disk.
 //!
 //! Nothing here knows it is inside a request future. The caller supplies the ceiling a route
-//! allows and reads the answer out; the clock over the router is the sync route's alone.
+//! allows and reads the answer out; the clock over the router is the sync route's alone —
+//! which for a streamed body means the clock runs over the body too, and [`Streamed`] carries
+//! the mark that says so.
 
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+use axum::body::Body;
+use datafusion::arrow::array::RecordBatch;
+use futures::{Stream, StreamExt as _};
 
 use crate::access::data::DataFiles;
 use crate::adql;
-use crate::adql::query::{Answer, Rows, Source, Table};
+use crate::adql::query::{Answer, Execution, Rows, Source, Table};
 use crate::app::request::Format;
 use crate::app::routes::tap::format::Answering;
 use crate::app::routes::tap::parameters::Parameters;
@@ -28,7 +41,7 @@ use crate::app::routes::tap::published::describe;
 use crate::app::routes::tap::upload::{Kind, UPLOAD_SCHEMA, Upload};
 use crate::app::service::Service;
 use crate::error::ApiError;
-use crate::output::{dsv, stream, votable};
+use crate::output::{dsv, parquet, stream, votable};
 use crate::storage::{self, Authorities, StorageOptions};
 use crate::tap::jobs::Writing;
 use crate::tap::schema;
@@ -49,7 +62,7 @@ const DSV_NULL: &str = "";
 pub(super) struct Answered {
     pub content_type: &'static str,
     /// Whether the answer stopped at the row bound. Only a VOTable can say so in the
-    /// document; the delimited formats have nowhere to put it.
+    /// document; the delimited formats and parquet have nowhere to put it.
     pub overflow: bool,
     pub num_rows: usize,
     pub data_bytes_read: u64,
@@ -58,12 +71,15 @@ pub(super) struct Answered {
 }
 
 /// Run one request's statement and keep the whole answer, which is what a `/sync` body is.
+///
+/// The body is bytes rather than text: every format here but parquet writes UTF-8, and one
+/// that does not is the reason nothing between this and the response may assume otherwise.
 pub(super) async fn run(
     service: &Service,
     parameters: &Parameters,
     answering: Answering,
     ceiling: adql::query::Limits,
-) -> Result<(String, Answered), ApiError> {
+) -> Result<(Vec<u8>, Answered), ApiError> {
     let prepared = prepare(service, parameters, ceiling).await?;
     let answer = adql::query::run(
         &prepared.translated,
@@ -146,6 +162,149 @@ pub(super) async fn write(
             .map(|table| table.name.clone())
             .collect(),
     })
+}
+
+/// One statement, answered as its rows arrive.
+///
+/// There is no [`Answered`] beside this body and there cannot be: the counts and the overflow
+/// flag are known once the last row is in, and by then the headers have gone. Everything a
+/// collected answer says in a header a streamed one says in the document or not at all —
+/// which is the whole of what `STREAMING=true` costs, and why it is off unless asked for.
+#[derive(Debug)]
+pub(super) struct Streamed {
+    pub content_type: &'static str,
+    /// The tables the statement named, as it named them, for the log. The counts are not
+    /// among them: the log line is written before a row has been read.
+    pub tables: Vec<String>,
+    pub body: Body,
+}
+
+/// The same statement, sent as its rows arrive.
+///
+/// **The head is written here, while a status can still be chosen.** `csv`, `tsv` and VOTable
+/// each refuse a nested column in `begin`, and a refusal after the `200` is a document that
+/// stops rather than a `400` naming the column — so `begin` is called before the response is
+/// built and its error is this function's.
+///
+/// **A truncation ends the document rather than closing it.** A collected answer says it was
+/// cut in `x-hats-overflow` where the format cannot say it itself; a streamed one sent that
+/// header before it knew. So the ending carries [`stream::Stopped::Bound`] where the row
+/// bound was reached, which VOTable writes as `OVERFLOW` after the table and which `csv`,
+/// `tsv` and parquet answer by ending without their terminator — no closing footer on a
+/// parquet file, no last chunk on a delimited one. A reader refuses all three, which is what
+/// it must do: a parquet file that closed over a truncation is one that looks whole and holds
+/// fewer rows than the query matched, and nothing in it says so.
+///
+/// **A bound of no rows is the exception, and it is not a truncation.** `MAXREC=0` reaches the
+/// bound by construction — the statement is planned and never run — so every request that
+/// writes it sets `overflow`, and ending the document there would leave `csv`, `tsv` and
+/// parquet unreadable. What that request asked for is the columns, which DALI §3.4.4 has come
+/// back with the indicator beside them, and a body no reader opens is not the columns. It is
+/// also the one bound a caller cannot be misled by: they wrote the zero.
+pub(super) async fn stream(
+    service: &Service,
+    parameters: &Parameters,
+    answering: Answering,
+    ceiling: adql::query::Limits,
+) -> Result<Streamed, ApiError> {
+    let started = Instant::now();
+    let prepared = prepare(service, parameters, ceiling).await?;
+    let tables = prepared
+        .tables
+        .iter()
+        .map(|table| table.name.clone())
+        .collect();
+    let mut encoder = encoder(answering)?;
+    let execution = adql::query::plan(
+        &prepared.translated,
+        &prepared.tables,
+        &prepared.data_files,
+        prepared.limits,
+    )
+    .await?;
+    let schema = Arc::clone(&execution.schema);
+    let head = encoder.begin(&schema)?;
+
+    // What the read cost, which only the `Execution` knows and which the ending is built
+    // from once the rows have run out. It is behind a lock because the two halves are apart:
+    // the execution is owned by the batch stream, and the ending is a closure the stream
+    // driver calls after that stream has ended.
+    let counted = Arc::new(Mutex::new(Counted::default()));
+    // Whether reaching the bound cuts anything away. `MAXREC=0` sets `overflow` on a request
+    // that asked for no rows, and a document ended over that is a schema the caller cannot
+    // read rather than a truncation they cannot see.
+    let cuts = prepared.limits.max_rows > 0;
+    let batches = reading(execution, Arc::clone(&counted));
+    // The driver's own count is the same number and is not read: the rows, the bytes and the
+    // overflow all come off the `Execution`, and taking two of the three from one place and
+    // the third from another is how they come to disagree.
+    let chunks = stream::streamed(encoder, head, batches, move |_rows| {
+        let counted = counted.lock().map(|held| *held).unwrap_or_default();
+        stream::Ending {
+            rows: counted.rows,
+            data_bytes_read: counted.data_bytes_read,
+            // A statement's scan, whatever it read, is not a count this document has a place
+            // for: VOTable and the delimited formats say nothing about either.
+            partitions: None,
+            elapsed: started.elapsed(),
+            overflow: counted.overflow,
+            stopped: (counted.overflow && cuts).then(|| {
+                stream::Stopped::Bound(format!(
+                    "this answer was cut at {} rows by the row bound this request was given",
+                    counted.rows
+                ))
+            }),
+        }
+    });
+    Ok(Streamed {
+        content_type: answering.content_type,
+        tables,
+        body: Body::from_stream(chunks),
+    })
+}
+
+/// What a read had cost by the time its rows ran out.
+#[derive(Debug, Default, Clone, Copy)]
+struct Counted {
+    rows: usize,
+    data_bytes_read: u64,
+    overflow: bool,
+}
+
+/// One [`Execution`] as a stream of batches, leaving its counters where the ending can read
+/// them.
+///
+/// **They are written after every batch rather than at the end**, because there are three
+/// ways the rows stop and only one of them reaches a line after the loop: the batches run
+/// out, the bound cuts them, or the read fails — and the last of those ends the stream at the
+/// error, with the driver calling the ending straight after. Written each time, whatever
+/// happened last is what the ending finds.
+fn reading(
+    execution: Execution,
+    counted: Arc<Mutex<Counted>>,
+) -> impl Stream<Item = Result<RecordBatch, ApiError>> + Send + 'static {
+    futures::stream::unfold(Some(execution), move |state| {
+        let counted = Arc::clone(&counted);
+        async move {
+            let mut execution = state?;
+            let next = execution.next().await;
+            if let Ok(mut held) = counted.lock() {
+                *held = Counted {
+                    rows: execution.num_rows(),
+                    data_bytes_read: execution.data_bytes_read(),
+                    overflow: execution.overflow(),
+                };
+            }
+            next.map(|batch| (batch, Some(execution)))
+        }
+    })
+    // An `unfold` panics when it is polled after returning `None`, and it panics on the
+    // worker rather than failing the request, so nothing in the response says what happened.
+    // `stream::streamed` does not poll this again — it moves to its own end phase on the
+    // `None` and never reaches the batches after that — but that is an assumption about a
+    // driver this does not own, and it is the assumption `StreamBody` held until a
+    // compression layer was wrapped around it.
+    .fuse()
 }
 
 /// A statement and the tables it names, opened and ready to be planned.
@@ -324,11 +483,19 @@ fn uploaded<'a>(
 /// The same encoders the collected writers are built on — [`encode`] drives them over rows
 /// that are all in hand, and this drives them over rows that are not. Two ways of writing
 /// one format would be two things to keep saying the same.
+/// **A job's parquet answer is not a streamed response.** The pieces go into a file that is
+/// served afterwards with a length and ranged reads, which is what a parquet reader needs to
+/// open one at a url.
+///
+/// The layout is [`parquet::SourceLayout::default`]: a statement reads a catalog, or several
+/// tables it joined, and there is no one source file whose bloom filters or writer version
+/// this answer could be said to inherit.
 fn encoder(answering: Answering) -> Result<Box<dyn stream::Encoder>, ApiError> {
     Ok(match answering.format {
         Format::Votable => Box::new(votable::Document::new(None)),
         Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, DSV_NULL)),
-        // The spelling table is the only source of a format here, and it holds these two.
+        Format::Parquet => Box::new(parquet::Writing::new(parquet::SourceLayout::default())),
+        // The spelling table is the only source of a format here, and it holds these three.
         other => {
             return Err(ApiError::internal(format!(
                 "{} is not a format this resource writes",
@@ -339,12 +506,23 @@ fn encoder(answering: Answering) -> Result<Box<dyn stream::Encoder>, ApiError> {
 }
 
 /// The rows, in the format the request asked for.
-fn encode(answer: &Answer, answering: Answering) -> Result<String, ApiError> {
+///
+/// **Only a VOTable is written differently when the rows were cut.** `OVERFLOW` is a VOTable
+/// marker; `csv`, `tsv` and parquet have nowhere in the document to put one and say it in
+/// `x-hats-overflow` instead, which is what `app::routes::tap::answer` is for. A parquet file
+/// that carried the fact would have to carry it in key/value metadata no reader looks at,
+/// which is the same as nowhere and worse for looking like somewhere.
+fn encode(answer: &Answer, answering: Answering) -> Result<Vec<u8>, ApiError> {
     match (answering.format, answer.overflow) {
-        (Format::Votable, false) => votable::encode(&answer.result),
-        (Format::Votable, true) => votable::encode_truncated(&answer.result),
-        (Format::Dsv(kind), _) => dsv::encode(&answer.result, kind, DSV_NULL),
-        // The spelling table is the only source of a format here, and it holds these two.
+        (Format::Votable, false) => votable::encode(&answer.result).map(String::into_bytes),
+        (Format::Votable, true) => {
+            votable::encode_truncated(&answer.result).map(String::into_bytes)
+        }
+        (Format::Dsv(kind), _) => {
+            dsv::encode(&answer.result, kind, DSV_NULL).map(String::into_bytes)
+        }
+        (Format::Parquet, _) => parquet::encode(&answer.result, parquet::SourceLayout::default()),
+        // The spelling table is the only source of a format here, and it holds these three.
         (other, _) => Err(ApiError::internal(format!(
             "{} is not a format this resource writes",
             other.name()

@@ -61,7 +61,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
-| 11.12 | `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA` | todo | later. No reference service can be asked about either; the nested half waits on §7.5 |
+| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half waits on §7.5 and nobody can be asked about it |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -292,20 +292,15 @@ job to be given.
 | a slow or distant origin | no | the clock, and a message that says which bound |
 
 Raising the clock is not an alternative: nginx's `proxy_read_timeout` defaults to 60
-seconds, shorter than this service's own default. Two things to build instead:
+seconds, shorter than this service's own default. Streaming is what answers the first three
+rows of that table and is built, on every route that answers rows — `streaming` in the
+file-server and API modes, `STREAMING` on `/tap/sync`. What is left:
 
-1. **Stream the response** — parquet in row-group chunks, JSON element by element — which
-   keeps time-to-first-byte short, keeps bytes flowing so intermediaries do not drop the
-   connection, and caps memory on a large result. Under the file-server's order it is
-   available a partition at a time. It moves two trades already shipped: compression
-   buffers before it emits, so fewer bytes cost time-to-first-byte; and the clock bounds
-   the response future rather than the body, so a request that has begun streaming is one
-   the clock stops measuring.
-2. **A prefetch primitive.** `POST /api/v1/prefetch` returns `202` and warms the object
-   cache; `GET` reports residency. A cache operation and not a job: no result to store, no
-   per-user state, idempotent, a no-op if never called. Document the limitation it exists
-   for — against a non-ranging origin holding a huge object, the first request after a cold
-   start runs out the clock.
+**A prefetch primitive.** `POST /api/v1/prefetch` returns `202` and warms the object
+cache; `GET` reports residency. A cache operation and not a job: no result to store, no
+per-user state, idempotent, a no-op if never called. Document the limitation it exists
+for — against a non-ranging origin holding a huge object, the first request after a cold
+start runs out the clock.
 
 ### 7.3 The API description, as it changes
 
@@ -717,13 +712,13 @@ a description and no UCD — there is no UCD1 word for a HEALPix index, and 1.03
 data-type, and UCD" for an extra field is a SHOULD.
 
 **A tier that reaches a nested column is refused, at 2 as at 3.** No format either version can
-answer in carries one — not VOTable, not `csv`, not `tsv` — so the alternative is a column
-silently absent from a request that asked for all of them. The refusal points at
-`POST {api.prefix}/v1/hats` with `format: parquet`, which is where a nested column is answered
-today; it cannot point at `RESPONSEFORMAT`, `parquet` and `json` being deliberately absent
-from the TAP format table until §11.12. What it costs is that a cone over a catalog with a
-nested column does not answer at all until an operator writes `hats_cols_default`, ZTF DR24
-being the one here.
+answer in carries one — VOTable is the only one a cone search has — so the alternative is a
+column silently absent from a request that asked for all of them. The refusal points at
+`{api.prefix}/tap/sync` with `RESPONSEFORMAT=parquet`, which is the same query in a protocol
+that can answer it, and at `POST {api.prefix}/v1/hats` with `format: parquet` for a caller
+already writing against this service's own API. What it costs is that a cone over a catalog
+with a nested column does not answer at all until an operator writes `hats_cols_default`,
+ZTF DR24 being the one here.
 
 #### Still to settle
 
@@ -827,17 +822,31 @@ this way is bounded by the same three bounds; `[[tap.table]]` stays credential-f
 operator's secret having no place in a published surface. The two reserved schemas are already
 reserved. The suite's upload checks are inline VOTable and stay red.
 
-### 11.12 `parquet` and `json` over TAP, and a nested column in `TAP_SCHEMA`
+### 11.12 `json` over TAP, and a nested column in `TAP_SCHEMA`
 
-The formats this service has of its own, advertised in `/capabilities` as what they are, and
-the only way a nested column can be answered at all — `votable`, `csv` and `tsv` each refuse
-one.
+`json` is the other extension format to advertise in `/capabilities` the way `parquet` is,
+and it is the one besides VOTable that could carry `QUERY_STATUS` in the document rather than
+in `x-hats-overflow`. Nothing in the format table stands in its way. What does is the shape:
+DALI §3.4.3 does not list JSON at all, so a service that answers in it is answering in a
+document of its own design, and publishing the name fixes `schema`, `rows` and the counts as
+an interface that then has to hold.
 
-Both halves are here because no reference service can be asked about either. None of them
-publishes a nested column, so there is no practice to follow and no check that can be
-calibrated against anybody: what `TAP_SCHEMA.columns` should say about `lightcurve.mag` is a
-decision to make alone, and it waits on §7.5 deciding what a nested column is in a VOTable
-first.
+Every reference service already made that decision. All four — ARI-Gaia, ESA-Gaia, IRSA and
+MAST — declare `application/json` in `/capabilities` and answer in it, IRSA adding
+`application/json5`; the snapshots under `tap-conformance/references/` are where that is
+recorded. So there is practice, and it is four different shapes rather than one to follow.
+What is left to decide is ours, not whether anyone has gone first.
+
+The nested half is what neither format settles. A column reaching a light curve is answerable
+in `parquet` today and says nothing about itself in the metadata: `TAP_SCHEMA.columns` has one
+row per column with one `datatype`, and what that row should say about `lightcurve.mag` — one
+row per leaf, one row for the column, an `arraysize`, a `xtype` — is undecided. It waits on
+§7.5 deciding what a nested column is in a VOTable first, since a name published in
+`TAP_SCHEMA` is one a client may then write into a query and ask for in any format.
+
+The nested half is the one nobody can be asked about. None of the four publishes a nested
+column, so there is no practice to follow there and no check that can be calibrated against
+anybody.
 
 ### 11.14 A DALI parameter value, read once and typed
 
@@ -901,8 +910,9 @@ left:
   **The ceiling is per format, not one number**: a row costs far more as JSON than as
   parquet, so a count generous for one is wrong for the other in both directions. Bytes
   written is what the two have in common and a row count is what a caller can predict, so it
-  likely wants both. This and §7.2's streaming are one piece of work, `collect` building the
-  whole answer before either writer starts.
+  likely wants both. Streaming narrows this rather than answering it: a request that asks for
+  it holds a chunk instead of the answer, but nothing makes a caller ask, so a `POST` naming
+  only a url is still `collect` building the whole answer before either writer starts.
 - **A `POST` body size limit.** The expression depth and node caps bound the caller's text
   only. The projection needs no cap of its own, being bounded by the schema.
 - **Reject pathological parquet early** — a footer claiming implausible row-group or column

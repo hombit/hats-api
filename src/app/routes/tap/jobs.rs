@@ -177,6 +177,14 @@ impl Work for Query {
                 .map(|value| (CREDENTIAL.to_owned(), value)),
         );
         let parameters = Parameters::read(&pairs)?;
+        // `STREAMING` is read and not acted on here, which is the one place in this service a
+        // parameter is. TAP §2.7 is explicit that a spurious parameter "must" be ignored,
+        // answered normally and not reported as an error, and on this resource the name is
+        // spurious: it is not TAP's, and it is not one this resource has anything to do with.
+        // The house rule it looks like an exception to is about a parameter this service
+        // *acts on* — a job's answer is written as it is read whatever it says, and comes
+        // back from the result resource as a file with a length and ranged reads, so there is
+        // no answer here for the parameter to be promising instead.
         let answering = format::resolve(parameters.format.as_deref())?;
         // Into the file as it is encoded, rather than built whole and handed over: a job's
         // answer is a file at the end of it either way, and this way the rows and the
@@ -603,8 +611,9 @@ pub(in crate::app) async fn result(
         if let Ok(value) = product.content_type.parse() {
             headers.insert(header::CONTENT_TYPE, value);
         }
-        // The same thing `/sync` says, for the same reason: `csv` and `tsv` have nowhere in
-        // the document to say they were cut, and this client did not see the request.
+        // The same thing `/sync` says, for the same reason: `csv`, `tsv` and `parquet` have
+        // nowhere in the document to say they were cut, and this client did not see the
+        // request.
         if let Ok(value) = product.overflow.to_string().parse() {
             headers.insert(header::HeaderName::from_static(OVERFLOW_HEADER), value);
         }
