@@ -8,8 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `RESPONSEFORMAT=parquet` on `/api/v1/tap/sync` and `/api/v1/tap/async`, declared in `/api/v1/tap/capabilities`, carrying `x-hats-overflow` where `MAXREC` cut it. [#105](https://github.com/hombit/hats-api/pull/105)
-- `STREAMING=true` on `/api/v1/tap/sync`: the answer is sent as it is read, with no `Content-Length`, `Accept-Ranges: none` and no `x-hats-overflow`. [#105](https://github.com/hombit/hats-api/pull/105)
+--
 
 ### Changed
 
@@ -25,11 +24,22 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
-- A catalog query that matches nothing returns its column names: a header row in `csv`, a schema in `parquet`, `FIELD`s in a VOTable.
+--
 
 ### Security
 
 --
+
+## [0.0.12] - 2026-09-22
+
+### Added
+
+- `RESPONSEFORMAT=parquet` on `/api/v1/tap/sync` and `/api/v1/tap/async`, declared in `/api/v1/tap/capabilities`, carrying `x-hats-overflow` where `MAXREC` cut it. [#105](https://github.com/hombit/hats-api/pull/105)
+- `STREAMING=true` on `/api/v1/tap/sync`: the answer is sent as it is read, with no `Content-Length`, `Accept-Ranges: none` and no `x-hats-overflow`. [#105](https://github.com/hombit/hats-api/pull/105)
+
+### Fixed
+
+- A catalog query that matches nothing returns its column names: a header row in `csv`, a schema in `parquet`, `FIELD`s in a VOTable. [#104](https://github.com/hombit/hats-api/pull/104)
 
 ## [0.0.11] - 2026-09-21
 
@@ -191,7 +201,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.11...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.12...HEAD
+[0.0.12]: https://github.com/hombit/hats-api/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/hombit/hats-api/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/hombit/hats-api/compare/v0.0.9...v0.0.10
 [0.0.9]: https://github.com/hombit/hats-api/compare/v0.0.8...v0.0.9
