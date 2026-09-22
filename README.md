@@ -870,9 +870,9 @@ The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables
 and `parquet`. `UPLOAD`, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a
 catalog URL as [above](#querying-a-catalog-the-service-does-not-publish).
 
-`parquet` is this service's own, declared in `capabilities` beside the rest, and it is the
-only format here that carries a **nested column** — a light curve or a spectrum held as one
-column of one row. VOTable, `csv` and `tsv` each refuse such a column by name, so a query
+TAP names the first three; `parquet` is an extension this service declares, as DALI §3.4.3
+provides for, and it appears in `capabilities` beside the rest. It is the only format here
+that carries a **nested column** — a light curve or a spectrum held as one column of one row. VOTable, `csv` and `tsv` each refuse such a column by name, so a query
 touching one is a query to ask for parquet back. Both resources answer it: `/sync` sends the
 whole file with its length, and a job writes one you can fetch by range.
 
@@ -884,16 +884,19 @@ curl -o rows.parquet --data-urlencode \
 ```
 
 **`STREAMING=true` sends the answer as it is read**, the same parameter the [file-server
-mode](#querying-one-file) takes and with the same trade. It is this service's own, so a TAP
-service that has not got it ignores it and answers the query. There is no `Content-Length`,
-so the answer carries `Accept-Ranges: none`, and no `x-hats-overflow` — whether the rows were
-cut is known once they have run out, and the headers went before the first one was read.
+mode](#querying-one-file) takes and with the same trade. TAP does not specify it — it is an
+extension this service introduces — so a TAP service that has not got it ignores it and
+answers the query, as does `/async` here, whose result is a file with a length and ranged
+reads whatever this says. There is no `Content-Length`, so the answer carries
+`Accept-Ranges: none`, and no `x-hats-overflow` — whether the rows were cut is known once
+they have run out, and the headers went before the first one was read.
 
 Use it when you are downloading the whole answer; leave it out for a reader that opens the
 URL over HTTP, which needs the length and the ranges a collected answer carries. A streamed
 answer that *does* hit the row bound ends without its terminator — no closing footer on a
 parquet file — so what you get is a body that will not open rather than a file that looks
-whole and holds fewer rows than your query matched.
+whole and holds fewer rows than your query matched. `MAXREC=0` is not that: it asks for the
+columns and no rows, and comes back as a document either way.
 
 `MAXREC` caps the rows. A VOTable cut short by it carries an `OVERFLOW` marker after the
 table; `csv`, `tsv` and `parquet` have nowhere in the document to say so and carry an

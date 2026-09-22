@@ -1457,7 +1457,7 @@ and the parameter rules are §3.
   answer at all and those refusals' "ask for json or parquet" named nothing a TAP client could
   write. DALI §3.4.3 provides for a format beyond the standard's list, and a client that has
   not heard of this one reads the media type out of `/capabilities` and skips it. `json` is
-  still absent, and deliberately: its shape is this service's own document rather than a
+  still absent, and deliberately: its shape is a document this crate designed rather than a
   rendering TAP defines.
 
   Two things go with it. **A TAP answer is bytes, not text** — `run::run` and `run::encode`
@@ -1465,15 +1465,21 @@ and the parameter rules are §3.
   **every resource answers it through one writer**: `output::parquet::Writing` driven
   collected for a `/sync` body, and driven a piece at a time for a job's file and for a
   streamed `/sync` body. Two writers per format is the thing that drifts.
-- **`STREAMING` is `/sync`'s, it is off unless asked for, and `/async` refuses it.** It is
-  this service's own rather than TAP's or DALI's, spelled and defaulted like the file-server
-  mode's `streaming` so the two are one parameter. Off is the decision and not an oversight:
+- **`STREAMING` is `/sync`'s, it is off unless asked for, and `/async` ignores it.** Neither
+  TAP nor DALI specifies it: it is an extension this service introduces, spelled and defaulted
+  like the file-server mode's `streaming` so the two are one parameter. Off is the decision
+  and not an oversight:
   a collected answer carries a `Content-Length` — which is what a parquet reader opening the
   url needs — and the `x-hats-overflow` a format with nowhere to say it depends on, and a
-  streamed one has neither, its headers having gone before the first row was read. A job
-  refuses it because a job's answer is written as it is read whatever the parameter says and
-  comes back as a file with a length; accepting it would promise a different answer than the
-  one that arrives, which is the dropped-parameter failure under another name.
+  streamed one has neither, its headers having gone before the first row was read.
+
+  **A job is where a parameter is read and not acted on, and that is TAP's requirement rather
+  than an exception to the house rule.** §2.7 has a spurious parameter ignored, answered
+  normally and not reported as an error, and on that resource this name is spurious: it is not
+  TAP's, and a job's answer is written as it is read whatever it says and comes back as a file
+  with a length and ranged reads. So there is no other answer for it to be promising, which is
+  what the never-dropped rule is about — that rule is scoped to a parameter this service
+  *acts on*. Refusing it instead fails a job for a name every other TAP service ignores.
 
   **A streamed answer that reached the row bound ends rather than closes.** `run::stream`
   puts `stream::Stopped::Bound` in the ending where `overflow` is set, so VOTable writes
@@ -1483,6 +1489,14 @@ and the parameter rules are §3.
   that looks whole and holds fewer rows than the query matched with nothing in it saying so.
   Do not "fix" that by closing the footer and putting the fact in key/value metadata; no
   reader surfaces it, which is worse than nowhere for looking like somewhere.
+
+  **`MAXREC=0` is the exception, and it is not a truncation.** It reaches the bound by
+  construction — the statement is planned and never run — so `overflow` is set for every
+  request that writes it, and ending the document there would send the columns as a body no
+  reader opens. The columns are what that request asked for, DALI §3.4.4 having them come back
+  with the indicator beside them, and it is the one bound a caller cannot be misled by: they
+  wrote the zero. So `run::stream` asks whether the bound cuts anything away, never whether it
+  was reached.
 
   `run::stream` marks its response `app::answer::Generated`. The rows are read as the body is
   sent, so without it a streamed TAP query is the one request `max_request_seconds` does not

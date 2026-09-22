@@ -61,7 +61,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
-| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | what a JSON answer's own shape means over TAP is undecided; the nested half waits on §7.5. No reference service can be asked about either |
+| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half waits on §7.5 and nobody can be asked about it |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -824,10 +824,18 @@ reserved. The suite's upload checks are inline VOTable and stay red.
 
 ### 11.12 `json` over TAP, and a nested column in `TAP_SCHEMA`
 
-`json` is the other format this service has of its own, to be advertised in `/capabilities`
-the way `parquet` is. Nothing in the format table stands in its way; what does is that a JSON
-answer's shape is this service's own document — `schema`, `rows` and the counts — and TAP
-defines no such thing, so what a TAP client is handed is a decision rather than a rendering.
+`json` is the other extension format to advertise in `/capabilities` the way `parquet` is,
+and it is the one besides VOTable that could carry `QUERY_STATUS` in the document rather than
+in `x-hats-overflow`. Nothing in the format table stands in its way. What does is the shape:
+DALI §3.4.3 does not list JSON at all, so a service that answers in it is answering in a
+document of its own design, and publishing the name fixes `schema`, `rows` and the counts as
+an interface that then has to hold.
+
+Every reference service already made that decision. All four — ARI-Gaia, ESA-Gaia, IRSA and
+MAST — declare `application/json` in `/capabilities` and answer in it, IRSA adding
+`application/json5`; the snapshots under `tap-conformance/references/` are where that is
+recorded. So there is practice, and it is four different shapes rather than one to follow.
+What is left to decide is ours, not whether anyone has gone first.
 
 The nested half is what neither format settles. A column reaching a light curve is answerable
 in `parquet` today and says nothing about itself in the metadata: `TAP_SCHEMA.columns` has one
@@ -836,8 +844,9 @@ row per leaf, one row for the column, an `arraysize`, a `xtype` — is undecided
 §7.5 deciding what a nested column is in a VOTable first, since a name published in
 `TAP_SCHEMA` is one a client may then write into a query and ask for in any format.
 
-No reference service can be asked about either. None of them publishes a nested column, so
-there is no practice to follow and no check that can be calibrated against anybody.
+The nested half is the one nobody can be asked about. None of the four publishes a nested
+column, so there is no practice to follow there and no check that can be calibrated against
+anybody.
 
 ### 11.14 A DALI parameter value, read once and typed
 

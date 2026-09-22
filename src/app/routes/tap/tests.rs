@@ -1022,6 +1022,50 @@ async fn streaming_takes_true_or_false() {
     assert_eq!(status, StatusCode::OK);
 }
 
+/// `MAXREC=0` is the columns whether or not the answer is streamed.
+///
+/// It reaches the row bound by construction, the statement being planned and never run, so a
+/// streamed answer that ended its document on every bound would send three of the four
+/// formats as a body no reader opens — and what this request asked for is the schema. It is
+/// the one bound nothing is hidden by: the caller wrote the zero, so there is no truncation
+/// for the ending to warn them about. DALI §3.4.4 has the columns come back with the
+/// indicator beside them, which is what VOTable writes here.
+#[tokio::test]
+async fn a_streamed_answer_of_no_rows_is_still_a_document() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, body) = ask_bytes(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT id, ra, dec FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("RESPONSEFORMAT", "parquet"),
+            ("STREAMING", "true"),
+            ("MAXREC", "0"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let (columns, rows) = read_parquet(&body);
+    assert_eq!(columns, ["id", "ra", "dec"]);
+    assert_eq!(rows, 0);
+
+    // And the marker is still said where the format has somewhere to say it, so what this
+    // dropped is the end of a document and not the fact itself.
+    let (status, _, votable) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT id FROM sky.objects"),
+            ("LANG", "ADQL"),
+            ("STREAMING", "true"),
+            ("MAXREC", "0"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(votable.contains(r#"value="OVERFLOW""#), "{votable}");
+}
+
 /// A `GET` to one of the resources that describe the service.
 async fn fetch(service: Service, path: &str) -> (StatusCode, String, String) {
     send(
@@ -1624,19 +1668,21 @@ async fn a_job_writes_the_parquet_sync_would_have_built() {
     assert_eq!(read_parquet(&written).1, hats::query::tests::fixture_rows());
 }
 
-/// `STREAMING` is `/sync`'s, and a job says so rather than accepting it as a no-op.
+/// `STREAMING` is `/sync`'s, and a job ignores it rather than refusing it.
 ///
-/// A job's answer is written as it is read whatever the parameter says, and comes back as a
-/// file with a length and ranged reads — so accepting it would promise a different answer
-/// than the one that arrives. The refusal is the job's own, TAP §2.7 having a parameter
-/// enforced when the query runs rather than at submission.
+/// TAP §2.7: a spurious parameter "must" be ignored, answered normally and not reported as an
+/// error — and on this resource the name is spurious, being neither TAP's nor one a job has
+/// anything to do with. A client that sets it for every request it makes would otherwise get
+/// a failed job for a name every other TAP service ignores. Nothing is promised by accepting
+/// it either: a job's answer is written as it is read whatever it says, and comes back as a
+/// file with a length and ranged reads.
 #[tokio::test]
-async fn a_job_refuses_the_streaming_parameter() {
+async fn a_job_ignores_the_streaming_parameter() {
     let dir = hats::query::tests::fixture(true);
     let harness = Jobbed::new(dir.path());
     let job = harness
         .submit(&[
-            ("QUERY", "SELECT id FROM sky.objects"),
+            ("QUERY", "SELECT id, ra FROM sky.objects ORDER BY id"),
             ("LANG", "ADQL"),
             ("RESPONSEFORMAT", "parquet"),
             ("STREAMING", "true"),
@@ -1644,10 +1690,16 @@ async fn a_job_refuses_the_streaming_parameter() {
         ])
         .await;
 
-    assert_eq!(harness.settled(&job).await, "ERROR");
-    let why = text_of(harness.get(&format!("{job}/error")).await).await;
-    assert!(why.contains("STREAMING"), "{why}");
-    assert!(why.contains("/sync"), "{why}");
+    assert_eq!(harness.settled(&job).await, "COMPLETED");
+    let response = harness.get(&format!("{job}/results/result")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // The answer the parameter did not change: a file with a length and ranged reads, which
+    // is what a job's result is whatever was asked for.
+    let headers = response.headers().clone();
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    assert!(headers.contains_key(header::CONTENT_LENGTH));
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(read_parquet(&body).1, hats::query::tests::fixture_rows());
 }
 
 /// TAP §2.7: a parameter is enforced when the query runs, not when the job is made.

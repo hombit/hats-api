@@ -194,6 +194,13 @@ pub(super) struct Streamed {
 /// parquet file, no last chunk on a delimited one. A reader refuses all three, which is what
 /// it must do: a parquet file that closed over a truncation is one that looks whole and holds
 /// fewer rows than the query matched, and nothing in it says so.
+///
+/// **A bound of no rows is the exception, and it is not a truncation.** `MAXREC=0` reaches the
+/// bound by construction — the statement is planned and never run — so every request that
+/// writes it sets `overflow`, and ending the document there would leave `csv`, `tsv` and
+/// parquet unreadable. What that request asked for is the columns, which DALI §3.4.4 has come
+/// back with the indicator beside them, and a body no reader opens is not the columns. It is
+/// also the one bound a caller cannot be misled by: they wrote the zero.
 pub(super) async fn stream(
     service: &Service,
     parameters: &Parameters,
@@ -223,6 +230,10 @@ pub(super) async fn stream(
     // the execution is owned by the batch stream, and the ending is a closure the stream
     // driver calls after that stream has ended.
     let counted = Arc::new(Mutex::new(Counted::default()));
+    // Whether reaching the bound cuts anything away. `MAXREC=0` sets `overflow` on a request
+    // that asked for no rows, and a document ended over that is a schema the caller cannot
+    // read rather than a truncation they cannot see.
+    let cuts = prepared.limits.max_rows > 0;
     let batches = reading(execution, Arc::clone(&counted));
     // The driver's own count is the same number and is not read: the rows, the bytes and the
     // overflow all come off the `Execution`, and taking two of the three from one place and
@@ -237,7 +248,7 @@ pub(super) async fn stream(
             partitions: None,
             elapsed: started.elapsed(),
             overflow: counted.overflow,
-            stopped: counted.overflow.then(|| {
+            stopped: (counted.overflow && cuts).then(|| {
                 stream::Stopped::Bound(format!(
                     "this answer was cut at {} rows by the row bound this request was given",
                     counted.rows

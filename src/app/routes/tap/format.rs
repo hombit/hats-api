@@ -24,19 +24,19 @@ pub(super) struct Answering {
 /// every service; `csv` and `tsv` are a SHOULD there and two of the four reference services
 /// offer neither.
 ///
-/// **`parquet` is this service's own, and it is here because it is the only answer to a
-/// nested column.** A light curve or a spectrum is one column of one row, and VOTable, `csv`
-/// and `tsv` each refuse such a column by name — so a catalog carrying one had no TAP answer
-/// at all, and the refusal's "ask for json or parquet" named nothing a TAP client could
-/// write. DALI §3.4.3 provides for exactly this, a service declaring formats beyond the
-/// ones the standard names, and a client that has not heard of it reads the media type off
-/// the capabilities document and skips it.
+/// **`parquet` is an extension format this service declares, and it is here because it is the
+/// only answer to a nested column.** A light curve or a spectrum is one column of one row, and
+/// VOTable, `csv` and `tsv` each refuse such a column by name — so a catalog carrying one had
+/// no TAP answer at all, and the refusal's "ask for json or parquet" named nothing a TAP
+/// client could write. DALI §3.4.3 provides for exactly this, a service declaring formats
+/// beyond the ones the standard names, and a client that has not heard of it reads the media
+/// type off the capabilities document and skips it.
 ///
 /// `json` stays absent, and not for want of an encoder. A parquet answer is a file — a shape
-/// nothing here invented — while this service's JSON answer is a document of its own, with a
-/// `schema`, a `rows` and its counts, and handing that to a TAP client is deciding what JSON
-/// means over TAP rather than writing the rows out. A name published here is one a client may
-/// then ask for, so it waits until there is an answer to that.
+/// nothing here invented — while this service's JSON answer is a document this crate
+/// designed, with a `schema`, a `rows` and its counts, and handing that to a TAP client is
+/// deciding what JSON means over TAP rather than writing the rows out. A name published here
+/// is one a client may then ask for, so it waits until there is an answer to that.
 const SPELLINGS: &[Answering] = &[
     Answering {
         asked: "votable",

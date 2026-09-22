@@ -227,7 +227,7 @@ fn maxrec(asked: Option<&str>) -> Result<Option<usize>, ApiError> {
     })
 }
 
-/// `STREAMING`, which is this service's own and not TAP's or DALI's.
+/// `STREAMING`, an extension this service introduces. Neither TAP nor DALI specifies it.
 ///
 /// **It is off unless a request writes it, and that is the decision rather than a default.**
 /// A collected answer carries a `Content-Length` and, where the format cannot say it in the
@@ -237,9 +237,10 @@ fn maxrec(asked: Option<&str>) -> Result<Option<usize>, ApiError> {
 /// for the streaming it wants. The same spelling and the same default as the file-server
 /// mode's `streaming`, so the two are one parameter with one meaning.
 ///
-/// Neither standard defines it, so a service that has not got it ignores it and answers the
-/// query — which is what this service does with every other name nobody defines, and is why
-/// the parameter can be written to any TAP service without breaking the request.
+/// Being an extension, it is a name no other service knows, and TAP §2.7 has a service ignore
+/// such a name, answer the request normally and report no error about it. So the parameter can
+/// be written to any TAP service without breaking the request — which is the same rule this
+/// service applies to the extensions other people introduce.
 ///
 /// The value is read as the request spells it. Presence alone is not `true`: `STREAMING` with
 /// no value reads equally as "yes" and as a client that meant to say `false` and lost the
