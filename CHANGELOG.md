@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- A page at `/api/v1/tap` listing the published tables and their example queries, with `pyvo` + `nested-pandas`, TOPCAT and STILTS snippets against the deployment's own url.
 
 ### Changed
 

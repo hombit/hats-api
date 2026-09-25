@@ -22,7 +22,7 @@ use crate::error::ApiError;
 use crate::tap::metadata::TableMetadata;
 
 /// Where the TAP resources sit under the API's own prefix.
-const TAP_SEGMENT: &str = "tap";
+pub(super) const TAP_SEGMENT: &str = "tap";
 
 /// The optional halves of ADQL 2.1 this service answers, each by the feature type that
 /// declares it and the forms it covers.

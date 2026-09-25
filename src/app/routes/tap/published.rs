@@ -1,6 +1,7 @@
 //! Reading what this service publishes, for the resources that describe it.
 //!
-//! `TAP_SCHEMA`, VOSI's `/tables` and `/examples` are built from this. It costs a few small
+//! `TAP_SCHEMA`, VOSI's `/tables`, `/examples` and the page at the base url are built
+//! from this. It costs a few small
 //! reads per published catalog — its properties, its partition list and the one
 //! `dataset/_common_metadata` that holds every partition's columns and no rows.
 //!
@@ -49,6 +50,10 @@ pub(super) struct Published<'a> {
     /// A position the catalog holds a row at, as `(ra, dec)` in degrees — see
     /// [`example_position`].
     pub position: Option<(f64, f64)>,
+    /// `hats_nrows`, where the catalog states it.
+    pub rows: Option<u64>,
+    /// `obs_title`, where the catalog states it.
+    pub title: Option<String>,
 }
 
 /// Every table this service publishes, opened and described.
@@ -88,6 +93,11 @@ pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, A
             },
             None,
         );
+        let properties = catalog.catalog().properties();
+        // Shown beside the name and never read as a fact about the rows, so a count that
+        // will not parse is a table listed without one rather than a page that fails.
+        let rows = properties.rows().ok().flatten();
+        let title = properties.get("obs_title").map(str::to_owned);
         let cell = deepest(catalog.catalog().partitions());
         let position = match coordinates {
             Some((ra, dec)) => {
@@ -101,6 +111,8 @@ pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, A
             coordinates: coordinates.map(|(ra, dec)| (ra.to_owned(), dec.to_owned())),
             cell,
             position,
+            rows,
+            title,
         });
     }
     Ok(published)
