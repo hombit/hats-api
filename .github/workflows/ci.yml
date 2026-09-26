@@ -96,7 +96,7 @@ jobs:
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=$HATS_API_TEST_MINIO_ACCESS_KEY \
             -e MINIO_ROOT_PASSWORD=$HATS_API_TEST_MINIO_SECRET_KEY \
-            quay.io/minio/minio server /data
+            docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z server /data
 
       # The tests write their own fixtures, but S3 has no way to create a bucket
       # implicitly, so that one step is here.
