@@ -8,6 +8,32 @@ Release dates are in the UTC time zone.
 
 ### Added
 
+--
+
+### Changed
+
+--
+
+### Deprecated
+
+--
+
+### Removed
+
+--
+
+### Fixed
+
+--
+
+### Security
+
+--
+
+## [0.0.14] - 2026-09-26
+
+### Added
+
 - `[limits] catalog_cache_seconds` and `max_catalog_cache_bytes`: catalog metadata is kept between requests. [#110](https://github.com/hombit/hats-api/pull/110)
 - `[[mount]] catalog_cache_seconds`, overriding the default per mount; `inf` keeps until evicted. [#110](https://github.com/hombit/hats-api/pull/110)
 - `[[tap.table]]` catalogs are cached in the background and refreshed before they expire. [#111](https://github.com/hombit/hats-api/pull/111)
@@ -18,21 +44,9 @@ Release dates are in the UTC time zone.
 
 - ADQL and TAP read only the fields of a nested column that a statement names. [#113](https://github.com/hombit/hats-api/pull/113)
 
-### Deprecated
-
---
-
 ### Removed
 
 - **Breaking** `[[mount]] immutable`; a config that sets it no longer loads. [#110](https://github.com/hombit/hats-api/pull/110)
-
-### Fixed
-
---
-
-### Security
-
---
 
 ## [0.0.13] - 2026-09-26
 
@@ -211,7 +225,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.13...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.14...HEAD
+[0.0.14]: https://github.com/hombit/hats-api/compare/v0.0.13...v0.0.14
 [0.0.13]: https://github.com/hombit/hats-api/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/hombit/hats-api/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/hombit/hats-api/compare/v0.0.10...v0.0.11
