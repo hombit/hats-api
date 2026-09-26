@@ -16,7 +16,20 @@
 //! A refresh reads through [`CatalogCache::renewed`], so the catalog as it was keeps answering
 //! until the catalog as it is has been read, and a refresh that fails leaves the old one in
 //! place to expire when it would have.
+//!
+//! **Tables that do not fit are read once and never refreshed.** Every published table shares
+//! `[limits] max_catalog_cache_bytes` with every other catalog, so where the tables together
+//! weigh more than it holds, keeping them warm is each refresh evicting what the last one read:
+//! a whole round of catalog reads per lifetime, with nothing kept to show for it, and every
+//! catalog a caller is reading pushed out along the way. So the operator is told once, with
+//! the two numbers, and from then on a table is read when a request asks for it, the way any
+//! other catalog is. A renewal is also the moment two readings of a table are held at once,
+//! the old one until it expires, so a set that only just fits is exactly the one it would push
+//! over.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use url::Url;
@@ -34,18 +47,70 @@ const RETRY: Duration = Duration::from_secs(60);
 
 /// Start keeping every published table warm, one task per table, and return at once.
 pub fn warm(service: &Service) {
+    let footprint = Arc::new(Footprint::default());
     for table in service.tap_tables.iter() {
         let service = service.clone();
         let name = table.qualified().to_owned();
         let url = table.url().clone();
-        tokio::spawn(async move { keep_warm(&service, &name, &url).await });
+        let footprint = Arc::clone(&footprint);
+        tokio::spawn(async move { keep_warm(&service, &name, &url, &footprint).await });
     }
 }
 
-/// Read one table, and read it again before it expires, for as long as the process runs.
-async fn keep_warm(service: &Service, name: &str, url: &Url) {
+/// What the published tables weigh together, as each was last read, against the one budget
+/// they share — and whether they have been found not to fit it.
+#[derive(Debug, Default)]
+struct Footprint {
+    weights: Mutex<HashMap<String, u64>>,
+    /// Once set, stays set: a table that shrank on its next reading would only be found to by
+    /// reading it, which is the refresh this stops.
+    overflowed: AtomicBool,
+}
+
+impl Footprint {
+    /// Record what one table weighs, and say whether the tables still fit `max_bytes`. The
+    /// first reading that does not fit is logged; every one after it is only answered.
+    fn fits(&self, name: &str, weight: u64, max_bytes: u64) -> bool {
+        if self.overflowed.load(Ordering::Relaxed) {
+            return false;
+        }
+        let total = {
+            let Ok(mut weights) = self.weights.lock() else {
+                return false;
+            };
+            weights.insert(name.to_owned(), weight);
+            weights
+                .values()
+                .fold(0u64, |total, weight| total.saturating_add(*weight))
+        };
+        if total <= max_bytes {
+            return true;
+        }
+        if !self.overflowed.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                table = name,
+                published_bytes = total,
+                max_catalog_cache_bytes = max_bytes,
+                "the published tables do not fit the catalog cache; they will not be \
+                 refreshed ahead of time, and are read when a request asks for them"
+            );
+        }
+        false
+    }
+
+    fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Relaxed)
+    }
+}
+
+/// Read one table, and read it again before it expires, for as long as the process runs and
+/// the published tables fit the cache.
+async fn keep_warm(service: &Service, name: &str, url: &Url, footprint: &Footprint) {
     let mut renew = false;
     loop {
+        if footprint.overflowed() {
+            return;
+        }
         let cache = service.catalogs_for(url);
         let lifetime = cache.lifetime();
         // Nowhere to keep what would be read.
@@ -58,12 +123,16 @@ async fn keep_warm(service: &Service, name: &str, url: &Url) {
         };
         let started = Instant::now();
         let wait = match read(service, url, &cache).await {
-            Ok(()) => {
+            Ok(weight) => {
                 tracing::info!(
                     table = name,
                     elapsed_ms = started.elapsed().as_millis(),
+                    bytes = weight,
                     "published table read into the catalog cache"
                 );
+                if !footprint.fits(name, weight, cache.max_bytes()) {
+                    return;
+                }
                 renew = true;
                 match refresh_after(lifetime) {
                     Some(wait) => wait,
@@ -90,8 +159,8 @@ fn refresh_after(lifetime: Lifetime) -> Option<Duration> {
 
 /// Everything a request against the table would read about it: the properties, the partition
 /// list, the schema, a position to centre an example on, and — where the partitions are
-/// directories — the names inside every one of them.
-async fn read(service: &Service, url: &Url, cache: &CatalogCache) -> Result<(), ApiError> {
+/// directories — the names inside every one of them. Answers what all of it weighs in the cache.
+async fn read(service: &Service, url: &Url, cache: &CatalogCache) -> Result<u64, ApiError> {
     // A published table carries no storage options: what reaches it is its mount's.
     let dir = storage::open_dir(
         url,
@@ -107,7 +176,7 @@ async fn read(service: &Service, url: &Url, cache: &CatalogCache) -> Result<(), 
     if catalog.properties().partition_is_a_directory() {
         catalog.names(partitions.cells(), data).await?;
     }
-    Ok(())
+    catalog.cached_weight()
 }
 
 #[cfg(test)]
@@ -119,6 +188,10 @@ mod tests {
     use crate::config::{ApiConfig, LimitsConfig, ServerConfig, TapConfig, TapTableConfig};
 
     fn published(dir: &std::path::Path) -> Service {
+        published_within(dir, &LimitsConfig::default())
+    }
+
+    fn published_within(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
         let tap = TapConfig {
             tables: vec![TapTableConfig {
                 name: "sky.objects".to_owned(),
@@ -130,7 +203,7 @@ mod tests {
         with_tap(
             serving(dir),
             &ApiConfig::default(),
-            &LimitsConfig::default(),
+            limits,
             &ServerConfig::default(),
             &tap,
         )
@@ -216,6 +289,53 @@ mod tests {
         );
         let kept = open(&service.catalogs_for(&url)).await.unwrap();
         assert_eq!(kept.properties().name(), Some("renewed"));
+    }
+
+    /// Reading a table says what it weighs in the cache, and a refresh — which reads it all
+    /// again — weighs the same.
+    #[tokio::test]
+    async fn a_read_says_what_the_table_weighs() {
+        let dir = crate::hats::query::tests::fixture(true);
+        let service = published(dir.path());
+        let url = table_url(&service);
+        let cache = service.catalogs_for(&url);
+        let first = read(&service, &url, &cache).await.unwrap();
+        assert!(first > 0);
+        assert_eq!(read(&service, &url, &cache.renewed()).await.unwrap(), first);
+    }
+
+    /// Tables that together outgrow the budget stop being refreshed — every one of them, not
+    /// only the table that tipped it over — and stay stopped.
+    #[test]
+    fn tables_that_do_not_fit_are_not_refreshed() {
+        let footprint = Footprint::default();
+        assert!(footprint.fits("a", 600, 1000));
+        assert!(footprint.fits("a", 700, 1000));
+        assert!(!footprint.fits("b", 400, 1000));
+        assert!(footprint.overflowed());
+        assert!(!footprint.fits("a", 1, 1000));
+    }
+
+    /// A table that alone outgrows the cache is read once and not kept warm: the task ends
+    /// rather than sleeping until the next refresh, and says why.
+    #[tokio::test]
+    async fn a_table_larger_than_the_cache_is_read_once() {
+        let dir = crate::hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_catalog_cache_bytes: bytesize::ByteSize::b(1),
+            ..LimitsConfig::default()
+        };
+        let service = published_within(dir.path(), &limits);
+        let url = table_url(&service);
+        assert_eq!(service.catalogs_for(&url).max_bytes(), 1);
+        let footprint = Footprint::default();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            keep_warm(&service, "sky.objects", &url, &footprint),
+        )
+        .await
+        .expect("a table that does not fit is not refreshed");
+        assert!(footprint.overflowed());
     }
 
     /// A catalog is read again at nine tenths of its lifetime, and one kept until evicted, or

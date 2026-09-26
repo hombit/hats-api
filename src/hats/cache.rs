@@ -121,7 +121,7 @@ impl Catalogs {
         let slots = Cache::builder()
             .max_capacity(max_bytes)
             .weigher(|_: &Key, slot: &Arc<Slot>| {
-                u32::try_from(KEY_WEIGHT.saturating_add(slot.weight())).unwrap_or(u32::MAX)
+                u32::try_from(entry_weight(slot)).unwrap_or(u32::MAX)
             })
             .expire_after(Deadline)
             .build();
@@ -131,6 +131,15 @@ impl Catalogs {
                 generations: AtomicU64::new(1),
             }),
         }
+    }
+
+    /// The budget, in the same estimated bytes an entry is weighed in.
+    pub fn max_bytes(&self) -> u64 {
+        self.shared
+            .slots
+            .policy()
+            .max_capacity()
+            .unwrap_or(u64::MAX)
     }
 
     /// The cache as one catalog sees it: this cache, and how long that catalog's parts live.
@@ -162,6 +171,11 @@ impl CatalogCache {
         self.lifetime
     }
 
+    /// The budget every catalog's parts share, whatever their lifetimes.
+    pub fn max_bytes(&self) -> u64 {
+        self.catalogs.max_bytes()
+    }
+
     /// The same cache, reading a catalog's properties again whether or not they are held.
     ///
     /// What is read replaces what was held only once the read has succeeded, and under a new
@@ -189,6 +203,7 @@ impl CatalogCache {
                 renew: self.renew,
 
                 anchor: std::sync::OnceLock::new(),
+                held: Mutex::default(),
             },
         }
     }
@@ -287,6 +302,11 @@ fn field_weight(field: &Field) -> u64 {
     own.saturating_add(nested)
 }
 
+/// What an entry costs against the budget: its value and what holding it costs besides.
+fn entry_weight(slot: &Slot) -> u64 {
+    KEY_WEIGHT.saturating_add(slot.weight())
+}
+
 /// What an entry costs beyond its value: the key, the slot, the cache's own bookkeeping. The
 /// url is shared between a catalog's entries, so it is not counted once per entry.
 const KEY_WEIGHT: u64 = 128;
@@ -364,6 +384,8 @@ pub(super) enum Slots {
         /// The anchor's slot, once found, which is where every other part's generation and
         /// deadline come from.
         anchor: std::sync::OnceLock<Arc<Slot>>,
+        /// Every part this handle has read or found, and what each weighs against the budget.
+        held: Mutex<HashMap<Part, u64>>,
     },
 }
 
@@ -387,6 +409,7 @@ impl Slots {
                 lifetime,
                 renew,
                 anchor,
+                ..
             } => {
                 let key = |generation| Key {
                     url: Arc::clone(url),
@@ -422,6 +445,36 @@ impl Slots {
         }
     }
 
+    /// Count a filled part towards what this handle holds.
+    fn hold(&self, part: Part, slot: &Slot) -> Result<(), ApiError> {
+        if let Self::Shared { held, .. } = self
+            && slot.value.initialized()
+        {
+            held.lock()
+                .map_err(|_| ApiError::internal("a catalog's parts were poisoned"))?
+                .insert(part, entry_weight(slot));
+        }
+        Ok(())
+    }
+
+    /// What the parts this handle has read or found weigh against the cache's budget, each
+    /// counted once however often it was asked for. Nothing, where nothing is kept.
+    ///
+    /// A part read only inside another's fill — `_common_metadata`'s schema, for the schema —
+    /// is counted by the handle that read it, and not by one that found the outer part already
+    /// filled. So this is the whole of a catalog only for a handle that read it from nothing:
+    /// a first reading, or a renewal.
+    pub(super) fn weight(&self) -> Result<u64, ApiError> {
+        match self {
+            Self::Local(_) => Ok(0),
+            Self::Shared { held, .. } => Ok(held
+                .lock()
+                .map_err(|_| ApiError::internal("a catalog's parts were poisoned"))?
+                .values()
+                .fold(0, |total, weight| total.saturating_add(*weight))),
+        }
+    }
+
     /// A part's value, read by `fill` where no request has read it yet.
     ///
     /// `fill` arrives boxed: one part's read asks for others — the schema for the partition
@@ -441,6 +494,7 @@ impl Slots {
             let _ = anchor.set(Arc::clone(&slot));
         }
         if slot.value.initialized() {
+            self.hold(part, &slot)?;
             return Ok(slot);
         }
         slot.value.get_or_try_init(|| fill).await?;
@@ -449,6 +503,7 @@ impl Slots {
             // and the slot went in empty.
             catalogs.shared.slots.insert(key, Arc::clone(&slot));
         }
+        self.hold(part, &slot)?;
         Ok(slot)
     }
 
@@ -460,9 +515,9 @@ impl Slots {
         if slot.value.set(value).is_ok()
             && let (Self::Shared { catalogs, .. }, Some(key)) = (self, key)
         {
-            catalogs.shared.slots.insert(key, slot);
+            catalogs.shared.slots.insert(key, Arc::clone(&slot));
         }
-        Ok(())
+        self.hold(part, &slot)
     }
 
     /// A part's value where it has been read already, reading nothing.

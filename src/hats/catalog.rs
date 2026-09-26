@@ -139,6 +139,12 @@ impl HatsCatalog {
         self.described.collection.as_ref()
     }
 
+    /// What the parts of this catalog read or found through this handle weigh against the
+    /// cache's budget — the room this catalog, read this far, takes up in it.
+    pub fn cached_weight(&self) -> Result<u64, ApiError> {
+        self.slots.weight()
+    }
+
     pub fn properties(&self) -> &Properties {
         &self.described.properties
     }
