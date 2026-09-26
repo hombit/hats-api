@@ -14,7 +14,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
-- `[[tap.table]]` catalogs that outgrow `max_catalog_cache_bytes` log a warning and are not refreshed.
+--
 
 ### Deprecated
 
