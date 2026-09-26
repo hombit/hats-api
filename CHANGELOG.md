@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- A page at `/api/v1/tap` listing the published tables and their example queries.
+--
 
 ### Changed
 
@@ -29,6 +29,12 @@ Release dates are in the UTC time zone.
 ### Security
 
 --
+
+## [0.0.13] - 2026-09-26
+
+### Added
+
+- A page at `/api/v1/tap` listing the published tables and their example queries. [#107](https://github.com/hombit/hats-api/pull/107)
 
 ## [0.0.12] - 2026-09-22
 
@@ -201,7 +207,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.12...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.13...HEAD
+[0.0.13]: https://github.com/hombit/hats-api/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/hombit/hats-api/compare/v0.0.11...v0.0.12
 [0.0.11]: https://github.com/hombit/hats-api/compare/v0.0.10...v0.0.11
 [0.0.10]: https://github.com/hombit/hats-api/compare/v0.0.9...v0.0.10
