@@ -188,6 +188,10 @@ mod tests {
     use crate::config::{ApiConfig, LimitsConfig, ServerConfig, TapConfig, TapTableConfig};
 
     fn published(dir: &std::path::Path) -> Service {
+        published_within(dir, &LimitsConfig::default())
+    }
+
+    fn published_within(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
         let tap = TapConfig {
             tables: vec![TapTableConfig {
                 name: "sky.objects".to_owned(),
@@ -199,7 +203,7 @@ mod tests {
         with_tap(
             serving(dir),
             &ApiConfig::default(),
-            &LimitsConfig::default(),
+            limits,
             &ServerConfig::default(),
             &tap,
         )
@@ -310,6 +314,28 @@ mod tests {
         assert!(!footprint.fits("b", 400, 1000));
         assert!(footprint.overflowed());
         assert!(!footprint.fits("a", 1, 1000));
+    }
+
+    /// A table that alone outgrows the cache is read once and not kept warm: the task ends
+    /// rather than sleeping until the next refresh, and says why.
+    #[tokio::test]
+    async fn a_table_larger_than_the_cache_is_read_once() {
+        let dir = crate::hats::query::tests::fixture(true);
+        let limits = LimitsConfig {
+            max_catalog_cache_bytes: bytesize::ByteSize::b(1),
+            ..LimitsConfig::default()
+        };
+        let service = published_within(dir.path(), &limits);
+        let url = table_url(&service);
+        assert_eq!(service.catalogs_for(&url).max_bytes(), 1);
+        let footprint = Footprint::default();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            keep_warm(&service, "sky.objects", &url, &footprint),
+        )
+        .await
+        .expect("a table that does not fit is not refreshed");
+        assert!(footprint.overflowed());
     }
 
     /// A catalog is read again at nine tenths of its lifetime, and one kept until evicted, or
