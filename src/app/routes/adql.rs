@@ -174,7 +174,7 @@ pub(in crate::app) async fn query_adql(
                 let dir =
                     storage::open_dir(&url, &table.storage, &service.policy, &service.transfers)?;
                 authorities.check(name, dir.opened(&table.storage))?;
-                adql::query::Source::Catalog(dir)
+                adql::query::Source::Catalog(dir, service.catalogs_for(&url))
             }
         };
         tables.push(adql::query::Table {

@@ -54,11 +54,11 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::access::data::DataFiles;
 use crate::engine::query::data_bytes_read;
-use crate::hats::{Catalog, HatsPartition};
+use crate::hats::{HatsCatalog, HatsPartition};
 
 /// What one read of a catalog's partitions is given.
 pub(super) struct PartitionScan {
-    pub catalog: Arc<Catalog>,
+    pub catalog: Arc<HatsCatalog>,
     pub data: DataFiles,
     /// The catalog's whole schema, which every partition is read against.
     pub table_schema: SchemaRef,
@@ -300,9 +300,7 @@ async fn read_partition(
 ) -> DfResult<Vec<datafusion::arrow::array::RecordBatch>> {
     let files = scan
         .catalog
-        .partition(&cell)
-        .map_err(|error| DataFusionError::Plan(error.to_string()))?
-        .files(&scan.data)
+        .files(&cell, &scan.data)
         .await
         .map_err(|error| DataFusionError::Plan(error.to_string()))?;
     if files.is_empty() {

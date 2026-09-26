@@ -13,7 +13,6 @@
 //! about order than a request naming one url does. What it does not promise is the order
 //! *within* a partition, which is [`Order`]'s business and unchanged.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -21,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use futures::stream::{self, Stream};
-use futures::{StreamExt, TryStreamExt, future};
+use futures::{StreamExt, future};
 
 use crate::access::data::DataFiles;
 use crate::config::LimitsConfig;
@@ -30,34 +29,10 @@ use crate::engine::query::{
 };
 use crate::engine::sql;
 use crate::error::ApiError;
-use crate::hats::partitions::{COMMON_METADATA, DATASET_DIR};
-use crate::hats::{Catalog, HatsPartition};
+use crate::hats::{CatalogCache, HatsCatalog, HatsPartition, HatsPartitionList};
 use crate::sky::healpix::{Cover, Coverage, Detail};
 use crate::sky::region::{self, Healpix, Region, Spatial};
 use crate::storage::{RemoteDir, RemoteFile};
-
-/// How many names one listing request brings back. S3 caps a page of `ListObjectsV2` at a
-/// thousand keys and the other stores are the same order, so this is what a walk of a whole
-/// dataset costs per thousand files — the number [`Search::partition_files`] weighs one
-/// request per chosen partition against.
-const LISTING_PAGE: usize = 1_000;
-
-/// How many partition listings are in flight at once.
-///
-/// Deliberately not [`CatalogLimits::max_concurrent_partitions`], which bounds *reads*: a read
-/// pulls row groups into memory, so a handful at a time is the point of it. A listing is a few
-/// kilobytes of names and costs a round trip, so the two want opposite numbers. The count is
-/// small either way — [`Search::partition_files`] only lists partition by partition when there
-/// are fewer of them than a walk of the whole dataset would cost in pages.
-const LISTING_CONCURRENCY: usize = 16;
-
-/// The last segment of a file's url, which for a partition's listing is the name inside it.
-fn basename(file: &RemoteFile) -> Option<String> {
-    file.url
-        .path_segments()
-        .and_then(|mut segments| segments.next_back())
-        .map(str::to_owned)
-}
 
 /// What one request against a catalog may spend before it is refused.
 #[derive(Debug, Clone, Copy)]
@@ -371,7 +346,8 @@ struct Walk {
 /// choose the same partitions, so they ask for them the same way.
 #[derive(Debug)]
 pub struct Search {
-    catalog: Catalog,
+    catalog: HatsCatalog,
+    partitions: Arc<HatsPartitionList>,
     /// Resolved only where the request carries a region, since that is the only thing that
     /// reads a position out of a row.
     columns: Option<Columns>,
@@ -384,8 +360,10 @@ impl Search {
         dir: RemoteDir,
         regions: Option<&[Region]>,
         limits: CatalogLimits,
+        cache: &CatalogCache,
     ) -> Result<Self, ApiError> {
-        let catalog = Catalog::open(dir, limits.max_metadata_bytes).await?;
+        let catalog = HatsCatalog::open(dir, cache, limits.max_metadata_bytes).await?;
+        let partitions = catalog.partitions().await?;
         // Only where there is a region to test. A catalog that does not name its position
         // columns is perfectly readable by a request that asks no spatial question, and
         // refusing one for want of a column it would never have used is refusing a request
@@ -396,8 +374,7 @@ impl Search {
         };
         let chosen = match regions {
             // No region is every partition, and none of them needs a spatial test.
-            None => catalog
-                .partitions()
+            None => partitions
                 .cells()
                 .iter()
                 .map(|partition| Chosen {
@@ -410,10 +387,10 @@ impl Search {
                 // The catalog's own deepest order, which is what the covering's depth is
                 // taken relative to. A catalog with no partitions at all has no order and
                 // no partitions to choose, so the covering it gets is beside the point.
-                let catalog_order = catalog.order().unwrap_or_default();
+                let catalog_order = partitions.order().unwrap_or_default();
                 let coverage = Coverage::of(&shapes, Detail::Partitions { catalog_order });
                 coverage
-                    .reaches(catalog.partitions())
+                    .reaches(&partitions)
                     .into_iter()
                     .map(|reached| Chosen {
                         partition: reached.partition.clone(),
@@ -424,13 +401,19 @@ impl Search {
         };
         Ok(Self {
             catalog,
+            partitions,
             columns,
             chosen,
         })
     }
 
-    pub fn catalog(&self) -> &Catalog {
+    pub fn catalog(&self) -> &HatsCatalog {
         &self.catalog
+    }
+
+    /// Every partition of the catalog, chosen or not.
+    pub fn partitions(&self) -> &HatsPartitionList {
+        &self.partitions
     }
 
     pub fn columns(&self) -> Option<&Columns> {
@@ -729,12 +712,7 @@ impl Search {
         limits: sql::Limits,
     ) -> Result<Read, ApiError> {
         let mut read = Read::default();
-        for file in self
-            .catalog
-            .partition(&chosen.partition)?
-            .files(data)
-            .await?
-        {
+        for file in self.catalog.files(&chosen.partition, data).await? {
             let per_file = Selection {
                 projection: selection.projection,
                 predicate: selection.predicate,
@@ -768,16 +746,26 @@ impl Search {
     ///
     /// A partition written as a directory needs a listing to enumerate. That is metadata
     /// rather than rows, so it is within what this route promises, and
-    /// `partition_files` gathers every one of them before the loop — so what a plan
+    /// [`HatsCatalog::names`] gathers every one of them before the loop — so what a plan
     /// costs in requests does not follow the number of partitions it names. The ordinary
     /// catalog pays nothing at all: its paths come from the cell and the suffix.
+    ///
+    /// Nothing here is about sizes: a directory's bytes are not one file's, and the plan
+    /// carries no estimate for these partitions.
     pub async fn entries(&self, data: &DataFiles) -> Result<Vec<Entry>, ApiError> {
         let suffix = self.catalog.properties().npix_suffix();
         // The hop a collection made, which is empty for a catalog named directly. Every path
         // here is joined onto the url the caller wrote, and that url is the collection's.
         let within = self.catalog.within();
         let listed = match self.catalog.properties().partition_is_a_directory() {
-            true => Some(self.partition_files(data).await?),
+            true => {
+                let chosen = self
+                    .chosen
+                    .iter()
+                    .map(|chosen| chosen.partition.clone())
+                    .collect::<Vec<_>>();
+                Some(self.catalog.names(&chosen, data).await?)
+            }
             false => None,
         };
         // One list of names per chosen partition and in the same order, so the two walk
@@ -820,97 +808,6 @@ impl Search {
         Ok(entries)
     }
 
-    /// The file names inside each chosen partition, in `self.chosen`'s own order.
-    ///
-    /// Only a directory-partitioned catalog reaches this, and for one it is unavoidable: the
-    /// names inside a partition appear in none of the catalog's metadata, so an entry naming a
-    /// file has to be told them by a listing. Nothing here is about sizes — a directory's
-    /// bytes are not one file's, and the plan carries no estimate for these partitions.
-    ///
-    /// **Two walks, and the cheaper is chosen by counting requests.** Listing each chosen
-    /// partition is one request apiece; listing the whole dataset is one per
-    /// [`LISTING_PAGE`] files however many partitions that spans. So a region that reached a
-    /// handful asks for exactly those, and a plan over a whole catalog reads the lot —
-    /// thirteen requests against 12,485 for ZTF DR24, which is the difference between a plan
-    /// that answers and one nobody waits for. Both produce the same names; this decides only
-    /// what they cost.
-    async fn partition_files(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
-        // One file per partition is the least a dataset can hold, so this is a floor on the
-        // pages a walk would cost. Erring low errs towards asking partition by partition,
-        // which is the walk that reads nothing it was not asked for.
-        let pages = self.catalog.partitions().len().div_ceil(LISTING_PAGE);
-        match self.chosen.len() > pages {
-            true => self.walk_dataset(data).await,
-            false => self.list_each(data).await,
-        }
-    }
-
-    /// Each chosen partition listed on its own, several at a time.
-    ///
-    /// `buffered` yields by position, so the names stay in `self.chosen`'s order whatever
-    /// order the listings land in — the same reason the read path uses it.
-    async fn list_each(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
-        // Materialized before the stream for the same reason [`Search::run`]'s reads are: a
-        // closure handing back a future that borrows its argument owes a higher-ranked bound
-        // the compiler will not infer here. Nothing is listed until the stream is polled.
-        let listings = self
-            .chosen
-            .iter()
-            .map(|chosen| async move {
-                let files = self
-                    .catalog
-                    .partition(&chosen.partition)?
-                    .files(data)
-                    .await?;
-                Ok::<_, ApiError>(files.iter().filter_map(basename).collect())
-            })
-            .collect::<Vec<_>>();
-        stream::iter(listings)
-            .buffered(LISTING_CONCURRENCY)
-            .try_collect()
-            .await
-    }
-
-    /// One recursive listing of the whole dataset, bucketed back onto the chosen partitions.
-    ///
-    /// A listing is recursive and paginated by the store, so this is one walk rather than one
-    /// request: every partition's files arrive in it, and the ones belonging to partitions the
-    /// region did not reach are dropped. That is the trade — it reads names nobody asked for,
-    /// and stops paying a round trip for each partition that was.
-    ///
-    /// Names come back relative to the dataset directory, which is also what a partition's own
-    /// path is once that prefix is off, so the two meet as strings and neither becomes a url.
-    async fn walk_dataset(&self, data: &DataFiles) -> Result<Vec<Vec<String>>, ApiError> {
-        let prefix = format!("{DATASET_DIR}/");
-        let mut found: HashMap<&str, Vec<String>> = HashMap::new();
-        let listing = self.catalog.dir().list(DATASET_DIR).await?;
-        for entry in &listing {
-            // The partition is everything above the name, and the name is what `data` judges
-            // — the same split `Partitioned::files` makes, on the same two halves.
-            let Some((directory, name)) = entry.name.rsplit_once('/') else {
-                continue;
-            };
-            if data.matches(name) {
-                found.entry(directory).or_default().push(name.to_owned());
-            }
-        }
-        let suffix = self.catalog.properties().npix_suffix();
-        Ok(self
-            .chosen
-            .iter()
-            .map(|chosen| {
-                let path = chosen.partition.path(suffix);
-                // `path` ends in the suffix, which for these catalogs is the `/` that the
-                // listing's own split took off.
-                let key = path
-                    .strip_prefix(&prefix)
-                    .unwrap_or(&path)
-                    .trim_end_matches('/');
-                found.get(key).cloned().unwrap_or_default()
-            })
-            .collect())
-    }
-
     /// The spatial constraint one partition's rows still have to meet.
     ///
     /// `None` twice over, and the two mean different things. A request with no region asks
@@ -941,77 +838,54 @@ impl Search {
         })
     }
 
-    /// The same test, against no partition in particular — for validating a region against
-    /// `_common_metadata` rather than pruning a real partition's rows with it. `_common_metadata`
-    /// carries no HEALPix values of its own to accelerate the test with, and there are no rows
-    /// behind it to prune anyway.
     /// The columns an answer with no rows has, taken from the catalog rather than from a
     /// partition.
     ///
     /// **Two answers reach this and they are the same answer.** A `limit` of zero asks for
     /// no rows, and a region that reaches no partition finds none; neither opens a partition,
     /// so neither has the thing every other answer takes its columns from. What is left is
-    /// `dataset/_common_metadata` — the schema every partition shares, and no rows.
+    /// the catalog's schema — `dataset/_common_metadata`'s, else the first partition's.
     ///
     /// The caller's own projection, predicate and region are planned against it exactly as
     /// they would be against a real partition, so the columns are the ones that were asked
     /// for and a request bad against a partition is bad against this too.
     ///
-    /// Failing that, one partition of the catalog read for no rows — a footer, and the
-    /// columns every partition shares. That is what `limit=0` has always paid where a
-    /// catalog carries no `_common_metadata`, and it is the same cost here: a request that
-    /// read no partition reads one file's footer to say what it was looking at.
-    ///
-    /// `None` where the catalog has neither — no such file and no partition — or where
-    /// neither will plan. Nothing then knows what the columns were, and an answer naming
-    /// none is the truth rather than a guess.
+    /// `None` where the catalog has neither — no such file and no partition — or where the
+    /// request will not plan against it. Nothing then knows what the columns were, and an
+    /// answer naming none is the truth rather than a guess.
     async fn columns_without_rows(
         &self,
         selection: &CatalogSelection<'_>,
         data: &DataFiles,
         limits: sql::Limits,
     ) -> Option<QueryResult> {
-        if let Some(result) = self.common_metadata_columns(selection, limits).await {
-            return Some(result);
-        }
-        // The first by the catalog's own order, so which partition answers does not depend
-        // on what the request asked for — two empty answers over one catalog describe it the
-        // same way.
-        let partition = self.catalog.partitions().cells().first()?;
-        let file = self
-            .catalog
-            .partition(partition)
-            .ok()?
-            .files(data)
-            .await
-            .ok()?
-            .into_iter()
-            .next()?;
-        query::run(
-            &file,
-            &self.describing(selection),
-            limits,
-            Order::Unspecified,
-        )
-        .await
-        .ok()
+        let schema = self.catalog.schema(data).await.ok()?;
+        self.described(&schema, selection, limits)
     }
 
-    /// `dataset/_common_metadata` read for its columns, where the catalog has one.
+    /// The same from `dataset/_common_metadata` alone, where the catalog has one.
     async fn common_metadata_columns(
         &self,
         selection: &CatalogSelection<'_>,
         limits: sql::Limits,
     ) -> Option<QueryResult> {
-        let common = self.catalog.dir().child(COMMON_METADATA).ok()?;
-        query::run(
-            &common,
-            &self.describing(selection),
-            limits,
-            Order::Unspecified,
-        )
-        .await
-        .ok()
+        let schema = self.catalog.common_schema().await?;
+        self.described(&schema, selection, limits)
+    }
+
+    /// The request planned against a schema, as an answer with no rows and nothing read.
+    fn described(
+        &self,
+        schema: &SchemaRef,
+        selection: &CatalogSelection<'_>,
+        limits: sql::Limits,
+    ) -> Option<QueryResult> {
+        let schema = query::describe(schema, &self.describing(selection), limits).ok()?;
+        Some(QueryResult {
+            schema,
+            batches: Vec::new(),
+            data_bytes_read: 0,
+        })
     }
 
     /// The caller's own request, asking for no rows: what makes the columns the ones they
@@ -1025,6 +899,9 @@ impl Search {
         }
     }
 
+    /// The region test, against no partition in particular — for validating a region against
+    /// a schema rather than pruning a real partition's rows with it. There are no HEALPix
+    /// values behind a schema to accelerate the test with, and no rows to prune anyway.
     fn spatial_for_schema<'a>(&'a self, regions: Option<&'a [Region]>) -> Option<Spatial<'a>> {
         let regions = regions?;
         let columns = self.columns.as_ref()?;
@@ -1105,7 +982,7 @@ pub struct CatalogResult {
 }
 
 /// What the catalog says its own columns are.
-fn columns(catalog: &Catalog) -> Result<Columns, ApiError> {
+fn columns(catalog: &HatsCatalog) -> Result<Columns, ApiError> {
     let properties = catalog.properties();
     let (ra, dec) = properties.coordinate_columns().ok_or_else(|| {
         ApiError::bad_request(
@@ -1146,6 +1023,7 @@ pub(crate) mod tests {
     use crate::access::AccessPolicy;
     use crate::access::mount::Mounts;
     use crate::config::{AccessConfig, DataConfig, LimitsConfig, MountConfig};
+    use crate::hats::partitions::COMMON_METADATA;
     use crate::sky::region::Region;
     use crate::storage::StorageOptions;
     use crate::storage::materialize::Transfers;
@@ -1359,10 +1237,18 @@ pub(crate) mod tests {
     async fn both_listings_find_the_same_files() {
         let dir = directory_fixture();
         let data = DataFiles::default();
-        let search = Search::resolve(opened(dir.path()), None, limits())
-            .await
-            .unwrap();
+        let resolve = async || {
+            Search::resolve(opened(dir.path()), None, limits(), &CatalogCache::off())
+                .await
+                .unwrap()
+        };
+        let search = resolve().await;
         assert_eq!(search.chosen().len(), CELLS.len());
+        let chosen = search
+            .chosen()
+            .iter()
+            .map(|chosen| chosen.partition.clone())
+            .collect::<Vec<_>>();
 
         // Sorted before comparing: a partition's files come back in the order the store lists
         // them, which on disk is the filesystem's and differs between machines. Which files
@@ -1371,8 +1257,20 @@ pub(crate) mod tests {
             listed.iter_mut().for_each(|names| names.sort());
             listed
         };
-        let walked = sorted(search.walk_dataset(&data).await.unwrap());
-        let each = sorted(search.list_each(&data).await.unwrap());
+        // Every partition at once is more than the pages a walk costs, so this walks.
+        let walked = sorted(search.catalog().names(&chosen, &data).await.unwrap());
+        // One at a time, on a catalog nothing has listed yet, is one listing apiece.
+        let each_search = resolve().await;
+        let mut each = Vec::new();
+        for partition in &chosen {
+            let names = each_search
+                .catalog()
+                .names(std::slice::from_ref(partition), &data)
+                .await
+                .unwrap();
+            each.extend(names);
+        }
+        let each = sorted(each);
         assert_eq!(walked, each);
 
         // The parts, and not the marker beside them.
@@ -1385,7 +1283,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_directory_partition_is_one_entry_per_file() {
         let dir = directory_fixture();
-        let search = Search::resolve(opened(dir.path()), None, limits())
+        let search = Search::resolve(opened(dir.path()), None, limits(), &CatalogCache::off())
             .await
             .unwrap();
         let entries = search.entries(&DataFiles::default()).await.unwrap();
@@ -1417,7 +1315,7 @@ pub(crate) mod tests {
                 source: root.display().to_string(),
                 serve: false,
                 follow_symlinks: false,
-                immutable: false,
+                catalog_cache_seconds: None,
                 storage: StorageOptions::default(),
                 filenames: None,
             }],
@@ -1525,7 +1423,7 @@ pub(crate) mod tests {
         limit: Option<usize>,
         bounds: CatalogLimits,
     ) -> Result<(Search, Outcome), ApiError> {
-        let search = Search::resolve(opened(dir), regions, bounds).await?;
+        let search = Search::resolve(opened(dir), regions, bounds, &CatalogCache::off()).await?;
         let selection = CatalogSelection {
             regions,
             limit,
@@ -1712,7 +1610,7 @@ pub(crate) mod tests {
     async fn a_zero_limit_still_refuses_a_bad_filter() {
         let dir = fixture(true);
         write_common_metadata(dir.path(), true);
-        let search = Search::resolve(opened(dir.path()), None, generous())
+        let search = Search::resolve(opened(dir.path()), None, generous(), &CatalogCache::off())
             .await
             .unwrap();
         let selection = CatalogSelection {

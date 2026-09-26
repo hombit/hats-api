@@ -39,6 +39,7 @@ use crate::config::{ApiConfig, ConfigError, DataConfig, LimitsConfig, ServerConf
 use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats::query::CatalogLimits;
+use crate::hats::{CatalogCache, Catalogs, Lifetime};
 use crate::storage::materialize::Transfers;
 use crate::tap::TapTableList;
 
@@ -67,6 +68,10 @@ pub struct Service {
     pub(in crate::app) max_query_radius_arcsec: f64,
     /// Answers held for the rest of the requests that read them; see [`cache`].
     pub(in crate::app) answers: Arc<cache::Answers>,
+    /// What has been read about catalogs, shared by every request and every mode.
+    catalogs: Catalogs,
+    /// How long a catalog under no mount that says otherwise is remembered.
+    catalog_lifetime: Lifetime,
     /// How long a request has to produce an answer; `None` where the operator set no bound.
     request_timeout: Option<Duration>,
     /// How large a request body may be, in bytes; `None` where the operator set no bound.
@@ -193,6 +198,8 @@ impl Service {
                 limits.query_cache_seconds,
                 limits.max_query_cache_bytes.as_u64(),
             )),
+            catalogs: Catalogs::new(limits.max_catalog_cache_bytes.as_u64()),
+            catalog_lifetime: limits.catalog_cache_seconds,
             request_timeout: (limits.max_request_seconds > 0)
                 .then(|| Duration::from_secs(limits.max_request_seconds)),
             // Saturating rather than refusing: a 32-bit host cannot hold a body that large
@@ -231,6 +238,28 @@ impl Service {
         self.mounts
             .resolve(url.path())
             .map_or(&self.data_files, |(mount, _)| mount.data_files())
+    }
+
+    /// The catalog cache, with the lifetime a catalog at this url is remembered for.
+    ///
+    /// **The mount's, never the mode's**, the same way [`Self::data_files_for`] is: a `file://`
+    /// url resolves through the mounts, and a catalog under one is remembered for as long as
+    /// that mount says whichever route reached it. A caller's own url is under no mount and
+    /// gets `[limits]`'s.
+    pub(in crate::app) fn catalogs_for(&self, url: &Url) -> CatalogCache {
+        let mount = match url.scheme() == access::LOCAL_SCHEME {
+            true => self.mounts.resolve(url.path()).map(|(mount, _)| mount),
+            false => None,
+        };
+        self.catalogs_in(mount)
+    }
+
+    /// The same, for a catalog the file server reached through this mount.
+    pub(in crate::app) fn catalogs_in(&self, mount: Option<&Mount>) -> CatalogCache {
+        let lifetime = mount
+            .and_then(Mount::catalog_cache)
+            .unwrap_or(self.catalog_lifetime);
+        self.catalogs.with_lifetime(lifetime)
     }
 }
 

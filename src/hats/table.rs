@@ -32,9 +32,8 @@ use datafusion::prelude::SessionContext;
 
 use crate::access::data::DataFiles;
 use crate::error::ApiError;
-use crate::hats::partitions::COMMON_METADATA;
 use crate::hats::scan::{CatalogScanExec, PartitionScan};
-use crate::hats::{Catalog, HatsPartition};
+use crate::hats::{CatalogCache, HatsCatalog, HatsPartition};
 use crate::sky::geometry;
 use crate::storage::RemoteDir;
 
@@ -57,7 +56,7 @@ pub struct Limits {
 /// One catalog, ready to be named in a statement.
 pub struct HatsTable {
     /// Shared with every scan planned against it, a scan reading partitions after planning ends.
-    catalog: Arc<Catalog>,
+    catalog: Arc<HatsCatalog>,
     data: DataFiles,
     schema: SchemaRef,
     /// The index column the partitions are pruned on, where the catalog's files have one.
@@ -67,12 +66,11 @@ pub struct HatsTable {
 }
 
 impl std::fmt::Debug for HatsTable {
-    /// The schema and not the partition list, which for a real catalog is twelve thousand
-    /// cells and says nothing a reader of a log line wanted.
+    /// Not the partition list, which for a real catalog is twelve thousand cells and says
+    /// nothing a reader of a log line wanted.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HatsTable")
             .field("url", &self.catalog.dir().url.as_str())
-            .field("partitions", &self.catalog.partitions().cells().len())
             .field("index", &self.index)
             .finish()
     }
@@ -81,19 +79,22 @@ impl std::fmt::Debug for HatsTable {
 impl HatsTable {
     /// Open a catalog and read what a statement needs to know about it before planning.
     ///
-    /// Two reads: the catalog's own metadata, which `hats/` decides the cost of, and its schema.
-    /// The second is what the `simple` routes do without — they learn the columns from the
-    /// first partition they were going to open anyway — and a planner cannot, a statement being
-    /// checked against a schema before anything is read.
+    /// The catalog's properties and its schema, which a statement is checked against before
+    /// anything is read. The partition list waits for the scan, which is where pruning needs
+    /// it; a statement that fails to plan never asks for it.
     pub async fn open(
         ctx: &SessionContext,
         dir: &RemoteDir,
         data: &DataFiles,
         limits: Limits,
+        cache: &CatalogCache,
     ) -> Result<Self, ApiError> {
-        let catalog = Catalog::open(dir.clone(), limits.max_metadata_bytes).await?;
+        let catalog = HatsCatalog::open(dir.clone(), cache, limits.max_metadata_bytes).await?;
         let data = data.clone();
-        let schema = schema_of(ctx, &catalog, &data).await?;
+        // The scan reads the partitions through this context, so the store is registered
+        // here whether or not the schema had to be read to learn the columns.
+        ctx.register_object_store(&dir.base, Arc::clone(&dir.store));
+        let schema = catalog.schema(&data).await?;
         let columns = catalog.columns().ok();
         // The catalog's own name for it, else the one name a file can be recognised by. Both
         // are checked against the schema, so a catalog naming a column its files have not got
@@ -135,9 +136,9 @@ impl HatsTable {
 
     /// The catalog behind the table: its partition list, its own files, its properties.
     ///
-    /// What reads it besides the scan is the `/examples` resource, which wants a partition
-    /// to take a row's position out of and the catalog's own layout to find that file by.
-    pub fn catalog(&self) -> &Catalog {
+    /// What reads it besides the scan is the `/examples` resource, which wants a position
+    /// the catalog holds a row at and a partition to size a cone by.
+    pub fn catalog(&self) -> &HatsCatalog {
         &self.catalog
     }
 
@@ -146,8 +147,7 @@ impl HatsTable {
     /// Every partition where there is nothing to prune on — no index column, or no filter that
     /// mentions it. `PruningPredicate` answers "might match", so a partition it keeps may still
     /// hold no matching row; what it promises is that one it drops holds none.
-    fn reached(&self, filters: &[Expr]) -> DfResult<Vec<HatsPartition>> {
-        let cells = self.catalog.partitions().cells();
+    fn reached(&self, cells: &[HatsPartition], filters: &[Expr]) -> DfResult<Vec<HatsPartition>> {
         let Some(index) = &self.index else {
             return Ok(cells.to_vec());
         };
@@ -237,11 +237,16 @@ impl TableProvider for HatsTable {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        // Pruning reads nothing — a partition's span is its cell — so choosing among twelve
-        // thousand is arithmetic. Nothing past that is done here: which files a partition holds
-        // and what is in them is `CatalogScanExec`'s to learn, one partition at a time and only
-        // for those a statement actually pulls.
-        let partitions = self.reached(filters)?;
+        // Pruning reads nothing past the partition list — a partition's span is its cell — so
+        // choosing among twelve thousand is arithmetic. Nothing past that is done here: which
+        // files a partition holds and what is in them is `CatalogScanExec`'s to learn, one
+        // partition at a time and only for those a statement actually pulls.
+        let listed = self
+            .catalog
+            .partitions()
+            .await
+            .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+        let partitions = self.reached(listed.cells(), filters)?;
         // The planning session, which each partition's own scan is planned in too. It is the
         // only `Session` DataFusion builds, so anything else reaching here is a context this
         // table was never registered in.
@@ -365,54 +370,4 @@ fn marked(schema: &SchemaRef, ra: &str, dec: &str) -> SchemaRef {
         })
         .collect::<Fields>();
     Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
-}
-
-/// The catalog's schema, which a statement is checked against before anything is read.
-///
-/// `dataset/_common_metadata` first: it is the schema and no rows, so it is one small `GET`
-/// and it describes every partition rather than the one that answered. A catalog that has not
-/// got it falls back to the first partition, which is what the `simple` routes do — they
-/// learn the columns from the file they were going to open anyway. The fallback is a footer
-/// read of a real partition, so it is the more expensive of the two and second for that
-/// reason.
-async fn schema_of(
-    ctx: &SessionContext,
-    catalog: &Catalog,
-    data: &DataFiles,
-) -> Result<SchemaRef, ApiError> {
-    let dir = catalog.dir();
-    ctx.register_object_store(&dir.base, Arc::clone(&dir.store));
-    if let Ok(file) = dir.child(COMMON_METADATA)
-        && let Ok(schema) = read_schema(ctx, file.url.as_str()).await
-    {
-        return Ok(schema);
-    }
-    let Some(first) = catalog.partitions().cells().first() else {
-        return Err(ApiError::bad_request(
-            "this catalog has no partitions, so nothing says what columns it has",
-        ));
-    };
-    let files = catalog.partition(first)?.files(data).await?;
-    let Some(file) = files.first() else {
-        return Err(ApiError::bad_request(
-            "this catalog's first partition holds no data file, so nothing says what columns \
-             it has",
-        ));
-    };
-    read_schema(ctx, file.url.as_str()).await
-}
-
-/// One parquet file's schema, with no rows read.
-async fn read_schema(ctx: &SessionContext, url: &str) -> Result<SchemaRef, ApiError> {
-    // The extension filter is off for the reason it is off everywhere here: a HATS partition
-    // may be named anything its `hats_npix_suffix` says, and `_common_metadata` has no
-    // extension at all.
-    let options = datafusion::prelude::ParquetReadOptions {
-        file_extension: "",
-        ..Default::default()
-    };
-    let frame = ctx.read_parquet(url, options).await.map_err(|error| {
-        ApiError::bad_request(format!("this catalog's columns could not be read: {error}"))
-    })?;
-    Ok(SchemaRef::from(frame.schema().as_arrow().clone()))
 }

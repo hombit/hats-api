@@ -23,7 +23,7 @@ use hats_api::config::{
     AccessConfig, ApiConfig, DataConfig, LimitsConfig, MountConfig, NetworkConfig, ServerConfig,
     TapConfig, TapTableConfig,
 };
-use hats_api::hats::HatsPartition;
+use hats_api::hats::{HatsPartition, Lifetime};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -42,13 +42,18 @@ const CATALOG: &str = "cat";
 /// A service with one mount over `server`'s bucket, published at `/hats`, and the tables
 /// in `tables` over it.
 fn mounted(server: &TestS3, tables: &[(&str, &str)]) -> Service {
+    mounted_for(server, tables, None)
+}
+
+/// The same, with the mount saying how long what is read about a catalog under it is kept.
+fn mounted_for(server: &TestS3, tables: &[(&str, &str)], lifetime: Option<Lifetime>) -> Service {
     let mount = MountConfig {
         path: "/hats".to_owned(),
         source: format!("s3://{}/{PREFIX}", server.bucket),
         // The whole point of the mode: the file server publishes what is in the bucket.
         serve: true,
         follow_symlinks: false,
-        immutable: false,
+        catalog_cache_seconds: lifetime,
         // The operator's own credential, written once. Nothing a caller sends carries one.
         storage: server.credentialed_options(),
         filenames: None,
@@ -628,4 +633,86 @@ async fn a_mounted_store_is_not_shared_with_a_url_the_caller_named() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+/// A JSON body posted to one of the API's own routes on a service that outlives the request,
+/// which is what a cache needs to be seen at all.
+async fn post(service: &Service, route: &str, body: serde_json::Value) -> (StatusCode, String) {
+    let request = Request::builder()
+        .method("POST")
+        .uri(route)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("the request");
+    let response = router(service.clone())
+        .oneshot(request)
+        .await
+        .expect("a response");
+    let status = response.status();
+    (status, text_of(response).await)
+}
+
+/// What is read about a catalog is kept between requests, whichever way it was reached: by
+/// a mount's path, or by a bucket the caller names with a key of their own. Once kept, the
+/// catalog's own files can go and a plan is still answered.
+///
+/// **The key is part of what an entry is kept under.** The same bucket named with no key is
+/// read afresh, and refused, rather than answered from what the key read.
+#[tokio::test]
+async fn a_catalog_in_a_bucket_is_answered_from_the_cache() {
+    let server = TestS3::authenticated().await;
+    put_catalog(&server);
+    let service = mounted(&server, &[]);
+    let plan = "/api/v1/simple/hats/plan";
+    let through_the_mount = serde_json::json!({"url": "file:///hats/cat"});
+    let direct = |storage: serde_json::Value| {
+        serde_json::json!({
+            "url": format!("s3://{}/{PREFIX}/{CATALOG}", server.bucket),
+            "storage": storage,
+        })
+    };
+    let keyed = direct(serde_json::json!({
+        "endpoint": server.endpoint,
+        "allow_http": true,
+        "access_key_id": common::ACCESS_KEY_ID,
+        "secret_access_key": common::SECRET_ACCESS_KEY,
+    }));
+
+    for body in [&through_the_mount, &keyed] {
+        let (status, answer) = post(&service, plan, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+    }
+
+    server.remove(&format!("{PREFIX}/{CATALOG}/hats.properties"));
+    server.remove(&format!("{PREFIX}/{CATALOG}/partition_info.csv"));
+    for body in [&through_the_mount, &keyed] {
+        let (status, answer) = post(&service, plan, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+    }
+
+    let (status, answer) = post(
+        &service,
+        plan,
+        direct(serde_json::json!({"endpoint": server.endpoint})),
+    )
+    .await;
+    assert_ne!(status, StatusCode::OK, "answered without the key: {answer}");
+}
+
+/// A mount that keeps nothing reads its catalogs afresh every time, so a catalog whose files
+/// are gone is gone for the next request.
+#[tokio::test]
+async fn a_mount_that_keeps_nothing_reads_its_catalog_every_time() {
+    let server = TestS3::authenticated().await;
+    put_catalog(&server);
+    let service = mounted_for(&server, &[], Some(Lifetime::Off));
+    let plan = "/api/v1/simple/hats/plan";
+    let body = serde_json::json!({"url": "file:///hats/cat"});
+
+    let (status, answer) = post(&service, plan, body.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    server.remove(&format!("{PREFIX}/{CATALOG}/hats.properties"));
+    let (status, answer) = post(&service, plan, body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
 }

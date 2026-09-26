@@ -40,7 +40,7 @@ use crate::storage::backends::{
 };
 use crate::storage::huggingface::{HfRepo, HfStore, hf_headers};
 use crate::storage::materialize::{MaterializingStore, Transfers};
-use crate::storage::options::{Credentials, Opened, StorageOptions, options_clause};
+use crate::storage::options::{Credentials, Fingerprint, Opened, StorageOptions, options_clause};
 
 /// Whether [`open`] can serve this scheme at all. Asked of [`Backend`] rather than of a
 /// list written out by hand, so a backend cannot be added and then refused here by a
@@ -79,6 +79,7 @@ pub struct RemoteFile {
     pub base: Url,
     pub url: Url,
     mounted_by: MountedBy,
+    built_with: Fingerprint,
 }
 
 impl RemoteFile {
@@ -94,6 +95,11 @@ impl RemoteFile {
             base,
             url,
             mounted_by: None,
+            #[expect(
+                clippy::unwrap_used,
+                reason = "a test with no entropy cannot run anyway"
+            )]
+            built_with: StorageOptions::default().fingerprint().unwrap(),
         }
     }
 
@@ -109,6 +115,7 @@ impl RemoteFile {
             base: self.base.clone(),
             url: self.url.clone(),
             mounted_by: self.mounted_by.clone(),
+            built_with: self.built_with,
         }
     }
 
@@ -123,6 +130,7 @@ impl RemoteFile {
             base: self.base.clone(),
             url: self.url.clone(),
             mounted_by: self.mounted_by.clone(),
+            built_with: self.built_with,
         }
     }
 
@@ -162,6 +170,7 @@ pub struct RemoteDir {
     /// replacing its last segment.
     pub url: Url,
     mounted_by: MountedBy,
+    built_with: Fingerprint,
 }
 
 /// One entry of a listing, named relative to the directory that was listed.
@@ -218,6 +227,7 @@ impl RemoteDir {
             base,
             url,
             mounted_by,
+            built_with,
         } = file;
         let mut url = url;
         if !url.path().ends_with('/') {
@@ -228,6 +238,7 @@ impl RemoteDir {
             base,
             url,
             mounted_by,
+            built_with,
         }
     }
 
@@ -242,6 +253,7 @@ impl RemoteDir {
             base: self.base.clone(),
             url: self.join(relative)?,
             mounted_by: self.mounted_by.clone(),
+            built_with: self.built_with,
         })
     }
 
@@ -249,6 +261,17 @@ impl RemoteDir {
     /// registered under, and what built it.
     pub fn opened<'a>(&self, options: &'a StorageOptions) -> Opened<'a> {
         Opened::new(&self.base, &self.mounted_by, options)
+    }
+
+    /// The options this store was built from, as a digest: the request's own for a url a
+    /// caller wrote, and the mount's for one that landed in a store-backed mount.
+    ///
+    /// Stamped where the store is built, for the reason [`MountedBy`] is — which options
+    /// built it is settled there, and working it out again beside the handle would be the
+    /// same fact in two places. With the url, it is what says two handles reach the same
+    /// bytes the same way.
+    pub fn built_with(&self) -> Fingerprint {
+        self.built_with
     }
 
     /// The same handle, stamped as the given mount's.
@@ -614,6 +637,7 @@ fn build(
                 url: file_url(url),
                 // A url the caller wrote; the mount arm above is what stamps one.
                 mounted_by: None,
+                built_with: options.fingerprint()?,
             })
         }
     }
@@ -665,6 +689,7 @@ fn local_file(path: &FilePath) -> Result<RemoteFile, ApiError> {
         // A `LocalFileSystem` is built with no credentials at all, so there is nothing a
         // second table at this authority could be given that it does not already have.
         mounted_by: None,
+        built_with: StorageOptions::default().fingerprint()?,
     })
 }
 

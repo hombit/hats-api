@@ -54,6 +54,7 @@ use crate::access::local::canonical_root;
 use crate::access::{AccessPolicy, LOCAL_SCHEME};
 use crate::config::{ConfigError, DataConfig, MountConfig};
 use crate::error::ApiError;
+use crate::hats::Lifetime;
 use crate::storage::materialize::Transfers;
 use crate::storage::{self, RemoteDir, StorageOptions};
 
@@ -137,7 +138,9 @@ pub struct Mount {
     source: MountSource,
     serve: bool,
     follow_symlinks: bool,
-    immutable: bool,
+    /// How long a catalog under it is remembered, where the mount says; `None` is
+    /// `[limits] catalog_cache_seconds`.
+    catalog_cache: Option<Lifetime>,
     /// Which files under it are data, which is the mount's own list where it wrote one
     /// and `[data] filenames` where it did not. Compiled per mount rather than looked up
     /// per request, so both modes ask one object the same question.
@@ -179,10 +182,11 @@ impl Mount {
         &self.data_files
     }
 
-    /// Whether what is published never changes once published, which is what lets a
-    /// cached copy be served without asking the filesystem whether it is still current.
-    pub fn immutable(&self) -> bool {
-        self.immutable
+    /// How long a catalog under this mount is remembered, where the mount says rather than
+    /// leaving it to `[limits]`. Freshness is a property of the data, and the operator who
+    /// wrote the mount is the one who knows how often it changes.
+    pub fn catalog_cache(&self) -> Option<Lifetime> {
+        self.catalog_cache
     }
 
     /// The directory this mount publishes, opened.
@@ -244,7 +248,7 @@ impl Mounts {
                 source,
                 serve: config.serve,
                 follow_symlinks: config.follow_symlinks,
-                immutable: config.immutable,
+                catalog_cache: config.catalog_cache_seconds,
                 data_files,
             });
         }
@@ -464,7 +468,7 @@ mod tests {
             source: source.display().to_string(),
             serve: true,
             follow_symlinks: false,
-            immutable: false,
+            catalog_cache_seconds: None,
             storage: StorageOptions::default(),
             filenames: None,
         }

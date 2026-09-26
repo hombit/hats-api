@@ -1030,7 +1030,7 @@ path = "/gaia"               # the address, in both modes
 source = "/mnt/data/gaia"    # where it actually is, which no caller sees
 serve = true                 # publish it as a directory; off is API-only
 follow_symlinks = false      # a local source only
-immutable = false
+catalog_cache_seconds = inf  # in place of [limits] catalog_cache_seconds, for this mount
 filenames = ["*.parquet"]    # in place of [data] filenames, for this mount
 
 [[mount]]
@@ -1053,6 +1053,28 @@ only.
 `serve` publishes the directory. With it off the mount is not served and not listed, and a
 request for any path under it is a 404, while an API request naming a file in it is
 answered as usual. Two mounts may not claim overlapping URL prefixes, served or not.
+
+`catalog_cache_seconds` is how long what is read about a catalog under the mount is kept:
+see [Catalog cache](#catalog-cache). `inf` keeps it until it is evicted for room, for a
+catalog that never changes once published; `0` keeps nothing.
+
+### Catalog cache
+
+What the service reads about a catalog — its properties, its partition list, its schema,
+the files inside a directory partition, a row to centre an example on — is kept for the
+requests after it, in every mode and for every backend.
+
+```toml
+[limits]
+catalog_cache_seconds = 86400        # a day; 0 keeps nothing, inf keeps until evicted
+max_catalog_cache_bytes = "256 MiB"  # one budget, shared by every catalog
+```
+
+Nothing asks the store whether a catalog changed, so a republished catalog is answered as
+it was until its lifetime is over. A `[[mount]]` sets its own with
+`catalog_cache_seconds`; a URL a caller names gets the `[limits]` value. A catalog is kept
+under its URL and the storage options it was read with, so a request with other
+credentials never reads what someone else's did.
 
 ### Published tables
 

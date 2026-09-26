@@ -317,12 +317,17 @@ async fn open_catalog(service: &Service, params: &Lowered<'_>) -> Result<Opened,
     // it are read is the catalog's own answer.
     let dir = storage::open_dir(&url, params.storage, &service.policy, &service.transfers)?;
     let on_disk = dir.url.to_file_path().ok();
-    let search = Search::resolve(dir, params.region, service.catalog_limits)
-        .await
-        .map_err(|error| match &on_disk {
-            Some(path) => error.from_mount(path),
-            None => error,
-        })?;
+    let search = Search::resolve(
+        dir,
+        params.region,
+        service.catalog_limits,
+        &service.catalogs_for(&url),
+    )
+    .await
+    .map_err(|error| match &on_disk {
+        Some(path) => error.from_mount(path),
+        None => error,
+    })?;
     Ok(Opened {
         search,
         url,
@@ -448,8 +453,8 @@ pub(in crate::app) async fn query_hats(
     tracing::info!(
         // The catalog's url, not the parameter, which may carry credentials.
         url = %search.catalog().dir().url,
-        partitions = search.catalog().partitions().len(),
-        source = search.catalog().partitions().source().name(),
+        partitions = search.partitions().len(),
+        source = search.partitions().source().name(),
         chosen = search.chosen().len(),
         partitions_read,
         selected = params.columns.is_some(),
@@ -486,7 +491,7 @@ pub(in crate::app) async fn query_hats_plan(
     let plan = plan_of(&service, &search, &params, None).await?;
     tracing::info!(
         url = %search.catalog().dir().url,
-        partitions = search.catalog().partitions().len(),
+        partitions = search.partitions().len(),
         chosen = search.chosen().len(),
         requests = plan.requests.len(),
         regions = params.region.map_or(0, <[Region]>::len),
@@ -1555,9 +1560,14 @@ mod tests {
             &service.transfers,
         )
         .unwrap();
-        let search = Search::resolve(dir_handle, params.region.as_deref(), service.catalog_limits)
-            .await
-            .unwrap();
+        let search = Search::resolve(
+            dir_handle,
+            params.region.as_deref(),
+            service.catalog_limits,
+            &service.catalogs_for(&url),
+        )
+        .await
+        .unwrap();
 
         let plan = plan_of(&service, &search, &params.lowered(), None)
             .await
@@ -1604,9 +1614,14 @@ mod tests {
                 &service.transfers,
             )
             .unwrap();
-            let search = Search::resolve(opened, None, service.catalog_limits)
-                .await
-                .unwrap();
+            let search = Search::resolve(
+                opened,
+                None,
+                service.catalog_limits,
+                &service.catalogs_for(&url),
+            )
+            .await
+            .unwrap();
             serde_json::to_value(
                 plan_of(&service, &search, &params.lowered(), None)
                     .await

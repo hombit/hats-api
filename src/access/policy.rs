@@ -737,7 +737,7 @@ pub(super) mod tests {
                 source: path.display().to_string(),
                 serve: false,
                 follow_symlinks,
-                immutable: false,
+                catalog_cache_seconds: None,
                 storage: StorageOptions::default(),
                 filenames: None,
             })

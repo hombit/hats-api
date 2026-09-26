@@ -37,7 +37,7 @@ use crate::adql::{Translated, functions};
 use crate::engine::query::{QueryResult, data_bytes_read, session_config};
 use crate::engine::sql;
 use crate::error::ApiError;
-use crate::hats;
+use crate::hats::{self, CatalogCache};
 use crate::sky::geometry;
 use crate::storage::{RemoteDir, RemoteFile};
 
@@ -114,8 +114,9 @@ pub struct Table {
 pub enum Source {
     /// One parquet file.
     File(RemoteFile),
-    /// A whole catalog, which chooses the partitions a scan reads.
-    Catalog(RemoteDir),
+    /// A whole catalog, which chooses the partitions a scan reads, and the cache what is read
+    /// about it is kept in.
+    Catalog(RemoteDir, CatalogCache),
     /// A table this service holds rather than reads — `TAP_SCHEMA`'s own five, which
     /// describe what it publishes and have no file anywhere.
     Memory(Arc<dyn TableProvider>),
@@ -286,9 +287,10 @@ pub async fn plan(
                     .map_err(|error| opening(&file.url, &error))?
                     .schema()
             }
-            Source::Catalog(dir) => {
+            Source::Catalog(dir, cache) => {
                 let url = dir.url.clone();
-                let table = hats::table::HatsTable::open(&ctx, dir, data, limits.catalog).await?;
+                let table =
+                    hats::table::HatsTable::open(&ctx, dir, data, limits.catalog, cache).await?;
                 let schema = TableProvider::schema(&table);
                 ctx.register_table(reference, Arc::new(table))
                     .map_err(|error| opening(&url, &error))?;

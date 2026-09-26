@@ -52,7 +52,7 @@ impl Served {
             source: dir.path().display().to_string(),
             serve: true,
             follow_symlinks: false,
-            immutable: false,
+            catalog_cache_seconds: None,
             storage: StorageOptions::default(),
             filenames: None,
         };

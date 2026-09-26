@@ -44,10 +44,10 @@ storage/  a url opened into a store: the url itself (store), each backend's opti
 engine/   the caller's SQL (sql) and running a selection against one parquet file (query)
 sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
           (healpix), and saying one inside a query (geometry)
-hats/     a catalog: its own files (catalog, partitions, properties), recognising one
-          somebody is browsing (browse), a request fanned out over it (query), it as a
-          table a statement names (table), and the partitions that table reads as rows are
-          pulled (scan)
+hats/     a catalog: its own files (catalog, partitions, properties), what is remembered
+          about one between requests (cache), recognising one somebody is browsing
+          (browse), a request fanned out over it (query), it as a table a statement names
+          (table), and the partitions that table reads as rows are pulled (scan)
 adql/     the statement rewrite (translate), running one (query), the functions the
           language requires (functions), and how a name is written (names)
 tap/      what this service publishes over TAP: the operator's tables (tables), what is
@@ -105,6 +105,12 @@ says which crate went double before the compiler gets a chance to be unhelpful a
   own secret in a response to their own request; what it costs is a plan that is now a
   document with a credential in it, so a second caller for such an echo needs the same
   argument made again rather than a reference to this one.
+
+  `StorageOptions::fingerprint` also reads the echo, and is not a second way out: it feeds
+  the map straight into an HMAC keyed by a per-process secret and keeps the digest. Anything
+  kept past a request that has to tell two sets of options apart holds a `Fingerprint`,
+  never the options — a cache key would otherwise be a copy of every caller's secret for as
+  long as the entry lives.
 - **A credential is never printed, and neither is anything a caller wrote beside one.**
   `storage::Headers` prints its count and nothing else: both the name and the value of a
   header come from the caller, and a token typed into a name is still a token in this
@@ -899,6 +905,37 @@ Everything below is about reading a catalog, not about judging one.
   looking, and it does not belong here. The partitions are taken for a tiling, `Partitions`
   is sorted and deduplicated on that basis, and a catalog whose cells nest gets whatever
   falls out.
+
+## What is remembered about a catalog
+
+`hats/cache.rs` keeps what `HatsCatalog` reads, one entry per part — the properties, the
+partition list, the schemas, one partition directory's names, the example position — under
+one byte budget for the whole process.
+
+- **A catalog's own files are read through `HatsCatalog`'s accessors and nowhere else.**
+  Code that reads `_common_metadata`, the properties or a partition listing for itself gets
+  none of the cache and none of the rules below, and is a second answer to what the catalog
+  says that nothing keeps in step with the first.
+- **Nothing kept holds a store or a credential.** A part is filled through the store of
+  the request that asked for it, and the key is the directory's url and
+  `RemoteDir::built_with` — the fingerprint of whichever options built the store, the
+  request's or the mount's. Two requests with the same key reach the same bytes the same
+  way, which is what makes either one's read good for the other.
+- **Every part belongs to one reading of the properties, and never outlives it.** The
+  anchor draws a generation that every other part's key carries, and a part's deadline is
+  its anchor's. A new part is a `Part` variant and a `Value` variant and a weight; it is
+  never a second cache beside this one, whose entries would have no anchor to go with.
+- **Only what is a fact about the catalog is kept.** A read that failed is never stored, so
+  the next request tries again. A file that is not there is a fact and is kept as absence;
+  a file that could not be read is not. The example position keeps only a position found,
+  since failing to find one is as likely to be a network as a catalog.
+- **A part's read is boxed.** One part asks for others — the schema for the partition list,
+  then a partition's files — and each is a DataFusion read, so held inline they nest into a
+  future larger than a thread's stack.
+- **The lifetime is the mount's, never the mode's.** `Service::catalogs_for` asks the mount
+  a `file://` url resolves to, the way `data_files_for` does, and `catalogs_in` is the file
+  server's side of the same question. A route that reaches for `[limits]`' lifetime where a
+  mount governs the catalog makes the two modes disagree about how stale one catalog may be.
 
 ## A request against a catalog
 

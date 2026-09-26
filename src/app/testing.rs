@@ -122,7 +122,7 @@ pub(in crate::app) fn serving(dir: &Path) -> crate::config::MountConfig {
         source: dir.display().to_string(),
         serve: true,
         follow_symlinks: false,
-        immutable: false,
+        catalog_cache_seconds: None,
         storage: StorageOptions::default(),
         filenames: None,
     }

@@ -39,8 +39,11 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 7.4 | compress JSON responses, never parquet | done | |
 | 8.4 | a clock on every request | done | `[limits] max_request_seconds`; the rest of §8.4 is not done |
 | 7.5 | VOTable output | in progress | flat columns answer; a nested one is refused by name until §7.5's four decisions are made |
-| 6.5 | request cost benchmark | todo | prerequisite for the rest of §6 — it ranks the layers |
-| 6 | caching | todo | build in the order §6.5 ranks |
+| 6.5 | request cost benchmark | todo | ranks the layers after the first two, which are justified by what is already measured |
+| 6 | caching | in progress | |
+| 6.1a | HATS catalog metadata layer | done | `hats/cache.rs`; one entry per part of a catalog, keyed by url and a fingerprint of the options |
+| 6.1b | parquet file metadata layer | todo | next |
+| 6.7 | warming the cache with known catalogs | todo | after §6.1b |
 | 7 | operational surface | todo | |
 | 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
@@ -74,8 +77,8 @@ what is deferred.
    write is under `[limits] scratch_dir`, at a path of its own choosing: a materialized copy,
    and a job's answer. The invariant is *where*, not *whether*, and a caller's url is never
    the destination.
-2. **A request keeps nothing; a job is the caller's own.** No session cache, no catalog
-   registry across requests, and §6's caches must be evictable, bounded, and correct when
+2. **A request leaves nothing a later one depends on; a job is the caller's own.** No
+   session state, and §6's caches must be evictable, bounded, and correct when
    empty. The one thing that outlives a request is a job the caller asked for and can
    destroy — it is in this process only, so it belongs to one replica and a restart loses it.
 3. **Nothing reaches an object store without passing its mode's policy.**
@@ -95,8 +98,6 @@ with; decide whether it gets one, since what it would return is metadata rather 
 `dataset/_common_metadata` is the schema and nothing else, so one small `GET` would say
 whether `columns` names a column the catalog has. Worth having once there is a reason to
 pay for the request: today the first partition's footer answers on the way to reading it.
-
-Nothing is cached, so every request against a catalog pays two `GET`s before a row.
 
 ### 5.2 The spatial predicate
 
@@ -148,8 +149,8 @@ first answer rather than following it to its primary table.
 
 ## 6. Phase 5 — caching
 
-**§6.5 comes first.** Which layers are worth building is a measurement, and the design
-below is written only as far as the decisions that are already made.
+The catalog layer and the parquet metadata layer are built first, on what is already
+measured; §6.5 ranks the rest.
 
 ### 6.0 Invariants
 
@@ -158,43 +159,31 @@ below is written only as far as the decisions that are already made.
 2. **The access policy is consulted before the cache**, or an entry outlives the config
    that admitted it.
 3. **The key includes everything affecting the bytes, credentials included** — as
-   `HMAC(per-process key, credential set)`, never a bare hash of a low-entropy secret.
-4. **Credentialed entries are always revalidated**, never served on TTL alone: the
-   conditional request carries the caller's own credentials, so a revoked one fails at the
-   origin. Keying gives isolation between callers; only revalidation catches a credential
-   that has stopped being valid.
-5. **Bound every layer twice**, by entries and by bytes, and make every layer emptiable at
-   runtime.
-6. **The TTL is the operator's, never the caller's.** A caller-set TTL is shared state,
-   abusable short as a cache-busting amplifier and long as a way to degrade someone else's
-   freshness. Request-side `Cache-Control` — `no-cache`, `max-age`, `no-store` — is
-   per-request by construction and is honoured instead, with concurrent revalidations
-   coalesced and floored, and `immutable` winning over `no-cache`.
+   `HMAC(per-process key, credential set)`, never a bare hash of a low-entropy secret — and
+   the value holds no credential, and no store built from one.
+4. **Time is the only validator.** A credential in the key isolates callers from each
+   other; one revoked at the origin still reaches metadata already read until the entry's
+   lifetime is over, and fails on its first read of data.
+5. **Bound every layer by bytes.**
+6. **The lifetime is the operator's, never the caller's.** A caller-set one is shared
+   state, abusable short as a cache-busting amplifier and long as a way to degrade someone
+   else's freshness. Nothing from outside the process invalidates an entry.
 
 ### 6.1 The layers
 
 | layer | holds | keyed by | bound |
 |---|---|---|---|
-| **HATS catalog metadata** | parsed `properties`, partition list, derived MOC | catalog url + validator | entries |
-| **Parquet file metadata** | `FileMetaData` footer, page index, bloom filter headers | object url + validator | bytes |
+| **Parquet file metadata** | `FileMetaData` footer, page index, bloom filter headers | object url + options fingerprint | bytes |
 | **Range-support verdict** | does this object's server honour `Range`? | object url | entries, short TTL |
 | **Object bytes** | whole objects or ranges | object url + validator (+ range) | bytes; off by default, §6.4 |
 | **Directory listings** | one page of a listing | prefix + validator | entries, short TTL |
 | **Negative results** | 404 for a missing object only — a 403 is recomputed, the policy behind it being reloadable | url | entries, very short TTL |
 
-Validators: `ETag` for the object stores, `ETag` else `Last-Modified` over http(s), and
-`(device, inode, mtime_nsec, size)` for a local file. Declared `immutable` never
-revalidates; otherwise a TTL bounds staleness and a changed validator evicts. Anything that
-can miss an update — §6.6's watcher — is an optimization on top of that, so a missed event
-costs `ttl`-bounded staleness rather than a permanently wrong answer.
+An entry lives for its mount's `catalog_cache_seconds`, or `[limits]`'s for a url under no
+mount, whichever layer it is in: freshness is a property of the data, and one number per
+mount is what an operator can reason about.
 
-**The catalog metadata layer has a reader that answers no query.** `/tables`, `TAP_SCHEMA`
-and `/examples` are each built out of the properties, the partition list and
-`dataset/_common_metadata` of every published table, and a client fetches all three before
-it has asked for a row. Those reads are the whole cost of those resources, so the layer is
-what makes them cheap rather than what makes them faster.
-
-**The first two are the ones worth building, and the reason is measured.** A
+**The parquet metadata layer is worth building, and the reason is measured.** A
 `format=parquet` request reads the source footer twice: DataFusion fetches it while
 inferring the schema and serves the scan from its own `FileMetadataCache`, while
 `output::parquet::read_layout` goes to the store and reads it again through a fetcher of
@@ -214,21 +203,15 @@ these to build.
 
 ### 6.2 Implementation
 
-One `src/cache.rs`, a single generic bounded cache, one instance per layer with its own
-weigher and limits. `moka` (async, TTL + TTI, weight-based eviction) is the expected
-dependency, `quick_cache` if something smaller is wanted. Entries hold parsed values shared
-by `Arc`, so a hit costs a clone, and concurrent misses on one key must collapse into a
-single fetch.
+`moka`'s sync cache with a weigher and per-entry expiry, the way `hats/cache.rs` uses it:
+slots that are `OnceCell`s, so concurrent misses on one key collapse into a single fetch
+and a failure is not kept, and a slot re-inserted once filled so it is weighed at what it
+holds. The parquet layer's key is the object's url and its store's `Fingerprint`, which
+`RemoteFile` already carries. Its limits are `[limits]` keys beside the catalog layer's.
 
-Configuration is `[cache]` with a master switch and a section per layer; mounts and access
-rules carry `immutable` and `ttl` overrides, freshness being a property of the data.
+### 6.3 Observability
 
-### 6.3 Observability and control
-
-Per layer: hits, misses, evictions, entries, bytes, and revalidations split into `304`
-versus changed, through §7.1's metrics. `X-Cache: hit | miss | revalidated` on file-server
-responses. A purge endpoint behind whatever admin gate §7 settles on, or bound to loopback.
-**`SIGHUP` empties every cache**, and later reloads the config.
+Per layer: hits, misses, evictions, entries and bytes, through §7.1's metrics.
 
 ### 6.4 What stays outside the process
 
@@ -246,26 +229,23 @@ accountings.
 **Query results are not cached.** The key space is url × predicate × projection × format,
 and the hit rate on point lookups is near zero.
 
-### 6.5 Prerequisite
+### 6.5 Ranking the rest
 
 Measure the cost breakdown of a request — footer read, metadata parse, data read, and the
-second footer read for `format=parquet` — against a real file, and build the layers it
-justifies in the order it ranks them. `tests/engine.rs` is the harness and already counts
+second footer read for `format=parquet` — against a real file, and build the remaining
+layers in the order it ranks them. `tests/engine.rs` is the harness and already counts
 requests, which is what settled the duplicate footer above; what it does not do is
 attribute *time* to each stage, and its numbers are against a local file, so they are the
 floor. The ranking needs an origin with latency in it.
 
-### 6.6 Later: invalidation from the filesystem
+### 6.7 Warming the cache with known catalogs
 
-`SIGHUP` first — a publishing pipeline ends with `kill -HUP`, and there is nothing to watch
-and no platform differences. A `notify` watcher over local mounts is the second level, and
-the traps are the reason it is second: inotify watches are per-directory and a HATS tree
-can exhaust `fs.inotify.max_user_watches` and then stop reporting silently; events coalesce
-and are lost on overflow, which has to mean "empty this mount"; a write in progress fires
-before the file is complete, so evict rather than read on the event; and a network
-filesystem reports nothing at all for another host's changes. Remote stores are out of
-scope — there is no push channel short of bucket notifications. Validation and TTL stay on
-underneath either way.
+After startup, in the background, read what the catalog and parquet layers hold for every
+`[[tap.table]]`, so the first client does not pay for it. Startup is not blocked on it and
+does not fail for it: a table that cannot be read is logged and left to the first request,
+which gets the refusal it would have got anyway. The TAP tables only — no discovery of
+catalogs under the mounts. A catalog whose mount keeps nothing is not warmed, there being
+nowhere to put what is read.
 
 ## 7. Phase 6 — operational surface
 
@@ -986,7 +966,9 @@ Nothing in it bounds what a `collect` returns.
    under a `[[mount]]` and a registry hands back urls — so either the registry's urls are
    resolved against the mounts, or a table gains an address the rest of the service has no
    way to name.
-4. **Filesystem-driven cache invalidation** (§6.6).
+4. **Emptying a cache from outside the process** — a signal, a purge endpoint, a filesystem
+   watcher over the local mounts. Until one exists an entry lives its lifetime, and `inf` on
+   a mount means until the process restarts.
 5. **Aggregating inside a nested column.** A ZTF row holds a whole light curve in
    `lightcurve.mag`, and the mean magnitude of one object is not expressible today. The
    obstacle is not the expression rules — an operation over one row's list is a scalar
