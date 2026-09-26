@@ -15,6 +15,8 @@ use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::Expr;
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr::utils::{Guarantee, LiteralGuarantee};
 use datafusion::prelude::ParquetReadOptions;
 use futures::{FutureExt, StreamExt, TryStreamExt, stream};
 
@@ -496,6 +498,61 @@ impl HatsCatalog {
             })
             .ok()
             .flatten()
+    }
+
+    /// The partitions the collection's indexes leave for a predicate, and the HEALPix values
+    /// of the rows they found, where the indexes say.
+    ///
+    /// What the predicate wants is read off it by `LiteralGuarantee` — `object_id = 7`,
+    /// `object_id IN (7, 8)`, either beside anything else under an `AND` — so nothing here
+    /// recognises a shape of its own, and a predicate it cannot prove such a set for asks no
+    /// index. Two indexed columns each constrained keep only the partitions both indexes name,
+    /// a row satisfying every guarantee at once.
+    ///
+    /// `None` where no index answered, for any of the reasons [`Self::indexed_partitions`]
+    /// gives: every partition is then still a candidate.
+    pub(crate) async fn indexed_cells(
+        &self,
+        predicate: &Arc<dyn PhysicalExpr>,
+        data: &DataFiles,
+        max_bytes: u64,
+        healpix: Option<&str>,
+    ) -> Option<Lookup> {
+        // Nothing to ask, and nothing worth analysing the predicate for.
+        self.collection()?;
+        let mut answered: Option<Lookup> = None;
+        for guarantee in LiteralGuarantee::analyze(predicate) {
+            if guarantee.guarantee != Guarantee::In {
+                continue;
+            }
+            let Some(found) = self
+                .indexed_partitions(
+                    &guarantee.column.name,
+                    &guarantee.literals,
+                    data,
+                    max_bytes,
+                    healpix,
+                )
+                .await
+            else {
+                continue;
+            };
+            answered = Some(match answered {
+                None => found,
+                Some(before) => Lookup {
+                    cells: before.cells.intersection(&found.cells).copied().collect(),
+                    // An index that gave no cells constrains nothing here.
+                    healpix: match (before.healpix, found.healpix) {
+                        (Some(before), Some(found)) => {
+                            Some(before.intersection(&found).cloned().collect())
+                        }
+                        (before, found) => before.or(found),
+                    },
+                    bytes_read: before.bytes_read + found.bytes_read,
+                },
+            });
+        }
+        answered
     }
 
     async fn find_position(&self, data: &DataFiles, ra: &str, dec: &str) -> Option<(f64, f64)> {

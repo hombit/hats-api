@@ -11,6 +11,7 @@ use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::Expr;
 use datafusion::physical_plan::{
     ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned, execute_stream,
     execute_stream_partitioned,
@@ -125,6 +126,11 @@ pub struct Selection<'a> {
     /// be recognisable to be planned on, and the two are conjoined: a row must be inside
     /// the region *and* satisfy the predicate.
     pub spatial: Option<Spatial<'a>>,
+    /// A filter of this service's own, beside the caller's predicate: the HEALPix cells a
+    /// collection's index found the rows asked for in. It prunes row groups the way a region's
+    /// covering does, and is exact wherever the index is, so it changes which bytes are read
+    /// and never which rows come back.
+    pub narrowing: Option<&'a Expr>,
     /// Most rows to return. `None` is however many match.
     pub limit: Option<usize>,
 }
@@ -480,6 +486,10 @@ fn shaped(
             let expr = region::predicate(df.schema(), spatial)?;
             df.filter(expr)?
         }
+    };
+    let df = match selection.narrowing {
+        None => df,
+        Some(expr) => df.filter(expr.clone())?,
     };
     // The predicate next, so it may name a column the projection does not return —
     // filtering on `filterid` while asking only for `mag` is the ordinary case.
@@ -920,6 +930,7 @@ pub(crate) mod tests {
                         projection: Projection::All,
                         predicate: Predicate::All,
                         spatial: None,
+                        narrowing: None,
                         limit: None,
                     },
                 ),
@@ -929,6 +940,7 @@ pub(crate) mod tests {
                         projection: Projection::ColumnText("objectid, mag"),
                         predicate: Predicate::All,
                         spatial: None,
+                        narrowing: None,
                         limit: None,
                     },
                 ),
@@ -938,6 +950,7 @@ pub(crate) mod tests {
                         projection: Projection::All,
                         predicate: Predicate::Filters("mag < 0.5"),
                         spatial: None,
+                        narrowing: None,
                         limit: None,
                     },
                 ),
@@ -947,6 +960,7 @@ pub(crate) mod tests {
                         projection: Projection::ColumnText("objectid"),
                         predicate: Predicate::Filters("mag < 0.5"),
                         spatial: None,
+                        narrowing: None,
                         limit: None,
                     },
                 ),
@@ -988,6 +1002,7 @@ pub(crate) mod tests {
             projection: Projection::ColumnText("objectid"),
             predicate: Predicate::Filters("mag < 1.0"),
             spatial: None,
+            narrowing: None,
             limit: None,
         };
         let first = ids(&run(&file, &selection, limits(), Order::File).await.unwrap());
@@ -1018,6 +1033,7 @@ pub(crate) mod tests {
                     projection: Projection::ColumnText("objectid"),
                     predicate,
                     spatial: None,
+                    narrowing: None,
                     limit: Some(100),
                 };
                 let first = ids(&run(&file, &selection, limits(), order).await.unwrap());
@@ -1048,6 +1064,7 @@ pub(crate) mod tests {
             projection: Projection::ColumnText("objectid"),
             predicate: Predicate::All,
             spatial: None,
+            narrowing: None,
             limit: Some(100),
         };
         let result = run(&file, &selection, limits(), Order::File).await.unwrap();
@@ -1077,6 +1094,7 @@ pub(crate) mod tests {
                 projection: Projection::All,
                 predicate: Predicate::All,
                 spatial: None,
+                narrowing: None,
                 limit: None,
             },
             limits(),
@@ -1096,6 +1114,7 @@ pub(crate) mod tests {
                 projection: Projection::ColumnText("objectid"),
                 predicate: Predicate::Filters("objectid = 61234"),
                 spatial: None,
+                narrowing: None,
                 limit: None,
             },
             limits(),

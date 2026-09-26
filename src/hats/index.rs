@@ -333,6 +333,23 @@ impl IndexLayout {
     }
 }
 
+/// `<column> IN (values)`, each value cast to the table's own type for the column: a filter a
+/// partition's row groups are pruned by, from the HEALPix values an index lookup found.
+///
+/// `None` where there is nothing to filter by, or a value will not cast.
+pub(crate) fn healpix_filter(
+    column: &str,
+    data_type: &DataType,
+    values: &HashSet<ScalarValue>,
+) -> Option<Expr> {
+    let values = values
+        .iter()
+        .map(|value| value.cast_to(data_type).map(lit))
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!values.is_empty()).then(|| named(column).in_list(values, false))
+}
+
 fn named(name: &str) -> Expr {
     Expr::Column(Column::new_unqualified(name.to_owned()))
 }

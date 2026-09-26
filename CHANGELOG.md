@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `/simple/hats` and a mounted catalog's query choose partitions by a collection's index catalogs.
 
 ### Changed
 

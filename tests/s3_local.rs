@@ -75,6 +75,7 @@ async fn a_column_list_and_a_predicate_run_against_a_real_file() {
             projection: Projection::ColumnText("objectid, objra"),
             predicate: Predicate::Filters("band = 'g' AND objectid < 100"),
             spatial: None,
+            narrowing: None,
             limit: Some(10),
         },
     )

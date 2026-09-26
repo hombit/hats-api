@@ -213,7 +213,7 @@ max_partitions = 128
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 
-# An ADQL or TAP query uses a collection's index only where its region leaves at least this
+# A query uses a collection's index only where its region leaves at least this
 # many partitions. From 1 to the smaller of [limits] and [tap.async.limits] max_partitions,
 # which is also the default.
 # min_partitions_for_index = 16

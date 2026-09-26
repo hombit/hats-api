@@ -26,7 +26,6 @@ use datafusion::common::{Column, DFSchema, DataFusionError, Result as DfResult, 
 use datafusion::execution::context::{ExecutionProps, SessionState};
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datafusion::physical_expr::utils::{Guarantee, LiteralGuarantee};
 use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::physical_optimizer::pruning::{PruningPredicateBuilder, PruningStatistics};
 use datafusion::physical_plan::ExecutionPlan;
@@ -34,6 +33,7 @@ use datafusion::prelude::SessionContext;
 
 use crate::access::data::DataFiles;
 use crate::error::ApiError;
+use crate::hats::index;
 use crate::hats::scan::{CatalogScanExec, PartitionScan};
 use crate::hats::{CatalogCache, HatsCatalog, HatsPartition};
 use crate::sky::geometry;
@@ -207,10 +207,8 @@ impl HatsTable {
     /// The partitions the collection's index catalogs leave, for a statement that says which
     /// values of an indexed column it wants.
     ///
-    /// What a statement wants is read off its filters by `LiteralGuarantee` — `object_id = 7`,
-    /// `object_id IN (7, 8)`, either beside anything else under an `AND` — so nothing here
-    /// recognises a shape of its own, and a filter it cannot prove such a set for asks no index.
-    /// Two indexed columns each constrained keep only the partitions both indexes name.
+    /// What a statement wants is read off its filters by [`HatsCatalog::indexed_cells`], and a
+    /// filter it cannot prove a set of values for asks no index.
     ///
     /// Every partition where no index answers: none covers the column, the catalog was named
     /// outside its collection, the index could not be read, or reading it would cost more
@@ -235,71 +233,31 @@ impl HatsTable {
         let Some(physical) = self.physical(filters) else {
             return unasked(cells);
         };
-        let mut chosen: Option<HashSet<(u8, u64)>> = None;
-        let mut healpix: Option<HashSet<ScalarValue>> = None;
-        let mut bytes_read = 0;
-        for guarantee in LiteralGuarantee::analyze(&physical) {
-            if guarantee.guarantee != Guarantee::In {
-                continue;
-            }
-            let Some(found) = self
-                .catalog
-                .indexed_partitions(
-                    &guarantee.column.name,
-                    &guarantee.literals,
-                    &self.data,
-                    self.limits.max_index_bytes,
-                    self.index.as_deref(),
-                )
-                .await
-            else {
-                continue;
-            };
-            bytes_read += found.bytes_read;
-            chosen = Some(match chosen {
-                None => found.cells,
-                Some(before) => before.intersection(&found.cells).copied().collect(),
-            });
-            // A row satisfies every guarantee at once, so its cell is in every set an index
-            // gave; an index that gave none constrains nothing here.
-            if let Some(found) = found.healpix {
-                healpix = Some(match healpix {
-                    None => found,
-                    Some(before) => before.intersection(&found).cloned().collect(),
-                });
-            }
-        }
-        let partitions = match chosen {
-            None => cells,
-            Some(chosen) => cells
-                .into_iter()
-                .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
-                .collect(),
+        let Some(found) = self
+            .catalog
+            .indexed_cells(
+                &physical,
+                &self.data,
+                self.limits.max_index_bytes,
+                self.index.as_deref(),
+            )
+            .await
+        else {
+            return unasked(cells);
         };
+        let healpix = found.healpix.and_then(|values| {
+            let column = self.index.as_deref()?;
+            let field = self.schema.field_with_name(column).ok()?;
+            index::healpix_filter(column, field.data_type(), &values)
+        });
         Indexed {
-            partitions,
-            healpix: healpix.and_then(|values| self.healpix_filter(&values)),
-            bytes_read,
+            partitions: cells
+                .into_iter()
+                .filter(|cell| found.cells.contains(&(cell.order, cell.pixel)))
+                .collect(),
+            healpix,
+            bytes_read: found.bytes_read,
         }
-    }
-
-    /// `<healpix column> IN (values)`, the values cast to the table's own type for the column.
-    fn healpix_filter(&self, values: &HashSet<ScalarValue>) -> Option<Expr> {
-        let column = self.index.as_deref()?;
-        let data_type = self
-            .schema
-            .field_with_name(column)
-            .ok()?
-            .data_type()
-            .clone();
-        let values = values
-            .iter()
-            .map(|value| value.cast_to(&data_type).map(datafusion::logical_expr::lit))
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?;
-        (!values.is_empty()).then(|| {
-            Expr::Column(Column::new_unqualified(column.to_owned())).in_list(values, false)
-        })
     }
 
     /// The statement's filters as one physical predicate over the catalog's whole schema.

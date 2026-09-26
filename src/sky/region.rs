@@ -1081,6 +1081,7 @@ mod tests {
                 partition: None,
                 relation: None,
             }),
+            narrowing: None,
             limit: None,
         };
         let result = query::run(file, &selection, limits(), Order::File).await?;
@@ -1202,6 +1203,7 @@ mod tests {
                     partition: None,
                     relation: None,
                 }),
+                narrowing: None,
                 limit: None,
             };
             let result = query::run(file, &selection, limits(), Order::File)
