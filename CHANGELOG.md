@@ -16,7 +16,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
---
+- ADQL and TAP read only the fields of a nested column that a statement names.
 
 ### Deprecated
 

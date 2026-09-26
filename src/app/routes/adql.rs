@@ -917,6 +917,178 @@ mod tests {
         assert!(body.contains("partitions"), "{body}");
     }
 
+    /// A value of [`nested_catalog`]'s lists: `seed` taken to a residue small enough that its
+    /// float is exact.
+    fn scattered(seed: i64) -> f64 {
+        f64::from(i32::try_from(seed % 100_003).unwrap())
+    }
+
+    /// A catalog of one partition whose `lc` is a struct of three lists: `mag`, small, and
+    /// `mjd` and `flux`, long and scattered so that compression cannot make them cheap. Ids
+    /// ascend with `_healpix_29`, and the rows are written in reverse so an ordering by the
+    /// index has something to do.
+    fn nested_catalog() -> tempfile::TempDir {
+        use std::sync::Arc;
+
+        use datafusion::arrow::array::{Array, Float64Array, Int64Array, ListArray, StructArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Fields, Float64Type, Schema};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::parquet::arrow::ArrowWriter;
+
+        const ROWS: i64 = 64;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("hats.properties"),
+            "obs_collection=nested\nhats_col_ra=ra\nhats_col_dec=dec\nhats_order=0\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("partition_info.csv"), "Norder,Npix\n0,0\n").unwrap();
+        let path = root.join(hats::HatsPartition::new(0, 0).path(".parquet"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let ids = (1..=ROWS).rev().collect::<Vec<_>>();
+        // Every row is at (45°, 30°), and each gets a cell of its own inside the order-23 cell
+        // holding that point, so the index orders them by id without moving any of them.
+        let at = cdshealpix::nested::hash(29, 45_f64.to_radians(), 30_f64.to_radians());
+        let cell = i64::try_from(at & !0xfff).unwrap();
+        let lists = |length: i64, scale: f64| {
+            ListArray::from_iter_primitive::<Float64Type, _, _>(ids.iter().map(|id| {
+                Some(
+                    (0..length)
+                        .map(|at| Some(scattered(id * 7919 + at * 104_729) * scale))
+                        .collect::<Vec<_>>(),
+                )
+            }))
+        };
+        let list = |name: &str| {
+            Field::new(
+                name,
+                DataType::List(Arc::new(Field::new("item", DataType::Float64, true))),
+                true,
+            )
+        };
+        let fields = Fields::from(vec![list("mag"), list("mjd"), list("flux")]);
+        let lc = StructArray::new(
+            fields.clone(),
+            vec![
+                Arc::new(lists(1, 1.0)),
+                Arc::new(lists(200, 0.001)),
+                Arc::new(lists(200, 0.37)),
+            ],
+            None,
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("ra", DataType::Float64, false),
+            Field::new("dec", DataType::Float64, false),
+            Field::new("_healpix_29", DataType::Int64, false),
+            Field::new("lc", DataType::Struct(fields), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(ids.clone())),
+                Arc::new(Float64Array::from(vec![45.0; ids.len()])),
+                Arc::new(Float64Array::from(vec![30.0; ids.len()])),
+                Arc::new(Int64Array::from(
+                    ids.iter().map(|id| cell + id).collect::<Vec<_>>(),
+                )),
+                Arc::new(lc) as Arc<dyn Array>,
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(std::fs::File::create(&path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        dir
+    }
+
+    /// A field of a nested column is read on its own, the way a parquet scan reads one: each
+    /// partition is given the statement's projection, so the reader fetches the one leaf and
+    /// not the struct around it.
+    ///
+    /// Each case is asked twice, for the field and for the whole struct, and the field has to
+    /// cost less than half — `mag` is a sliver of `lc`, and a partition that read the struct
+    /// and threw the rest away would cost the same both ways. A filter on a column the answer
+    /// does not carry, a `TOP` with nothing between it and the scan, and an ordering by the
+    /// index are the three shapes that put something else between the projection and the scan.
+    #[tokio::test]
+    async fn a_field_of_a_nested_column_reads_that_field_alone() {
+        let dir = nested_catalog();
+        let ask = async |query: &str| -> serde_json::Value {
+            let (status, body) = post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            serde_json::from_str(&body).unwrap()
+        };
+        let mag = |id: i64| scattered(id * 7919);
+        let values = |answer: &serde_json::Value, column: &str| -> Vec<(i64, f64)> {
+            answer["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    let id = row["id"].as_i64().unwrap();
+                    let lc = &row[column];
+                    let mag = lc.get("mag").unwrap_or(lc)[0].as_f64().unwrap();
+                    (id, mag)
+                })
+                .collect()
+        };
+
+        for (field, whole, expected) in [
+            (
+                r#"SELECT id, "lc"."mag" AS m FROM c WHERE id IN (3, 5)"#,
+                r#"SELECT id, "lc" AS m FROM c WHERE id IN (3, 5)"#,
+                vec![5, 3],
+            ),
+            (
+                r#"SELECT "lc"."mag" AS m, id FROM c WHERE ra > 0 AND id <= 2"#,
+                r#"SELECT "lc" AS m, id FROM c WHERE ra > 0 AND id <= 2"#,
+                vec![2, 1],
+            ),
+            (
+                r#"SELECT id, "lc"."mag" AS m FROM c
+                   WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45, 30, 1)) AND id >= 63"#,
+                r#"SELECT id, "lc" AS m FROM c
+                   WHERE 1 = CONTAINS(POINT(ra, dec), CIRCLE(45, 30, 1)) AND id >= 63"#,
+                vec![64, 63],
+            ),
+            (
+                r#"SELECT TOP 2 id, "lc"."mag" AS m FROM c"#,
+                r#"SELECT TOP 2 id, "lc" AS m FROM c"#,
+                vec![64, 63],
+            ),
+            (
+                r#"SELECT TOP 2 id, "lc"."mag" AS m FROM c ORDER BY "_healpix_29""#,
+                r#"SELECT TOP 2 id, "lc" AS m FROM c ORDER BY "_healpix_29""#,
+                vec![1, 2],
+            ),
+        ] {
+            let narrow = ask(field).await;
+            let wide = ask(whole).await;
+            let wanted = expected.iter().map(|&id| (id, mag(id))).collect::<Vec<_>>();
+            assert_eq!(values(&narrow, "m"), wanted, "{field}");
+            assert_eq!(values(&wide, "m"), wanted, "{whole}");
+            let read = |answer: &serde_json::Value| answer["data_bytes_read"].as_u64().unwrap();
+            assert!(
+                read(&narrow) * 2 < read(&wide),
+                "{field}: {} bytes against {} for the whole struct",
+                read(&narrow),
+                read(&wide)
+            );
+        }
+    }
+
     /// **That the pruning has teeth**, which the tests above cannot show: they would pass
     /// whether or not a partition was skipped, since skipping one changes what a query costs
     /// and not what it answers.
