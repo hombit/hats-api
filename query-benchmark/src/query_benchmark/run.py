@@ -1,9 +1,14 @@
-"""One cone search per catalog, timed, against a service this starts itself.
+"""One cone search and one ID search per catalog, timed, against a service this starts
+itself.
 
 What is measured is the whole request as a client sees it: the body goes out, the rows
 come back, and the clock stops when the last byte is read. Two builds are compared by
-running this against each and reading the two tables — or the two `--json` files, which
+running this against each and reading the tables — or the two `--json` files, which
 carry every individual time rather than the summary.
+
+**The cone goes through `/simple/hats` and the ID search through `/adql`**, since a
+collection's index is asked only by a statement. Both read the same columns of the same
+object; the ID search skips a catalog whose collection has no index.
 
 **The two counts beside the times are what say the comparison is honest.** A build that
 returns fewer rows, or reads fewer bytes, is not a faster build; it is a different
@@ -18,6 +23,7 @@ import statistics
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -89,10 +95,41 @@ def ask(base_url: str, name: str) -> tuple[float, dict]:
             "streaming": True,
         }
     ).encode()
+    return timed(f"{base_url}/api/v1/simple/hats", body)
+
+
+def quoted(name: str) -> str:
+    """A column as ADQL delimits it, segment by segment.
+
+    `_healpix_29` is not a name ADQL's grammar admits bare, and a delimited name is matched
+    exactly, which is what the catalog's own spelling wants. The dot into a nested column
+    stays structure rather than becoming part of one name.
+    """
+    return ".".join(f'"{part}"' for part in name.split("."))
+
+
+def id_query(name: str) -> str:
+    """The ID search: the cone's own columns, of the object at its centre, by its ids."""
+    catalog = CATALOGS[name]
+    columns = ", ".join(quoted(column) for column in catalog.columns)
+    values = ", ".join(str(value) for value in catalog.ids)
+    return f"SELECT {columns} FROM c WHERE {quoted(catalog.id_column)} IN ({values})"
+
+
+def ask_ids(base_url: str, name: str) -> tuple[float, dict]:
+    """One ID search, and how long it took to read the whole answer."""
+    body = json.dumps(
+        {
+            "query": id_query(name),
+            "tables": {"c": {"type": "hats", "url": f"file:///{name}"}},
+        }
+    ).encode()
+    return timed(f"{base_url}/api/v1/adql", body)
+
+
+def timed(url: str, body: bytes) -> tuple[float, dict]:
     request = urllib.request.Request(
-        f"{base_url}/api/v1/simple/hats",
-        data=body,
-        headers={"content-type": "application/json"},
+        url, data=body, headers={"content-type": "application/json"}
     )
     started = time.perf_counter()
     with urllib.request.urlopen(request, timeout=REQUEST_SECONDS) as response:
@@ -100,7 +137,13 @@ def ask(base_url: str, name: str) -> tuple[float, dict]:
     return time.perf_counter() - started, answer
 
 
-def measure(base_url: str, name: str, source: str, runs: int) -> Measured:
+def measure(
+    base_url: str,
+    name: str,
+    source: str,
+    runs: int,
+    asking: Callable[[str, str], tuple[float, dict]] = ask,
+) -> Measured:
     """Ask one catalog `runs` times, or stop at the first refusal.
 
     Stopping matters: a request that 400s comes back in milliseconds, and four more of
@@ -114,7 +157,7 @@ def measure(base_url: str, name: str, source: str, runs: int) -> Measured:
     measured = Measured(catalog=name, source=source)
     for _ in range(runs):
         try:
-            seconds, answer = ask(base_url, name)
+            seconds, answer = asking(base_url, name)
         except urllib.error.HTTPError as refused:
             said = refused.read().decode(errors="replace").strip()
             measured.error = f"HTTP {refused.code}: {said[:300]}"
@@ -167,7 +210,10 @@ def table(results: list[Measured]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="query-benchmark",
-        description="Time one cone search per HATS catalog through /simple/hats.",
+        description=(
+            "Time one cone search per HATS catalog through /simple/hats, and one ID search "
+            "per indexed catalog through /adql."
+        ),
     )
     parser.add_argument(
         "--catalog",
@@ -220,11 +266,20 @@ def main(argv: list[str] | None = None) -> int:
         results = [
             measure(base_url, name, source, args.runs) for name, source in picked.items()
         ]
+        by_id = [
+            measure(base_url, name, source, args.runs, asking=ask_ids)
+            for name, source in picked.items()
+            if CATALOGS[name].ids
+        ]
     finally:
         process.terminate()
         process.wait(timeout=10)
 
+    print("cone search\n")
     print(table(results))
+    if by_id:
+        print("\nID search\n")
+        print(table(by_id))
     if args.json_path:
         args.json_path.write_text(
             json.dumps(
@@ -232,12 +287,18 @@ def main(argv: list[str] | None = None) -> int:
                     "binary": str(args.binary),
                     "cone": {"ra": RA, "dec": DEC, "radius_arcsec": RADIUS_ARCSEC},
                     "catalogs": [vars(measured) for measured in results],
+                    "ids": [
+                        {**vars(measured), "query": id_query(measured.catalog)}
+                        for measured in by_id
+                    ],
                 },
                 indent=2,
             )
             + "\n"
         )
-    failed = [measured.catalog for measured in results if measured.error]
+    failed = [f"{one.catalog} (cone)" for one in results if one.error] + [
+        f"{one.catalog} (ID)" for one in by_id if one.error
+    ]
     if failed:
         print(f"\nthese did not answer: {', '.join(failed)}")
     return 1 if failed else 0

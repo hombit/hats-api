@@ -7,13 +7,13 @@
 //! it, and held in the catalog's slots from then on. Whether those slots outlive the request
 //! is [`CatalogCache`]'s decision; this module reads the same way either way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
-use datafusion::common::Column;
+use datafusion::common::{Column, ScalarValue};
 use datafusion::logical_expr::Expr;
 use datafusion::prelude::ParquetReadOptions;
 use futures::{FutureExt, StreamExt, TryStreamExt, stream};
@@ -23,6 +23,7 @@ use crate::error::ApiError;
 use crate::storage::{RemoteDir, RemoteFile};
 
 use super::cache::{CatalogCache, Part, Slot, Slots, Value, mismatched};
+use super::index::{IndexLayout, Lookup};
 use super::partitions::{
     self, COMMON_METADATA, DATA_THUMBNAIL, DATASET_DIR, HatsPartition, HatsPartitionList,
 };
@@ -53,6 +54,9 @@ pub struct HatsCatalog {
     /// This catalog's own directory — below the collection, where one was followed — opened
     /// through this request's store.
     dir: RemoteDir,
+    /// The collection's directory, where a collection was followed to reach this catalog:
+    /// where its index catalogs are.
+    collection_dir: Option<RemoteDir>,
     described: Arc<Described>,
     slots: Slots,
     max_metadata_bytes: u64,
@@ -100,12 +104,13 @@ impl HatsCatalog {
             return Err(mismatched(Part::Anchor));
         };
         let described = Arc::clone(described);
-        let dir = match described.within.trim_end_matches('/') {
-            "" => dir,
-            table => dir.subdir(table)?,
+        let (dir, collection_dir) = match described.within.trim_end_matches('/') {
+            "" => (dir, None),
+            table => (dir.subdir(table)?, Some(dir)),
         };
         Ok(Self {
             dir,
+            collection_dir,
             described,
             slots,
             max_metadata_bytes,
@@ -434,6 +439,65 @@ impl HatsCatalog {
         }
     }
 
+    /// The partitions holding any of `values` of `column`, by the collection's index on it, and
+    /// what asking cost.
+    ///
+    /// `None` wherever the index is not used: there is none to ask — a catalog named outside its
+    /// collection, or a column no index covers — it cannot be read, which is logged, or reading
+    /// it could cost more than `max_bytes`. Every partition is then a candidate, as it is for a
+    /// catalog with no index at all. The same rows come back either way; what the index changes
+    /// is how many partitions are opened.
+    ///
+    /// `healpix` is the table's HEALPix column, whose values of the rows found come back too
+    /// where the index carries it.
+    pub(crate) async fn indexed_partitions(
+        &self,
+        column: &str,
+        values: &HashSet<ScalarValue>,
+        data: &DataFiles,
+        max_bytes: u64,
+        healpix: Option<&str>,
+    ) -> Option<Lookup> {
+        let (collection, root) = (self.collection()?, self.collection_dir.as_ref()?);
+        let listed = collection
+            .indexes()
+            .inspect_err(|error| tracing::warn!(%error, "cannot read a collection's indexes"))
+            .ok()?;
+        let (at, name) = listed
+            .iter()
+            .enumerate()
+            .find_map(|(at, (indexed, name))| (*indexed == column).then_some((at, *name)))?;
+        let looked_up = async {
+            let dir = root.subdir(inside_collection(name, "all_indexes")?)?;
+            let part = Part::Index { at };
+            let slot = self
+                .slots
+                .filled(
+                    part,
+                    async {
+                        let layout =
+                            IndexLayout::read(&dir, column, data, self.max_metadata_bytes).await?;
+                        Ok(Value::Index(Arc::new(layout)))
+                    }
+                    .boxed(),
+                )
+                .await?;
+            let Some(Value::Index(layout)) = slot.value() else {
+                return Err(mismatched(part));
+            };
+            layout
+                .partitions_for(&dir, values, max_bytes, healpix)
+                .await
+        };
+        looked_up
+            .await
+            .inspect_err(|error| {
+                tracing::warn!(%error, column, "cannot use a collection's index; reading every partition");
+            })
+            .ok()
+            .flatten()
+    }
+
     async fn find_position(&self, data: &DataFiles, ra: &str, dec: &str) -> Option<(f64, f64)> {
         if let Ok(thumbnail) = self.dir.child(DATA_THUMBNAIL)
             && let Some(found) = read_position(&thumbnail, ra, dec).await
@@ -549,14 +613,24 @@ async fn read_collection(dir: &RemoteDir) -> Result<Option<Properties>, ApiError
 /// message saying the caller may name the catalog directly. That costs a collection whose
 /// members are published apart from it, which is not a shape a collection is written in.
 pub(super) fn primary_table(collection: &Properties) -> Result<&str, ApiError> {
+    let named = collection.get("hats_primary_table_url").ok_or_else(|| {
+        ApiError::bad_request(
+            "this collection's hats_primary_table_url is missing; name the catalog's own url",
+        )
+    })?;
+    inside_collection(named, "hats_primary_table_url")
+}
+
+/// A catalog a collection names by `key`, **only where it is a path inside the collection** —
+/// see [`primary_table`] for why nothing else is followed. Its indexes are held to the same
+/// rule as its primary table, being catalogs this service would otherwise connect to on a
+/// file's say-so.
+fn inside_collection<'a>(named: &'a str, key: &str) -> Result<&'a str, ApiError> {
     let refuse = |why: &str| {
         ApiError::bad_request(format!(
-            "this collection's hats_primary_table_url {why}; name the catalog's own url"
+            "this collection's {key} {why}; name the catalog's own url"
         ))
     };
-    let named = collection
-        .get("hats_primary_table_url")
-        .ok_or_else(|| refuse("is missing"))?;
     if named.contains("://") || named.starts_with('/') || named.starts_with('\\') {
         return Err(refuse("is not a path inside the collection"));
     }
@@ -568,7 +642,7 @@ pub(super) fn primary_table(collection: &Properties) -> Result<&str, ApiError> {
     {
         return Err(refuse("does not name a directory inside the collection"));
     }
-    Ok(named)
+    Ok(named.trim_end_matches('/'))
 }
 
 /// One parquet file's schema, with no rows read.

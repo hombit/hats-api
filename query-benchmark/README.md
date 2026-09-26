@@ -28,6 +28,14 @@ asks for it: the rows leave as they are read rather than after the service has b
 whole body. A run that was stopped part-way says so in `refused` instead of in the status,
 and is reported as an error rather than timed — a partial answer is not a fast one.
 
+## ID search
+
+A second table times a lookup of the same object by the column its collection indexes —
+`ticid`, `source_id`, and the four `objectid`s ZTF gives it — through `POST /api/v1/adql`,
+since a collection's index is used only by a statement. It reads the same columns as the
+cone, so the two tables differ in how the partitions are found. `ps1`'s collection has no
+index and is not in it.
+
 ## Choosing catalogs, and reading them from elsewhere
 
 `--catalog` takes `NAME`, or `NAME=LOCATION` to read it from somewhere else, and repeats.

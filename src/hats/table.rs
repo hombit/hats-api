@@ -15,6 +15,7 @@
 //! writes `_healpix_29 BETWEEN …` by hand gets the same partitions as one who writes a circle,
 //! which no pattern over `CONTAINS` would have given them.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{ArrayRef, UInt64Array};
@@ -25,7 +26,8 @@ use datafusion::common::{Column, DFSchema, DataFusionError, Result as DfResult, 
 use datafusion::execution::context::{ExecutionProps, SessionState};
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Expr, TableProviderFilterPushDown, TableType};
-use datafusion::physical_expr::create_physical_expr;
+use datafusion::physical_expr::utils::{Guarantee, LiteralGuarantee};
+use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use datafusion::physical_optimizer::pruning::{PruningPredicateBuilder, PruningStatistics};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
@@ -51,6 +53,21 @@ pub struct Limits {
     /// How many partitions are read at once.
     pub max_concurrent_partitions: usize,
     pub max_metadata_bytes: u64,
+    /// How many partitions a statement must still reach, after its region, for a collection's
+    /// index to be asked. Below it the partitions are few enough to read without asking.
+    pub min_partitions_for_index: usize,
+    /// The most an index lookup may read. One that would read more is skipped, never refused:
+    /// the index narrows a scan, and the scan is answered without it.
+    pub max_index_bytes: u64,
+}
+
+/// What the collection's indexes made of a scan's partitions.
+struct Indexed {
+    partitions: Vec<HatsPartition>,
+    /// A filter on the HEALPix column from the cells of the rows the indexes found.
+    healpix: Option<Expr>,
+    /// What reading the indexes fetched.
+    bytes_read: u64,
 }
 
 /// One catalog, ready to be named in a statement.
@@ -151,37 +168,18 @@ impl HatsTable {
         let Some(index) = &self.index else {
             return Ok(cells.to_vec());
         };
-        let Some(predicate) = conjunction(filters) else {
-            return Ok(cells.to_vec());
-        };
-        // Against the catalog's whole schema and not the one column being pruned on. A region
-        // test reaches here as the covering `OR`ed with the coordinate bounds and the
-        // haversine, so a schema holding only the index column is one the filter cannot even
-        // be planned against — and what that costs is not a wrong answer but every partition
-        // kept, silently. `Spans` answers `None` for every column but the index, which is how
-        // a predicate says it has no statistics for one: the container is kept on that term
-        // and pruned on the others.
+        // `Spans` answers `None` for every column but the index, which is how a predicate says
+        // it has no statistics for one: the container is kept on that term and pruned on the
+        // others.
         let Ok(field) = self.schema.field_with_name(index) else {
             return Ok(cells.to_vec());
         };
         let data_type = field.data_type().clone();
-        let schema = Arc::clone(&self.schema);
-        let Ok(df_schema) = DFSchema::try_from(Arc::clone(&schema)) else {
-            return Ok(cells.to_vec());
-        };
-        // The default planning context, which is what a caller outside physical planning is
-        // told to pass: a scalar subquery then fails to convert rather than being resolved
-        // against a plan this has no part of, and a failure here keeps every partition.
-        let Ok(physical) = create_physical_expr(
-            &predicate,
-            &df_schema,
-            &ExecutionProps::new(),
-            &PhysicalPlanningContext::default(),
-        ) else {
+        let Some(physical) = self.physical(filters) else {
             return Ok(cells.to_vec());
         };
         let Some(pruning) = PruningPredicateBuilder::new()
-            .with_file_schema(Arc::clone(&schema))
+            .with_file_schema(Arc::clone(&self.schema))
             .build(physical)
         else {
             // Trivially true, or a predicate the builder could not use. Both mean every
@@ -204,6 +202,126 @@ impl HatsTable {
             .filter(|(_, keep)| *keep)
             .map(|(cell, _)| cell.clone())
             .collect())
+    }
+
+    /// The partitions the collection's index catalogs leave, for a statement that says which
+    /// values of an indexed column it wants.
+    ///
+    /// What a statement wants is read off its filters by `LiteralGuarantee` — `object_id = 7`,
+    /// `object_id IN (7, 8)`, either beside anything else under an `AND` — so nothing here
+    /// recognises a shape of its own, and a filter it cannot prove such a set for asks no index.
+    /// Two indexed columns each constrained keep only the partitions both indexes name.
+    ///
+    /// Every partition where no index answers: none covers the column, the catalog was named
+    /// outside its collection, the index could not be read, or reading it would cost more
+    /// than a request may fetch. Asked only where at least `min_partitions_for_index` are
+    /// left, fewer being cheaper to read than to look up.
+    ///
+    /// **Where an index carries the table's HEALPix column, the rows' cells come back too**, and
+    /// become a filter on that column for the partitions' own scans. A partition is sorted by
+    /// HEALPix and not by the indexed column, so without it a lookup reads every row group of
+    /// the partition it found; with it, the row groups are pruned the way a cone's are. The
+    /// filter is exact wherever the index is — the rows asked for are in those cells — and it is
+    /// trusted the same way.
+    async fn indexed(&self, cells: Vec<HatsPartition>, filters: &[Expr]) -> Indexed {
+        let unasked = |partitions| Indexed {
+            partitions,
+            healpix: None,
+            bytes_read: 0,
+        };
+        if cells.len() < self.limits.min_partitions_for_index {
+            return unasked(cells);
+        }
+        let Some(physical) = self.physical(filters) else {
+            return unasked(cells);
+        };
+        let mut chosen: Option<HashSet<(u8, u64)>> = None;
+        let mut healpix: Option<HashSet<ScalarValue>> = None;
+        let mut bytes_read = 0;
+        for guarantee in LiteralGuarantee::analyze(&physical) {
+            if guarantee.guarantee != Guarantee::In {
+                continue;
+            }
+            let Some(found) = self
+                .catalog
+                .indexed_partitions(
+                    &guarantee.column.name,
+                    &guarantee.literals,
+                    &self.data,
+                    self.limits.max_index_bytes,
+                    self.index.as_deref(),
+                )
+                .await
+            else {
+                continue;
+            };
+            bytes_read += found.bytes_read;
+            chosen = Some(match chosen {
+                None => found.cells,
+                Some(before) => before.intersection(&found.cells).copied().collect(),
+            });
+            // A row satisfies every guarantee at once, so its cell is in every set an index
+            // gave; an index that gave none constrains nothing here.
+            if let Some(found) = found.healpix {
+                healpix = Some(match healpix {
+                    None => found,
+                    Some(before) => before.intersection(&found).cloned().collect(),
+                });
+            }
+        }
+        let partitions = match chosen {
+            None => cells,
+            Some(chosen) => cells
+                .into_iter()
+                .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
+                .collect(),
+        };
+        Indexed {
+            partitions,
+            healpix: healpix.and_then(|values| self.healpix_filter(&values)),
+            bytes_read,
+        }
+    }
+
+    /// `<healpix column> IN (values)`, the values cast to the table's own type for the column.
+    fn healpix_filter(&self, values: &HashSet<ScalarValue>) -> Option<Expr> {
+        let column = self.index.as_deref()?;
+        let data_type = self
+            .schema
+            .field_with_name(column)
+            .ok()?
+            .data_type()
+            .clone();
+        let values = values
+            .iter()
+            .map(|value| value.cast_to(&data_type).map(datafusion::logical_expr::lit))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        (!values.is_empty()).then(|| {
+            Expr::Column(Column::new_unqualified(column.to_owned())).in_list(values, false)
+        })
+    }
+
+    /// The statement's filters as one physical predicate over the catalog's whole schema.
+    ///
+    /// The whole schema and not the one column being pruned on: a region test reaches here as
+    /// the covering `OR`ed with the coordinate bounds and the haversine, so a schema holding
+    /// only the index column is one the filter cannot even be planned against — and what that
+    /// costs is not a wrong answer but every partition kept, silently.
+    ///
+    /// The default planning context, which is what a caller outside physical planning is told
+    /// to pass: a scalar subquery then fails to convert rather than being resolved against a
+    /// plan this has no part of, and `None` keeps every partition.
+    fn physical(&self, filters: &[Expr]) -> Option<Arc<dyn PhysicalExpr>> {
+        let predicate = conjunction(filters)?;
+        let df_schema = DFSchema::try_from(Arc::clone(&self.schema)).ok()?;
+        create_physical_expr(
+            &predicate,
+            &df_schema,
+            &ExecutionProps::new(),
+            &PhysicalPlanningContext::default(),
+        )
+        .ok()
     }
 }
 
@@ -246,7 +364,18 @@ impl TableProvider for HatsTable {
             .partitions()
             .await
             .map_err(|error| DataFusionError::Plan(error.to_string()))?;
-        let partitions = self.reached(listed.cells(), filters)?;
+        let reached = self.reached(listed.cells(), filters)?;
+        let after_region = reached.len();
+        let indexed = self.indexed(reached, filters).await;
+        tracing::info!(
+            url = %self.catalog.dir().url,
+            partitions = listed.len(),
+            after_region,
+            after_index = indexed.partitions.len(),
+            index_bytes = indexed.bytes_read,
+            index_cells = indexed.healpix.is_some(),
+            "catalog scan"
+        );
         // The planning session, which each partition's own scan is planned in too. It is the
         // only `Session` DataFusion builds, so anything else reaching here is a context this
         // table was never registered in.
@@ -261,9 +390,11 @@ impl TableProvider for HatsTable {
             catalog: Arc::clone(&self.catalog),
             data: self.data.clone(),
             table_schema: Arc::clone(&self.schema),
-            partitions,
+            partitions: indexed.partitions,
+            index_bytes: indexed.bytes_read,
             projection: projection.cloned(),
             filters: filters.to_vec(),
+            narrowing: indexed.healpix,
             limit,
             max_partitions: self.limits.max_partitions,
             concurrency: self.limits.max_concurrent_partitions,
@@ -337,7 +468,7 @@ impl PruningStatistics for Spans<'_> {
     fn contained(
         &self,
         _column: &Column,
-        _values: &std::collections::HashSet<ScalarValue>,
+        _values: &HashSet<ScalarValue>,
     ) -> Option<datafusion::arrow::array::BooleanArray> {
         None
     }

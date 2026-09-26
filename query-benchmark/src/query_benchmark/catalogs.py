@@ -6,6 +6,10 @@ whole. What a query costs against these is the columns it projects far more than
 it returns, so the column lists are the benchmark as much as the cone is — widening one
 measures something else.
 
+The ID search asks each catalog for the object at the cone's centre by the column its
+collection indexes, reading the same columns, so what differs between the two tables is how
+the partitions are found.
+
 Every source here is public and read anonymously.
 """
 
@@ -30,6 +34,11 @@ class Catalog:
 
     source: str
     columns: tuple[str, ...]
+    #: The column the collection's index covers, and the object at the cone's centre in it.
+    #: The same object as the cone search asks for, so the two tables are two ways of
+    #: finding one thing. No ids is a collection with no index, which the ID search skips.
+    id_column: str
+    ids: tuple[int, ...] = ()
 
 
 CATALOGS: dict[str, Catalog] = {
@@ -47,6 +56,8 @@ CATALOGS: dict[str, Catalog] = {
             "lightcurve.sap_flux",
             "lightcurve.sap_flux_err",
         ),
+        id_column="ticid",
+        ids=(341738544,),
     ),
     "gaia": Catalog(
         source="https://data.lsdb.io/hats/gaia_dr3_epoch_phot",
@@ -66,12 +77,18 @@ CATALOGS: dict[str, Catalog] = {
             "epoch_photometry.variability_flag_bp_reject",
             "epoch_photometry.variability_flag_rp_reject",
         ),
+        id_column="source_id",
+        ids=(1338822021487330304,),
     ),
     "ztf": Catalog(
         source="s3://ipac-irsa-ztf/ztf/enhanced/dr24/lc/hats",
         # Its partitions are directories, so this is also the one catalog whose read
         # needs a listing before it opens a file.
         columns=("_healpix_29", "objectid", "objra", "objdec", "lightcurve"),
+        id_column="objectid",
+        # One star has an objectid per field and filter it was seen in; these are the four
+        # the cone finds, so the lookup is also one of several values at once.
+        ids=(1722207400009164, 680113300005170, 680213300009232, 1722107400005560),
     ),
     "ps1": Catalog(
         source="s3://stpubdata/panstarrs/ps1/public/hats/detection",
@@ -85,5 +102,7 @@ CATALOGS: dict[str, Catalog] = {
             "psfFluxErr",
             "filterID",
         ),
+        # The detection collection declares no index, so there is no ID search to time.
+        id_column="objID",
     ),
 }

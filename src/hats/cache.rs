@@ -1,9 +1,9 @@
 //! What this process remembers about the catalogs it has read, and for how long.
 //!
 //! **One entry per part of a catalog, not one per catalog.** The properties, the partition
-//! list, the schema, the files inside each directory partition and the example position are
-//! each an entry, filled when something first asks for it and weighed when it is filled. So a
-//! part the budget cannot hold — the file names of a catalog of twelve thousand directory
+//! list, the schema, the files inside each directory partition, the example position and the
+//! layout of each of the collection's index catalogs are each an entry, filled when something
+//! first asks for it and weighed when it is filled. So a part the budget cannot hold — the file names of a catalog of twelve thousand directory
 //! partitions — is let go of on its own, and the catalog's properties stay.
 //!
 //! **Keyed by the catalog's url and the options that built its store.** The options are a
@@ -41,6 +41,7 @@ use crate::error::ApiError;
 use crate::storage::{Fingerprint, RemoteDir};
 
 use super::catalog::Described;
+use super::index::IndexLayout;
 use super::partitions::{HatsPartition, HatsPartitionList};
 
 /// How long what is read from one catalog is kept.
@@ -210,6 +211,10 @@ pub(super) enum Part {
     },
     /// A position the catalog holds a row at.
     Position,
+    /// The layout of one of the collection's index catalogs, by its place in `all_indexes`.
+    Index {
+        at: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -229,6 +234,7 @@ pub(super) enum Value {
     Schema(Option<SchemaRef>),
     Files(Arc<[String]>),
     Position((f64, f64)),
+    Index(Arc<IndexLayout>),
 }
 
 impl Value {
@@ -254,6 +260,7 @@ impl Value {
                 .map(|name| size(name.len()).saturating_add(size(size_of::<String>())))
                 .sum(),
             Self::Position(_) => 16,
+            Self::Index(layout) => layout.weight(),
         }
     }
 }

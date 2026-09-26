@@ -44,6 +44,7 @@ use datafusion::physical_plan::limit::GlobalLimitExec;
 use datafusion::physical_plan::metrics::{
     Count, ExecutionPlanMetricsSet, MetricBuilder, MetricsSet,
 };
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -64,8 +65,15 @@ pub(super) struct PartitionScan {
     pub table_schema: SchemaRef,
     /// The partitions the region left, in the order they are to be read.
     pub partitions: Vec<HatsPartition>,
+    /// What the collection's index lookups read while planning, which were reads of this
+    /// statement and are reported with the scan's own.
+    pub index_bytes: u64,
     pub projection: Option<Vec<usize>>,
     pub filters: Vec<Expr>,
+    /// A filter on the index column from the cells of the rows an index lookup found, which
+    /// is this scan's own and no part of the statement: it prunes each partition's row
+    /// groups, and the column it names is read for it and dropped again.
+    pub narrowing: Option<Expr>,
     /// The rows a partition need yield, where DataFusion said the statement wants no more.
     pub limit: Option<usize>,
     /// How many partitions may be opened before the stream refuses to open another.
@@ -247,6 +255,7 @@ impl ExecutionPlan for CatalogScanExec {
         };
         let partitions = walk.take(allowed).cloned().collect::<Vec<_>>();
         let bytes = MetricBuilder::new(&self.metrics).global_counter(BYTES_SCANNED);
+        bytes.add(usize::try_from(scan.index_bytes).unwrap_or(usize::MAX));
         // Each partition is a future that does nothing until polled, so `buffered` starts only
         // as many as it is about to yield — and none past what the consumer pulls.
         let reads = stream::iter(partitions)
@@ -327,15 +336,24 @@ async fn read_partition(
         Some(_) => None,
         None => scan.limit,
     };
+    // The narrowing names the index column, which the statement need not have asked for; it
+    // is read for the filter and projected away after it, so the batches are the statement's.
+    let (projection, added) = with_narrowing(&scan)?;
     let mut plan = table
-        .scan(&scan.state, scan.projection.as_ref(), &scan.filters, limit)
+        .scan(&scan.state, projection.as_ref(), &scan.filters, limit)
         .await?;
     // **The filter goes on top and the optimizer runs, or the parquet reader prunes nothing.**
     // `ListingTable` hands the reader no predicate for an ordinary column; what does is the
     // physical optimizer's filter pushdown, moving a `FilterExec`'s predicate into the scan
     // below it. A scan planned outside the statement's plan misses that pass, and the covering
     // then skips no row group and no page — the same rows for half again the bytes.
-    if let Some(filter) = scan.filters.iter().cloned().reduce(Expr::and) {
+    if let Some(filter) = scan
+        .filters
+        .iter()
+        .chain(scan.narrowing.as_ref())
+        .cloned()
+        .reduce(Expr::and)
+    {
         let schema = DFSchema::try_from(plan.schema())?;
         let predicate = create_physical_expr(
             &filter,
@@ -344,6 +362,19 @@ async fn read_partition(
             &PhysicalPlanningContext::default(),
         )?;
         plan = Arc::new(FilterExec::try_new(predicate, plan)?);
+    }
+    if added {
+        let schema = plan.schema();
+        let kept = (0..schema.fields().len() - 1)
+            .map(|at| {
+                let name = schema.field(at).name().clone();
+                (
+                    Arc::new(PhysicalColumn::new(&name, at)) as Arc<dyn PhysicalExpr>,
+                    name,
+                )
+            })
+            .collect::<Vec<_>>();
+        plan = Arc::new(ProjectionExec::try_new(kept, plan)?);
     }
     if let Some(options) = order {
         let schema = plan.schema();
@@ -369,6 +400,23 @@ async fn read_partition(
     let batches = collect(Arc::clone(&plan), context).await?;
     bytes.add(usize::try_from(data_bytes_read(plan.as_ref())).unwrap_or(usize::MAX));
     Ok(batches)
+}
+
+/// The projection a partition is read with, and whether the index column was added to it
+/// for the narrowing — last, so dropping it again is dropping the last column.
+fn with_narrowing(scan: &PartitionScan) -> DfResult<(Option<Vec<usize>>, bool)> {
+    let (Some(_), Some(column)) = (&scan.narrowing, &scan.index) else {
+        return Ok((scan.projection.clone(), false));
+    };
+    let at = scan.table_schema.index_of(column)?;
+    Ok(match &scan.projection {
+        Some(projection) if !projection.contains(&at) => {
+            let mut projection = projection.clone();
+            projection.push(at);
+            (Some(projection), true)
+        }
+        other => (other.clone(), false),
+    })
 }
 
 /// DataFusion's name for the bytes a scan fetched, which is what `data_bytes_read` sums.

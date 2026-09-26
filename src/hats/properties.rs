@@ -94,6 +94,29 @@ impl Properties {
         self.get("dataproduct_type")
     }
 
+    /// A collection's index catalogs, as `(column, directory)` pairs in the order written.
+    ///
+    /// `all_indexes` is a whitespace-separated list alternating a column of the primary
+    /// table and the directory, inside the collection, of the catalog that indexes it. A list
+    /// of odd length is refused, since which name pairs with which is then a guess.
+    pub fn indexes(&self) -> Result<Vec<(&str, &str)>, ApiError> {
+        let Some(listed) = self.get("all_indexes") else {
+            return Ok(Vec::new());
+        };
+        let names = listed.split_whitespace().collect::<Vec<_>>();
+        if names.len() % 2 != 0 {
+            return Err(ApiError::bad_request(
+                "this collection's all_indexes does not pair every column with a catalog",
+            ));
+        }
+        Ok(names
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|[column, directory]| (*column, *directory))
+            .collect())
+    }
+
     /// The columns a `region` is tested against, which a lone parquet file cannot supply
     /// and a catalog can. Both or neither: a position needs two coordinates, and half of
     /// one is a catalog that has not said.

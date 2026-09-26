@@ -84,6 +84,12 @@ impl From<&crate::config::LimitsConfig> for Limits {
                 max_partitions: config.max_partitions,
                 max_concurrent_partitions: config.max_concurrent_partitions,
                 max_metadata_bytes: config.max_catalog_metadata_bytes.as_u64(),
+                // What `[limits]` alone implies. `Service::new` settles it against
+                // `[tap.async.limits]` too, which this conversion cannot see.
+                min_partitions_for_index: config
+                    .min_partitions_for_index
+                    .unwrap_or(config.max_partitions),
+                max_index_bytes: config.max_bytes_fetched.as_u64(),
             },
         }
     }
