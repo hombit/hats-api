@@ -64,7 +64,7 @@ fn render(base: &str, published: &[Published<'_>]) -> String {
          <h1>TAP</h1>\n\
          <p>Base url: <code>{base_text}</code></p>\n\
          <nav><a href=\"#catalogs\">Catalogs</a><a href=\"#examples\">Examples</a></nav>\n",
-        css = include_str!("page.css"),
+        css = include_str!("page/page.css"),
     );
 
     // Few catalogs set `obs_title`, and a column empty on every row is width taken from the
@@ -103,7 +103,7 @@ fn render(base: &str, published: &[Published<'_>]) -> String {
     let _ = write!(
         out,
         "<script>\n{script}</script>\n</body>\n</html>\n",
-        script = include_str!("page.js"),
+        script = include_str!("page/page.js"),
     );
     out
 }

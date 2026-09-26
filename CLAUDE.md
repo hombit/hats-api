@@ -1693,6 +1693,10 @@ pushing a tag as `refs/tags/vx.y.z` only works around it.
    dependency bump that changes none of those is not an entry at all. Add the comparison
    link at the foot beside the others.
 
+   **Short: about eighty characters before the link.** Name the thing and what it now
+   does, then stop. Which clients, formats, headers or edge cases it covers are what the
+   pull request is for, and a reader who needs them follows the number.
+
    **An entry that breaks a caller starts with `**Breaking**`**, before anything else on
    the line — a renamed or removed field, a route that moves, a default that changes an
    answer, a status a client matched on. The reader deciding whether to upgrade is
