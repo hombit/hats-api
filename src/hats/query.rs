@@ -1364,8 +1364,15 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(search.chosen().len(), CELLS.len());
 
-        let walked = search.walk_dataset(&data).await.unwrap();
-        let each = search.list_each(&data).await.unwrap();
+        // Sorted before comparing: a partition's files come back in the order the store lists
+        // them, which on disk is the filesystem's and differs between machines. Which files
+        // is the question here, and nothing promises their order.
+        let sorted = |mut listed: Vec<Vec<String>>| {
+            listed.iter_mut().for_each(|names| names.sort());
+            listed
+        };
+        let walked = sorted(search.walk_dataset(&data).await.unwrap());
+        let each = sorted(search.list_each(&data).await.unwrap());
         assert_eq!(walked, each);
 
         // The parts, and not the marker beside them.
@@ -1383,12 +1390,20 @@ pub(crate) mod tests {
             .unwrap();
         let entries = search.entries(&DataFiles::default()).await.unwrap();
         assert_eq!(entries.len(), CELLS.len() * 2);
+        // The first partition's two files, in whichever order its directory lists them.
+        let mut first: Vec<&str> = entries
+            .iter()
+            .take(2)
+            .map(|entry| entry.path.as_str())
+            .collect();
+        first.sort_unstable();
+        let under = format!("dataset/Norder={ORDER}/Dir=0/Npix={}", CELLS[0]);
         assert_eq!(
-            entries.first().unwrap().path,
-            format!(
-                "dataset/Norder={ORDER}/Dir=0/Npix={}/part0.parquet",
-                CELLS[0]
-            )
+            first,
+            [
+                format!("{under}/part0.parquet"),
+                format!("{under}/part1.parquet")
+            ]
         );
         // A directory's bytes are not one file's, so no entry claims an estimate.
         assert!(entries.iter().all(|entry| entry.estimated_bytes.is_none()));
