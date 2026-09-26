@@ -1014,9 +1014,14 @@ pub(crate) mod tests {
     use std::fs;
     use std::path::Path;
 
-    use datafusion::arrow::array::{Array, Float32Array, Float64Array, Int64Array};
+    use datafusion::arrow::array::{
+        Array, Float32Array, Float64Array, Int64Array, UInt8Array, UInt64Array,
+    };
     use datafusion::arrow::datatypes::{DataType, Field};
     use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::file::metadata::{
+        ParquetMetaData, ParquetMetaDataReader, ParquetMetaDataWriter,
+    };
     use url::Url;
 
     use super::*;
@@ -1084,7 +1089,13 @@ pub(crate) mod tests {
     /// return the same rows either way, since the column is an accelerator and nothing else.
     pub(crate) fn fixture(healpix: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        write_fixture(dir.path(), healpix);
+        dir
+    }
+
+    /// The same catalog, written into `root`.
+    fn write_fixture(root: &Path, healpix: bool) {
+        fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("hats.properties"),
             format!(
@@ -1102,7 +1113,114 @@ pub(crate) mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             write_partition(&path, &rows, healpix);
         }
+    }
+
+    /// The fixture as a collection's primary table, at `catalog/`, beside an index on `id` at
+    /// `id_index/` — split over two files so a lookup has one to skip, and with a combined
+    /// `dataset/_metadata` where `metadata` asks for one.
+    pub(crate) fn indexed_collection(metadata: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("collection.properties"),
+            "obs_collection=indexed\nhats_primary_table_url=catalog\nall_indexes=id id_index\n",
+        )
+        .unwrap();
+        write_fixture(&root.join("catalog"), true);
+        let index = root.join("id_index");
+        fs::create_dir_all(index.join("dataset/index")).unwrap();
+        fs::write(
+            index.join("hats.properties"),
+            "obs_collection=id_index\ndataproduct_type=index\nhats_index_column=id\n",
+        )
+        .unwrap();
+        let rows = points()
+            .into_iter()
+            .flat_map(|(cell, rows)| rows.into_iter().map(move |row| (cell, row.id)))
+            .collect::<Vec<_>>();
+        let (first, second) = rows.split_at(rows.len() / 2);
+        let mut footers = Vec::new();
+        for (at, part) in [first, second].into_iter().enumerate() {
+            let name = format!("index/part.{at}.parquet");
+            footers.push((
+                name.clone(),
+                write_index(&index.join("dataset").join(&name), part),
+            ));
+        }
+        if metadata {
+            write_combined(&index.join("dataset/_metadata"), &footers);
+        }
         dir
+    }
+
+    /// The id of the first row of the fixture's partition at `at` in [`CELLS`].
+    pub(crate) fn first_id_in(at: usize) -> i64 {
+        points()[at].1[0].id
+    }
+
+    /// One file of an index: `(Norder, Npix, id)` rows, sorted by the id.
+    fn write_index(path: &Path, rows: &[(u64, i64)]) -> ParquetMetaData {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("Norder", DataType::UInt8, false),
+            Field::new("Npix", DataType::UInt64, false),
+            Field::new("id", DataType::Int64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(UInt8Array::from(vec![ORDER; rows.len()])),
+                Arc::new(UInt64Array::from(
+                    rows.iter().map(|(cell, _)| *cell).collect::<Vec<_>>(),
+                )),
+                Arc::new(Int64Array::from(
+                    rows.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
+                )),
+            ],
+        )
+        .unwrap();
+        let mut writer =
+            ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        ParquetMetaDataReader::new()
+            .parse_and_finish(&bytes::Bytes::from(fs::read(path).unwrap()))
+            .unwrap()
+    }
+
+    /// A `_metadata` the way an importer writes one: every file's row groups in one footer,
+    /// each tagged with the path of the file it came from.
+    fn write_combined(path: &Path, files: &[(String, ParquetMetaData)]) {
+        let mut first = None;
+        let mut groups = Vec::new();
+        for (name, metadata) in files {
+            first.get_or_insert_with(|| metadata.file_metadata().clone());
+            for group in metadata.row_groups() {
+                let columns = group
+                    .columns()
+                    .iter()
+                    .map(|chunk| {
+                        chunk
+                            .clone()
+                            .into_builder()
+                            .set_file_path(name.clone())
+                            .build()
+                            .unwrap()
+                    })
+                    .collect();
+                groups.push(
+                    group
+                        .clone()
+                        .into_builder()
+                        .set_column_metadata(columns)
+                        .build()
+                        .unwrap(),
+                );
+            }
+        }
+        let combined = ParquetMetaData::new(first.unwrap(), groups);
+        ParquetMetaDataWriter::new(fs::File::create(path).unwrap(), &combined)
+            .finish()
+            .unwrap();
     }
 
     /// `dataset/_common_metadata` beside a fixture: the same schema its partitions carry,

@@ -676,6 +676,102 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
     }
 
+    /// **A collection's index chooses the partitions a lookup by the indexed column opens.**
+    /// With one partition allowed, `id = X` over the whole catalog is answered through the
+    /// collection, whose index names the one partition holding X, and refused when the same
+    /// catalog is named on its own — outside its collection it has no index, and every
+    /// partition is a candidate. Both ways an index is laid out: with a combined `_metadata`,
+    /// and with only its files' own footers.
+    #[tokio::test]
+    async fn an_indexed_lookup_opens_only_the_partitions_the_index_names() {
+        for metadata in [false, true] {
+            let dir = hats::query::tests::indexed_collection(metadata);
+            let ask = async |max_partitions: usize, url: &str, query: &str| {
+                let limits = LimitsConfig {
+                    max_partitions,
+                    ..LimitsConfig::default()
+                };
+                let mut service = mounted(dir.path(), &ApiConfig::default());
+                service.adql_limits = (&limits).into();
+                post_json(
+                    service,
+                    "/api/v1/adql",
+                    serde_json::json!({
+                        "query": query,
+                        "tables": {"c": {"type": "hats", "url": url}},
+                    }),
+                )
+                .await
+            };
+            let ids = |body: &str| -> Vec<i64> {
+                let answer: serde_json::Value = serde_json::from_str(body).unwrap();
+                answer["rows"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| row["id"].as_i64().unwrap())
+                    .collect()
+            };
+            let one = hats::query::tests::first_id_in(2);
+
+            let lookup = format!("SELECT id FROM c WHERE id = {one}");
+            let (status, body) = ask(1, "file:///", &lookup).await;
+            assert_eq!(status, StatusCode::OK, "{metadata}: {body}");
+            assert_eq!(ids(&body), vec![one], "{metadata}: {body}");
+
+            let (status, body) = ask(1, "file:///catalog", &lookup).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{metadata}: {body}");
+            assert!(body.contains("partitions"), "{metadata}: {body}");
+
+            // Beside another condition, which the index leaves to the rows.
+            let (status, body) = ask(
+                1,
+                "file:///",
+                &format!("SELECT id FROM c WHERE id = {one} AND ra > -1000"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{metadata}: {body}");
+            assert_eq!(ids(&body), vec![one], "{metadata}: {body}");
+
+            // Two values in two partitions open exactly those two.
+            let other = hats::query::tests::first_id_in(0);
+            let (status, body) = ask(
+                2,
+                "file:///",
+                &format!("SELECT id FROM c WHERE id IN ({one}, {other}) ORDER BY id"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{metadata}: {body}");
+            assert_eq!(ids(&body), vec![other, one], "{metadata}: {body}");
+
+            // A value no partition holds opens none.
+            let (status, body) = ask(1, "file:///", "SELECT id FROM c WHERE id = -5").await;
+            assert_eq!(status, StatusCode::OK, "{metadata}: {body}");
+            assert!(ids(&body).is_empty(), "{metadata}: {body}");
+        }
+    }
+
+    /// An index that cannot be read leaves every partition a candidate: the same rows, from
+    /// reading all of them.
+    #[tokio::test]
+    async fn a_broken_index_is_read_around() {
+        let dir = hats::query::tests::indexed_collection(false);
+        std::fs::remove_dir_all(dir.path().join("id_index/dataset")).unwrap();
+        let one = hats::query::tests::first_id_in(2);
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": format!("SELECT id FROM c WHERE id = {one}"),
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(answer["rows"][0]["id"], one, "{body}");
+    }
+
     /// `ORDER BY` the index is answered by the order partitions are read in, so a `TOP` over
     /// it reads the partitions at that end of the catalog and no others. With one partition
     /// allowed, a sort that consumed its whole input would be refused.

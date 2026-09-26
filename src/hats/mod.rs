@@ -23,6 +23,7 @@
 pub mod browse;
 mod cache;
 mod catalog;
+mod index;
 pub mod partitions;
 pub mod properties;
 pub mod query;

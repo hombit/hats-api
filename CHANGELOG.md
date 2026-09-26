@@ -11,6 +11,7 @@ Release dates are in the UTC time zone.
 - `[limits] catalog_cache_seconds` and `max_catalog_cache_bytes`: catalog metadata is kept between requests. [#110](https://github.com/hombit/hats-api/pull/110)
 - `[[mount]] catalog_cache_seconds`, overriding the default per mount; `inf` keeps until evicted. [#110](https://github.com/hombit/hats-api/pull/110)
 - `[[tap.table]]` catalogs are cached in the background and refreshed before they expire. [#111](https://github.com/hombit/hats-api/pull/111)
+- ADQL and TAP choose partitions by a collection's `all_indexes` index catalogs.
 
 ### Changed
 

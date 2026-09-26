@@ -44,7 +44,8 @@ storage/  a url opened into a store: the url itself (store), each backend's opti
 engine/   the caller's SQL (sql) and running a selection against one parquet file (query)
 sky/      a shape on the sky: what it means as a predicate (region), which cells cover it
           (healpix), and saying one inside a query (geometry)
-hats/     a catalog: its own files (catalog, partitions, properties), what is remembered
+hats/     a catalog: its own files (catalog, partitions, properties), a collection's index
+          catalogs (index), what is remembered
           about one between requests (cache), recognising one somebody is browsing
           (browse), a request fanned out over it (query), it as a table a statement names
           (table), and the partitions that table reads as rows are pulled (scan)
@@ -937,6 +938,26 @@ one byte budget for the whole process.
   a `file://` url resolves to, the way `data_files_for` does, and `catalogs_in` is the file
   server's side of the same question. A route that reaches for `[limits]`' lifetime where a
   mount governs the catalog makes the two modes disagree about how stale one catalog may be.
+
+## A collection's indexes
+
+`hats/index.rs` answers which partitions hold given values of an indexed column, from the
+index catalogs a collection names in `all_indexes`.
+
+- **An index is found only through its collection, and only inside it.** `all_indexes` is
+  followed downwards by the same rule as `hats_primary_table_url`, and a catalog named on its
+  own, outside its collection, has no index. A request has no field for one.
+- **What a statement wants is read off its filters by `LiteralGuarantee`, never by matching a
+  shape.** `=`, `IN` and `OR` chains of equalities, beside anything else under an `AND`, are
+  DataFusion's to recognise; a filter it proves no set for asks no index.
+- **An index narrows the partitions and never refuses a request.** One that cannot be read is
+  logged and every partition stays a candidate, so the answer is the same rows, from reading
+  more of them. It is trusted otherwise: a value it does not list is a partition not opened.
+- **The ADQL route's and TAP's, not the `simple` routes'.** `HatsTable::scan` is where it is
+  asked, before the statistics pruning of `reached`.
+- **Its layout is a part of the catalog**, kept under the same generation as the rest: the
+  column's type and the value range of each index file, so a lookup reads only the files that
+  can hold a value asked for.
 
 ## A request against a catalog
 
