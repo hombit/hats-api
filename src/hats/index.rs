@@ -65,6 +65,9 @@ pub struct IndexLayout {
     column: String,
     /// Its type in the index, which a looked-up value is cast to.
     data_type: DataType,
+    /// Every column the index files carry, which says whether a lookup can also answer with
+    /// the rows' HEALPix values.
+    columns: Vec<String>,
     files: Vec<IndexFile>,
 }
 
@@ -75,9 +78,9 @@ struct IndexFile {
     path: String,
     /// `None` where a file's statistics say nothing, which is a file every lookup reads.
     range: Option<(ScalarValue, ScalarValue)>,
-    /// The compressed size of what a lookup reads of it: the indexed column, `Norder` and
-    /// `Npix`, in every row group. More than the lookup will read, row groups being pruned
-    /// within the file, and so a bound that can only err high.
+    /// The compressed size of the indexed column, `Norder` and `Npix`, in every row group — far
+    /// more than a lookup reads, row groups being pruned within the file, and what the budget
+    /// is checked against. A HEALPix column read beside them is not counted in it.
     bytes: u64,
 }
 
@@ -86,6 +89,10 @@ struct IndexFile {
 pub(crate) struct Lookup {
     /// The partitions holding a value asked for, as `(order, pixel)`.
     pub cells: HashSet<(u8, u64)>,
+    /// The HEALPix values of the rows found, where the index carries the table's HEALPix
+    /// column beside the value. A partition is sorted by that column and not by the indexed
+    /// one, so this is what lets its row groups be pruned the way a cone's are.
+    pub healpix: Option<HashSet<ScalarValue>>,
     /// What reading the index fetched.
     pub bytes_read: u64,
 }
@@ -100,7 +107,12 @@ impl IndexLayout {
                 .map_or(0, |(min, max)| min.size() + max.size());
             u64::try_from(file.path.len() + range + 72).unwrap_or(u64::MAX)
         };
-        self.files.iter().map(per_file).sum()
+        let columns = self
+            .columns
+            .iter()
+            .map(|name| u64::try_from(name.len() + 24).unwrap_or(u64::MAX))
+            .sum::<u64>();
+        self.files.iter().map(per_file).sum::<u64>() + columns
     }
 
     /// Read an index's layout: its column's type, and the range of values each file covers.
@@ -119,6 +131,7 @@ impl IndexLayout {
             None => read_each(dir, data).await?,
         };
         let mut data_type = None;
+        let mut columns: Option<Vec<String>> = None;
         let mut files = Vec::new();
         for (path, metadata) in footers {
             let schema = parquet_to_arrow_schema(
@@ -139,6 +152,20 @@ impl IndexLayout {
             if let Some((_, field)) = schema.column_with_name(column) {
                 data_type.get_or_insert_with(|| field.data_type().clone());
             }
+            // Only what every file carries, since a lookup reads one column list from all of
+            // the files it chooses.
+            let here = schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect::<Vec<_>>();
+            columns = Some(match columns {
+                None => here,
+                Some(before) => before
+                    .into_iter()
+                    .filter(|name| here.contains(name))
+                    .collect(),
+            });
             files.push(IndexFile {
                 range: range_of(&metadata, &schema, column),
                 bytes: read_bytes(&metadata, &schema, column),
@@ -148,6 +175,7 @@ impl IndexLayout {
         Ok(Self {
             column: column.to_owned(),
             data_type: data_type.unwrap_or(DataType::Null),
+            columns: columns.unwrap_or_default(),
             files,
         })
     }
@@ -200,12 +228,17 @@ impl IndexLayout {
     /// no partition holds: the answer is then empty, which is a catalog holding no such row
     /// rather than a failure. `None` where reading those files could cost more than
     /// `max_bytes`, which is the index declining rather than the request failing.
+    ///
+    /// `healpix` is the table's HEALPix column. Where the index carries one of that name, the
+    /// rows' values of it come back too.
     pub(super) async fn partitions_for(
         &self,
         dir: &RemoteDir,
         values: &HashSet<ScalarValue>,
         max_bytes: u64,
+        healpix: Option<&str>,
     ) -> Result<Option<Lookup>, ApiError> {
+        let healpix = healpix.filter(|name| self.columns.iter().any(|column| column == name));
         let values = values
             .iter()
             .map(|value| value.cast_to(&self.data_type))
@@ -225,6 +258,7 @@ impl IndexLayout {
         if files.is_empty() {
             return Ok(Some(Lookup {
                 cells: HashSet::new(),
+                healpix: healpix.map(|_| HashSet::new()),
                 bytes_read: 0,
             }));
         }
@@ -248,13 +282,27 @@ impl IndexLayout {
             .read_parquet(urls, options)
             .await?
             .filter(named(&self.column).in_list(values.into_iter().map(lit).collect(), false))?
-            .select(vec![named(ORDER), named(PIXEL)])?
+            .select(
+                [named(ORDER), named(PIXEL)]
+                    .into_iter()
+                    .chain(healpix.map(named))
+                    .collect::<Vec<_>>(),
+            )?
             .create_physical_plan()
             .await?;
         let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await?;
         let bytes_read = crate::engine::query::data_bytes_read(plan.as_ref());
         let mut cells = HashSet::new();
+        let mut found_healpix = healpix.map(|_| HashSet::new());
         for batch in &batches {
+            if let Some(found) = found_healpix.as_mut() {
+                let column = batch.column(2);
+                for row in 0..batch.num_rows() {
+                    if column.is_valid(row) {
+                        found.insert(ScalarValue::try_from_array(column, row)?);
+                    }
+                }
+            }
             let as_u64 = |at: usize| -> Result<UInt64Array, ApiError> {
                 let column = cast(batch.column(at), &DataType::UInt64)?;
                 column
@@ -277,7 +325,11 @@ impl IndexLayout {
                 cells.insert((order, pixels.value(row)));
             }
         }
-        Ok(Some(Lookup { cells, bytes_read }))
+        Ok(Some(Lookup {
+            cells,
+            healpix: found_healpix,
+            bytes_read,
+        }))
     }
 }
 
@@ -483,14 +535,14 @@ mod tests {
     #[tokio::test]
     async fn a_lookup_reads_only_the_files_whose_range_holds_the_value() {
         for metadata in [false, true] {
-            let dir = indexed_collection(metadata);
+            let dir = indexed_collection(metadata, true);
             let (index, layout) = layout_of(dir.path()).await;
             assert_eq!(layout.files.len(), 2, "{metadata}");
             std::fs::remove_file(dir.path().join("id_index/dataset/index/part.0.parquet")).unwrap();
 
             let late = ids([first_id_in(3)]);
             let found = layout
-                .partitions_for(&index, &late, u64::MAX)
+                .partitions_for(&index, &late, u64::MAX, None)
                 .await
                 .unwrap();
             assert_eq!(found.unwrap().cells.len(), 1, "{metadata}");
@@ -498,7 +550,7 @@ mod tests {
             let half = i64::try_from(fixture_rows() / 2).unwrap();
             let many = ids(half + 1..=half + 40);
             let found = layout
-                .partitions_for(&index, &many, u64::MAX)
+                .partitions_for(&index, &many, u64::MAX, None)
                 .await
                 .unwrap();
             let found = found.unwrap();
@@ -508,7 +560,7 @@ mod tests {
             let early = ids([first_id_in(0)]);
             assert!(
                 layout
-                    .partitions_for(&index, &early, u64::MAX)
+                    .partitions_for(&index, &early, u64::MAX, None)
                     .await
                     .is_err(),
                 "{metadata}"
@@ -520,11 +572,11 @@ mod tests {
     /// is an optimization, and declining it leaves the scan to answer without one.
     #[tokio::test]
     async fn a_lookup_over_its_budget_is_declined() {
-        let dir = indexed_collection(true);
+        let dir = indexed_collection(true, true);
         let (index, layout) = layout_of(dir.path()).await;
         std::fs::remove_dir_all(dir.path().join("id_index/dataset/index")).unwrap();
         let found = layout
-            .partitions_for(&index, &ids([first_id_in(0)]), 1)
+            .partitions_for(&index, &ids([first_id_in(0)]), 1, None)
             .await
             .unwrap();
         assert!(found.is_none());
@@ -533,7 +585,7 @@ mod tests {
     /// `Norder` and `Npix` are what name a partition, and an index without them is not used.
     #[tokio::test]
     async fn an_index_without_norder_and_npix_is_refused() {
-        let dir = indexed_collection(false);
+        let dir = indexed_collection(false, true);
         let file = dir.path().join("id_index/dataset/index/part.0.parquet");
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         let batch = datafusion::arrow::record_batch::RecordBatch::try_new(

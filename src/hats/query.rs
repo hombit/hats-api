@@ -1089,12 +1089,12 @@ pub(crate) mod tests {
     /// return the same rows either way, since the column is an accelerator and nothing else.
     pub(crate) fn fixture(healpix: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        write_fixture(dir.path(), healpix);
+        write_fixture(dir.path(), healpix, None);
         dir
     }
 
-    /// The same catalog, written into `root`.
-    fn write_fixture(root: &Path, healpix: bool) {
+    /// The same catalog, written into `root`, with row groups of `rows_per_group` where it says.
+    fn write_fixture(root: &Path, healpix: bool, rows_per_group: Option<usize>) {
         fs::create_dir_all(root).unwrap();
         fs::write(
             root.join("hats.properties"),
@@ -1111,14 +1111,18 @@ pub(crate) mod tests {
         for (cell, rows) in points() {
             let path = root.join(HatsPartition::new(ORDER, cell).path(".parquet"));
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            write_partition(&path, &rows, healpix);
+            write_rows(&path, &rows, healpix, DataType::Float64, rows_per_group);
         }
     }
 
     /// The fixture as a collection's primary table, at `catalog/`, beside an index on `id` at
     /// `id_index/` — split over two files so a lookup has one to skip, and with a combined
     /// `dataset/_metadata` where `metadata` asks for one.
-    pub(crate) fn indexed_collection(metadata: bool) -> tempfile::TempDir {
+    ///
+    /// The partitions are written in row groups of eight, in HEALPix order, so a filter on
+    /// `_healpix_29` can skip most of a partition; `healpix` is whether the index carries that
+    /// column beside the id, as the indexes hats-import writes do.
+    pub(crate) fn indexed_collection(metadata: bool, healpix: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         fs::write(
@@ -1126,7 +1130,7 @@ pub(crate) mod tests {
             "obs_collection=indexed\nhats_primary_table_url=catalog\nall_indexes=id id_index\n",
         )
         .unwrap();
-        write_fixture(&root.join("catalog"), true);
+        write_fixture(&root.join("catalog"), true, Some(8));
         let index = root.join("id_index");
         fs::create_dir_all(index.join("dataset/index")).unwrap();
         fs::write(
@@ -1136,7 +1140,10 @@ pub(crate) mod tests {
         .unwrap();
         let rows = points()
             .into_iter()
-            .flat_map(|(cell, rows)| rows.into_iter().map(move |row| (cell, row.id)))
+            .flat_map(|(cell, rows)| {
+                rows.into_iter()
+                    .map(move |row| (cell, row.id, healpix_of(row.ra, row.dec)))
+            })
             .collect::<Vec<_>>();
         let (first, second) = rows.split_at(rows.len() / 2);
         let mut footers = Vec::new();
@@ -1144,7 +1151,7 @@ pub(crate) mod tests {
             let name = format!("index/part.{at}.parquet");
             footers.push((
                 name.clone(),
-                write_index(&index.join("dataset").join(&name), part),
+                write_index(&index.join("dataset").join(&name), part, healpix),
             ));
         }
         if metadata {
@@ -1165,25 +1172,29 @@ pub(crate) mod tests {
     }
 
     /// One file of an index: `(Norder, Npix, id)` rows, sorted by the id.
-    fn write_index(path: &Path, rows: &[(u64, i64)]) -> ParquetMetaData {
-        let schema = Arc::new(Schema::new(vec![
+    fn write_index(path: &Path, rows: &[(u64, i64, i64)], healpix: bool) -> ParquetMetaData {
+        let mut fields = vec![
             Field::new("Norder", DataType::UInt8, false),
             Field::new("Npix", DataType::UInt64, false),
             Field::new("id", DataType::Int64, false),
-        ]));
-        let batch = RecordBatch::try_new(
-            Arc::clone(&schema),
-            vec![
-                Arc::new(UInt8Array::from(vec![ORDER; rows.len()])),
-                Arc::new(UInt64Array::from(
-                    rows.iter().map(|(cell, _)| *cell).collect::<Vec<_>>(),
-                )),
-                Arc::new(Int64Array::from(
-                    rows.iter().map(|(_, id)| *id).collect::<Vec<_>>(),
-                )),
-            ],
-        )
-        .unwrap();
+        ];
+        let mut columns: Vec<Arc<dyn Array>> = vec![
+            Arc::new(UInt8Array::from(vec![ORDER; rows.len()])),
+            Arc::new(UInt64Array::from(
+                rows.iter().map(|(cell, _, _)| *cell).collect::<Vec<_>>(),
+            )),
+            Arc::new(Int64Array::from(
+                rows.iter().map(|(_, id, _)| *id).collect::<Vec<_>>(),
+            )),
+        ];
+        if healpix {
+            fields.push(Field::new("_healpix_29", DataType::Int64, false));
+            columns.push(Arc::new(Int64Array::from(
+                rows.iter().map(|(_, _, cell)| *cell).collect::<Vec<_>>(),
+            )));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
         let mut writer =
             ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, None).unwrap();
         writer.write(&batch).unwrap();
@@ -1254,11 +1265,32 @@ pub(crate) mod tests {
     }
 
     /// The same, with the coordinates written at `precision`.
+    fn write_partition_at(path: &Path, rows: &[Point], healpix: bool, precision: DataType) {
+        write_rows(path, rows, healpix, precision, None);
+    }
+
+    /// A row's order-29 cell, as the fixture writes `_healpix_29`.
+    fn healpix_of(ra: f64, dec: f64) -> i64 {
+        i64::try_from(cdshealpix::nested::hash(
+            29,
+            ra.to_radians(),
+            dec.to_radians(),
+        ))
+        .unwrap()
+    }
+
+    /// One partition's file, in row groups of `rows_per_group` where it says.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "writing an f32 column is the point of the narrower fixture"
     )]
-    fn write_partition_at(path: &Path, rows: &[Point], healpix: bool, precision: DataType) {
+    fn write_rows(
+        path: &Path,
+        rows: &[Point],
+        healpix: bool,
+        precision: DataType,
+        rows_per_group: Option<usize>,
+    ) {
         let narrow = precision == DataType::Float32;
         let coordinate = |values: Vec<f64>| -> Arc<dyn Array> {
             match narrow {
@@ -1284,18 +1316,19 @@ pub(crate) mod tests {
             fields.push(Field::new("_healpix_29", DataType::Int64, false));
             columns.push(Arc::new(Int64Array::from(
                 rows.iter()
-                    .map(|row| {
-                        let cell =
-                            cdshealpix::nested::hash(29, row.ra.to_radians(), row.dec.to_radians());
-                        i64::try_from(cell).unwrap()
-                    })
+                    .map(|row| healpix_of(row.ra, row.dec))
                     .collect::<Vec<_>>(),
             )));
         }
         let schema = Arc::new(Schema::new(fields));
         let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
+        let properties = rows_per_group.map(|rows| {
+            datafusion::parquet::file::properties::WriterProperties::builder()
+                .set_max_row_group_row_count(Some(rows))
+                .build()
+        });
         let mut writer =
-            ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, None).unwrap();
+            ArrowWriter::try_new(fs::File::create(path).unwrap(), schema, properties).unwrap();
         writer.write(&batch).unwrap();
         writer.close().unwrap();
     }

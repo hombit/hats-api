@@ -27,9 +27,13 @@ def configuration(port: int, mounts: dict[str, str]) -> str:
     Only the chosen catalogs are mounted, because mounting one opens a store: mounting
     four to ask one of them would put three round trips into the startup of every run.
 
-    The bounds are raised well past what this cone needs. They are there to stop a
-    request running away, and a benchmark that tripped one would report the refusal's
-    timing as though it were the query's.
+    The bounds on bytes, rows and time are raised well past what this cone needs. They are
+    there to stop a request running away, and a benchmark that tripped one would report the
+    refusal's timing as though it were the query's.
+
+    The partition bound is the service's own default and not raised: it is also what decides
+    when a collection's index is asked, and an ID search timed with a bound raised past the
+    catalog's size would be timing a scan of every partition instead.
     """
     lines = [
         "# Written by query-benchmark. Every run overwrites it.",
@@ -45,7 +49,7 @@ def configuration(port: int, mounts: dict[str, str]) -> str:
         "max_request_seconds = 600",
         'max_bytes_fetched = "50GiB"',
         "max_rows = 10000000",
-        "max_partitions = 4096",
+        "max_partitions = 128",
         "",
     ]
     for slug, source in mounts.items():

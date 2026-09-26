@@ -17,7 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from query_benchmark.run import DEFAULT_BINARY, chosen
+from query_benchmark.catalogs import CATALOGS
+from query_benchmark.run import DEFAULT_BINARY, chosen, id_query
 from query_benchmark.service import configuration
 
 #: Which build to measure. CI points this at the debug one, having built that.
@@ -68,3 +69,21 @@ def test_a_location_replaces_the_catalogs_own_source():
     # The region is an S3 option, so it goes on the S3 mount and on no other.
     assert written.count("storage = ") == 0
     assert 'source = "https://data.lsdb.io/hats/tess/tess_lightcurve"' in written
+
+
+def test_an_id_search_reads_the_cones_columns_of_the_indexed_ids():
+    """The statement names every column the cone reads, delimited, and every id at once."""
+    written = id_query("ztf")
+    assert written.startswith('SELECT "_healpix_29", "objectid", ')
+    assert 'WHERE "objectid" IN (1722207400009164, ' in written
+    assert written.count(",") == len(CATALOGS["ztf"].columns) - 1 + len(CATALOGS["ztf"].ids) - 1
+    # A nested field is two delimited names joined by the dot, not one name with a dot in it.
+    assert '"lightcurve"."time"' in id_query("tess")
+    # A collection with no index has nothing to look up.
+    assert CATALOGS["ps1"].ids == ()
+
+
+def test_the_partition_bound_is_the_services_own():
+    """Raised, it would lift the index threshold with it, and the ID search would time a
+    scan of every partition rather than the index."""
+    assert "max_partitions = 128" in configuration(8080, chosen(["ps1"]))

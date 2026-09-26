@@ -685,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn an_indexed_lookup_opens_only_the_partitions_the_index_names() {
         for metadata in [false, true] {
-            let dir = hats::query::tests::indexed_collection(metadata);
+            let dir = hats::query::tests::indexed_collection(metadata, true);
             let ask = async |max_partitions: usize, url: &str, query: &str| {
                 let limits = LimitsConfig {
                     max_partitions,
@@ -757,7 +757,7 @@ mod tests {
     /// in `data_bytes_read` where it was asked, and nothing of them where it was not.
     #[tokio::test]
     async fn the_index_is_asked_only_above_its_threshold() {
-        let dir = hats::query::tests::indexed_collection(false);
+        let dir = hats::query::tests::indexed_collection(false, true);
         let (id, ra, dec) = hats::query::tests::first_row_in(2);
         let ask = async |min_partitions_for_index: usize| {
             let limits = LimitsConfig {
@@ -788,11 +788,54 @@ mod tests {
         assert!(asked > not_asked, "asked {asked}, not asked {not_asked}");
     }
 
+    /// **An index carrying the table's HEALPix column narrows the partition it found to the
+    /// rows' cells, and loses none of them.** The narrowing is a filter the statement never
+    /// wrote, on a column it may not have asked for, so what has to hold is that it changes
+    /// nothing about the answer: the same rows as the index without the column, for one value
+    /// and for several in different partitions, with and without the column projected.
+    #[tokio::test]
+    async fn an_index_with_healpix_narrows_without_losing_rows() {
+        let (one, other) = (
+            hats::query::tests::first_id_in(2),
+            hats::query::tests::first_id_in(0),
+        );
+        let ask = async |healpix: bool, query: &str| {
+            let dir = hats::query::tests::indexed_collection(false, healpix);
+            let limits = LimitsConfig {
+                min_partitions_for_index: Some(1),
+                ..LimitsConfig::default()
+            };
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            let (status, body) = post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{healpix}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            answer["rows"].clone()
+        };
+        for query in [
+            format!("SELECT id FROM c WHERE id = {one}"),
+            format!("SELECT id, ra, dec, _healpix_29 FROM c WHERE id = {one}"),
+            format!("SELECT id FROM c WHERE id IN ({one}, {other}) ORDER BY id"),
+        ] {
+            let (narrowed, whole) = (ask(true, &query).await, ask(false, &query).await);
+            assert_eq!(narrowed, whole, "{query}");
+            assert!(!narrowed.as_array().unwrap().is_empty(), "{query}");
+        }
+    }
+
     /// An index that cannot be read leaves every partition a candidate: the same rows, from
     /// reading all of them.
     #[tokio::test]
     async fn a_broken_index_is_read_around() {
-        let dir = hats::query::tests::indexed_collection(false);
+        let dir = hats::query::tests::indexed_collection(false, true);
         std::fs::remove_dir_all(dir.path().join("id_index/dataset")).unwrap();
         let one = hats::query::tests::first_id_in(2);
         let (status, body) = post_json(

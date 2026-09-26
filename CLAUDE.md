@@ -961,6 +961,12 @@ index catalogs a collection names in `all_indexes`.
 - **`Norder` and `Npix` are required, and `_healpix_29` is not a substitute.** The HATS note
   does not list an index's columns; `hats`' own lookup groups by those two, so an index
   without them is not one any reader uses.
+- **Where the index carries the table's HEALPix column, the lookup narrows the partition too.**
+  The rows' cells come back and become the scan's `narrowing` — a filter on that column for
+  each partition's own read, the column read for it and projected away again — so the row
+  groups are pruned the way a cone's are rather than all read for an id. It is the scan's and
+  never the statement's filter, and `an_index_with_healpix_narrows_without_losing_rows` is what
+  holds it to changing no answer.
 - **Files are chosen by `PruningPredicate` over each file's range, in passes of a few values.**
   Handed a long `IN` list at once it keeps every file; `a_lookup_reads_only_the_files_whose_range_holds_the_value`
   is what catches that. Row groups within the chosen files are DataFusion's to prune.

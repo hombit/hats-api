@@ -61,6 +61,15 @@ pub struct Limits {
     pub max_index_bytes: u64,
 }
 
+/// What the collection's indexes made of a scan's partitions.
+struct Indexed {
+    partitions: Vec<HatsPartition>,
+    /// A filter on the HEALPix column from the cells of the rows the indexes found.
+    healpix: Option<Expr>,
+    /// What reading the indexes fetched.
+    bytes_read: u64,
+}
+
 /// One catalog, ready to be named in a statement.
 pub struct HatsTable {
     /// Shared with every scan planned against it, a scan reading partitions after planning ends.
@@ -208,19 +217,26 @@ impl HatsTable {
     /// than a request may fetch. Asked only where at least `min_partitions_for_index` are
     /// left, fewer being cheaper to read than to look up.
     ///
-    /// Beside the partitions, what the index lookups read, which the scan reports with its own.
-    async fn indexed(
-        &self,
-        cells: Vec<HatsPartition>,
-        filters: &[Expr],
-    ) -> (Vec<HatsPartition>, u64) {
+    /// **Where an index carries the table's HEALPix column, the rows' cells come back too**, and
+    /// become a filter on that column for the partitions' own scans. A partition is sorted by
+    /// HEALPix and not by the indexed column, so without it a lookup reads every row group of
+    /// the partition it found; with it, the row groups are pruned the way a cone's are. The
+    /// filter is exact wherever the index is — the rows asked for are in those cells — and it is
+    /// trusted the same way.
+    async fn indexed(&self, cells: Vec<HatsPartition>, filters: &[Expr]) -> Indexed {
+        let unasked = |partitions| Indexed {
+            partitions,
+            healpix: None,
+            bytes_read: 0,
+        };
         if cells.len() < self.limits.min_partitions_for_index {
-            return (cells, 0);
+            return unasked(cells);
         }
         let Some(physical) = self.physical(filters) else {
-            return (cells, 0);
+            return unasked(cells);
         };
         let mut chosen: Option<HashSet<(u8, u64)>> = None;
+        let mut healpix: Option<HashSet<ScalarValue>> = None;
         let mut bytes_read = 0;
         for guarantee in LiteralGuarantee::analyze(&physical) {
             if guarantee.guarantee != Guarantee::In {
@@ -233,6 +249,7 @@ impl HatsTable {
                     &guarantee.literals,
                     &self.data,
                     self.limits.max_index_bytes,
+                    self.index.as_deref(),
                 )
                 .await
             else {
@@ -243,17 +260,46 @@ impl HatsTable {
                 None => found.cells,
                 Some(before) => before.intersection(&found.cells).copied().collect(),
             });
+            // A row satisfies every guarantee at once, so its cell is in every set an index
+            // gave; an index that gave none constrains nothing here.
+            if let Some(found) = found.healpix {
+                healpix = Some(match healpix {
+                    None => found,
+                    Some(before) => before.intersection(&found).cloned().collect(),
+                });
+            }
         }
-        match chosen {
-            None => (cells, bytes_read),
-            Some(chosen) => (
-                cells
-                    .into_iter()
-                    .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
-                    .collect(),
-                bytes_read,
-            ),
+        let partitions = match chosen {
+            None => cells,
+            Some(chosen) => cells
+                .into_iter()
+                .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
+                .collect(),
+        };
+        Indexed {
+            partitions,
+            healpix: healpix.and_then(|values| self.healpix_filter(&values)),
+            bytes_read,
         }
+    }
+
+    /// `<healpix column> IN (values)`, the values cast to the table's own type for the column.
+    fn healpix_filter(&self, values: &HashSet<ScalarValue>) -> Option<Expr> {
+        let column = self.index.as_deref()?;
+        let data_type = self
+            .schema
+            .field_with_name(column)
+            .ok()?
+            .data_type()
+            .clone();
+        let values = values
+            .iter()
+            .map(|value| value.cast_to(&data_type).map(datafusion::logical_expr::lit))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        (!values.is_empty()).then(|| {
+            Expr::Column(Column::new_unqualified(column.to_owned())).in_list(values, false)
+        })
     }
 
     /// The statement's filters as one physical predicate over the catalog's whole schema.
@@ -319,7 +365,17 @@ impl TableProvider for HatsTable {
             .await
             .map_err(|error| DataFusionError::Plan(error.to_string()))?;
         let reached = self.reached(listed.cells(), filters)?;
-        let (partitions, index_bytes) = self.indexed(reached, filters).await;
+        let after_region = reached.len();
+        let indexed = self.indexed(reached, filters).await;
+        tracing::info!(
+            url = %self.catalog.dir().url,
+            partitions = listed.len(),
+            after_region,
+            after_index = indexed.partitions.len(),
+            index_bytes = indexed.bytes_read,
+            index_cells = indexed.healpix.is_some(),
+            "catalog scan"
+        );
         // The planning session, which each partition's own scan is planned in too. It is the
         // only `Session` DataFusion builds, so anything else reaching here is a context this
         // table was never registered in.
@@ -334,10 +390,11 @@ impl TableProvider for HatsTable {
             catalog: Arc::clone(&self.catalog),
             data: self.data.clone(),
             table_schema: Arc::clone(&self.schema),
-            partitions,
-            index_bytes,
+            partitions: indexed.partitions,
+            index_bytes: indexed.bytes_read,
             projection: projection.cloned(),
             filters: filters.to_vec(),
+            narrowing: indexed.healpix,
             limit,
             max_partitions: self.limits.max_partitions,
             concurrency: self.limits.max_concurrent_partitions,

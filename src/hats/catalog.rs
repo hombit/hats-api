@@ -447,12 +447,16 @@ impl HatsCatalog {
     /// it could cost more than `max_bytes`. Every partition is then a candidate, as it is for a
     /// catalog with no index at all. The same rows come back either way; what the index changes
     /// is how many partitions are opened.
+    ///
+    /// `healpix` is the table's HEALPix column, whose values of the rows found come back too
+    /// where the index carries it.
     pub(crate) async fn indexed_partitions(
         &self,
         column: &str,
         values: &HashSet<ScalarValue>,
         data: &DataFiles,
         max_bytes: u64,
+        healpix: Option<&str>,
     ) -> Option<Lookup> {
         let (collection, root) = (self.collection()?, self.collection_dir.as_ref()?);
         let listed = collection
@@ -481,7 +485,9 @@ impl HatsCatalog {
             let Some(Value::Index(layout)) = slot.value() else {
                 return Err(mismatched(part));
             };
-            layout.partitions_for(&dir, values, max_bytes).await
+            layout
+                .partitions_for(&dir, values, max_bytes, healpix)
+                .await
         };
         looked_up
             .await
