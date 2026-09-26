@@ -6,27 +6,20 @@
 //! `dataset/_common_metadata` that holds every partition's columns and no rows.
 //!
 //! `/examples` adds one more, and it is the only place here that touches data: a single row,
-//! for a position to centre a cone on. `data_thumbnail.parquet` answers it in one small `GET`
-//! where a catalog has one, and where it has not, the first row group of two columns of its
-//! smallest partition does. See [`example_position`] for why nothing cheaper works.
+//! for a position to centre a cone on — see [`crate::hats::HatsCatalog::example_position`]
+//! for why nothing cheaper works.
 //!
-//! **Read per request rather than held.** Nothing in this service is a registry that
-//! accumulates across requests, and a catalog an operator republished is then described as
-//! it is now rather than as it was when the process started.
+//! **All of it is read through the catalog cache**, so a client fetching the three documents
+//! in a row pays for the reads once, and a catalog an operator republished is described as
+//! it is now once its mount's lifetime is over.
 
-use datafusion::arrow::array::{Array, Float64Array};
-use datafusion::arrow::compute::cast;
-use datafusion::arrow::datatypes::DataType;
 use datafusion::catalog::TableProvider;
-use datafusion::common::Column;
-use datafusion::logical_expr::Expr;
 use datafusion::prelude::SessionContext;
 
 use crate::app::service::Service;
 use crate::error::ApiError;
-use crate::hats::partitions::DATA_THUMBNAIL;
+use crate::hats::HatsPartition;
 use crate::hats::table::HatsTable;
-use crate::hats::{HatsPartition, HatsPartitionList};
 use crate::storage::{self, StorageOptions};
 use crate::tap::metadata::{self, Marks, TableMetadata};
 use crate::tap::{TapTable, schema};
@@ -44,11 +37,12 @@ pub(super) struct Published<'a> {
     /// The two columns holding a position, as the catalog names them. `None` where the
     /// catalog names neither, which is a catalog no cone can be written against.
     pub coordinates: Option<(String, String)>,
-    /// The catalog's deepest partition — see [`deepest`]. What reads it is the radius of
-    /// the example cone, a cell being the one length scale a catalog offers.
+    /// The catalog's deepest partition — see [`crate::hats::HatsPartitionList::deepest`].
+    /// What reads it is the radius of the example cone, a cell being the one length scale a
+    /// catalog offers.
     pub cell: Option<HatsPartition>,
     /// A position the catalog holds a row at, as `(ra, dec)` in degrees — see
-    /// [`example_position`].
+    /// [`crate::hats::HatsCatalog::example_position`].
     pub position: Option<(f64, f64)>,
     /// `hats_nrows`, where the catalog states it.
     pub rows: Option<u64>,
@@ -78,9 +72,15 @@ pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, A
             &service.transfers,
         )?;
         let data = service.data_files_for(url).clone();
-        let catalog = HatsTable::open(&ctx, &dir, &data, service.adql_limits.catalog)
-            .await
-            .map_err(|error| describing(table.qualified(), &error))?;
+        let catalog = HatsTable::open(
+            &ctx,
+            &dir,
+            &data,
+            service.adql_limits.catalog,
+            &service.catalogs_for(url),
+        )
+        .await
+        .map_err(|error| describing(table.qualified(), &error))?;
         let coordinates = catalog.coordinates();
         let metadata = metadata::describe(
             table.qualified(),
@@ -98,13 +98,16 @@ pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, A
         // will not parse is a table listed without one rather than a page that fails.
         let rows = properties.rows().ok().flatten();
         let title = properties.get("obs_title").map(str::to_owned);
-        let cell = deepest(catalog.catalog().partitions());
-        let position = match coordinates {
-            Some((ra, dec)) => {
-                example_position(&ctx, &catalog, &data, cell.as_ref(), ra, dec).await
-            }
-            None => None,
-        };
+        let cell = catalog
+            .catalog()
+            .partitions()
+            .await
+            .map_err(|error| describing(table.qualified(), &error))?
+            .deepest()
+            .cloned();
+        // `None` wherever no row can be read, and the example is then a plain first-rows
+        // query rather than a cone that might return nothing.
+        let position = catalog.catalog().example_position(&data).await;
         published.push(Published {
             table,
             metadata,
@@ -116,94 +119,6 @@ pub(super) async fn open_each(service: &Service) -> Result<Vec<Published<'_>>, A
         });
     }
     Ok(published)
-}
-
-/// A position the catalog really holds a row at, read out of one of its own rows.
-///
-/// **A cone has to be centred on something that is there, and only a row says where that
-/// is.** Everything cheaper is a guess that fails on some real catalog: a partition's centre
-/// is empty wherever the data fills a corner of its cell, which is every catalog covering a
-/// patch of sky rather than the whole of it, and a cone wide enough to cover the cell
-/// instead is no longer an example of the query anybody writes. `hats` reaches the same
-/// conclusion in `io/summary_file.py`, which takes the `ra` and `dec` of an example row.
-///
-/// `data_thumbnail.parquet` first, which is what `hats` writes at a catalog's root for
-/// exactly this — a handful of rows, so reading it is one small `GET`. A catalog without one
-/// costs the first row group of two columns of its smallest partition instead, which is the
-/// price of an example that works; most published catalogs predate the thumbnail.
-///
-/// `None` wherever neither can be read, and the example is then a plain first-rows query
-/// rather than a cone that might return nothing.
-async fn example_position(
-    ctx: &SessionContext,
-    catalog: &HatsTable,
-    data: &crate::access::data::DataFiles,
-    cell: Option<&HatsPartition>,
-    ra: &str,
-    dec: &str,
-) -> Option<(f64, f64)> {
-    let catalog = catalog.catalog();
-    if let Ok(thumbnail) = catalog.dir().child(DATA_THUMBNAIL)
-        && let Some(found) = read_position(ctx, thumbnail.url.as_str(), ra, dec).await
-    {
-        return Some(found);
-    }
-    let files = catalog.partition(cell?).ok()?.files(data).await.ok()?;
-    read_position(ctx, files.first()?.url.as_str(), ra, dec).await
-}
-
-/// The two coordinates of one row of one parquet file.
-///
-/// The columns are named as `Column`s rather than parsed from text: a catalog's column may be
-/// mixed-case or carry a character the parser would read as structure, and this context has
-/// DataFusion's own identifier normalization on. `limit(1)` is what keeps it to a row group.
-async fn read_position(ctx: &SessionContext, url: &str, ra: &str, dec: &str) -> Option<(f64, f64)> {
-    let options = datafusion::prelude::ParquetReadOptions {
-        // A HATS partition is named whatever `hats_npix_suffix` says, and the thumbnail is
-        // read the same way for the same reason the schema is.
-        file_extension: "",
-        ..Default::default()
-    };
-    let named = |name: &str| Expr::Column(Column::new_unqualified(name.to_owned()));
-    let batches = ctx
-        .read_parquet(url, options)
-        .await
-        .ok()?
-        .select(vec![named(ra), named(dec)])
-        .ok()?
-        .limit(0, Some(1))
-        .ok()?
-        .collect()
-        .await
-        .ok()?;
-    let batch = batches.iter().find(|batch| batch.num_rows() > 0)?;
-    // Cast rather than match: ZTF DR24 writes its coordinates as `Float32`, and a catalog is
-    // free to write them at any width.
-    let value = |at: usize| -> Option<f64> {
-        let column = cast(batch.column(at), &DataType::Float64).ok()?;
-        let column = column.as_any().downcast_ref::<Float64Array>()?;
-        column.is_valid(0).then(|| column.value(0))
-    };
-    let (ra, dec) = (value(0)?, value(1)?);
-    (ra.is_finite() && dec.is_finite()).then_some((ra, dec))
-}
-
-/// The catalog's deepest partition — the first of them, so that the same catalog answers
-/// the same way twice.
-///
-/// **The deepest rather than the first, because that is where the rows are.** HATS splits a
-/// cell when it holds too many rows, so the deepest order in the list is the most crowded
-/// part of the sky this catalog covers; the front of the list is wherever HEALPix numbering
-/// happens to start, which for a catalog covering one patch of sky is as likely to be its
-/// emptiest cell as its fullest. It also makes the cell small, and a cell a cone has to
-/// cover is a cone as wide as the cell.
-fn deepest(partitions: &HatsPartitionList) -> Option<HatsPartition> {
-    let order = partitions.order()?;
-    partitions
-        .cells()
-        .iter()
-        .find(|cell| cell.order == order)
-        .cloned()
 }
 
 /// Every table this service publishes, described — `TAP_SCHEMA`'s own five first, since

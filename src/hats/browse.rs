@@ -1,7 +1,7 @@
 //! Recognising a catalog somebody is browsing, for the file-server mode.
 //!
 //! The API is told what it is looking at: a caller names a catalog's url, and the answer to
-//! "is this a catalog" is whatever [`super::Catalog::open`] makes of the directory. A person
+//! "is this a catalog" is whatever [`super::HatsCatalog::open`] makes of the directory. A person
 //! browsing a mount names nothing — they click, and the page has to know before they ask
 //! whether there is a question to offer. So this is a cheap look at a directory, made from
 //! names and from one small read, and it is a *hint*: everything it says yes to is opened

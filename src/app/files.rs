@@ -971,9 +971,14 @@ async fn query_catalog(
     // operator's and no part of what the caller wrote.
     let hide_the_path = |error: ApiError| hide.apply(error);
 
-    let search = Search::resolve(dir, selection.regions, service.catalog_limits)
-        .await
-        .map_err(hide_the_path)?;
+    let search = Search::resolve(
+        dir,
+        selection.regions,
+        service.catalog_limits,
+        &service.catalogs_in(Some(mount)),
+    )
+    .await
+    .map_err(hide_the_path)?;
     // Each partition's rows leave as it lands, in the catalog's own order. The bound that is
     // known before anything is read is still taken first — a url has no work list to answer
     // with, so it is the same refusal the collected path gives rather than a `422` carrying
@@ -985,7 +990,7 @@ async fn query_catalog(
             return Err(too_much_for_a_url(&why));
         }
         let chosen = search.chosen().len();
-        let partitions = search.catalog().partitions().len();
+        let partitions = search.partitions().len();
         let streamed = std::sync::Arc::new(hats::query::Streamed::default());
         let batches = search.stream(
             (&selection).into(),
@@ -1045,7 +1050,7 @@ async fn query_catalog(
         // The url path, not the mount's own: where the catalog really is is the
         // operator's business.
         path = request.uri.path(),
-        partitions = search.catalog().partitions().len(),
+        partitions = search.partitions().len(),
         chosen = search.chosen().len(),
         partitions_read,
         projected = query.columns.is_some(),

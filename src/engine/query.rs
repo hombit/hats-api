@@ -10,11 +10,12 @@ use std::sync::Arc;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::execution::TaskContext;
+use datafusion::execution::context::SessionState;
 use datafusion::physical_plan::{
     ExecutionPlan, ExecutionPlanProperties, collect, collect_partitioned, execute_stream,
     execute_stream_partitioned,
 };
-use datafusion::prelude::{ParquetReadOptions, SessionConfig, SessionContext};
+use datafusion::prelude::{DataFrame, ParquetReadOptions, SessionConfig, SessionContext};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 
@@ -431,8 +432,43 @@ async fn planned(
             "this file describes no columns; it is empty, or not a parquet file",
         ));
     }
-    let state = ctx.state();
+    let df = shaped(df, &ctx.state(), selection, limits, reproducible)?;
+    let schema = Arc::new(df.schema().as_arrow().clone());
+    let plan = df.create_physical_plan().await?;
+    Ok((ctx, plan, schema))
+}
 
+/// The columns a selection would answer with against a table of this schema, with nothing
+/// read and nothing planned to be.
+///
+/// The same shaping a file's query gets, so a request refused against a file is refused
+/// against its schema, and the columns named are the ones the rows would have carried. What
+/// this is for is an answer with no rows over a catalog: the schema is the catalog's, known
+/// without opening any of its partitions.
+pub fn describe(
+    schema: &SchemaRef,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+) -> Result<SchemaRef, ApiError> {
+    if schema.fields().is_empty() {
+        return Err(ApiError::bad_request(
+            "this file describes no columns; it is empty, or not a parquet file",
+        ));
+    }
+    let ctx = session_context(false);
+    let df = ctx.read_batch(RecordBatch::new_empty(Arc::clone(schema)))?;
+    let df = shaped(df, &ctx.state(), selection, limits, false)?;
+    Ok(Arc::new(df.schema().as_arrow().clone()))
+}
+
+/// The region, the predicate, the projection and the limit, on top of a table.
+fn shaped(
+    df: DataFrame,
+    state: &SessionState,
+    selection: &Selection<'_>,
+    limits: sql::Limits,
+    reproducible: bool,
+) -> Result<DataFrame, ApiError> {
     // The region ahead of the caller's predicate, which is the order the two are cheapest
     // in: a region lowers to comparisons against the coordinate columns that row-group
     // statistics can prune on, so it decides what there is for the predicate to run over.
@@ -450,22 +486,22 @@ async fn planned(
     let df = match selection.predicate {
         Predicate::All => df,
         Predicate::Filters(text) => {
-            let expr = sql::filters(&state, df.schema(), text, limits)?;
+            let expr = sql::filters(state, df.schema(), text, limits)?;
             df.filter(expr)?
         }
         Predicate::FilterText(text) => {
-            let expr = sql::filter_text(&state, df.schema(), text, limits)?;
+            let expr = sql::filter_text(state, df.schema(), text, limits)?;
             df.filter(expr)?
         }
     };
     let df = match selection.projection {
         Projection::All => df,
         Projection::Columns(names) => {
-            let exprs = sql::columns(&state, df.schema(), names, limits)?;
+            let exprs = sql::columns(state, df.schema(), names, limits)?;
             df.select(exprs)?
         }
         Projection::ColumnText(list) => {
-            let exprs = sql::column_text(&state, df.schema(), list, limits)?;
+            let exprs = sql::column_text(state, df.schema(), list, limits)?;
             df.select(exprs)?
         }
     };
@@ -477,10 +513,7 @@ async fn planned(
         (Some(rows), false) => df.limit(0, Some(rows))?,
         _ => df,
     };
-
-    let schema = Arc::new(df.schema().as_arrow().clone());
-    let plan = df.create_physical_plan().await?;
-    Ok((ctx, plan, schema))
+    Ok(df)
 }
 
 /// The partitions chained in index order, stopping at `limit` rows where there is one.

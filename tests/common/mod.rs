@@ -122,6 +122,11 @@ impl TestS3 {
         format!("s3://{}/{key}", self.bucket)
     }
 
+    /// Take an object away, for the cases that are about what is answered once it is gone.
+    pub fn remove(&self, key: &str) {
+        std::fs::remove_file(self.object_path(key)).expect("remove the object");
+    }
+
     /// The url naming an object here. Just the object: how to reach the server is
     /// [`Self::options`], sent beside it.
     pub fn url(&self, key: &str) -> String {

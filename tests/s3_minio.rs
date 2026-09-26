@@ -262,7 +262,7 @@ async fn a_mount_over_minio_serves_and_lists_and_queries() {
         source: format!("s3://{}/{prefix}", minio.bucket),
         serve: true,
         follow_symlinks: false,
-        immutable: false,
+        catalog_cache_seconds: None,
         storage: minio.credentialed_options(),
         filenames: None,
     };
@@ -343,7 +343,7 @@ fn mount_config(from: &MountConfig) -> MountConfig {
         source: from.source.clone(),
         serve: from.serve,
         follow_symlinks: from.follow_symlinks,
-        immutable: from.immutable,
+        catalog_cache_seconds: from.catalog_cache_seconds,
         storage: from.storage.configured(),
         filenames: from.filenames.clone(),
     }

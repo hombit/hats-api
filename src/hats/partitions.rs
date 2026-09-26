@@ -154,6 +154,19 @@ impl HatsPartitionList {
         self.cells.iter().map(|cell| cell.order).max()
     }
 
+    /// The first partition at the deepest order — the same one every time for one catalog.
+    ///
+    /// **The deepest rather than the first, because that is where the rows are.** HATS splits
+    /// a cell when it holds too many rows, so the deepest order in the list is the most
+    /// crowded part of the sky this catalog covers; the front of the list is wherever HEALPix
+    /// numbering happens to start, which for a catalog covering one patch of sky is as likely
+    /// to be its emptiest cell as its fullest. It is also the smallest cell, which is what a
+    /// length scale taken from it wants.
+    pub fn deepest(&self) -> Option<&HatsPartition> {
+        let order = self.order()?;
+        self.cells.iter().find(|cell| cell.order == order)
+    }
+
     /// The partitions overlapping a stretch of sky, as a contiguous slice.
     ///
     /// Two binary searches, which is the point of keeping the list sorted. A region's

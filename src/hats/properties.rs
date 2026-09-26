@@ -66,6 +66,14 @@ impl Properties {
         Ok(Self { entries })
     }
 
+    /// Roughly how many bytes this holds, for a cache that is bounded by them.
+    pub(crate) fn weight(&self) -> u64 {
+        self.entries
+            .iter()
+            .map(|(key, value)| u64::try_from(key.len() + value.len() + 48).unwrap_or(u64::MAX))
+            .sum()
+    }
+
     /// One key as written, for anything this service does not itself act on.
     pub fn get(&self, key: &str) -> Option<&str> {
         self.entries

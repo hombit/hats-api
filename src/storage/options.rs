@@ -2,10 +2,12 @@
 //! of them are credentials, and the refusal of every option the url's scheme has no use for.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use hmac::{Hmac, KeyInit, Mac};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
+use sha2::Sha256;
 use url::Url;
 
 use crate::access::{BACKENDS, Backend};
@@ -879,6 +881,20 @@ impl StorageOptions {
         out.into()
     }
 
+    /// What these options are, as something that can tell two sets apart and says nothing
+    /// about either.
+    ///
+    /// Built from [`Self::echo`], so every option that reaches the wire reaches this too and a
+    /// field added there cannot be left out here. The echoed map is dropped at the end of this
+    /// call; what is kept is the digest.
+    pub fn fingerprint(&self) -> Result<Fingerprint, ApiError> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(process_key()?)
+            .map_err(|error| ApiError::internal(format!("cannot key a fingerprint: {error}")))?;
+        let echoed = serde_json::to_vec(&self.echo())?;
+        mac.update(&echoed);
+        Ok(Fingerprint(mac.finalize().into_bytes().into()))
+    }
+
     /// Whether anything here would be sent to the store as proof of identity — which is
     /// the whole of what `allow_cleartext` is protecting, and what a plan says to re-attach.
     pub fn has_credentials(&self) -> bool {
@@ -1014,6 +1030,41 @@ impl<'a> Opened<'a> {
     }
 }
 
+/// A keyed digest of the options a store was built from.
+///
+/// **Keyed, and the key is this process's own.** Many credentials are short — a WebDAV
+/// password, a token someone chose — and a bare hash of one can be reversed by trying
+/// candidates. The key is drawn from the system's entropy on first use and never leaves
+/// memory, so a digest that did would say nothing to anyone without it, and two processes
+/// fingerprint the same options differently.
+///
+/// What it is for is holding a key for something built from credentials — a cached catalog —
+/// without holding the credentials for as long as that lives.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Fingerprint([u8; 32]);
+
+impl std::fmt::Debug for Fingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Fingerprint(..)")
+    }
+}
+
+/// The key every [`Fingerprint`] in this process is made with.
+///
+/// Fallible and never falls back, for the reason a job id is: a key from anywhere weaker than
+/// the system's entropy is one somebody else can reproduce.
+fn process_key() -> Result<&'static [u8; 32], ApiError> {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    if let Some(key) = KEY.get() {
+        return Ok(key);
+    }
+    let mut drawn = [0u8; 32];
+    getrandom::fill(&mut drawn)
+        .map_err(|error| ApiError::internal(format!("no entropy for a fingerprint: {error}")))?;
+    // Two threads drawing at once both reach here, and the first to set wins for both.
+    Ok(KEY.get_or_init(|| drawn))
+}
+
 /// What opened each authority a request has named so far, so a second table naming one
 /// already open can be checked against the first.
 ///
@@ -1135,6 +1186,26 @@ mod tests {
     use crate::storage::store::tests::{SECRET, no_options, open, options};
 
     use super::*;
+
+    /// Two sets of options that reach a store the same way fingerprint alike, and a single
+    /// credential changed is a different fingerprint — which is what keeps one caller's cached
+    /// catalog from answering another's. Nothing of the secret shows in what it prints.
+    #[test]
+    fn a_fingerprint_tells_credentials_apart_and_says_nothing_of_them() {
+        let with = |secret: &str| StorageOptions {
+            s3: S3Options {
+                access_key_id: Some("key".to_owned().into()),
+                secret_access_key: Some(secret.to_owned().into()),
+                ..S3Options::default()
+            },
+            ..StorageOptions::default()
+        };
+        let one = with(SECRET).fingerprint().unwrap();
+        assert_eq!(one, with(SECRET).fingerprint().unwrap());
+        assert_ne!(one, with("another").fingerprint().unwrap());
+        assert_ne!(one, no_options().fingerprint().unwrap());
+        assert!(!format!("{one:?}").contains(SECRET));
+    }
 
     /// Each scheme takes its own options and refuses the rest. An option in the wrong
     /// place is a caller who has confused two backends, and where it is a credential

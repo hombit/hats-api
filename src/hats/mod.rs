@@ -2,9 +2,10 @@
 //! into.
 //!
 //! A catalog is addressed as a directory rather than as a file, so nothing here takes a
-//! [`crate::storage::RemoteFile`]. What it produces is a [`Catalog`] — the two things a
-//! spatial query needs before it can choose anything to read: the column names, and the
-//! partition list in HEALPix order.
+//! [`crate::storage::RemoteFile`]. What it produces is a [`HatsCatalog`] — what a query needs
+//! before it can choose anything to read: the column names, the partition list in HEALPix
+//! order, the files inside each partition and the schema, each read when first asked for and
+//! kept in [`Catalogs`] for as long as the catalog's [`Lifetime`].
 //!
 //! **Nothing here decides what to read.** Choosing partitions is `sky::healpix`'s, and
 //! running a query against one is `engine::query`'s. This is the part that has to talk to the
@@ -20,6 +21,7 @@
 //! than anything of ours.
 
 pub mod browse;
+mod cache;
 mod catalog;
 pub mod partitions;
 pub mod properties;
@@ -27,7 +29,8 @@ pub mod query;
 mod scan;
 pub mod table;
 
-pub use catalog::{Catalog, Columns, Partitioned};
+pub use cache::{CatalogCache, Catalogs, Lifetime};
+pub use catalog::{Columns, HatsCatalog, Partitioned};
 pub use partitions::{HatsPartition, HatsPartitionList};
 pub use properties::Properties;
 pub use scan::OrderByIndex;

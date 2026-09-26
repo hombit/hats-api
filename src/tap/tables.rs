@@ -292,7 +292,7 @@ mod tests {
             source: dir.display().to_string(),
             serve: false,
             follow_symlinks: false,
-            immutable: false,
+            catalog_cache_seconds: None,
             storage: StorageOptions::default(),
             filenames: None,
         }
@@ -446,7 +446,7 @@ mod tests {
             source: "s3://ipac-irsa-ztf/hats".to_owned(),
             serve: false,
             follow_symlinks: false,
-            immutable: false,
+            catalog_cache_seconds: None,
             storage: StorageOptions::default(),
             filenames: None,
         };

@@ -9,11 +9,13 @@ use std::fmt;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bytesize::ByteSize;
 use http::HeaderValue;
 use serde::Deserialize;
 
+use crate::hats::Lifetime;
 use crate::storage::StorageOptions;
 
 /// Where to look for the file when `--config` is not given.
@@ -256,10 +258,11 @@ pub struct MountConfig {
     /// mount. A store has no symlinks, so it is an error to write on one.
     #[serde(default)]
     pub follow_symlinks: bool,
-    /// Whether what is published never changes once published, which is what lets a
-    /// cached copy be served without revalidating it.
+    /// How long what is read about a catalog under this mount is kept, in place of
+    /// `[limits] catalog_cache_seconds`. `inf` keeps it until evicted for room, for a
+    /// catalog that never changes once published; `0` keeps nothing.
     #[serde(default)]
-    pub immutable: bool,
+    pub catalog_cache_seconds: Option<Lifetime>,
     /// Which files under it are read as data, in place of `[data] filenames`. Absent is
     /// that list; an empty list is a mount with no query surface at all.
     pub filenames: Option<Vec<String>>,
@@ -377,6 +380,16 @@ pub struct LimitsConfig {
     /// one does not fit. Without it a service answering large queries would hold every one
     /// of them for the whole of `query_cache_seconds`.
     pub max_query_cache_bytes: ByteSize,
+    /// How long what is read about a catalog — its properties, partitions, schema and the
+    /// files inside its partitions — is kept for the requests after it. `0` keeps nothing.
+    ///
+    /// Time is the only validator: nothing asks the store whether a catalog changed, since
+    /// that is the round trip being saved. So this is how long a republished catalog may
+    /// still be answered as it was. A `[[mount]]` may set its own, including `inf`.
+    pub catalog_cache_seconds: Lifetime,
+    /// The most this service will hold in what it has read about catalogs, across all of
+    /// them. The least recently used parts go first when a new one does not fit.
+    pub max_catalog_cache_bytes: ByteSize,
     /// How large a request body may be. `0` is no bound.
     ///
     /// It bounds the bytes a caller sends, which the expression limits cannot: those are
@@ -454,6 +467,13 @@ impl Default for LimitsConfig {
             // an allocation: what is held is what has been asked for in the last few
             // minutes, which for a service nobody is reading is nothing.
             max_query_cache_bytes: ByteSize::gib(2),
+            // A day: catalogs are republished on the scale of releases, and a day is how
+            // long a new release may be answered as the old one before anyone restarts
+            // anything. A mount that knows better says so itself.
+            catalog_cache_seconds: Lifetime::For(Duration::from_secs(86_400)),
+            // Thousands of ordinary catalogs; the file names of a directory-partitioned
+            // catalog are the large part, at tens of MB for ZTF's.
+            max_catalog_cache_bytes: ByteSize::mib(256),
             // Axum's own default, which is what this replaces rather than widens. A body
             // here is a query and not an upload, so the figure is set by the largest thing a
             // query legitimately carries: a `region`, either as a serialized MOC or as one
@@ -910,7 +930,7 @@ mod tests {
         assert_eq!(mount.source, "/data/hats");
         assert!(!mount.serve);
         assert!(!mount.follow_symlinks);
-        assert!(!mount.immutable);
+        assert_eq!(mount.catalog_cache_seconds, None);
         // Absent is `[data] filenames`, which an empty list is not.
         assert_eq!(mount.filenames, None);
         // Neither half has a default that could stand in for the other.
@@ -925,20 +945,50 @@ mod tests {
         let config = parse(
             "[[mount]]\npath = \"/\"\nsource = \"/srv/data\"\nfollow_symlinks = true\n\
              filenames = [\"*.parquet\"]\n\
-             [[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"\nimmutable = true\n\
+             [[mount]]\npath = \"/hats\"\nsource = \"/data/hats\"\ncatalog_cache_seconds = inf\n\
              serve = true",
         )
         .unwrap();
         let [first, second] = config.mounts.as_slice() else {
             panic!("expected two mounts, got {:?}", config.mounts)
         };
-        assert!(first.follow_symlinks && !first.immutable && !first.serve);
+        assert!(first.follow_symlinks && !first.serve);
+        assert_eq!(first.catalog_cache_seconds, None);
         assert_eq!(
             first.filenames.as_deref(),
             Some(["*.parquet".to_owned()].as_slice())
         );
-        assert!(!second.follow_symlinks && second.immutable && second.serve);
+        assert!(!second.follow_symlinks && second.serve);
+        assert_eq!(second.catalog_cache_seconds, Some(Lifetime::Forever));
         assert_eq!(second.filenames, None);
+    }
+
+    /// A lifetime is a number of seconds: a whole one, a fraction, `0` for nothing kept and
+    /// `inf` for kept until evicted. Anything that is not a length of time is refused where it
+    /// is written rather than read as one.
+    #[test]
+    fn a_catalog_lifetime_is_seconds_zero_or_forever() {
+        let lifetime = |text: &str| {
+            parse(&format!("[limits]\ncatalog_cache_seconds = {text}"))
+                .map(|config| config.limits.catalog_cache_seconds)
+        };
+        assert_eq!(
+            lifetime("3600").unwrap(),
+            Lifetime::For(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            lifetime("0.5").unwrap(),
+            Lifetime::For(Duration::from_millis(500))
+        );
+        assert_eq!(lifetime("0").unwrap(), Lifetime::Off);
+        assert_eq!(lifetime("inf").unwrap(), Lifetime::Forever);
+        for refused in ["-1", "nan", "-inf", "\"a day\""] {
+            assert!(lifetime(refused).is_err(), "{refused}");
+        }
+        assert_eq!(
+            parse("").unwrap().limits.catalog_cache_seconds,
+            Lifetime::For(Duration::from_secs(86_400))
+        );
     }
 
     /// A published table is a name and a path, and both halves are required. No `storage`

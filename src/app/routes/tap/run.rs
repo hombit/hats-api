@@ -387,7 +387,7 @@ async fn prepare(
                 data_files = Some(service.data_files_for(url).clone());
                 let dir = storage::open_dir(url, &no_storage, &service.policy, &service.transfers)?;
                 authorities.check(spelling, dir.opened(&no_storage))?;
-                Source::Catalog(dir)
+                Source::Catalog(dir, service.catalogs_for(url))
             }
         };
         tables.push(Table {
@@ -473,7 +473,10 @@ fn uploaded<'a>(
                 &service.transfers,
             )?;
             authorities.check(spelling, dir.opened(&upload.storage))?;
-            Ok((Source::Catalog(dir), Some(files)))
+            Ok((
+                Source::Catalog(dir, service.catalogs_for(&upload.url)),
+                Some(files),
+            ))
         }
     }
 }

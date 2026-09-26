@@ -8,7 +8,8 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- `[limits] catalog_cache_seconds` and `max_catalog_cache_bytes`: catalog metadata is kept between requests. [#110](https://github.com/hombit/hats-api/pull/110)
+- `[[mount]] catalog_cache_seconds`, overriding the default per mount; `inf` keeps until evicted. [#110](https://github.com/hombit/hats-api/pull/110)
 
 ### Changed
 
@@ -20,7 +21,7 @@ Release dates are in the UTC time zone.
 
 ### Removed
 
---
+- **Breaking** `[[mount]] immutable`; a config that sets it no longer loads. [#110](https://github.com/hombit/hats-api/pull/110)
 
 ### Fixed
 

@@ -13,8 +13,9 @@ mod redirect;
 mod store;
 
 pub use options::{
-    Authorities, AzureOptions, GcsOptions, HEADERS, Headers, HfOptions, HttpOptions, Opened,
-    S3Options, StorageOptions, WebdavOptions, WebdavTransport, option_names, option_schemes,
+    Authorities, AzureOptions, Fingerprint, GcsOptions, HEADERS, Headers, HfOptions, HttpOptions,
+    Opened, S3Options, StorageOptions, WebdavOptions, WebdavTransport, option_names,
+    option_schemes,
 };
 pub use store::{
     Entry, Level, MountedBy, NamedBy, Object, RemoteDir, RemoteFile, SourceUrl, file_url, open,

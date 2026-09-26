@@ -34,6 +34,7 @@ futures = "0.3"
 getrandom = { version = "0.4", features = ["std"] }
 # Compiles the whole list of data-file patterns into one matcher.
 globset = "0.4"
+hmac = "0.13"
 html-escape = "0.2"
 http = "1"
 http-range-header = "0.4"
@@ -44,6 +45,7 @@ java-properties = "2"
 mime_guess = "2"
 # Multi-Order Coverage maps: the covering of a region, and the set algebra over it.
 moc = "0.19.2"
+moka = { version = "0.12", default-features = false, features = ["sync"] }
 # Keep in sync with datafusion
 object_store = "0.13"
 object_store_opendal = "0.58"
@@ -58,6 +60,7 @@ tempfile = "3"
 tld = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1.1"
