@@ -16,7 +16,7 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
-- ADQL and TAP read only the fields of a nested column that a statement names.
+- ADQL and TAP read only the fields of a nested column that a statement names. [#113](https://github.com/hombit/hats-api/pull/113)
 
 ### Deprecated
 
