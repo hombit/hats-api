@@ -1089,6 +1089,17 @@ request in front of it.
   `FilterExec` does not pass it down; and the fetch the sort carried has to be pushed down again
   after the swap, since a filter without one gathers a whole batch and reads to the bound.
   `an_order_by_the_index_reads_from_that_end_of_the_catalog` holds all of it.
+
+  **A field of a nested column is read on its own, and the projection that asks for it is
+  DataFusion's, not ours.** Its leaf-expression rules put `get_field(lightcurve, 'mag')` in a
+  projection directly over the scan, and `CatalogScanExec::try_swapping_with_projection` takes
+  it into each partition's read, where the optimizer pushes it into the parquet reader. Do not
+  work out which fields a statement uses by walking its plan or its SQL: that is the
+  planner's, and it already has. The projection goes above the partition's own filter and still
+  reaches the reader only because `pushdown_filters` moves the whole predicate into the scan
+  first — with it off, a `FilterExec` is left in the way and every leaf is read.
+  `a_field_of_a_nested_column_reads_that_field_alone` holds it, over a filter, a region, a `TOP`
+  and an ordering by the index.
 - **A bound reached returns the plan, never a partial answer.** Rows cut off at a limit are
   a value the caller cannot tell from the whole answer. `Outcome::TooMuchWork` carries which
   bound and its two numbers, and the route renders the work list with `reason` set.

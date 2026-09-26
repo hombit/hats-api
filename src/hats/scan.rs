@@ -19,6 +19,7 @@
 use std::fmt;
 use std::sync::Arc;
 
+use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::compute::SortOptions;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::catalog::TableProvider;
@@ -33,6 +34,7 @@ use datafusion::execution::{SendableRecordBatchStream, TaskContext};
 use datafusion::logical_expr::Expr;
 use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::physical_expr::expressions::Column as PhysicalColumn;
+use datafusion::physical_expr::projection::ProjectionExpr;
 use datafusion::physical_expr::{
     EquivalenceProperties, LexOrdering, PhysicalExpr, PhysicalSortExpr, create_physical_expr,
 };
@@ -87,12 +89,36 @@ pub(super) struct PartitionScan {
     pub index: Option<String>,
 }
 
-/// The execution node: one output stream, which is the partitions in order.
-pub(super) struct CatalogScanExec {
-    scan: Arc<PartitionScan>,
+/// What one execution node does with the partitions beyond reading them, each part of it
+/// taken over from the plan above.
+#[derive(Clone, Default)]
+struct Shape {
     /// Whether the rows come out sorted by the index column, and which way. `None` is the
     /// partitions in catalog order with each one's rows as the files hold them.
     order: Option<SortOptions>,
+    /// The projection above this node, computed inside each partition's read instead.
+    projection: Option<Projected>,
+}
+
+/// A projection this node took over from the plan above it.
+///
+/// **What it is for is a nested column.** `lightcurve.mag` is planned as `get_field(lightcurve,
+/// 'mag')` in a projection over the scan, and over a scan of its own a parquet reader answers
+/// that by reading the one leaf; left above this node, every partition reads the whole struct
+/// and the projection throws the rest away. So each partition's read is given the projection,
+/// and DataFusion's optimizer pushes it into the reader there.
+#[derive(Clone)]
+struct Projected {
+    /// Over the scan's own columns, which are the table's columns its `projection` names.
+    exprs: Vec<ProjectionExpr>,
+    /// What they produce, which is this node's output.
+    schema: SchemaRef,
+}
+
+/// The execution node: one output stream, which is the partitions in order.
+pub(super) struct CatalogScanExec {
+    scan: Arc<PartitionScan>,
+    shape: Shape,
     properties: Arc<PlanProperties>,
     /// What the partitions' own scans fetched. Those scans are planned while this one runs,
     /// so they are not in the plan tree where a caller's `data_bytes_read` is added up, and
@@ -107,24 +133,25 @@ impl fmt::Debug for CatalogScanExec {
             .field("url", &self.scan.catalog.dir().url.as_str())
             .field("partitions", &self.scan.partitions.len())
             .field("limit", &self.scan.limit)
-            .field("order", &self.order)
+            .field("order", &self.shape.order)
+            .field("projected", &self.shape.projection.is_some())
             .finish()
     }
 }
 
 impl CatalogScanExec {
     pub(super) fn new(scan: PartitionScan) -> DfResult<Self> {
-        Self::with_order(Arc::new(scan), None)
+        Self::with_shape(Arc::new(scan), Shape::default())
     }
 
-    fn with_order(scan: Arc<PartitionScan>, order: Option<SortOptions>) -> DfResult<Self> {
-        let schema = match &scan.projection {
-            Some(indices) => Arc::new(scan.table_schema.project(indices)?),
-            None => Arc::clone(&scan.table_schema),
+    fn with_shape(scan: Arc<PartitionScan>, shape: Shape) -> DfResult<Self> {
+        let schema = match &shape.projection {
+            Some(projected) => Arc::clone(&projected.schema),
+            None => columns_of(&scan)?,
         };
         // The ordering the rows really have, declared so that DataFusion's own analysis is
         // what decides a sort above is redundant — never a guess of this node's.
-        let equivalences = match (order, index_of(&scan, &schema)) {
+        let equivalences = match (shape.order, index_position(&scan, &shape)?) {
             (Some(options), Some(position)) => {
                 let name = schema.field(position).name().clone();
                 EquivalenceProperties::new_with_orderings(
@@ -148,10 +175,15 @@ impl CatalogScanExec {
         );
         Ok(Self {
             scan,
-            order,
+            shape,
             properties: Arc::new(properties),
             metrics: ExecutionPlanMetricsSet::new(),
         })
+    }
+
+    /// The same node with one part of its shape replaced.
+    fn reshaped(&self, shape: Shape) -> DfResult<Self> {
+        Self::with_shape(Arc::clone(&self.scan), shape)
     }
 
     /// The same scan with its rows sorted by the index column, or `None` where it cannot be.
@@ -164,18 +196,45 @@ impl CatalogScanExec {
     /// partitions that hold `n` rows rather than after all of them. What is not known is the
     /// order inside a file, which is the importer's, so that part is always sorted.
     fn ordered(&self, options: SortOptions) -> DfResult<Option<Self>> {
-        let schema = self.schema();
-        if index_of(&self.scan, &schema).is_none() {
+        if index_position(&self.scan, &self.shape)?.is_none() {
             return Ok(None);
         }
-        Self::with_order(Arc::clone(&self.scan), Some(options)).map(Some)
+        self.reshaped(Shape {
+            order: Some(options),
+            ..self.shape.clone()
+        })
+        .map(Some)
     }
 }
 
-/// Where the index column is in the scan's own output, if it is there at all.
-fn index_of(scan: &PartitionScan, schema: &SchemaRef) -> Option<usize> {
-    let index = scan.index.as_ref()?;
-    schema.index_of(index).ok()
+/// The table's columns the scan reads, before any projection it took over.
+fn columns_of(scan: &PartitionScan) -> DfResult<SchemaRef> {
+    Ok(match &scan.projection {
+        Some(indices) => Arc::new(scan.table_schema.project(indices)?),
+        None => Arc::clone(&scan.table_schema),
+    })
+}
+
+/// Where the index column is in the node's output, if it is there at all.
+///
+/// Through a projection it is the output that *is* the column, found by position rather than
+/// by name: a projection may alias it, and may give its name to something else.
+fn index_position(scan: &PartitionScan, shape: &Shape) -> DfResult<Option<usize>> {
+    let Some(index) = &scan.index else {
+        return Ok(None);
+    };
+    let Ok(at) = columns_of(scan)?.index_of(index) else {
+        return Ok(None);
+    };
+    Ok(match &shape.projection {
+        None => Some(at),
+        Some(projected) => projected.exprs.iter().position(|projection| {
+            projection
+                .expr
+                .downcast_ref::<PhysicalColumn>()
+                .is_some_and(|column| column.index() == at)
+        }),
+    })
 }
 
 impl DisplayAs for CatalogScanExec {
@@ -185,8 +244,17 @@ impl DisplayAs for CatalogScanExec {
             "CatalogScanExec: partitions={}, limit={:?}, order={:?}",
             self.scan.partitions.len(),
             self.scan.limit,
-            self.order
-        )
+            self.shape.order
+        )?;
+        if let Some(projected) = &self.shape.projection {
+            let exprs = projected
+                .exprs
+                .iter()
+                .map(|projection| format!("{} as {}", projection.expr, projection.alias))
+                .collect::<Vec<_>>();
+            write!(f, ", projection=[{}]", exprs.join(", "))?;
+        }
+        Ok(())
     }
 }
 
@@ -232,6 +300,29 @@ impl ExecutionPlan for CatalogScanExec {
         Some(self.metrics.clone_inner())
     }
 
+    /// Take the projection over this node into each partition's read.
+    ///
+    /// Only the first. Folding a second into it is the question of whether inlining one
+    /// projection into another evaluates a costly expression twice, and that is for
+    /// DataFusion's own merging of projections to answer, not this node's.
+    fn try_swapping_with_projection(
+        &self,
+        projection: &ProjectionExec,
+    ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+        if self.shape.projection.is_some() {
+            return Ok(None);
+        }
+        let projected = Projected {
+            exprs: projection.expr().to_vec(),
+            schema: projection.schema(),
+        };
+        let node = self.reshaped(Shape {
+            projection: Some(projected),
+            ..self.shape.clone()
+        })?;
+        Ok(Some(Arc::new(node)))
+    }
+
     fn execute(
         &self,
         partition: usize,
@@ -243,7 +334,8 @@ impl ExecutionPlan for CatalogScanExec {
             )));
         }
         let scan = Arc::clone(&self.scan);
-        let order = self.order;
+        let shape = self.shape.clone();
+        let order = shape.order;
         let allowed = scan.max_partitions;
         let concurrency = scan.concurrency.max(1);
         let beyond = scan.partitions.len() > allowed;
@@ -263,7 +355,7 @@ impl ExecutionPlan for CatalogScanExec {
                 read_partition(
                     Arc::clone(&scan),
                     cell,
-                    order,
+                    shape.clone(),
                     Arc::clone(&context),
                     bytes.clone(),
                 )
@@ -303,10 +395,10 @@ impl ExecutionPlan for CatalogScanExec {
 async fn read_partition(
     scan: Arc<PartitionScan>,
     cell: HatsPartition,
-    order: Option<SortOptions>,
+    shape: Shape,
     context: Arc<TaskContext>,
     bytes: Count,
-) -> DfResult<Vec<datafusion::arrow::array::RecordBatch>> {
+) -> DfResult<Vec<RecordBatch>> {
     let files = scan
         .catalog
         .files(&cell, &scan.data)
@@ -332,7 +424,7 @@ async fn read_partition(
         // partition yields batches of the one schema the plan was made against.
         .with_schema(Arc::clone(&scan.table_schema));
     let table = ListingTable::try_new(config)?;
-    let limit = match order {
+    let limit = match shape.order {
         Some(_) => None,
         None => scan.limit,
     };
@@ -376,9 +468,24 @@ async fn read_partition(
             .collect::<Vec<_>>();
         plan = Arc::new(ProjectionExec::try_new(kept, plan)?);
     }
-    if let Some(options) = order {
+    // **The statement's projection goes over the filter, and reaches the reader anyway.** The
+    // optimizer below moves the whole predicate into the parquet scan first, the session
+    // pushing filters into the reader, so the projection is left directly over the scan and is
+    // pushed in after it — `get_field` becoming a read of one leaf. A filter the reader would
+    // not take stays a `FilterExec`, and a projection only passes one that it narrows while
+    // keeping the filter's columns, which a nested field usually does not: the same rows, from
+    // reading the whole struct.
+    if let Some(projected) = &shape.projection {
+        let exprs = projected
+            .exprs
+            .iter()
+            .map(|projection| (Arc::clone(&projection.expr), projection.alias.clone()))
+            .collect::<Vec<_>>();
+        plan = Arc::new(ProjectionExec::try_new(exprs, plan)?);
+    }
+    if let Some(options) = shape.order {
         let schema = plan.schema();
-        let Some(position) = index_of(&scan, &schema) else {
+        let Some(position) = index_position(&scan, &shape)? else {
             return Err(DataFusionError::Internal(
                 "an ordered catalog scan was planned without its index column".to_owned(),
             ));
