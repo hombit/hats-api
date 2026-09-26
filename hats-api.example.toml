@@ -101,8 +101,8 @@ allow_plain_http = false
 # source = "/data/hats"        # an absolute path, or a url in any scheme read above
 # serve = true                 # publish it; off is API-only
 # follow_symlinks = false      # a local source only
-# immutable = false            # never changes once published, so a cached copy needs no
-#                              # revalidating
+# catalog_cache_seconds = inf  # in place of [limits] catalog_cache_seconds, for this mount;
+#                              # inf for a catalog that never changes once published
 # filenames = ["*.parquet"]    # in place of [data] filenames, for this mount
 #
 # A source in a store. `serve` on one of these puts this service in front of that store: a
@@ -240,6 +240,15 @@ query_cache_seconds = 240
 # The most held in such answers at once. One larger than this is never kept, and the oldest
 # go when a new one does not fit.
 max_query_cache_bytes = "2GiB"
+
+# How long what is read about a catalog — its properties, partitions, schema and the files
+# inside its partitions — is kept for the requests after it. "0" keeps nothing, "inf" keeps
+# it until evicted for room. Nothing asks the store whether a catalog changed, so this is
+# how long a republished catalog may still be answered as it was. A [[mount]] may set its own.
+catalog_cache_seconds = 86400
+# The most held about catalogs at once, across all of them. The least recently used go
+# first when a new one does not fit.
+max_catalog_cache_bytes = "256MiB"
 
 # How large a request body may be; over it, 413. "0" is no bound. What makes a body large
 # is "region" — a serialized MOC, or one circle per source of a cross-match — and no other
