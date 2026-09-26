@@ -243,9 +243,8 @@ max_query_cache_bytes = "2GiB"
 
 # How long what is read about a catalog — its properties, partitions, schema and the files
 # inside its partitions — is kept for the requests after it. "0" keeps nothing, "inf" keeps
-# it until evicted for room. Nothing asks the store whether a catalog changed, so this is
-# how long a republished catalog may still be answered as it was. A [[mount]] may set a
-# different lifetime for the catalogs under it, with its own catalog_cache_seconds.
+# it until evicted for room. A [[mount]] may set a different lifetime for the catalogs
+# under it, with its own catalog_cache_seconds.
 catalog_cache_seconds = 86400
 # The most held about catalogs at once, across all of them. The least recently used go
 # first when a new one does not fit.
