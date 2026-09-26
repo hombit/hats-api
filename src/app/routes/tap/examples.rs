@@ -140,7 +140,7 @@ fn render(published: &[Published<'_>]) -> String {
 /// A table can end up with nothing — a catalog naming no position column, or one whose
 /// columns are all nested — and it is then simply absent. An example that would not run is
 /// worse than a menu one entry shorter.
-fn offered(table: &Published<'_>) -> Vec<(String, TapExample)> {
+pub(super) fn offered(table: &Published<'_>) -> Vec<(String, TapExample)> {
     let qualified = &table.metadata.qualified;
     let configured = table.table.examples();
     if !configured.is_empty() {

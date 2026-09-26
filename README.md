@@ -678,6 +678,9 @@ The service speaks IVOA's
 https://example.com/api/v1/tap
 ```
 
+In a browser that url is a page listing the published tables and their example queries,
+with `pyvo`, TOPCAT and STILTS snippets written against the deployment's own url.
+
 ### Publishing catalogs
 
 Mount the catalogs, then give each one an entry in the config file:
@@ -855,6 +858,7 @@ VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for
 
 | | |
 |---|---|
+| `/api/v1/tap` | a page for a browser: tables, examples, client snippets |
 | `/api/v1/tap/sync` | run one ADQL query, `GET` or `POST` |
 | `/api/v1/tap/async` | submit a query as a job, poll it, collect the rows |
 | `/api/v1/tap/capabilities` | what the service supports |

@@ -8,7 +8,7 @@ Release dates are in the UTC time zone.
 
 ### Added
 
---
+- A page at `/api/v1/tap` listing the published tables and their example queries.
 
 ### Changed
 

@@ -470,6 +470,8 @@ pub(in crate::app) fn with_queries(router: Router<AppState>, prefix: &str) -> Ro
 fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
     let job = |child: &str| route(prefix, &format!("tap/async/{{id}}{child}"));
     router
+        // The base url a person is handed, opened in a browser. TAP puts nothing here.
+        .route(&route(prefix, "tap"), get(tap::page))
         .route(
             &route(prefix, "tap/sync"),
             get(tap::tap_sync_get).post(tap::tap_sync_post),

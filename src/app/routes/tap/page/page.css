@@ -1,0 +1,85 @@
+/* The TAP base url's page, in the listing's hand: the same tokens, one column, a monospace
+   family for anything a reader types. Inlined, because a stylesheet fetched from elsewhere
+   is one this service's networks may not reach. */
+:root {
+  color-scheme: light dark;
+  --bg: #fff;
+  --surface: #eef2f8;
+  --stripe: #f4f6f8;
+  --fg: #16181b;
+  --muted: #4e545c;
+  --hover: #dde7f6;
+  --line: #c2c9d2;
+  --edge: #97a1ad;
+  --link: #0a53b5;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121517;
+    --surface: #1d232a;
+    --stripe: #191d21;
+    --fg: #eef1f4;
+    --muted: #aab3bd;
+    --hover: #27333f;
+    --line: #39424c;
+    --edge: #5a6672;
+    --link: #82b8ff;
+  }
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  margin: 2rem 1.5rem;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 0.9rem;
+  max-width: 56rem;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre { font-family: var(--mono); font-size: 0.82rem; }
+h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.3rem; }
+h2 { font-size: 1rem; font-weight: 600; margin: 1.6rem 0 0.4rem; }
+h3 { font: 600 0.82rem var(--mono); margin: 0.9rem 0 0.25rem; }
+p, li { color: var(--muted); margin: 0.3rem 0; }
+p code, li code { color: var(--fg); }
+ol { padding-left: 1.4rem; }
+nav a { margin-right: 0.8rem; }
+
+pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  margin: 0.3rem 0;
+  overflow-x: auto;
+  padding: 0.6rem 0.8rem;
+}
+
+/* The listing's snippet boxes: a bar of names, the chosen one filled, the copy button at the
+   far end so reaching for a client does not land on it. The bar needs `page.js`, so without
+   it each box is shown under its own name instead. */
+.client-tabs { display: none; gap: 0.3rem; align-items: center; flex-wrap: wrap; }
+body.js .client-tabs { display: flex; }
+body.js .client-label { display: none; }
+.client-label { font: 600 0.75rem var(--mono); margin: 0.6rem 0 0; }
+.client-copy { margin-left: auto; }
+.client-tab, .client-copy {
+  padding: 0.1rem 0.5rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--edge);
+  border-radius: 0.25rem;
+  font: 0.72rem/1.4 system-ui, -apple-system, sans-serif;
+  cursor: pointer;
+}
+.client-tab:hover, .client-copy:hover { background: var(--hover); border-color: var(--link); }
+.client-tab.on { background: var(--link); border-color: var(--link); color: var(--bg); }
+
+.wide { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border-bottom: 1px solid var(--line); padding: 0.3rem 0.8rem 0.3rem 0; text-align: left; }
+th { font-weight: 600; }
+tbody tr:nth-child(even) { background: var(--stripe); }
+td.count { font-family: var(--mono); font-size: 0.82rem; text-align: right; }
+td.title, .table { color: var(--muted); }

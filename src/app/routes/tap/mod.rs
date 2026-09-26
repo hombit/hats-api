@@ -4,6 +4,7 @@ mod answer;
 mod examples;
 mod format;
 mod jobs;
+mod page;
 mod parameters;
 mod published;
 mod run;
@@ -21,5 +22,6 @@ pub(in crate::app) use jobs::{
     phase, quote, result, results, set_destruction, set_execution_duration, set_job_parameters,
     set_phase, show,
 };
+pub(in crate::app) use page::page;
 pub(in crate::app) use sync::{tap_sync_get, tap_sync_post};
 pub(in crate::app) use vosi::{availability, capabilities, table, tables};

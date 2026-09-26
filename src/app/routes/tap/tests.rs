@@ -319,6 +319,72 @@ async fn an_operators_examples_replace_the_generated_one() {
     assert!(page.contains("Ampersand &amp; &lt;angle&gt;"), "{page}");
 }
 
+/// The base url, opened in a browser: the tables, the examples, and snippets written against
+/// this deployment's own url and first example, so what a reader copies runs as it stands.
+#[tokio::test]
+async fn the_base_url_is_a_page_for_a_person() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, content_type, page) = send(
+        published(dir.path(), &LimitsConfig::default()),
+        Request::builder()
+            .uri("/api/v1/tap")
+            .header(header::HOST, "example.com")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(content_type, "text/html; charset=utf-8");
+
+    let base = "http://example.com/api/v1/tap";
+    assert!(
+        page.contains(&format!(
+            "<a href=\"{base}/tables/sky.objects\"><code>sky.objects</code></a>"
+        )),
+        "{page}"
+    );
+    let (_, _, examples) = fetch_examples(published(dir.path(), &LimitsConfig::default())).await;
+    let found = queries(&examples);
+    let [query] = found.as_slice() else {
+        panic!("expected one example, got {found:?}")
+    };
+    // A box per client, each holding this example: the query itself, then the clients.
+    let escaped = quick_xml::escape::escape(query.as_str()).into_owned();
+    assert!(
+        page.contains(&format!(
+            "<pre class=\"client-code\" data-client=\"ADQL\">{escaped}</pre>"
+        )),
+        "{page}"
+    );
+    for client in ["ADQL", "pyvo", "TOPCAT", "STILTS", "curl"] {
+        assert!(
+            page.contains(&format!(
+                "<button class=\"client-tab\" data-client=\"{client}\">"
+            )),
+            "{client}\n{page}"
+        );
+        assert!(
+            page.contains(&format!(
+                "<pre class=\"client-code\" data-client=\"{client}\">"
+            )),
+            "{client}\n{page}"
+        );
+    }
+    assert!(
+        page.contains(&format!("pyvo.dal.TAPService(&quot;{base}&quot;)")),
+        "{page}"
+    );
+    assert!(
+        page.contains("RESPONSEFORMAT=&quot;parquet&quot;"),
+        "{page}"
+    );
+    assert!(
+        page.contains(&format!("stilts tapquery tapurl={base}")),
+        "{page}"
+    );
+    assert!(page.contains("out=rows.parquet"), "{page}");
+}
+
 /// A client picks the resource out of `/capabilities` and has no other way to find it, so
 /// the declaration and the route are one change. DALI §2.3 puts it the other way round too:
 /// a service that does not implement `/examples` answers 404 there.
