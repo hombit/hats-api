@@ -18,17 +18,23 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion::arrow::array::{Array, UInt64Array};
+use datafusion::arrow::array::{Array, ArrayRef, BooleanArray, UInt64Array};
 use datafusion::arrow::compute::cast;
-use datafusion::arrow::datatypes::{DataType, Schema};
-use datafusion::common::{Column, ScalarValue};
+use datafusion::arrow::datatypes::{DataType, Field, Schema};
+use datafusion::common::pruning::PruningStatistics;
+use datafusion::common::{Column, DFSchema, ScalarValue};
 use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Expr, lit};
 use datafusion::parquet::arrow::arrow_reader::statistics::StatisticsConverter;
 use datafusion::parquet::arrow::parquet_to_arrow_schema;
 use datafusion::parquet::file::metadata::{
     PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader,
 };
+use datafusion::physical_expr::create_physical_expr;
+use datafusion::physical_optimizer::pruning::PruningPredicateBuilder;
+use datafusion::physical_plan::collect;
 use datafusion::prelude::ParquetReadOptions;
 use futures::{StreamExt, TryStreamExt, stream};
 
@@ -44,6 +50,13 @@ const PIXEL: &str = "Npix";
 
 /// How many index footers are read at once, for an index with no `_metadata`.
 const FOOTER_CONCURRENCY: usize = 16;
+
+/// How many values one pruning pass over the files is asked about.
+///
+/// `PruningPredicate` turns an `IN` list into a comparison against each file's range only up
+/// to a length of its own choosing, and past it answers "maybe" for every file — so a lookup
+/// of many values is put to it in pieces this short, and the files any piece keeps are read.
+const VALUES_PER_PASS: usize = 16;
 
 /// What an index catalog holds, by file, without any of its rows.
 #[derive(Debug)]
@@ -62,6 +75,19 @@ struct IndexFile {
     path: String,
     /// `None` where a file's statistics say nothing, which is a file every lookup reads.
     range: Option<(ScalarValue, ScalarValue)>,
+    /// The compressed size of what a lookup reads of it: the indexed column, `Norder` and
+    /// `Npix`, in every row group. More than the lookup will read, row groups being pruned
+    /// within the file, and so a bound that can only err high.
+    bytes: u64,
+}
+
+/// What one lookup came to.
+#[derive(Debug)]
+pub(crate) struct Lookup {
+    /// The partitions holding a value asked for, as `(order, pixel)`.
+    pub cells: HashSet<(u8, u64)>,
+    /// What reading the index fetched.
+    pub bytes_read: u64,
 }
 
 impl IndexLayout {
@@ -72,7 +98,7 @@ impl IndexLayout {
                 .range
                 .as_ref()
                 .map_or(0, |(min, max)| min.size() + max.size());
-            u64::try_from(file.path.len() + range + 64).unwrap_or(u64::MAX)
+            u64::try_from(file.path.len() + range + 72).unwrap_or(u64::MAX)
         };
         self.files.iter().map(per_file).sum()
     }
@@ -100,15 +126,23 @@ impl IndexLayout {
                 metadata.file_metadata().key_value_metadata(),
             )
             .map_err(ApiError::SourceMetadata)?;
-            let (_, field) = schema.column_with_name(column).ok_or_else(|| {
-                ApiError::bad_request(format!(
-                    "this collection's index for {column} has no {column} column"
-                ))
-            })?;
-            data_type.get_or_insert_with(|| field.data_type().clone());
+            // The two columns that name a partition. The HATS note does not list an index's
+            // columns; `hats`' own lookup groups by these two, so an index without them is not
+            // one any reader can use.
+            for name in [column, ORDER, PIXEL] {
+                if schema.column_with_name(name).is_none() {
+                    return Err(ApiError::bad_request(format!(
+                        "this collection's index for {column} has no {name} column"
+                    )));
+                }
+            }
+            if let Some((_, field)) = schema.column_with_name(column) {
+                data_type.get_or_insert_with(|| field.data_type().clone());
+            }
             files.push(IndexFile {
-                path,
                 range: range_of(&metadata, &schema, column),
+                bytes: read_bytes(&metadata, &schema, column),
+                path,
             });
         }
         Ok(Self {
@@ -118,35 +152,89 @@ impl IndexLayout {
         })
     }
 
-    /// The partitions of the primary table holding any of `values`, as `(order, pixel)`.
+    /// The index files whose range can hold one of `values`, as DataFusion's
+    /// `PruningPredicate` judges them from the ranges kept here — the same judgement it makes
+    /// of a parquet file's row groups, one level up.
+    fn candidates(&self, values: &[ScalarValue]) -> Result<Vec<&IndexFile>, ApiError> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            &self.column,
+            self.data_type.clone(),
+            true,
+        )]));
+        let df_schema = DFSchema::try_from(Arc::clone(&schema))?;
+        let statistics = FileRanges(self);
+        let mut keep = vec![false; self.files.len()];
+        for pass in values.chunks(VALUES_PER_PASS) {
+            let predicate =
+                named(&self.column).in_list(pass.iter().cloned().map(lit).collect(), false);
+            let physical = create_physical_expr(
+                &predicate,
+                &df_schema,
+                &ExecutionProps::new(),
+                &PhysicalPlanningContext::default(),
+            )?;
+            let kept = match PruningPredicateBuilder::new()
+                .with_file_schema(Arc::clone(&schema))
+                .build(physical)
+            {
+                Some(pruning) => pruning.prune(&statistics)?,
+                // Nothing it could prune on, which keeps every file.
+                None => vec![true; self.files.len()],
+            };
+            for (keep, kept) in keep.iter_mut().zip(kept) {
+                *keep |= kept;
+            }
+        }
+        Ok(self
+            .files
+            .iter()
+            .zip(keep)
+            .filter(|(_, keep)| *keep)
+            .map(|(file, _)| file)
+            .collect())
+    }
+
+    /// The partitions of the primary table holding any of `values`.
     ///
-    /// Only the files whose range can hold one of them are read, and a value no file's range
-    /// holds is one no partition holds: the answer is then empty, which is a catalog holding
-    /// no such row rather than a failure.
+    /// Only the files that can hold one of them are read, and a value no file can hold is one
+    /// no partition holds: the answer is then empty, which is a catalog holding no such row
+    /// rather than a failure. `None` where reading those files could cost more than
+    /// `max_bytes`, which is the index declining rather than the request failing.
     pub(super) async fn partitions_for(
         &self,
         dir: &RemoteDir,
         values: &HashSet<ScalarValue>,
-    ) -> Result<HashSet<(u8, u64)>, ApiError> {
+        max_bytes: u64,
+    ) -> Result<Option<Lookup>, ApiError> {
         let values = values
             .iter()
             .map(|value| value.cast_to(&self.data_type))
             .collect::<Result<Vec<_>, _>>()?;
-        let urls = self
-            .files
+        let files = self.candidates(&values)?;
+        let estimate = files.iter().map(|file| file.bytes).sum::<u64>();
+        if estimate > max_bytes {
+            tracing::info!(
+                column = self.column,
+                files = files.len(),
+                estimate,
+                max_bytes,
+                "an index lookup would read more than max_bytes_fetched; not using the index"
+            );
+            return Ok(None);
+        }
+        if files.is_empty() {
+            return Ok(Some(Lookup {
+                cells: HashSet::new(),
+                bytes_read: 0,
+            }));
+        }
+        let urls = files
             .iter()
-            .filter(|file| match &file.range {
-                None => true,
-                Some((min, max)) => values.iter().any(|value| value >= min && value <= max),
-            })
             .map(|file| {
                 dir.child(&format!("{DATASET_DIR}/{}", file.path))
                     .map(|file| file.url.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if urls.is_empty() {
-            return Ok(HashSet::new());
-        }
         let ctx = crate::engine::query::session_context(false);
         ctx.register_object_store(&dir.base, Arc::clone(&dir.store));
         // The index's own files are named whatever its writer chose, as a catalog's are.
@@ -154,14 +242,17 @@ impl IndexLayout {
             file_extension: "",
             ..Default::default()
         };
-        let named = |name: &str| Expr::Column(Column::new_unqualified(name.to_owned()));
-        let batches = ctx
+        // Row groups within the files are DataFusion's to prune, from each footer's own
+        // statistics, the rows being sorted by the value.
+        let plan = ctx
             .read_parquet(urls, options)
             .await?
             .filter(named(&self.column).in_list(values.into_iter().map(lit).collect(), false))?
             .select(vec![named(ORDER), named(PIXEL)])?
-            .collect()
+            .create_physical_plan()
             .await?;
+        let batches = collect(Arc::clone(&plan), ctx.task_ctx()).await?;
+        let bytes_read = crate::engine::query::data_bytes_read(plan.as_ref());
         let mut cells = HashSet::new();
         for batch in &batches {
             let as_u64 = |at: usize| -> Result<UInt64Array, ApiError> {
@@ -186,8 +277,80 @@ impl IndexLayout {
                 cells.insert((order, pixels.value(row)));
             }
         }
-        Ok(cells)
+        Ok(Some(Lookup { cells, bytes_read }))
     }
+}
+
+fn named(name: &str) -> Expr {
+    Expr::Column(Column::new_unqualified(name.to_owned()))
+}
+
+/// Each index file's range as statistics `PruningPredicate` can read, one container per file.
+struct FileRanges<'a>(&'a IndexLayout);
+
+impl FileRanges<'_> {
+    fn bound(&self, column: &Column, max: bool) -> Option<ArrayRef> {
+        if column.name != self.0.column {
+            return None;
+        }
+        let empty = ScalarValue::try_from(&self.0.data_type).ok()?;
+        let values = self.0.files.iter().map(|file| match &file.range {
+            Some((low, high)) => match max {
+                true => high.clone(),
+                false => low.clone(),
+            },
+            None => empty.clone(),
+        });
+        ScalarValue::iter_to_array(values).ok()
+    }
+}
+
+impl PruningStatistics for FileRanges<'_> {
+    fn min_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.bound(column, false)
+    }
+
+    fn max_values(&self, column: &Column) -> Option<ArrayRef> {
+        self.bound(column, true)
+    }
+
+    fn num_containers(&self) -> usize {
+        self.0.files.len()
+    }
+
+    fn null_counts(&self, _column: &Column) -> Option<ArrayRef> {
+        None
+    }
+
+    fn row_counts(&self) -> Option<ArrayRef> {
+        None
+    }
+
+    fn contained(&self, _column: &Column, _values: &HashSet<ScalarValue>) -> Option<BooleanArray> {
+        None
+    }
+}
+
+/// The compressed size of the indexed column, `Norder` and `Npix`, across a file's row groups.
+fn read_bytes(metadata: &ParquetMetaData, schema: &Schema, column: &str) -> u64 {
+    let descriptor = metadata.file_metadata().schema_descr();
+    let leaves = [column, ORDER, PIXEL]
+        .into_iter()
+        .filter_map(|name| {
+            StatisticsConverter::try_new(name, schema, descriptor)
+                .ok()?
+                .parquet_column_index()
+        })
+        .collect::<Vec<_>>();
+    metadata
+        .row_groups()
+        .iter()
+        .flat_map(|group| {
+            leaves
+                .iter()
+                .map(move |&leaf| u64::try_from(group.column(leaf).compressed_size()).unwrap_or(0))
+        })
+        .sum()
 }
 
 /// The lowest and highest value of `column` in a file, across its row groups.
@@ -295,32 +458,103 @@ async fn read_each(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hats::query::tests::{first_id_in, indexed_collection};
+    use crate::hats::query::tests::{first_id_in, fixture_rows, indexed_collection};
+
+    fn ids(values: impl IntoIterator<Item = i64>) -> HashSet<ScalarValue> {
+        values
+            .into_iter()
+            .map(|id| ScalarValue::Int64(Some(id)))
+            .collect()
+    }
+
+    async fn layout_of(dir: &std::path::Path) -> (RemoteDir, IndexLayout) {
+        let index = crate::storage::open_mounted_dir(&dir.join("id_index")).unwrap();
+        let layout = IndexLayout::read(&index, "id", &DataFiles::default(), u64::MAX)
+            .await
+            .unwrap();
+        (index, layout)
+    }
 
     /// A lookup reads only the index files whose range can hold a value asked for. With the
     /// first file gone after the layout was read, a value from the second half is still found
     /// and one from the first half fails to read — which it would not, had the lookup skipped
-    /// nothing.
+    /// nothing. The same for forty values at once: put to `PruningPredicate` as one `IN` list
+    /// they keep every file, the deleted one included, which is what `VALUES_PER_PASS` is for.
     #[tokio::test]
     async fn a_lookup_reads_only_the_files_whose_range_holds_the_value() {
         for metadata in [false, true] {
             let dir = indexed_collection(metadata);
-            let index = crate::storage::open_mounted_dir(&dir.path().join("id_index")).unwrap();
-            let layout = IndexLayout::read(&index, "id", &DataFiles::default(), u64::MAX)
-                .await
-                .unwrap();
+            let (index, layout) = layout_of(dir.path()).await;
             assert_eq!(layout.files.len(), 2, "{metadata}");
             std::fs::remove_file(dir.path().join("id_index/dataset/index/part.0.parquet")).unwrap();
 
-            let late = HashSet::from([ScalarValue::Int64(Some(first_id_in(3)))]);
-            let found = layout.partitions_for(&index, &late).await.unwrap();
-            assert_eq!(found.len(), 1, "{metadata}: {found:?}");
+            let late = ids([first_id_in(3)]);
+            let found = layout
+                .partitions_for(&index, &late, u64::MAX)
+                .await
+                .unwrap();
+            assert_eq!(found.unwrap().cells.len(), 1, "{metadata}");
 
-            let early = HashSet::from([ScalarValue::Int64(Some(first_id_in(0)))]);
+            let half = i64::try_from(fixture_rows() / 2).unwrap();
+            let many = ids(half + 1..=half + 40);
+            let found = layout
+                .partitions_for(&index, &many, u64::MAX)
+                .await
+                .unwrap();
+            let found = found.unwrap();
+            assert!(!found.cells.is_empty(), "{metadata}");
+            assert!(found.bytes_read > 0, "{metadata}");
+
+            let early = ids([first_id_in(0)]);
             assert!(
-                layout.partitions_for(&index, &early).await.is_err(),
+                layout
+                    .partitions_for(&index, &early, u64::MAX)
+                    .await
+                    .is_err(),
                 "{metadata}"
             );
         }
+    }
+
+    /// A lookup that would read more than it may is declined, and nothing is read: the index
+    /// is an optimization, and declining it leaves the scan to answer without one.
+    #[tokio::test]
+    async fn a_lookup_over_its_budget_is_declined() {
+        let dir = indexed_collection(true);
+        let (index, layout) = layout_of(dir.path()).await;
+        std::fs::remove_dir_all(dir.path().join("id_index/dataset/index")).unwrap();
+        let found = layout
+            .partitions_for(&index, &ids([first_id_in(0)]), 1)
+            .await
+            .unwrap();
+        assert!(found.is_none());
+    }
+
+    /// `Norder` and `Npix` are what name a partition, and an index without them is not used.
+    #[tokio::test]
+    async fn an_index_without_norder_and_npix_is_refused() {
+        let dir = indexed_collection(false);
+        let file = dir.path().join("id_index/dataset/index/part.0.parquet");
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = datafusion::arrow::record_batch::RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(datafusion::arrow::array::Int64Array::from(vec![
+                1_i64,
+            ]))],
+        )
+        .unwrap();
+        let mut writer = datafusion::parquet::arrow::ArrowWriter::try_new(
+            std::fs::File::create(&file).unwrap(),
+            schema,
+            None,
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let index = crate::storage::open_mounted_dir(&dir.path().join("id_index")).unwrap();
+        let error = IndexLayout::read(&index, "id", &DataFiles::default(), u64::MAX)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("Norder"), "{error}");
     }
 }

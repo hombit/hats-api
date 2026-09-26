@@ -953,6 +953,17 @@ index catalogs a collection names in `all_indexes`.
 - **An index narrows the partitions and never refuses a request.** One that cannot be read is
   logged and every partition stays a candidate, so the answer is the same rows, from reading
   more of them. It is trusted otherwise: a value it does not list is a partition not opened.
+- **It is asked only where it can pay, and read only where it fits.** Only where at least
+  `[limits] min_partitions_for_index` partitions are left after the region, and only where the
+  index files that can hold a value — their compressed size for the three columns read — come
+  to no more than `max_bytes_fetched`. Over either line it is skipped, not refused. What it
+  does read is counted in `data_bytes_read` with the scan's own.
+- **`Norder` and `Npix` are required, and `_healpix_29` is not a substitute.** The HATS note
+  does not list an index's columns; `hats`' own lookup groups by those two, so an index
+  without them is not one any reader uses.
+- **Files are chosen by `PruningPredicate` over each file's range, in passes of a few values.**
+  Handed a long `IN` list at once it keeps every file; `a_lookup_reads_only_the_files_whose_range_holds_the_value`
+  is what catches that. Row groups within the chosen files are DataFusion's to prune.
 - **The ADQL route's and TAP's, not the `simple` routes'.** `HatsTable::scan` is where it is
   asked, before the statistics pruning of `reached`.
 - **Its layout is a part of the catalog**, kept under the same generation as the rest: the

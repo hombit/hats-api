@@ -301,6 +301,11 @@ pub struct LimitsConfig {
     /// from whichever discovery source answered, so this is checked and refused without a
     /// single byte of data fetched. The other two can only be watched as they accumulate.
     pub max_partitions: usize,
+    /// How many partitions a statement must still reach, after its region, before a
+    /// collection's index is asked which of them hold the values it looks up. It may be from
+    /// 1 to the smaller of the two partition bounds, `[limits] max_partitions` and
+    /// `[tap.async.limits] max_partitions`, and absent is that smaller bound.
+    pub min_partitions_for_index: Option<usize>,
     /// How many bytes of data one request may fetch from the store, across every partition.
     ///
     /// What a request costs the origin, which the partition count does not bound: one dense
@@ -418,6 +423,27 @@ pub struct LimitsConfig {
     pub max_expression_nodes: usize,
 }
 
+impl LimitsConfig {
+    /// `min_partitions_for_index` as it applies: the value written, or the smallest
+    /// `max_partitions` in force where none was — `async_max_partitions` being
+    /// `[tap.async.limits]`' own, where it sets one.
+    pub fn min_partitions_for_index(
+        &self,
+        async_max_partitions: Option<usize>,
+    ) -> Result<usize, ConfigError> {
+        let most = async_max_partitions
+            .map_or(self.max_partitions, |other| other.min(self.max_partitions));
+        match self.min_partitions_for_index {
+            None => Ok(most),
+            Some(written) if (1..=most).contains(&written) => Ok(written),
+            Some(written) => Err(ConfigError::Limits(format!(
+                "min_partitions_for_index is {written}, and it has to be between 1 and \
+                 {most}, the smaller of [limits] and [tap.async.limits] max_partitions"
+            ))),
+        }
+    }
+}
+
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
@@ -438,6 +464,9 @@ impl Default for LimitsConfig {
             // bytes — `max_bytes_fetched` and the clock are what bound those. Wider than this
             // is the plan route's, fanning the partitions out as separate requests.
             max_partitions: 128,
+            // As many as a statement may read, so by default the index is asked only where
+            // the scan would otherwise be refused.
+            min_partitions_for_index: None,
             max_bytes_fetched: ByteSize::gib(10),
             max_rows: 1_000_000,
             // Room for a real aggregate — a `GROUP BY` over a few million distinct values,
@@ -770,6 +799,8 @@ pub enum ConfigError {
     /// twice, or a url the access policy refuses. Named by the `name`, which is what the
     /// operator wrote and what a caller would have queried.
     Tap(String, String),
+    /// A `[limits]` value that contradicts another one.
+    Limits(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -786,6 +817,7 @@ impl fmt::Display for ConfigError {
                 write!(f, "invalid filenames entry {pattern:?}: {reason}")
             }
             Self::Tap(name, reason) => write!(f, "invalid [[tap.table]] {name:?}: {reason}"),
+            Self::Limits(reason) => write!(f, "invalid [limits]: {reason}"),
         }
     }
 }
@@ -966,6 +998,36 @@ mod tests {
     /// A lifetime is a number of seconds: a whole one, a fraction, `0` for nothing kept and
     /// `inf` for kept until evicted. Anything that is not a length of time is refused where it
     /// is written rather than read as one.
+    /// Unset, the index threshold is the smallest `max_partitions` in force; set, it is
+    /// between one and that, and anything else is refused at startup rather than read as a
+    /// threshold nothing could reach.
+    #[test]
+    fn the_index_threshold_fits_under_every_partition_bound() {
+        let limits = |written: Option<usize>| LimitsConfig {
+            max_partitions: 128,
+            min_partitions_for_index: written,
+            ..LimitsConfig::default()
+        };
+        assert_eq!(limits(None).min_partitions_for_index(None).unwrap(), 128);
+        assert_eq!(limits(None).min_partitions_for_index(Some(32)).unwrap(), 32);
+        assert_eq!(limits(Some(16)).min_partitions_for_index(None).unwrap(), 16);
+        assert_eq!(
+            limits(Some(16))
+                .min_partitions_for_index(Some(512))
+                .unwrap(),
+            16
+        );
+        for (written, jobs) in [(0, None), (129, None), (64, Some(32))] {
+            let error = limits(Some(written))
+                .min_partitions_for_index(jobs)
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("min_partitions_for_index"),
+                "{error}"
+            );
+        }
+    }
+
     #[test]
     fn a_catalog_lifetime_is_seconds_zero_or_forever() {
         let lifetime = |text: &str| {

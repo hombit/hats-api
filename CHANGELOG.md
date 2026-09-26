@@ -12,6 +12,7 @@ Release dates are in the UTC time zone.
 - `[[mount]] catalog_cache_seconds`, overriding the default per mount; `inf` keeps until evicted. [#110](https://github.com/hombit/hats-api/pull/110)
 - `[[tap.table]]` catalogs are cached in the background and refreshed before they expire. [#111](https://github.com/hombit/hats-api/pull/111)
 - ADQL and TAP choose partitions by a collection's `all_indexes` index catalogs. [#112](https://github.com/hombit/hats-api/pull/112)
+- `[limits] min_partitions_for_index`: how many partitions a query must reach before its index is used. [#112](https://github.com/hombit/hats-api/pull/112)
 
 ### Changed
 

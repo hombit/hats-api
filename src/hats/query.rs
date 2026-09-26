@@ -1158,6 +1158,12 @@ pub(crate) mod tests {
         points()[at].1[0].id
     }
 
+    /// The same row's id and position, as `(id, ra, dec)`.
+    pub(crate) fn first_row_in(at: usize) -> (i64, f64, f64) {
+        let row = &points()[at].1[0];
+        (row.id, row.ra, row.dec)
+    }
+
     /// One file of an index: `(Norder, Npix, id)` rows, sorted by the id.
     fn write_index(path: &Path, rows: &[(u64, i64)]) -> ParquetMetaData {
         let schema = Arc::new(Schema::new(vec![

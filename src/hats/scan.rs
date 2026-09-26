@@ -64,6 +64,9 @@ pub(super) struct PartitionScan {
     pub table_schema: SchemaRef,
     /// The partitions the region left, in the order they are to be read.
     pub partitions: Vec<HatsPartition>,
+    /// What the collection's index lookups read while planning, which were reads of this
+    /// statement and are reported with the scan's own.
+    pub index_bytes: u64,
     pub projection: Option<Vec<usize>>,
     pub filters: Vec<Expr>,
     /// The rows a partition need yield, where DataFusion said the statement wants no more.
@@ -247,6 +250,7 @@ impl ExecutionPlan for CatalogScanExec {
         };
         let partitions = walk.take(allowed).cloned().collect::<Vec<_>>();
         let bytes = MetricBuilder::new(&self.metrics).global_counter(BYTES_SCANNED);
+        bytes.add(usize::try_from(scan.index_bytes).unwrap_or(usize::MAX));
         // Each partition is a future that does nothing until polled, so `buffered` starts only
         // as many as it is about to yield — and none past what the consumer pulls.
         let reads = stream::iter(partitions)

@@ -213,6 +213,12 @@ max_partitions = 128
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 
+# How many partitions an ADQL or TAP query must still reach, after its region, before a
+# collection's index is used to find which of them hold the values it looks up. It may be
+# from 1 to the smaller of the two partition bounds, [limits] max_partitions and
+# [tap.async.limits] max_partitions, and absent is that smaller bound.
+# min_partitions_for_index = 16
+
 # How much memory one ADQL statement's own working set may take — a join's hash table, an
 # aggregate's groups, a sort's heap. The /adql route's alone: every other route evaluates
 # one expression per row, and none of this is what max_rows bounds, since a GROUP BY over a

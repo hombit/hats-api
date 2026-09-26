@@ -184,6 +184,11 @@ impl Service {
         // mistake to hear about at startup, the way a local source that is not there is.
         mounts.check_sources(&policy, &transfers)?;
         let tap_tables = TapTableList::new(&tap.tables, &policy, &transfers)?;
+        // One value for a statement run now and one run as a job, so it has to fit under
+        // both bounds on what they may read.
+        let mut adql_limits: adql::query::Limits = limits.into();
+        adql_limits.catalog.min_partitions_for_index =
+            limits.min_partitions_for_index(tap.jobs.limits.max_partitions)?;
         Ok(Self {
             policy: Arc::new(policy),
             transfers,
@@ -192,7 +197,7 @@ impl Service {
             tap_tables: Arc::new(tap_tables),
             sql_limits: limits.into(),
             catalog_limits: limits.into(),
-            adql_limits: limits.into(),
+            adql_limits,
             max_query_radius_arcsec: limits.max_query_radius_arcsec,
             answers: Arc::new(cache::Answers::new(
                 limits.query_cache_seconds,

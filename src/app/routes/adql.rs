@@ -751,6 +751,43 @@ mod tests {
         }
     }
 
+    /// **The index is asked only where enough partitions are left to be worth it.** A lookup
+    /// whose region already narrows the scan to one partition is answered the same with and
+    /// without the index, and what differs is what was read: the index's own files are counted
+    /// in `data_bytes_read` where it was asked, and nothing of them where it was not.
+    #[tokio::test]
+    async fn the_index_is_asked_only_above_its_threshold() {
+        let dir = hats::query::tests::indexed_collection(false);
+        let (id, ra, dec) = hats::query::tests::first_row_in(2);
+        let ask = async |min_partitions_for_index: usize| {
+            let limits = LimitsConfig {
+                min_partitions_for_index: Some(min_partitions_for_index),
+                ..LimitsConfig::default()
+            };
+            let mut service = mounted(dir.path(), &ApiConfig::default());
+            service.adql_limits = (&limits).into();
+            let (status, body) = post_json(
+                service,
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": format!(
+                        "SELECT id FROM c WHERE id = {id} AND CONTAINS(POINT('ICRS', ra, dec), \
+                         CIRCLE('ICRS', {ra}, {dec}, 0.0001)) = 1"
+                    ),
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["rows"][0]["id"], id, "{body}");
+            answer["data_bytes_read"].as_u64().unwrap()
+        };
+        let asked = ask(1).await;
+        let not_asked = ask(2).await;
+        assert!(asked > not_asked, "asked {asked}, not asked {not_asked}");
+    }
+
     /// An index that cannot be read leaves every partition a candidate: the same rows, from
     /// reading all of them.
     #[tokio::test]

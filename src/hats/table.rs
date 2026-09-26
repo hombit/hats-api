@@ -53,6 +53,12 @@ pub struct Limits {
     /// How many partitions are read at once.
     pub max_concurrent_partitions: usize,
     pub max_metadata_bytes: u64,
+    /// How many partitions a statement must still reach, after its region, for a collection's
+    /// index to be asked. Below it the partitions are few enough to read without asking.
+    pub min_partitions_for_index: usize,
+    /// The most an index lookup may read. One that would read more is skipped, never refused:
+    /// the index narrows a scan, and the scan is answered without it.
+    pub max_index_bytes: u64,
 }
 
 /// One catalog, ready to be named in a statement.
@@ -198,35 +204,55 @@ impl HatsTable {
     /// Two indexed columns each constrained keep only the partitions both indexes name.
     ///
     /// Every partition where no index answers: none covers the column, the catalog was named
-    /// outside its collection, or the index could not be read.
-    async fn indexed(&self, cells: &[HatsPartition], filters: &[Expr]) -> Vec<HatsPartition> {
+    /// outside its collection, the index could not be read, or reading it would cost more
+    /// than a request may fetch. Asked only where at least `min_partitions_for_index` are
+    /// left, fewer being cheaper to read than to look up.
+    ///
+    /// Beside the partitions, what the index lookups read, which the scan reports with its own.
+    async fn indexed(
+        &self,
+        cells: Vec<HatsPartition>,
+        filters: &[Expr],
+    ) -> (Vec<HatsPartition>, u64) {
+        if cells.len() < self.limits.min_partitions_for_index {
+            return (cells, 0);
+        }
         let Some(physical) = self.physical(filters) else {
-            return cells.to_vec();
+            return (cells, 0);
         };
         let mut chosen: Option<HashSet<(u8, u64)>> = None;
+        let mut bytes_read = 0;
         for guarantee in LiteralGuarantee::analyze(&physical) {
             if guarantee.guarantee != Guarantee::In {
                 continue;
             }
             let Some(found) = self
                 .catalog
-                .indexed_partitions(&guarantee.column.name, &guarantee.literals, &self.data)
+                .indexed_partitions(
+                    &guarantee.column.name,
+                    &guarantee.literals,
+                    &self.data,
+                    self.limits.max_index_bytes,
+                )
                 .await
             else {
                 continue;
             };
+            bytes_read += found.bytes_read;
             chosen = Some(match chosen {
-                None => found,
-                Some(before) => before.intersection(&found).copied().collect(),
+                None => found.cells,
+                Some(before) => before.intersection(&found.cells).copied().collect(),
             });
         }
         match chosen {
-            None => cells.to_vec(),
-            Some(chosen) => cells
-                .iter()
-                .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
-                .cloned()
-                .collect(),
+            None => (cells, bytes_read),
+            Some(chosen) => (
+                cells
+                    .into_iter()
+                    .filter(|cell| chosen.contains(&(cell.order, cell.pixel)))
+                    .collect(),
+                bytes_read,
+            ),
         }
     }
 
@@ -292,8 +318,8 @@ impl TableProvider for HatsTable {
             .partitions()
             .await
             .map_err(|error| DataFusionError::Plan(error.to_string()))?;
-        let candidates = self.indexed(listed.cells(), filters).await;
-        let partitions = self.reached(&candidates, filters)?;
+        let reached = self.reached(listed.cells(), filters)?;
+        let (partitions, index_bytes) = self.indexed(reached, filters).await;
         // The planning session, which each partition's own scan is planned in too. It is the
         // only `Session` DataFusion builds, so anything else reaching here is a context this
         // table was never registered in.
@@ -309,6 +335,7 @@ impl TableProvider for HatsTable {
             data: self.data.clone(),
             table_schema: Arc::clone(&self.schema),
             partitions,
+            index_bytes,
             projection: projection.cloned(),
             filters: filters.to_vec(),
             limit,

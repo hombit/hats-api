@@ -23,7 +23,7 @@ use crate::error::ApiError;
 use crate::storage::{RemoteDir, RemoteFile};
 
 use super::cache::{CatalogCache, Part, Slot, Slots, Value, mismatched};
-use super::index::IndexLayout;
+use super::index::{IndexLayout, Lookup};
 use super::partitions::{
     self, COMMON_METADATA, DATA_THUMBNAIL, DATASET_DIR, HatsPartition, HatsPartitionList,
 };
@@ -439,18 +439,21 @@ impl HatsCatalog {
         }
     }
 
-    /// The partitions holding any of `values` of `column`, by the collection's index on it.
+    /// The partitions holding any of `values` of `column`, by the collection's index on it, and
+    /// what asking cost.
     ///
-    /// `None` wherever there is no index to ask — a catalog named outside its collection, or
-    /// a column no index covers — and wherever the index cannot be read, which is logged: every
-    /// partition is then a candidate, as it is for a catalog with no index at all. The same
-    /// rows come back either way; what the index changes is how many partitions are opened.
-    pub async fn indexed_partitions(
+    /// `None` wherever the index is not used: there is none to ask — a catalog named outside its
+    /// collection, or a column no index covers — it cannot be read, which is logged, or reading
+    /// it could cost more than `max_bytes`. Every partition is then a candidate, as it is for a
+    /// catalog with no index at all. The same rows come back either way; what the index changes
+    /// is how many partitions are opened.
+    pub(crate) async fn indexed_partitions(
         &self,
         column: &str,
         values: &HashSet<ScalarValue>,
         data: &DataFiles,
-    ) -> Option<HashSet<(u8, u64)>> {
+        max_bytes: u64,
+    ) -> Option<Lookup> {
         let (collection, root) = (self.collection()?, self.collection_dir.as_ref()?);
         let listed = collection
             .indexes()
@@ -478,7 +481,7 @@ impl HatsCatalog {
             let Some(Value::Index(layout)) = slot.value() else {
                 return Err(mismatched(part));
             };
-            layout.partitions_for(&dir, values).await
+            layout.partitions_for(&dir, values, max_bytes).await
         };
         looked_up
             .await
@@ -486,6 +489,7 @@ impl HatsCatalog {
                 tracing::warn!(%error, column, "cannot use a collection's index; reading every partition");
             })
             .ok()
+            .flatten()
     }
 
     async fn find_position(&self, data: &DataFiles, ra: &str, dec: &str) -> Option<(f64, f64)> {
