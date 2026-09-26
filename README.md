@@ -1071,8 +1071,9 @@ max_catalog_cache_bytes = "256 MiB"  # one budget, shared by every catalog
 ```
 
 Nothing asks the store whether a catalog changed, so a republished catalog is answered as
-it was until its lifetime is over. A `[[mount]]` sets its own with
-`catalog_cache_seconds`; a URL a caller names gets the `[limits]` value. A catalog is kept
+it was until its lifetime is over. A `[[mount]]` may set a different lifetime
+for the catalogs under it, with its own `catalog_cache_seconds`; a catalog at a URL a caller
+names is kept for the `[limits]` lifetime. A catalog is kept
 under its URL and the storage options it was read with, so a request with other
 credentials never reads what someone else's did.
 
