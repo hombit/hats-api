@@ -178,6 +178,9 @@ async fn main() -> ExitCode {
         });
     }
 
+    // In the background: the service answers before any of them has been read.
+    app::warm(&service);
+
     tracing::info!(
         %listen_addr,
         allows = %service.policy.allowed_schemes().join(", "),

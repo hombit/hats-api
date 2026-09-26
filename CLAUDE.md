@@ -56,7 +56,8 @@ output/   an answer written out: json, dsv, votable, parquet
 app/      the HTTP surface: the service and router (service), the file-server mode (files),
           what every body shares (request), what every answer carries (answer), one module
           per route under routes/ — with routes/tap/ for the IVOA resources — the directory
-          page (listing) and the API description (openapi/)
+          page (listing), the API description (openapi/), and reading the published
+          catalogs into the cache ahead of time (warm)
 ```
 
 `config`, `error` and `logging` stay at the top, being everyone's.
