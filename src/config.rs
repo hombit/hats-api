@@ -301,10 +301,9 @@ pub struct LimitsConfig {
     /// from whichever discovery source answered, so this is checked and refused without a
     /// single byte of data fetched. The other two can only be watched as they accumulate.
     pub max_partitions: usize,
-    /// How many partitions a statement must still reach, after its region, before a
-    /// collection's index is asked which of them hold the values it looks up. It may be from
-    /// 1 to the smaller of the two partition bounds, `[limits] max_partitions` and
-    /// `[tap.async.limits] max_partitions`, and absent is that smaller bound.
+    /// A statement uses a collection's index only where its region leaves at least this many
+    /// partitions. From 1 to the smaller of `[limits]` and `[tap.async.limits]`
+    /// `max_partitions`, which is also the default.
     pub min_partitions_for_index: Option<usize>,
     /// How many bytes of data one request may fetch from the store, across every partition.
     ///

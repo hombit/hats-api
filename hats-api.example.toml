@@ -213,10 +213,9 @@ max_partitions = 128
 max_bytes_fetched = "10GiB"
 max_rows = 1000000
 
-# How many partitions an ADQL or TAP query must still reach, after its region, before a
-# collection's index is used to find which of them hold the values it looks up. It may be
-# from 1 to the smaller of the two partition bounds, [limits] max_partitions and
-# [tap.async.limits] max_partitions, and absent is that smaller bound.
+# An ADQL or TAP query uses a collection's index only where its region leaves at least this
+# many partitions. From 1 to the smaller of [limits] and [tap.async.limits] max_partitions,
+# which is also the default.
 # min_partitions_for_index = 16
 
 # How much memory one ADQL statement's own working set may take — a join's hash table, an
