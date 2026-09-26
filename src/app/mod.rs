@@ -11,6 +11,8 @@ mod routes;
 mod service;
 #[cfg(test)]
 mod testing;
+mod warm;
 
 pub use routes::tap::Jobs;
 pub use service::{Service, health_schema, router, router_with};
+pub use warm::warm;

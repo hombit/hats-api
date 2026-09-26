@@ -137,6 +137,7 @@ impl Catalogs {
         CatalogCache {
             catalogs: self.clone(),
             lifetime,
+            renew: false,
         }
     }
 }
@@ -147,12 +148,32 @@ impl Catalogs {
 pub struct CatalogCache {
     catalogs: Catalogs,
     lifetime: Lifetime,
+    renew: bool,
 }
 
 impl CatalogCache {
     /// Nothing kept past the request, for a test or a caller with no cache to hand.
     pub fn off() -> Self {
         Catalogs::new(0).with_lifetime(Lifetime::Off)
+    }
+
+    pub fn lifetime(&self) -> Lifetime {
+        self.lifetime
+    }
+
+    /// The same cache, reading a catalog's properties again whether or not they are held.
+    ///
+    /// What is read replaces what was held only once the read has succeeded, and under a new
+    /// generation, so every other part is read again with it. Until then requests go on being
+    /// answered from what was there — which is what lets a catalog be refreshed before it
+    /// expires rather than after, with no request finding it gone. A read that fails leaves
+    /// the old one to expire on its own.
+    #[must_use]
+    pub fn renewed(&self) -> Self {
+        Self {
+            renew: true,
+            ..self.clone()
+        }
     }
 
     /// Where one catalog's parts are held, and the anchor they all belong to.
@@ -164,6 +185,8 @@ impl CatalogCache {
                 url: Arc::from(dir.url.as_str()),
                 built_with: dir.built_with(),
                 lifetime,
+                renew: self.renew,
+
                 anchor: std::sync::OnceLock::new(),
             },
         }
@@ -329,6 +352,8 @@ pub(super) enum Slots {
         url: Arc<str>,
         built_with: Fingerprint,
         lifetime: Lifetime,
+        /// Whether the anchor is read afresh rather than found — see [`CatalogCache::renewed`].
+        renew: bool,
         /// The anchor's slot, once found, which is where every other part's generation and
         /// deadline come from.
         anchor: std::sync::OnceLock<Arc<Slot>>,
@@ -353,6 +378,7 @@ impl Slots {
                 url,
                 built_with,
                 lifetime,
+                renew,
                 anchor,
             } => {
                 let key = |generation| Key {
@@ -363,11 +389,17 @@ impl Slots {
                 };
                 if part == Part::Anchor {
                     let key = key(0);
-                    let slot = catalogs.shared.slots.get_with(key.clone(), || {
+                    let fresh = || {
                         let generation =
                             catalogs.shared.generations.fetch_add(1, Ordering::Relaxed);
                         Arc::new(Slot::new(lifetime.deadline(Instant::now()), generation))
-                    });
+                    };
+                    // Renewing makes a slot the cache does not hold yet: `filled` puts it in,
+                    // over the old one, only once it holds something.
+                    let slot = match renew {
+                        true => fresh(),
+                        false => catalogs.shared.slots.get_with(key.clone(), fresh),
+                    };
                     return Ok((slot, Some(key)));
                 }
                 let anchor = anchor.get().ok_or_else(|| {

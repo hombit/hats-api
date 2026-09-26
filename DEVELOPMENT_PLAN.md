@@ -42,8 +42,8 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 6.5 | request cost benchmark | todo | ranks the layers after the first two, which are justified by what is already measured |
 | 6 | caching | in progress | |
 | 6.1a | HATS catalog metadata layer | done | `hats/cache.rs`; one entry per part of a catalog, keyed by url and a fingerprint of the options |
-| 6.1b | parquet file metadata layer | todo | next |
-| 6.7 | warming the cache with known catalogs | todo | after §6.1b |
+| 6.1b | parquet file metadata layer | todo | not now; see §6.1 for what DataFusion's own cache already does |
+| 6.7 | warming the cache with known catalogs | done | `app/warm.rs`; the TAP tables at startup, and again at nine tenths of their lifetime |
 | 7 | operational surface | todo | |
 | 10.2 | `box` renamed `zone` | done | |
 | 10.1 | the ADQL request shape | todo | |
@@ -196,6 +196,17 @@ whose only accessor is `as_any`, and the concrete type lives in
 that crate as a direct dependency, version-locked the way `object_store` already is. Decide
 that here rather than paying it for one call site.
 
+**DataFusion's cache already validates, and its key is too narrow to share.** An entry is
+checked against the object's current size and last-modified time, which DataFusion has from
+a `HEAD` it makes on every query anyway, so a shared footer cache cannot go stale and needs
+no lifetime. But it lives in each request's `RuntimeEnv` and is keyed by the
+`object_store::Path` alone — no bucket, no host — so sharing it across requests needs it
+scoped to one store and one `Fingerprint`. The cheapest such scope is a catalog: a footer
+cache kept as one more part of a `HatsCatalog` and handed to the context of a request that
+reads that catalog alone, with a byte limit of its own since the catalog cache cannot weigh
+it as it grows. A context reading two catalogs keeps a cache of its own. Once built,
+`app/warm.rs` reads the published tables' footers too.
+
 The range-support verdict is keyed by object, not by host — one server hands back static
 files that range and generated responses that do not. It saves only the probe on a second
 read, and the probe is also the transfer for a non-ranging object, so it is the last of
@@ -237,15 +248,6 @@ layers in the order it ranks them. `tests/engine.rs` is the harness and already 
 requests, which is what settled the duplicate footer above; what it does not do is
 attribute *time* to each stage, and its numbers are against a local file, so they are the
 floor. The ranking needs an origin with latency in it.
-
-### 6.7 Warming the cache with known catalogs
-
-After startup, in the background, read what the catalog and parquet layers hold for every
-`[[tap.table]]`, so the first client does not pay for it. Startup is not blocked on it and
-does not fail for it: a table that cannot be read is logged and left to the first request,
-which gets the refusal it would have got anyway. The TAP tables only — no discovery of
-catalogs under the mounts. A catalog whose mount keeps nothing is not warmed, there being
-nowhere to put what is read.
 
 ## 7. Phase 6 — operational surface
 
