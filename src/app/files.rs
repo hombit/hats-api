@@ -686,6 +686,7 @@ impl FileQuery {
             projection,
             predicate,
             spatial,
+            narrowing: None,
             limit,
         })
     }
@@ -971,7 +972,7 @@ async fn query_catalog(
     // operator's and no part of what the caller wrote.
     let hide_the_path = |error: ApiError| hide.apply(error);
 
-    let search = Search::resolve(
+    let mut search = Search::resolve(
         dir,
         selection.regions,
         service.catalog_limits,
@@ -979,6 +980,14 @@ async fn query_catalog(
     )
     .await
     .map_err(hide_the_path)?;
+    search
+        .consult_indexes(
+            &selection,
+            mount.data_files(),
+            service.sql_limits,
+            service.catalog_limits,
+        )
+        .await;
     // Each partition's rows leave as it lands, in the catalog's own order. The bound that is
     // known before anything is read is still taken first — a url has no work list to answer
     // with, so it is the same refusal the collected path gives rather than a `422` carrying

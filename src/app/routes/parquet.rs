@@ -165,6 +165,7 @@ impl ParquetQuery {
             projection: projection_of(self.columns.as_deref()),
             predicate: predicate_of(self.filters.as_deref()),
             spatial: self.spatial()?,
+            narrowing: None,
             limit: self.limit,
         })
     }

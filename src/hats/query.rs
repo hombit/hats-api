@@ -19,6 +19,11 @@ use std::sync::{Arc, OnceLock};
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
+use datafusion::common::DFSchema;
+use datafusion::execution::context::ExecutionProps;
+use datafusion::logical_expr::Expr;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
+use datafusion::physical_expr::{PhysicalExpr, create_physical_expr};
 use futures::stream::{self, Stream};
 use futures::{StreamExt, future};
 
@@ -29,7 +34,7 @@ use crate::engine::query::{
 };
 use crate::engine::sql;
 use crate::error::ApiError;
-use crate::hats::{CatalogCache, HatsCatalog, HatsPartition, HatsPartitionList};
+use crate::hats::{CatalogCache, HatsCatalog, HatsPartition, HatsPartitionList, index};
 use crate::sky::healpix::{Cover, Coverage, Detail};
 use crate::sky::region::{self, Healpix, Region, Spatial};
 use crate::storage::{RemoteDir, RemoteFile};
@@ -52,6 +57,9 @@ pub struct CatalogLimits {
     /// How many partitions are read at once. Not a bound — a performance setting, and the
     /// reason the two accumulating bounds overshoot rather than stop dead.
     pub max_concurrent_partitions: usize,
+    /// How many partitions a request must still reach, after its region, for a collection's
+    /// index to be asked. Below it the partitions are few enough to read without asking.
+    pub min_partitions_for_index: usize,
 }
 
 /// Which bound stopped a request, and the two numbers it turned on.
@@ -108,6 +116,9 @@ impl From<&LimitsConfig> for CatalogLimits {
             max_bytes_fetched: config.max_bytes_fetched.as_u64(),
             max_rows: config.max_rows,
             max_concurrent_partitions: config.max_concurrent_partitions,
+            min_partitions_for_index: config
+                .min_partitions_for_index
+                .unwrap_or(config.max_partitions),
         }
     }
 }
@@ -352,6 +363,11 @@ pub struct Search {
     /// reads a position out of a row.
     columns: Option<Columns>,
     chosen: Vec<Chosen>,
+    /// A filter on the HEALPix column from the cells of the rows a collection's index found,
+    /// for every partition's own read. See [`Self::consult_indexes`].
+    narrowing: Option<Expr>,
+    /// What the index lookups fetched, which is part of what the request read.
+    index_bytes: u64,
 }
 
 impl Search {
@@ -404,7 +420,92 @@ impl Search {
             partitions,
             columns,
             chosen,
+            narrowing: None,
+            index_bytes: 0,
         })
+    }
+
+    /// Leave only the partitions the collection's index catalogs name, for a predicate that
+    /// says which values of an indexed column it wants.
+    ///
+    /// **The rows route's and not the plan's.** A plan is the work a request would take, said
+    /// without doing any of it, and asking an index is reading one: so the plan route keeps
+    /// every partition the region reaches, each entry carrying the caller's filter, and this is
+    /// called only where the rows are about to be read.
+    ///
+    /// **It narrows and never refuses.** An index that is not there, cannot be read or would
+    /// cost more than [`CatalogLimits::max_bytes_fetched`] leaves the chosen list as it was, and
+    /// the same rows come back from reading more partitions. So does a predicate that will not
+    /// plan against the catalog's schema — reading a partition is what then says why.
+    ///
+    /// Asked only where at least [`CatalogLimits::min_partitions_for_index`] partitions are
+    /// chosen, fewer being cheaper to read than to look up — and before
+    /// [`Self::too_many_partitions`], since a request the index narrows to a few partitions is
+    /// one that reads a few.
+    ///
+    /// Where the index carries the catalog's HEALPix column, the cells of the rows it found
+    /// also become a filter on that column for each partition's own read, so its row groups
+    /// are pruned the way a cone's are rather than all read for one id.
+    pub async fn consult_indexes(
+        &mut self,
+        selection: &CatalogSelection<'_>,
+        data: &DataFiles,
+        limits: sql::Limits,
+        bounds: CatalogLimits,
+    ) {
+        // A `limit` of zero reads no partition, so there is nothing for an index to spare.
+        if matches!(selection.predicate, Predicate::All)
+            || selection.limit == Some(0)
+            || self.chosen.len() < bounds.min_partitions_for_index
+            || self.catalog.collection().is_none()
+        {
+            return;
+        }
+        let Ok(schema) = self.catalog.schema(data).await else {
+            return;
+        };
+        let Some(physical) = physical_predicate(&schema, selection.predicate, limits) else {
+            return;
+        };
+        // The catalog's name for it, else the one a file can be recognised by — checked
+        // against the schema, since a narrowing on a column the files have not got would fail
+        // every read rather than prune one.
+        let healpix = self
+            .catalog
+            .properties()
+            .healpix_column()
+            .ok()
+            .and_then(|(name, _)| schema.field_with_name(name).ok());
+        let Some(found) = self
+            .catalog
+            .indexed_cells(
+                &physical,
+                data,
+                bounds.max_bytes_fetched,
+                healpix.map(|field| field.name().as_str()),
+            )
+            .await
+        else {
+            return;
+        };
+        let before = self.chosen.len();
+        self.chosen.retain(|chosen| {
+            found
+                .cells
+                .contains(&(chosen.partition.order, chosen.partition.pixel))
+        });
+        self.index_bytes = found.bytes_read;
+        self.narrowing = found.healpix.zip(healpix).and_then(|(values, field)| {
+            index::healpix_filter(field.name(), field.data_type(), &values)
+        });
+        tracing::info!(
+            url = %self.catalog.dir().url,
+            before,
+            after = self.chosen.len(),
+            index_bytes = self.index_bytes,
+            index_cells = self.narrowing.is_some(),
+            "catalog index"
+        );
     }
 
     pub fn catalog(&self) -> &HatsCatalog {
@@ -519,7 +620,7 @@ impl Search {
 
         let mut batches: Vec<RecordBatch> = Vec::new();
         let mut schema: Option<SchemaRef> = None;
-        let mut data_bytes_read = 0;
+        let mut data_bytes_read = self.index_bytes;
         let mut rows = 0;
         let mut partitions_read = 0;
         let mut source = None;
@@ -644,6 +745,16 @@ impl Search {
         });
 
         let limit = selection.limit;
+        let walk = Walk {
+            counted: Counted {
+                data_bytes_read: search.index_bytes,
+                ..Counted::default()
+            },
+            done: false,
+        };
+        streamed
+            .data_bytes_read
+            .store(search.index_bytes, Ordering::Relaxed);
         let concurrency = bounds.max_concurrent_partitions.max(1);
         // **A limit is what decides whether the order is still promised.** `buffered`
         // yields by position, so a partition that finished first waits for the ones the
@@ -692,7 +803,7 @@ impl Search {
         landing
             // `scan` rather than `take_while`: the partition that reaches the limit still
             // has rows to send, so the stop happens after them rather than instead of them.
-            .scan(Walk::default(), move |walk, read| {
+            .scan(walk, move |walk, read| {
                 if walk.done {
                     return future::ready(None);
                 }
@@ -721,6 +832,7 @@ impl Search {
                 // the others matched. It caps what one partition returns, and the total is
                 // trimmed once every partition is in.
                 limit: selection.limit,
+                narrowing: self.narrowing.as_ref(),
             };
             let result = query::run(&file, &per_file, limits, Order::Unspecified).await?;
             read.data_bytes_read += result.data_bytes_read;
@@ -895,6 +1007,7 @@ impl Search {
             projection: selection.projection,
             predicate: selection.predicate,
             spatial: self.spatial_for_schema(selection.regions),
+            narrowing: None,
             limit: Some(0),
         }
     }
@@ -979,6 +1092,30 @@ pub struct CatalogResult {
     /// One of the files read, for the parquet writer to copy a layout from. Absent where
     /// nothing was read at all.
     pub source: Option<RemoteFile>,
+}
+
+/// The caller's predicate as one physical expression over the catalog's schema, planned the
+/// way a partition's read plans it — or `None` where there is none, or it will not plan.
+fn physical_predicate(
+    schema: &SchemaRef,
+    predicate: Predicate<'_>,
+    limits: sql::Limits,
+) -> Option<Arc<dyn PhysicalExpr>> {
+    let state = query::session_context(false).state();
+    let df_schema = DFSchema::try_from(Arc::clone(schema)).ok()?;
+    let expr = match predicate {
+        Predicate::All => return None,
+        Predicate::Filters(text) => sql::filters(&state, &df_schema, text, limits),
+        Predicate::FilterText(text) => sql::filter_text(&state, &df_schema, text, limits),
+    }
+    .ok()?;
+    create_physical_expr(
+        &expr,
+        &df_schema,
+        &ExecutionProps::new(),
+        &PhysicalPlanningContext::default(),
+    )
+    .ok()
 }
 
 /// What the catalog says its own columns are.
@@ -1595,6 +1732,128 @@ pub(crate) mod tests {
             )
             .await?;
         Ok((search, outcome))
+    }
+
+    /// A collection's index leaves only the partitions holding the values a filter asks for,
+    /// and the rows are the ones reading every partition gives — collected or streamed, with
+    /// the index carrying the HEALPix column or not. What reading the index fetched is counted
+    /// in what the request read.
+    #[tokio::test]
+    async fn an_index_narrows_the_partitions_a_read_opens() {
+        let (one, other) = (first_id_in(2), first_id_in(0));
+        let data = DataFiles::new(&DataConfig::default().filenames).unwrap();
+        let sql_limits = sql::Limits::from(&LimitsConfig::default());
+        let bounds = CatalogLimits {
+            min_partitions_for_index: 1,
+            ..generous()
+        };
+        let resolved = async |dir: &Path| {
+            Search::resolve(opened(dir), None, bounds, &CatalogCache::off())
+                .await
+                .unwrap()
+        };
+        let collected = async |search: &Search, selection: &CatalogSelection<'_>| match search
+            .run(selection, &data, sql_limits, bounds)
+            .await
+            .unwrap()
+        {
+            Outcome::Rows(result) => *result,
+            Outcome::TooMuchWork(why) => panic!("unexpectedly refused: {why}"),
+        };
+        for healpix in [true, false] {
+            let dir = indexed_collection(false, healpix);
+            for filters in [
+                format!("id = {one}"),
+                format!("id IN ({one}, {other})"),
+                format!("id = {one} AND dec > -90"),
+            ] {
+                let selection = CatalogSelection {
+                    predicate: Predicate::Filters(&filters),
+                    ..CatalogSelection::default()
+                };
+                let whole = resolved(dir.path()).await;
+                let mut narrowed = resolved(dir.path()).await;
+                narrowed
+                    .consult_indexes(&selection, &data, sql_limits, bounds)
+                    .await;
+                assert!(
+                    narrowed.chosen().len() < whole.chosen().len(),
+                    "{healpix} {filters}"
+                );
+                assert!(narrowed.index_bytes > 0, "{healpix} {filters}");
+                assert_eq!(narrowed.narrowing.is_some(), healpix, "{filters}");
+
+                let (from_index, from_all) = (
+                    collected(&narrowed, &selection).await,
+                    collected(&whole, &selection).await,
+                );
+                assert!(!ids(&from_index).is_empty(), "{healpix} {filters}");
+                assert_eq!(ids(&from_index), ids(&from_all), "{healpix} {filters}");
+                assert!(from_index.partitions_read < from_all.partitions_read);
+                assert!(from_index.rows.data_bytes_read >= narrowed.index_bytes);
+
+                let streamed = Arc::new(Streamed::default());
+                let batches = narrowed
+                    .stream(
+                        (&selection).into(),
+                        data.clone(),
+                        sql_limits,
+                        bounds,
+                        Arc::clone(&streamed),
+                    )
+                    .collect::<Vec<_>>()
+                    .await;
+                let mut streamed_ids = Vec::new();
+                for batch in batches {
+                    let batch = batch.unwrap();
+                    let column = batch.column_by_name("id").unwrap();
+                    let column = column.as_any().downcast_ref::<Int64Array>().unwrap();
+                    streamed_ids.extend(column.iter().flatten());
+                }
+                streamed_ids.sort_unstable();
+                let mut expected = ids(&from_all);
+                expected.sort_unstable();
+                assert_eq!(streamed_ids, expected, "{healpix} {filters}");
+                assert_eq!(
+                    streamed.data_bytes_read(),
+                    from_index.rows.data_bytes_read,
+                    "{healpix} {filters}"
+                );
+            }
+        }
+    }
+
+    /// Below `min_partitions_for_index`, or with nothing in the filter an index can answer, the
+    /// index is not asked and every partition stays.
+    #[tokio::test]
+    async fn an_index_is_asked_only_where_it_can_pay() {
+        let dir = indexed_collection(false, true);
+        let data = DataFiles::new(&DataConfig::default().filenames).unwrap();
+        let sql_limits = sql::Limits::from(&LimitsConfig::default());
+        let one = first_id_in(2);
+        for (filters, min_partitions_for_index) in [
+            (format!("id = {one}"), CELLS.len() + 1),
+            (format!("id > {one}"), 1),
+            (format!("id = {one} OR dec > 0"), 1),
+        ] {
+            let bounds = CatalogLimits {
+                min_partitions_for_index,
+                ..generous()
+            };
+            let selection = CatalogSelection {
+                predicate: Predicate::Filters(&filters),
+                ..CatalogSelection::default()
+            };
+            let mut search =
+                Search::resolve(opened(dir.path()), None, bounds, &CatalogCache::off())
+                    .await
+                    .unwrap();
+            search
+                .consult_indexes(&selection, &data, sql_limits, bounds)
+                .await;
+            assert_eq!(search.chosen().len(), CELLS.len(), "{filters}");
+            assert_eq!(search.index_bytes, 0, "{filters}");
+        }
     }
 
     /// The rows a region search returns are the rows the region holds — no more, and none

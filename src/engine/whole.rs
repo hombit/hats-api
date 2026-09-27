@@ -66,8 +66,8 @@ pub fn answers_with_the_file(
     // Why a query ran is worth being able to ask, since the answer is the difference
     // between reading a footer and re-encoding a partition — and nothing in a correct
     // answer says which happened.
-    if selection.limit.is_some() || selection.spatial.is_some() {
-        tracing::debug!("a query: it narrows by a limit or a region");
+    if selection.limit.is_some() || selection.spatial.is_some() || selection.narrowing.is_some() {
+        tracing::debug!("a query: it narrows by a limit, a region or an index");
         return false;
     }
     let Some(schema) = file_schema(metadata) else {

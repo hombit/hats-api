@@ -282,6 +282,7 @@ pub async fn lookup(
             projection: columns.map_or(Projection::All, Projection::Columns),
             predicate: Predicate::Filters(&predicate),
             spatial: None,
+            narrowing: None,
             limit: None,
         },
     )

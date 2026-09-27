@@ -301,7 +301,7 @@ pub struct LimitsConfig {
     /// from whichever discovery source answered, so this is checked and refused without a
     /// single byte of data fetched. The other two can only be watched as they accumulate.
     pub max_partitions: usize,
-    /// A statement uses a collection's index only where its region leaves at least this many
+    /// A query uses a collection's index only where its region leaves at least this many
     /// partitions. From 1 to the smaller of `[limits]` and `[tap.async.limits]`
     /// `max_partitions`, which is also the default.
     pub min_partitions_for_index: Option<usize>,

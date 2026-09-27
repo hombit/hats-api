@@ -350,7 +350,7 @@ pub(in crate::app) async fn query_hats(
     refuse_unknown(&body.unknown, &CatalogQuery::takes())?;
     let params = body.lowered();
     let Opened {
-        search,
+        mut search,
         url,
         output,
     } = open_catalog(&service, &params).await?;
@@ -361,6 +361,16 @@ pub(in crate::app) async fn query_hats(
     };
 
     let selection = params.selection();
+    // Here and not in `open_catalog`, which the plan route shares: a plan says what a request
+    // would read without reading any of it, and an index is a read.
+    search
+        .consult_indexes(
+            &selection,
+            service.data_files_for(&url),
+            service.sql_limits,
+            service.catalog_limits,
+        )
+        .await;
     // Streamed, where the caller asked for it: each partition's rows leave as it lands,
     // so nothing here holds the answer and the body starts before the last partition is
     // read. The fan-out is the same fan-out — `max_concurrent_partitions` reads in flight,
@@ -1759,5 +1769,69 @@ mod tests {
         let (status, body) = ask_hats(service, serde_json::json!({"url": "file:///"})).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert!(body.contains("at most 2"), "{body}");
+    }
+
+    /// A filter on an indexed column is answered from the partitions the collection's index
+    /// names, so a request the partition bound refuses over the whole catalog is answered —
+    /// streamed and collected. The plan route asks no index: a plan says what a request would
+    /// read without reading anything, so it still names every partition.
+    #[tokio::test]
+    async fn the_rows_route_asks_the_index_and_the_plan_route_does_not() {
+        let dir = hats::query::tests::indexed_collection(false, true);
+        let one = hats::query::tests::first_id_in(2);
+        let limits = LimitsConfig {
+            max_partitions: 1,
+            min_partitions_for_index: Some(1),
+            ..LimitsConfig::default()
+        };
+        let service = || {
+            let mounts =
+                Arc::new(Mounts::new(&[serving(dir.path())], &DataConfig::default()).unwrap());
+            let policy = AccessPolicy::new(
+                &crate::config::AccessConfig::default(),
+                Arc::clone(&mounts),
+                None,
+            )
+            .unwrap();
+            Service::new(
+                policy,
+                &limits,
+                mounts,
+                &ApiConfig::default(),
+                &DataConfig::default(),
+                &crate::config::TapConfig::default(),
+                &ServerConfig::default(),
+            )
+            .unwrap()
+        };
+        let filters = format!("id = {one}");
+        for streaming in [false, true] {
+            let (status, body) = ask_hats(
+                service(),
+                serde_json::json!({"url": "file:///", "filters": filters, "streaming": streaming}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{streaming}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["rows"].as_array().unwrap().len(), 1, "{body}");
+            assert_eq!(answer["rows"][0]["id"], one, "{body}");
+        }
+
+        // A filter no index answers is still the whole catalog, and refused.
+        let (status, body) = ask_hats(
+            service(),
+            serde_json::json!({"url": "file:///", "filters": "dec > -90"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+
+        let (status, plan) = ask_plan(
+            service(),
+            "/api/v1/simple/hats/plan",
+            serde_json::json!({"url": "file:///", "filters": filters}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{plan}");
+        assert_eq!(plan["requests"].as_array().unwrap().len(), 4, "{plan}");
     }
 }

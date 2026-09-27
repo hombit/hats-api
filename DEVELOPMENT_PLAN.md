@@ -49,7 +49,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 10.1 | the ADQL request shape | todo | |
 | 10.3 | the statement planned, over parquet tables | done | every function ADQL makes mandatory is answered; the geometry it leaves optional is §10.7's |
 | 10.4 | HATS catalogs as tables | done | partitions pruned by `PruningPredicate` over each cell's span, not by recognising a region |
-| 10.9 | a collection's index catalogs | done | ADQL and TAP only; the `simple` routes still read every partition a region reaches |
+| 10.9 | a collection's index catalogs | done | every route that reads rows; the plan route names every partition the region reaches |
 | 10.5 | one large table and small ones | todo | |
 | 10.6 | two large catalogs | todo | a crossmatch is answered as a nested-loop join; this is making it an equijoin once the left row is expanded to cells, with three things to measure first |
 | 11.0 | the conformance suite | done | `pyvo` and STILTS `taplint` against a built service, in CI as a report rather than a gate. Written before any of §11, so none of it is tuned to what was built |

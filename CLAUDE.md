@@ -970,8 +970,13 @@ index catalogs a collection names in `all_indexes`.
 - **Files are chosen by `PruningPredicate` over each file's range, in passes of a few values.**
   Handed a long `IN` list at once it keeps every file; `a_lookup_reads_only_the_files_whose_range_holds_the_value`
   is what catches that. Row groups within the chosen files are DataFusion's to prune.
-- **The ADQL route's and TAP's, not the `simple` routes'.** `HatsTable::scan` is where it is
-  asked, before the statistics pruning of `reached`.
+- **Every route that reads rows asks it, and the plan route does not.** `HatsTable::scan` asks
+  it for a statement, after the statistics pruning of `reached`; `Search::consult_indexes` asks
+  it for the `simple` rows route and the file server's catalog query, after the region and
+  before `too_many_partitions`, so a lookup the index narrows to one partition is not refused
+  for the catalog it was written against. Both go through `HatsCatalog::indexed_cells`. A plan
+  is the work a request would take said without doing any, and reading an index is work, so
+  `open_catalog` — which the plan route shares — never asks it.
 - **Its layout is a part of the catalog**, kept under the same generation as the rest: the
   column's type and the value range of each index file, so a lookup reads only the files that
   can hold a value asked for.
