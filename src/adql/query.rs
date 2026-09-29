@@ -287,19 +287,24 @@ pub async fn plan(
                 };
                 ctx.register_parquet(reference.clone(), file.url.as_str(), options)
                     .await
-                    .map_err(|error| opening(&file.url, &error))?;
+                    .map_err(|error| opening(&file.url, error))?;
                 ctx.table_provider(reference)
                     .await
-                    .map_err(|error| opening(&file.url, &error))?
+                    .map_err(|error| opening(&file.url, error))?
                     .schema()
             }
             Source::Catalog(dir, cache) => {
                 let url = dir.url.clone();
-                let table =
-                    hats::table::HatsTable::open(&ctx, dir, data, limits.catalog, cache).await?;
+                // A local catalog's store names where the mount really is.
+                let table = hats::table::HatsTable::open(&ctx, dir, data, limits.catalog, cache)
+                    .await
+                    .map_err(|error| match url.to_file_path() {
+                        Ok(path) => error.from_mount(&path),
+                        Err(()) => error,
+                    })?;
                 let schema = TableProvider::schema(&table);
                 ctx.register_table(reference, Arc::new(table))
-                    .map_err(|error| opening(&url, &error))?;
+                    .map_err(|error| opening(&url, error))?;
                 schema
             }
             Source::Memory(provider) => {
@@ -562,15 +567,17 @@ fn refusal(error: &DataFusionError) -> ApiError {
 
 /// Opening one of the request's tables, which is a statement about that file rather than
 /// about the query.
-fn opening(url: &Url, error: &DataFusionError) -> ApiError {
-    let refusal = ApiError::bad_request(format!(
-        "tables: {url} could not be read as parquet: {}",
-        first_line(&error.to_string())
-    ));
-    // A local url resolved to a place on disk the caller did not write and must not be shown.
-    match url.to_file_path().ok() {
-        Some(path) => refusal.from_mount(&path),
-        None => refusal,
+///
+/// A local url is where the mount really is, which the caller did not write and must not be
+/// shown — in the sentence built here or in the store's own message — so the error goes to
+/// [`ApiError::from_mount`] whole rather than wrapped in a refusal it would pass through.
+fn opening(url: &Url, error: DataFusionError) -> ApiError {
+    match url.to_file_path() {
+        Ok(path) => ApiError::from(error).from_mount(&path),
+        Err(()) => ApiError::bad_request(format!(
+            "tables: {url} could not be read as parquet: {}",
+            first_line(&error.to_string())
+        )),
     }
 }
 
