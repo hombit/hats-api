@@ -422,10 +422,10 @@ statistics and bloom filters per column, so the answer round-trips through anyth
 reads the original. It carries the values above as themselves.
 
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
-`-Inf` written as themselves. A list of numbers or booleans is a VOTable array; a list of
-strings and a struct fail the request, as does a list of integers with a missing item, which
-a VOTable has no way to write unless the column came from an uploaded VOTable that declared a
-`VALUES null`.
+`-Inf` written as themselves. Lists are VOTable arrays; structs are refused. A list of
+strings is padded to one width, so a streamed answer refuses it unless it came from an
+uploaded VOTable. A missing integer or string inside a list fails the request, and so does a
+listed string ending in a blank.
 
 **`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
 `-inf` written as those three, which `float()` in Python reads back. Flat columns only.

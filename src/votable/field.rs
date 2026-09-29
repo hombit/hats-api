@@ -169,6 +169,23 @@ pub fn fixed_count(arraysize: &str) -> Option<usize> {
     }
 }
 
+/// What a two-dimensional character `arraysize` says: the width of one string, which is its
+/// first dimension, and how many strings a cell holds — `None` where that is variable.
+///
+/// `None` for any other `arraysize`: one dimension is one string, and a third says how the
+/// strings are grouped, which a list of them no longer carries.
+pub fn string_array(arraysize: &str) -> Option<(usize, Option<usize>)> {
+    let size = ArraySize::parse(arraysize)?;
+    let [width] = size.leading[..] else {
+        return None;
+    };
+    let strings = match size.last {
+        crate::votable::datatype::Last::Fixed(n) => Some(n),
+        crate::votable::datatype::Last::Variable => None,
+    };
+    Some((width, strings))
+}
+
 /// Whether an `arraysize` is one whose last dimension is variable.
 pub fn is_variable(arraysize: &str) -> bool {
     ArraySize::parse(arraysize)

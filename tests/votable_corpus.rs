@@ -92,7 +92,8 @@ fn every_document_in_the_corpus_reads_as_its_writer_wrote_it() {
 /// round trip of one table through two clients cannot be. Two things are one value on the way
 /// back, because an answer is TABLEDATA and TABLEDATA says them the same way (VOTable 1.5
 /// §5.5): an empty string and a null, and a zero-length array and a null. The one thing the
-/// writer refuses is a list of strings, which has no spelling yet; any other refusal fails.
+/// writer refuses is a list of strings holding one its padding would change; any other
+/// refusal fails.
 #[test]
 fn every_document_the_corpus_reads_writes_back_as_itself() {
     let mut found = Vec::new();
@@ -235,7 +236,14 @@ fn round_trip(document: &Path) -> Result<bool, String> {
     };
     let answer = match output::votable::encode(&result) {
         Ok(answer) => answer,
-        Err(_) if holds_a_list_of_strings(&first) => return Ok(false),
+        Err(refused)
+            if holds_a_list_of_strings(&first)
+                && refused
+                    .to_string()
+                    .contains("fixed-width strings cannot carry") =>
+        {
+            return Ok(false);
+        }
         Err(refused) => return Err(format!("the writer refused it: {refused}")),
     };
     let again = votable::read(answer.as_bytes())

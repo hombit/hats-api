@@ -64,7 +64,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. A job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
-| 11.11 | table upload | done | an array of strings from an upload is readable and not yet writable as VOTable, which is §7.5's |
+| 11.11 | table upload | done | |
 | 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half waits on §7.5 and nobody can be asked about it |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
@@ -295,7 +295,8 @@ VOSI asks the same question in the astronomy vocabulary and answers it already, 
 
 ### 7.5 A nested column in a VOTable
 
-`format=votable` answers a flat table and refuses a struct or a list column by name. The
+`format=votable` answers a flat table and a list of numbers, booleans or strings, and refuses
+a struct or a deeper list by name. The
 nested half is a set of decisions rather than a piece of code: the shape it lowers to is
 not in the standard, and every alternative puts a value in an answer that a reader cannot
 tell from a different value.
@@ -303,15 +304,17 @@ tell from a different value.
 The shape to follow is
 [this notebook](https://github.com/lincc-frameworks/notebooks_lf/blob/main/lsdb/busy_week_2025/VOTable-example-for-hats.ipynb):
 a `GROUP` carrying the column's name and a `FIELDref` per subfield, beside flat `FIELD`s
-named `diaSource.band`, each holding one row's whole array. Four things it does not settle.
+named `diaSource.band`, each holding one row's whole array. Three things it does not settle,
+and one the flat list of strings already has.
 
-- **An array of strings has no spelling.** VOTable's only form is `arraysize="8x*"` — a
-  variable number of *fixed-width* strings, space-padded — so the width has to be measured
-  over the answer first, and a value with real trailing spaces comes back trimmed. The
-  notebook hits this and leaves it. A band is the ordinary case, so this one blocks the rest.
+- **An array of strings is fixed-width strings.** `arraysize="Wx*"`, blank-padded, with `W`
+  the upload's own where it declared one and measured over the answer otherwise — so a
+  document written as its rows arrive refuses a field whose width it cannot measure, and a
+  `GROUP`'s string fields inherit that. A string the padding would change — a trailing blank,
+  a null, an empty one a trimmed cell would drop — refuses the answer.
 - **A null inside an array.** A float has `NaN` and a boolean has `?`. An integer has only
   `VALUES`'s `null`, a magic value a real measurement can equal, so it needs a pass to find
-  one nothing uses and a refusal when there is none. A string has nothing at all.
+  one nothing uses and a refusal when there is none. A string has nothing, and is refused.
 - **Both arrow shapes are one VOTable.** `List<Struct<…>>` and `Struct<List<…>, …>` — which
   is what nested-pandas writes — produce the same `GROUP`. Writing them as two cases is how
   they come to disagree about a null at the struct level, which belongs to neither field.
