@@ -287,14 +287,7 @@ impl Walker<'_> {
                 }
             }
             "INFO" => {
-                let failed = get("name").as_deref() == Some("QUERY_STATUS")
-                    && get("value").is_some_and(|value| value.eq_ignore_ascii_case("ERROR"));
-                if failed {
-                    let said = match empty {
-                        true => String::new(),
-                        false => self.text_until_end("INFO")?,
-                    };
-                    self.error = Some(said);
+                if self.failed(&attributes, empty)? {
                     return Ok(None);
                 }
             }
@@ -317,6 +310,27 @@ impl Walker<'_> {
             self.stack.push(name.to_owned());
         }
         Ok(None)
+    }
+
+    /// Whether an `INFO` says the query that produced the document failed. Where it does,
+    /// what it says is kept, read through its end.
+    fn failed(&mut self, attributes: &[(String, String)], empty: bool) -> Result<bool, String> {
+        let get = |key: &str| {
+            attributes
+                .iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        let failed = get("name") == Some("QUERY_STATUS")
+            && get("value").is_some_and(|value| value.eq_ignore_ascii_case("ERROR"));
+        if failed {
+            let said = match empty {
+                true => String::new(),
+                false => self.text_until_end("INFO")?,
+            };
+            self.error = Some(said);
+        }
+        Ok(failed)
     }
 
     fn closed(&mut self, name: &str) -> Result<(), String> {
@@ -402,17 +416,27 @@ impl Walker<'_> {
                                         BINARY2"
                                 .to_owned());
                         }
-                        // An `INFO` may follow the serialization; anything else is skipped.
+                        // An `INFO` may follow the serialization, and may be where a service
+                        // says the query failed after the rows it had.
+                        "INFO" => {
+                            if !self.failed(&attributes(&element)?, false)? {
+                                self.skip("INFO")?;
+                            }
+                        }
                         other => self.skip(other)?,
                     }
                 }
-                Event::Empty(element) => {
-                    if local(&element) == "FITS" {
+                Event::Empty(element) => match local(&element) {
+                    "FITS" => {
                         return Err("this VOTable carries its rows as FITS, which this service \
                                     does not read; send TABLEDATA, BINARY or BINARY2"
                             .to_owned());
                     }
-                }
+                    "INFO" => {
+                        self.failed(&attributes(&element)?, true)?;
+                    }
+                    _ => {}
+                },
                 Event::End(_) => return Ok(batches),
                 Event::Eof => return Err("the document ends inside its DATA".to_owned()),
                 _ => {}
@@ -460,14 +484,13 @@ impl Walker<'_> {
                     self.row(builders, rows)?;
                     pending += 1;
                 }
+                // A table always has a column, `builders` refusing one with none.
                 Event::Empty(element) if local(&element) == "TR" => {
-                    rows += 1;
-                    if !builders.is_empty() {
-                        return Err(format!(
-                            "row {rows} has no cells, and the table has {} columns",
-                            builders.len()
-                        ));
-                    }
+                    return Err(format!(
+                        "row {} has no cells, and the table has {} columns",
+                        rows + 1,
+                        builders.len()
+                    ));
                 }
                 Event::Start(element) | Event::Empty(element) => {
                     return Err(format!(
@@ -899,6 +922,7 @@ fn declared_encoding(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use datafusion::arrow::array::{Array, AsArray};
+    use datafusion::arrow::compute::concat_batches;
     use datafusion::arrow::datatypes::{DataType, Float32Type, Int16Type, Int32Type};
 
     use super::*;
@@ -917,7 +941,7 @@ mod tests {
 
     fn one(text: &str) -> RecordBatch {
         let table = read(text.as_bytes()).unwrap();
-        datafusion::arrow::compute::concat_batches(&table.schema, &table.batches).unwrap()
+        concat_batches(&table.schema, &table.batches).unwrap()
     }
 
     /// The same rows three ways, each of which has to read back as the same arrays.
@@ -1176,6 +1200,274 @@ mod tests {
         assert!(refused.is_err(), "{:?}", refused.map(|table| table.schema));
     }
 
+    /// A document around a single column of `field`, with `data` inside its `DATA`.
+    fn single(field: &str, data: &str) -> String {
+        format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA>{data}</DATA></TABLE></RESOURCE></VOTABLE>")
+    }
+
+    fn refused(document: &str) -> String {
+        match read(document.as_bytes()) {
+            Ok(table) => panic!("{document} was read: {table:?}"),
+            Err(said) => said,
+        }
+    }
+
+    /// More rows than one batch holds come back as several batches, in order, from every
+    /// serialization.
+    #[test]
+    fn a_table_longer_than_a_batch_is_read_in_batches() {
+        let count = BATCH_ROWS + 3;
+        let field = "<FIELD name=\"n\" datatype=\"int\"/>";
+        let rows: String = (0..count)
+            .map(|n| format!("<TR><TD>{n}</TD></TR>"))
+            .collect();
+        let stream = (0..count)
+            .flat_map(|n| i32::try_from(n).unwrap().to_be_bytes())
+            .collect::<Vec<_>>();
+        let binary = general_purpose::STANDARD.encode(&stream);
+        let flagged = (0..count)
+            .flat_map(|n| {
+                let mut row = vec![0u8];
+                row.extend(i32::try_from(n).unwrap().to_be_bytes());
+                row
+            })
+            .collect::<Vec<_>>();
+        let binary2 = general_purpose::STANDARD.encode(&flagged);
+        for data in [
+            format!("<TABLEDATA>{rows}</TABLEDATA>"),
+            format!("<BINARY><STREAM encoding=\"base64\">{binary}</STREAM></BINARY>"),
+            format!("<BINARY2><STREAM encoding=\"base64\">{binary2}</STREAM></BINARY2>"),
+        ] {
+            let table = read(single(field, &data).as_bytes()).unwrap();
+            let sizes: Vec<usize> = table.batches.iter().map(RecordBatch::num_rows).collect();
+            assert_eq!(sizes, [BATCH_ROWS, 3]);
+            let batch = concat_batches(&table.schema, &table.batches).unwrap();
+            let values = batch.column(0).as_primitive::<Int32Type>();
+            assert!(
+                values
+                    .values()
+                    .iter()
+                    .zip(0..)
+                    .all(|(value, n)| *value == n)
+            );
+        }
+    }
+
+    /// A `DATA` with nothing in it, and a `STREAM` with nothing in it, are a table of no
+    /// rows rather than a refusal.
+    #[test]
+    fn an_empty_data_or_stream_is_a_table_of_no_rows() {
+        let field = "<FIELD name=\"n\" datatype=\"int\"/>";
+        for document in [
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA/></TABLE></RESOURCE></VOTABLE>"),
+            single(field, "<BINARY><STREAM encoding=\"base64\"/></BINARY>"),
+            single(
+                field,
+                "<BINARY2><STREAM encoding=\"base64\"></STREAM></BINARY2>",
+            ),
+            single(field, "<TABLEDATA/>"),
+        ] {
+            let table = read(document.as_bytes()).unwrap();
+            assert_eq!(table.schema.fields().len(), 1, "{document}");
+            assert_eq!(
+                table
+                    .batches
+                    .iter()
+                    .map(RecordBatch::num_rows)
+                    .sum::<usize>(),
+                0,
+                "{document}"
+            );
+        }
+    }
+
+    /// A `TABLE` with no `DATA` is still the table where no other has one, and a `TABLE`
+    /// with neither fields nor data has no columns to answer with.
+    #[test]
+    fn a_table_with_no_data_answers_with_its_columns_or_is_refused() {
+        let table = read(
+            b"<VOTABLE><RESOURCE><TABLE ID=\"t\"><FIELD name=\"a\" datatype=\"int\"/></TABLE>\
+              <TABLE ref=\"t\"/></RESOURCE></VOTABLE>",
+        )
+        .unwrap();
+        assert_eq!(table.schema.field(0).name(), "a");
+        assert!(table.batches.is_empty());
+
+        let said = refused("<VOTABLE><RESOURCE><TABLE/></RESOURCE></VOTABLE>");
+        assert!(said.contains("declares no FIELD"), "{said}");
+        let said = refused("<VOTABLE><RESOURCE><TABLE ref=\"t\"/></RESOURCE></VOTABLE>");
+        assert!(said.contains("names no TABLE"), "{said}");
+        let said = refused("<VOTABLE><RESOURCE/></VOTABLE>");
+        assert!(said.contains("holds no TABLE"), "{said}");
+    }
+
+    /// Each way a document can be other than what its `FIELD`s declare is refused, and the
+    /// refusal says which.
+    #[test]
+    fn a_document_that_contradicts_itself_is_refused_saying_how() {
+        let int = "<FIELD name=\"n\" datatype=\"int\"/>";
+        let pairs = "<FIELD name=\"p\" datatype=\"short\" arraysize=\"2x*\"/>";
+        let stream = |bytes: &[u8]| {
+            format!(
+                "<BINARY><STREAM encoding=\"base64\">{}</STREAM></BINARY>",
+                general_purpose::STANDARD.encode(bytes)
+            )
+        };
+        let mut two_pairs = Vec::new();
+        for _ in 0..2 {
+            two_pairs.extend(2u32.to_be_bytes());
+            two_pairs.extend([0, 1, 0, 2]);
+        }
+        let cases = [
+            (single(int, "<TABLEDATA><TR/></TABLEDATA>"), "has no cells"),
+            (
+                single(int, "<TABLEDATA><TR><TD>1</TD><TD>2</TD></TR></TABLEDATA>"),
+                "more cells",
+            ),
+            (
+                single(int, "<TABLEDATA><TR></TR></TABLEDATA>"),
+                "has 0 cells",
+            ),
+            (
+                single(
+                    int,
+                    "<TABLEDATA><TR><TD encoding=\"base64\">AAAAAQ==</TD></TR></TABLEDATA>",
+                ),
+                "encoding",
+            ),
+            (
+                single(int, "<TABLEDATA><TR><TD><B>1</B></TD></TR></TABLEDATA>"),
+                "only text",
+            ),
+            (single(int, "<TABLEDATA><TD>1</TD></TABLEDATA>"), "only TR"),
+            (
+                single(int, "<TABLEDATA><TR><B/></TR></TABLEDATA>"),
+                "only TD",
+            ),
+            (
+                single(int, "<TABLEDATA><TR><TD>x</TD></TR></TABLEDATA>"),
+                "row 1, column n",
+            ),
+            (single(int, "<FITS/>"), "FITS"),
+            (
+                single(int, "<FITS><STREAM href=\"x.fits\"/></FITS>"),
+                "FITS",
+            ),
+            (single(int, "<BINARY><TD/></BINARY>"), "only STREAM"),
+            (
+                single(int, "<BINARY><STREAM>AAAAAQ==</STREAM></BINARY>"),
+                "base64",
+            ),
+            (
+                single(
+                    int,
+                    "<BINARY2><STREAM encoding=\"gzip\">AAAAAQ==</STREAM></BINARY2>",
+                ),
+                "gzip",
+            ),
+            (
+                single(
+                    int,
+                    "<BINARY><STREAM encoding=\"base64\">%%%%</STREAM></BINARY>",
+                ),
+                "not base64",
+            ),
+            (single(int, &stream(&[0, 0, 1])), "row 1, column n"),
+            (
+                single(
+                    "<FIELD name=\"none\" datatype=\"int\" arraysize=\"0\"/>",
+                    &stream(&[0]),
+                ),
+                "takes no bytes",
+            ),
+            (
+                format!(
+                    "<VOTABLE><RESOURCE><TABLE nrows=\"3\">{pairs}<DATA>{}</DATA></TABLE>\
+                     </RESOURCE></VOTABLE>",
+                    stream(&two_pairs)
+                ),
+                "nrows=\"3\"",
+            ),
+            (
+                single(
+                    &format!("{int}<FIELD name=\"n\" datatype=\"long\"/>"),
+                    "<TABLEDATA/>",
+                ),
+                "two FIELDs",
+            ),
+            (
+                single(
+                    "<FIELD name=\"n\" datatype=\"int\"><VALUES ref=\"v\"/></FIELD>",
+                    "<TABLEDATA/>",
+                ),
+                "names no VALUES",
+            ),
+            (
+                single(int, "<TABLEDATA><TR><TD>&#xFFFFFF;</TD></TR></TABLEDATA>"),
+                "well-formed",
+            ),
+            (
+                "<VOTABLE><RESOURCE><INFO name=\"QUERY_STATUS\" value=\"error\"/></RESOURCE>\
+                 </VOTABLE>"
+                    .to_owned(),
+                "failed",
+            ),
+            (
+                single(
+                    int,
+                    "<TABLEDATA><TR><TD>1</TD></TR></TABLEDATA>\
+                     <INFO name=\"QUERY_STATUS\" value=\"ERROR\">cut short</INFO>",
+                ),
+                "cut short",
+            ),
+            (
+                single(
+                    int,
+                    "<TABLEDATA><TR><TD>1</TD></TR></TABLEDATA>\
+                     <INFO name=\"QUERY_STATUS\" value=\"ERROR\"/>",
+                ),
+                "failed",
+            ),
+            ("<table/>".to_owned(), "root element is <table>"),
+            ("not xml at all".to_owned(), "not XML"),
+            ("<!-- nothing -->".to_owned(), "no element"),
+        ];
+        for (document, says) in cases {
+            let said = refused(&document);
+            assert!(said.contains(says), "{document}: {said}");
+        }
+    }
+
+    /// A document cut short anywhere inside its table is refused rather than read as the
+    /// rows before the cut.
+    #[test]
+    fn a_document_that_ends_inside_its_table_is_refused() {
+        let field = "<FIELD name=\"n\" datatype=\"int\"/>";
+        for cut in [
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA>"),
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA><INFO name=\"x\">"),
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA><TABLEDATA>"),
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA><TABLEDATA><TR>"),
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA><TABLEDATA><TR><TD>1"),
+            format!("<VOTABLE><RESOURCE><TABLE>{field}<DATA><BINARY>"),
+        ] {
+            let said = refused(&cut);
+            assert!(said.contains("ends inside"), "{cut}: {said}");
+        }
+    }
+
+    /// What XML says is not content — a comment, a processing instruction — is not part of
+    /// a cell, and a `CDATA` section and a character reference are.
+    #[test]
+    fn a_cell_is_its_text_and_nothing_else_xml_carries() {
+        let batch = one(&single(
+            "<FIELD name=\"s\" datatype=\"char\" arraysize=\"*\"/>",
+            "<TABLEDATA><TR><TD>a<!-- not this --><?pi not this?>b<![CDATA[<c>]]>&#x64;&amp;\
+             </TD></TR></TABLEDATA>",
+        ));
+        assert_eq!(batch.column(0).as_string::<i32>().value(0), "ab<c>d&");
+    }
+
     #[test]
     fn a_declared_encoding_is_read_off_the_declaration() {
         assert_eq!(
@@ -1198,5 +1490,10 @@ mod tests {
         assert!(!is_votable(b"<!DOCTYPE html><html><body>"));
         assert!(!is_votable(b"PAR1\x15\x04"));
         assert!(!is_votable(b"a,b\n1,2\n"));
+        assert!(!is_votable(b""));
+        assert!(!is_votable(
+            b"<?xml version=\"1.0\"?>\n<!-- only a comment -->"
+        ));
+        assert!(!is_votable(b"<<<"));
     }
 }
