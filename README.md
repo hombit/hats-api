@@ -424,8 +424,8 @@ reads the original. It carries the values above as themselves.
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
 `-Inf` written as themselves. Lists are VOTable arrays; structs are refused. A list of
 strings is padded to one width, so a streamed answer refuses it unless it came from an
-uploaded VOTable. A value VOTable can't round-trip, such as a missing item or a string with
-a trailing blank, fails the request.
+uploaded VOTable. A missing integer or string inside a list fails the request, and so does a
+listed string ending in a blank.
 
 **`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
 `-inf` written as those three, which `float()` in Python reads back. Flat columns only.
