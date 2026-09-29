@@ -5,14 +5,15 @@
 //! be smaller on the wire, but a response is compressed on the way out anyway, and base64
 //! of a packed buffer is not.
 //!
-//! **A list of numbers or booleans is an array; anything deeper is refused by name.** A
-//! numeric array is what VOTable was built around, and one item that is missing has a
+//! **A list of numbers, booleans or strings is an array; anything deeper is refused by name.**
+//! A numeric array is what VOTable was built around, and one item that is missing has a
 //! spelling for a float (`NaN`) and a boolean (`?`), and for an integer only where the column
 //! carries a `VALUES` `null` — which a VOTable upload brings and nothing else does. A list of
-//! strings and a struct are the nested-column question: a nested column becomes a `GROUP` of
-//! `FIELDref`s over dotted `FIELD`s, and a variable-length array of variable-length strings
-//! has no spelling in VOTable at all. Guessing at those would put a value in an answer that a
-//! reader cannot tell from a different value, so the column is refused until they are decided.
+//! strings is strings of one width, blank-padded, and a string that padding would change is
+//! refused rather than written. A struct is the nested-column question — a nested column
+//! becomes a `GROUP` of `FIELDref`s over dotted `FIELD`s — and guessing at it would put a value
+//! in an answer that a reader cannot tell from a different value, so it is refused until that
+//! is decided.
 //!
 //! A column a VOTable upload declared is described as that document described it, which is
 //! what `declaration` decides.
@@ -84,6 +85,22 @@ pub fn encode_truncated(result: &QueryResult) -> Result<String, ApiError> {
 
 fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
     let mut encoder = Document::new(Some(result.num_rows()));
+    encoder.measured = result
+        .schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(at, field)| {
+            is_string_list(field.data_type()).then(|| {
+                result
+                    .batches
+                    .iter()
+                    .map(|batch| longest(batch.column(at)))
+                    .max()
+                    .unwrap_or_default()
+            })
+        })
+        .collect();
     let bytes = stream::collected(
         &mut encoder,
         result,
@@ -104,14 +121,27 @@ fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
 ///
 /// What does *not* move is `OVERFLOW`: DALI §4.4.1 puts it after the table precisely
 /// because the `OK` at the top was written before the row count was known.
+///
+/// **Neither does a string array's width, unless its upload declared one.** A list of strings is
+/// written as strings of one width, and the width is in the `FIELD`; a collected answer measures
+/// it over the rows first, which is what `measured` holds, and a streamed one has nothing to
+/// measure and refuses the column in `begin`.
 #[derive(Debug)]
 pub struct Document {
     rows: Option<usize>,
+    /// Per column, the longest string in a list-of-strings column, over the whole answer.
+    measured: Vec<Option<usize>>,
+    /// Per column, what `begin` declared it as, which is what the rows are written against.
+    declared: Vec<Declaration>,
 }
 
 impl Document {
     pub fn new(rows: Option<usize>) -> Self {
-        Self { rows }
+        Self {
+            rows,
+            measured: Vec::new(),
+            declared: Vec::new(),
+        }
     }
 }
 
@@ -131,8 +161,13 @@ impl stream::Encoder for Document {
         // An `ID` has to be unique in the document, and two columns may share a name — a
         // statement can select one twice. The second one keeps its name and goes without.
         let mut identified = Vec::new();
-        for field in schema.fields() {
-            let declared = declaration(field)?;
+        self.declared = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(at, field)| declaration(field, self.measured.get(at).copied().flatten()))
+            .collect::<Result<_, _>>()?;
+        for (field, declared) in schema.fields().iter().zip(&self.declared) {
             let name = attribute(field.name())?;
             let _ = write!(out, "<FIELD name=\"{name}\"");
             if is_xml_name(field.name()) && !identified.contains(&field.name()) {
@@ -172,7 +207,7 @@ impl stream::Encoder for Document {
 
     fn rows(&mut self, batch: &RecordBatch) -> Result<Vec<u8>, ApiError> {
         let mut out = String::new();
-        push_rows(batch, &mut out)?;
+        push_rows(batch, &self.declared, &mut out)?;
         Ok(out.into_bytes())
     }
 
@@ -368,9 +403,13 @@ struct Declaration {
     utype: Option<String>,
     description: Option<String>,
     null: Option<String>,
+    /// For a list of strings, how many characters each is written in.
+    width: Option<usize>,
 }
 
-fn declaration(field: &Field) -> Result<Declaration, ApiError> {
+/// `measured` is the longest string in a list-of-strings column, where the answer was read
+/// before it was written.
+fn declaration(field: &Field, measured: Option<usize>) -> Result<Declaration, ApiError> {
     let said = |key: &str| {
         field
             .metadata()
@@ -381,6 +420,13 @@ fn declaration(field: &Field) -> Result<Declaration, ApiError> {
     let datatype = said(votable_field::DATATYPE);
     let arraysize = said(votable_field::ARRAYSIZE);
     let mut declared = match field.data_type() {
+        DataType::List(_) | DataType::LargeList(_) if is_string_list(field.data_type()) => {
+            strings(field, datatype.as_deref(), arraysize, measured, None)?
+        }
+        DataType::FixedSizeList(_, size) if is_string_list(field.data_type()) => {
+            let count = usize::try_from(*size).unwrap_or_default();
+            strings(field, datatype.as_deref(), arraysize, measured, Some(count))?
+        }
         DataType::List(item) | DataType::LargeList(item) => {
             let (datatype, _) = array_datatype(field, item, datatype.as_deref())?;
             Declaration {
@@ -464,12 +510,114 @@ fn declaration(field: &Field) -> Result<Declaration, ApiError> {
     Ok(declared)
 }
 
+/// Whether a column is a list of strings, which VOTable writes as strings of one width.
+fn is_string_list(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            matches!(
+                item.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            )
+        }
+        _ => false,
+    }
+}
+
+/// The longest string in a list-of-strings column, in characters, over the items its rows
+/// reach — a sliced batch's list still holds the whole child array.
+fn longest(array: &ArrayRef) -> usize {
+    // Arrow's offsets are one longer than the rows, so the first and the last bound them all.
+    fn reached<O: Copy + TryInto<usize>>(offsets: &[O]) -> (usize, usize) {
+        let last = offsets.len().saturating_sub(1);
+        (between(offsets, 0).0, between(offsets, last).0)
+    }
+    let (values, start, end) = match array.data_type() {
+        DataType::List(_) => {
+            let lists = array.as_list::<i32>();
+            let (start, end) = reached(lists.value_offsets());
+            (lists.values(), start, end)
+        }
+        DataType::LargeList(_) => {
+            let lists = array.as_list::<i64>();
+            let (start, end) = reached(lists.value_offsets());
+            (lists.values(), start, end)
+        }
+        DataType::FixedSizeList(_, size) => {
+            let lists = array.as_fixed_size_list();
+            let size = usize::try_from(*size).unwrap_or_default();
+            let start = usize::try_from(lists.value_offset(0)).unwrap_or_default();
+            (lists.values(), start, start + lists.len() * size)
+        }
+        _ => return 0,
+    };
+    let values = values.slice(start, end.saturating_sub(start));
+    let characters = |value: Option<&str>| value.map_or(0, |value| value.chars().count());
+    match values.data_type() {
+        DataType::Utf8 => values.as_string::<i32>().iter().map(characters).max(),
+        DataType::LargeUtf8 => values.as_string::<i64>().iter().map(characters).max(),
+        DataType::Utf8View => values.as_string_view().iter().map(characters).max(),
+        _ => None,
+    }
+    .unwrap_or_default()
+}
+
+/// How a list of strings is declared: `char` or `unicodeChar`, and an `arraysize` of the
+/// width each string is written in by how many a cell holds.
+///
+/// **The width is the upload's where it declared one, and measured otherwise.** A width has
+/// to be in the `FIELD`, ahead of every row; a document that declared one has said how wide
+/// its strings are, and anything else is measured over the answer first — which an answer
+/// written as its rows are read cannot do, so it refuses the column rather than guessing.
+///
+/// **A measured width is at least two.** A string of one character is read back exactly,
+/// blank included, where a wider one is trimmed of its padding; at a width of one an empty
+/// string would be written as a blank and come back as one.
+fn strings(
+    field: &Field,
+    said: Option<&str>,
+    arraysize: Option<String>,
+    measured: Option<usize>,
+    count: Option<usize>,
+) -> Result<Declaration, ApiError> {
+    let character = match said {
+        Some("char") => "char",
+        _ => "unicodeChar",
+    };
+    let declared = arraysize
+        .filter(|_| matches!(said, Some("char" | "unicodeChar")))
+        .and_then(|written| {
+            let (width, strings) = votable_field::string_array(&written)?;
+            (strings == count).then_some((width, written))
+        });
+    let (width, arraysize) = match declared {
+        Some(declared) => declared,
+        None => {
+            let width = measured.ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "column {:?} is a list of strings, whose width a VOTable declares ahead of \
+                     the rows, and this answer is written as its rows are read; ask for the \
+                     whole answer at once, or for parquet",
+                    field.name()
+                ))
+            })?;
+            let width = width.max(2);
+            let strings = count.map_or_else(|| "*".to_owned(), |count| count.to_string());
+            (width, format!("{width}x{strings}"))
+        }
+    };
+    Ok(Declaration {
+        datatype: character.to_owned(),
+        arraysize: Some(arraysize),
+        width: Some(width),
+        ..Declaration::default()
+    })
+}
+
 /// The primitive an array column's items are declared as, and how many Arrow values one of
 /// them is.
 ///
-/// **Numbers and booleans only.** An array of strings has one spelling in VOTable, fixed-width
-/// and blank-padded, which loses a string's own trailing blanks; and a struct has none at all.
-/// Both are the nested-column question, refused by name until it is settled.
+/// **Numbers and booleans only**, strings being [`strings`]'s. A struct has no spelling at all,
+/// and is the nested-column question, refused by name until it is settled.
 fn array_datatype(
     field: &Field,
     item: &Field,
@@ -495,8 +643,9 @@ fn array_datatype(
         ) => spelling(item)?.datatype,
         (other, _) => {
             return Err(ApiError::bad_request(format!(
-                "column {:?} is a list of {other}, and only a list of numbers or booleans has \
-                 a VOTable form here; ask for json or parquet, or leave the column out",
+                "column {:?} is a list of {other}, and only a list of numbers, booleans or \
+                 strings has a VOTable form here; ask for json or parquet, or leave the column \
+                 out",
                 field.name()
             )));
         }
@@ -512,13 +661,18 @@ type Push<'a> = Box<dyn Fn(usize, &mut String) -> Result<(), ApiError> + 'a>;
 /// The writers are resolved once per column rather than once per cell: a batch is
 /// columnar, and deciding what a value is on every one of them is the whole cost of
 /// writing a wide table.
-fn push_rows(batch: &RecordBatch, out: &mut String) -> Result<(), ApiError> {
+fn push_rows(
+    batch: &RecordBatch,
+    declared: &[Declaration],
+    out: &mut String,
+) -> Result<(), ApiError> {
     let schema = batch.schema();
     let columns = batch
         .columns()
         .iter()
         .zip(schema.fields())
-        .map(|(array, field)| Ok((array, writer(array, field)?)))
+        .zip(declared)
+        .map(|((array, field), declared)| Ok((array, writer(array, field, declared)?)))
         .collect::<Result<Vec<(&ArrayRef, Push<'_>)>, ApiError>>()?;
     for row in 0..batch.num_rows() {
         out.push_str("<TR>");
@@ -544,29 +698,33 @@ fn push_rows(batch: &RecordBatch, out: &mut String) -> Result<(), ApiError> {
 /// The arms are [`spelling`]'s list, which has already run over the same schema — so the
 /// refusal at the end is what keeps the two from drifting rather than a case a request
 /// reaches.
-fn writer<'a>(array: &'a ArrayRef, field: &Field) -> Result<Push<'a>, ApiError> {
-    let declared = declaration(field)?;
+fn writer<'a>(
+    array: &'a ArrayRef,
+    field: &Field,
+    declared: &Declaration,
+) -> Result<Push<'a>, ApiError> {
     let push: Push<'_> = match array.data_type() {
         DataType::List(_) => {
             let lists = array.as_list::<i32>();
             let offsets = lists.value_offsets();
-            let items = item_writer(lists.values(), &declared)?;
-            spans(items, &declared, move |row| between(offsets, row))
+            cells(lists.values(), field, declared, move |row| {
+                between(offsets, row)
+            })?
         }
         DataType::LargeList(_) => {
             let lists = array.as_list::<i64>();
             let offsets = lists.value_offsets();
-            let items = item_writer(lists.values(), &declared)?;
-            spans(items, &declared, move |row| between(offsets, row))
+            cells(lists.values(), field, declared, move |row| {
+                between(offsets, row)
+            })?
         }
         DataType::FixedSizeList(_, size) => {
             let lists = array.as_fixed_size_list();
             let size = usize::try_from(*size).unwrap_or_default();
-            let items = item_writer(lists.values(), &declared)?;
-            spans(items, &declared, move |row| {
+            cells(lists.values(), field, declared, move |row| {
                 let start = usize::try_from(lists.value_offset(row)).unwrap_or_default();
                 (start, start + size)
-            })
+            })?
         }
         DataType::Boolean if declared.datatype == "bit" => {
             let array = array.as_boolean();
@@ -626,6 +784,91 @@ fn between<O: Copy + TryInto<usize>>(offsets: &[O], row: usize) -> (usize, usize
             .unwrap_or_default()
     };
     (at(row), at(row + 1))
+}
+
+/// One cell of an array column, from a span of the list's values: strings at the width
+/// `declared` gives them, anything else item by item.
+fn cells<'a>(
+    values: &'a ArrayRef,
+    field: &Field,
+    declared: &Declaration,
+    span: impl Fn(usize) -> (usize, usize) + 'a,
+) -> Result<Push<'a>, ApiError> {
+    match declared.width {
+        Some(width) => padded(values, field, width, declared.arraysize.as_deref(), span),
+        None => Ok(spans(item_writer(values, declared)?, declared, span)),
+    }
+}
+
+/// A cell of strings, each padded with blanks to `width` and written one after another, which
+/// is how §5.1 writes a two-dimensional `char`.
+///
+/// **A string that would not read back as itself is refused, and so is the answer.** A reader
+/// trims a fixed-width string of its trailing blanks, so one that ends in a blank comes back
+/// shorter; a null has no spelling but blanks, which read back as an empty string; and at a
+/// width of one a blank is kept, so an empty string comes back as one. Past the end of a cell
+/// the trimming is a TD's own — readers trim the whitespace around its text — so where the
+/// count is variable an empty string last in its cell would come back as no string at all.
+fn padded<'a>(
+    values: &'a ArrayRef,
+    field: &Field,
+    width: usize,
+    arraysize: Option<&str>,
+    span: impl Fn(usize) -> (usize, usize) + 'a,
+) -> Result<Push<'a>, ApiError> {
+    let text: Box<dyn Fn(usize) -> &'a str + 'a> = match values.data_type() {
+        DataType::Utf8 => {
+            let array = values.as_string::<i32>();
+            Box::new(move |index| array.value(index))
+        }
+        DataType::LargeUtf8 => {
+            let array = values.as_string::<i64>();
+            Box::new(move |index| array.value(index))
+        }
+        DataType::Utf8View => {
+            let array = values.as_string_view();
+            Box::new(move |index| array.value(index))
+        }
+        other => {
+            return Err(ApiError::internal(format!(
+                "a list of {other} reached the VOTable string writer"
+            )));
+        }
+    };
+    let name = field.name().clone();
+    let variable = arraysize.is_some_and(|size| size.trim_end().ends_with('*'));
+    let lossy = move |why: String| {
+        ApiError::bad_request(format!(
+            "column {name:?} {why}, which a VOTable's fixed-width strings cannot carry; ask for \
+             parquet"
+        ))
+    };
+    Ok(Box::new(move |row, out| {
+        let (start, end) = span(row);
+        // Whether every string so far is empty, which makes the whole cell blanks: trimmed,
+        // that is an empty `TD`, and an empty `TD` is a null.
+        let mut blank = true;
+        for index in start..end {
+            if values.is_null(index) {
+                return Err(lossy("holds a missing string in an array".to_owned()));
+            }
+            let value = text(index);
+            let length = value.chars().count();
+            blank &= value.is_empty();
+            let trimmed_away = value.is_empty() && index + 1 == end && (variable || blank);
+            if value.ends_with(' ') || (value.is_empty() && width == 1) || trimmed_away {
+                return Err(lossy(format!("holds {value:?} in an array")));
+            }
+            if length > width {
+                return Err(lossy(format!(
+                    "holds {value:?}, longer than the {width} characters its arraysize declares"
+                )));
+            }
+            push_text(value, out)?;
+            out.extend(std::iter::repeat_n(' ', width - length));
+        }
+        Ok(())
+    }))
 }
 
 /// One cell of an array column: its items between two offsets into the list's values,
@@ -1123,7 +1366,8 @@ mod tests {
     /// than dropped from the answer.
     #[test]
     fn a_nested_column_is_refused_by_name() {
-        let item = Arc::new(Field::new("item", DataType::Utf8, true));
+        let strings = Arc::new(Field::new("item", DataType::Utf8, true));
+        let item = Arc::new(Field::new("item", DataType::List(strings), true));
         let list = ListArray::new_null(item, 1);
         let refused = encode(&one("bands", Arc::new(list))).unwrap_err();
         assert!(refused.to_string().contains("bands"), "{refused}");
@@ -1218,6 +1462,212 @@ mod tests {
 
     /// A column a VOTable upload declared is described the way that document described it —
     /// and a declaration that no longer fits the column's type is not repeated.
+    /// A list of strings, the rows being `None` for a null list and each string `None` for a
+    /// null item; a fixed count where `fixed` says so.
+    fn string_lists(rows: &[Option<Vec<Option<&str>>>], fixed: Option<i32>) -> ArrayRef {
+        use datafusion::arrow::array::{FixedSizeListBuilder, ListBuilder, StringBuilder};
+
+        match fixed {
+            None => {
+                let mut builder = ListBuilder::new(StringBuilder::new());
+                for row in rows {
+                    builder.append_option(row.clone());
+                }
+                Arc::new(builder.finish())
+            }
+            Some(size) => {
+                let mut builder = FixedSizeListBuilder::new(StringBuilder::new(), size);
+                for row in rows {
+                    match row {
+                        Some(items) => {
+                            for item in items {
+                                builder.values().append_option(*item);
+                            }
+                            builder.append(true);
+                        }
+                        None => {
+                            for _ in 0..size {
+                                builder.values().append_null();
+                            }
+                            builder.append(false);
+                        }
+                    }
+                }
+                Arc::new(builder.finish())
+            }
+        }
+    }
+
+    /// The strings the reader makes of each row of the written document's one column.
+    fn read_back(document: &str) -> Vec<Option<Vec<String>>> {
+        let table = crate::votable::read(document.as_bytes()).unwrap();
+        let batch =
+            datafusion::arrow::compute::concat_batches(&table.schema, &table.batches).unwrap();
+        let column = batch.column(0);
+        (0..batch.num_rows())
+            .map(|row| {
+                (!column.is_null(row)).then(|| {
+                    let items = match column.data_type() {
+                        DataType::FixedSizeList(_, _) => column.as_fixed_size_list().value(row),
+                        _ => column.as_list::<i32>().value(row),
+                    };
+                    let items = items.as_string::<i32>();
+                    (0..items.len())
+                        .map(|at| items.value(at).to_owned())
+                        .collect()
+                })
+            })
+            .collect()
+    }
+
+    /// A list of strings is strings of the longest one's width, blank-padded and run together,
+    /// and reads back as the list it was — variable or fixed, null rows and all.
+    #[test]
+    fn a_list_of_strings_is_strings_of_one_width() {
+        let rows = [
+            Some(vec![Some("g"), Some("r")]),
+            None,
+            Some(vec![Some("ztf_g")]),
+            Some(vec![Some(""), Some("i")]),
+        ];
+        let lists = string_lists(&rows, None);
+        let document = encode(&one("bands", Arc::clone(&lists))).unwrap();
+        assert!(
+            document.contains("datatype=\"unicodeChar\" arraysize=\"5x*\""),
+            "{document}"
+        );
+        assert_eq!(cells(&document)[0], "g    r    ");
+        // Every Arrow shape of a list of strings is the same document.
+        for shape in [
+            DataType::LargeList(Arc::new(Field::new_list_field(DataType::LargeUtf8, true))),
+            DataType::List(Arc::new(Field::new_list_field(DataType::Utf8View, true))),
+        ] {
+            let cast = datafusion::arrow::compute::cast(&lists, &shape).unwrap();
+            assert_eq!(encode(&one("bands", cast)).unwrap(), document, "{shape}");
+        }
+        let expected = |rows: &[Option<Vec<Option<&str>>>]| {
+            rows.iter()
+                .map(|row| {
+                    row.as_ref().map(|items| {
+                        items
+                            .iter()
+                            .map(|item| item.unwrap_or_default().to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(read_back(&document), expected(&rows));
+
+        let fixed = [
+            Some(vec![Some("u"), Some("")]),
+            None,
+            Some(vec![Some("éé"), Some("z")]),
+        ];
+        let document = encode(&one("pair", string_lists(&fixed, Some(2)))).unwrap();
+        // A width of one would keep a blank as a character, so the narrowest is two.
+        assert!(document.contains("arraysize=\"2x2\""), "{document}");
+        assert_eq!(read_back(&document), expected(&fixed));
+    }
+
+    /// Where an upload declared its strings' width, that is the width, and the declaration is
+    /// kept as the document wrote it — which is also what lets a streamed answer write one.
+    #[test]
+    fn a_list_of_strings_an_upload_declared_keeps_its_width() {
+        use crate::output::stream::Encoder as _;
+
+        let values = string_lists(&[Some(vec![Some("ab"), Some("c")])], None);
+        let declared = Field::new("s", values.data_type().clone(), true).with_metadata(
+            [
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "8x*"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        );
+        let schema = Arc::new(Schema::new(vec![declared]));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![values]).unwrap();
+        let document = encode(&result(batch.clone())).unwrap();
+        assert!(
+            document.contains("datatype=\"char\" arraysize=\"8x*\""),
+            "{document}"
+        );
+        assert_eq!(
+            cells(&document)[0],
+            format!("ab{}c{}", " ".repeat(6), " ".repeat(7))
+        );
+
+        let mut streamed = Document::new(None);
+        assert!(streamed.begin(&schema).is_ok());
+        assert!(streamed.rows(&batch).is_ok());
+
+        // A third dimension groups the strings, which a list no longer says, so the width is
+        // measured instead.
+        let grouped = Field::new("s", batch.column(0).data_type().clone(), true).with_metadata(
+            [
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "8x2x*"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![grouped])),
+            vec![Arc::clone(batch.column(0))],
+        )
+        .unwrap();
+        let document = encode(&result(batch)).unwrap();
+        assert!(
+            document.contains("datatype=\"char\" arraysize=\"2x*\""),
+            "{document}"
+        );
+
+        // With nothing declared, a document written as its rows arrive has no width to give.
+        let undeclared = one("s", string_lists(&[Some(vec![Some("ab")])], None));
+        let refused = Document::new(None).begin(&undeclared.schema).unwrap_err();
+        assert!(refused.to_string().contains("\"s\""), "{refused}");
+        assert!(refused.to_string().contains("whole answer"), "{refused}");
+    }
+
+    /// A string the padding would change, or one with no spelling, refuses the answer rather
+    /// than coming back as a different string.
+    #[test]
+    fn a_string_its_padding_would_change_is_refused() {
+        for (rows, fixed) in [
+            // Its own trailing blank, trimmed with the padding.
+            (vec![Some(vec![Some("g "), Some("r")])], None),
+            // A null item, whose only spelling is blanks: an empty string.
+            (vec![Some(vec![Some("g"), None])], None),
+            // An empty string last in a variable cell, trimmed with the cell's whitespace.
+            (vec![Some(vec![Some("g"), Some("")])], None),
+            // A fixed cell of nothing but empty strings, which trims to an empty `TD`.
+            (vec![Some(vec![Some(""), Some("")])], Some(2)),
+        ] {
+            let refused = encode(&one("bands", string_lists(&rows, fixed))).unwrap_err();
+            assert!(
+                refused.to_string().contains("fixed-width strings"),
+                "{rows:?}: {refused}"
+            );
+        }
+
+        // Longer than the width an upload declared.
+        let values = string_lists(&[Some(vec![Some("toolong")])], None);
+        let declared = Field::new("s", values.data_type().clone(), true).with_metadata(
+            [
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "3x*"),
+            ]
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect(),
+        );
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(vec![declared])), vec![values]);
+        let refused = encode(&result(batch.unwrap())).unwrap_err();
+        assert!(refused.to_string().contains("longer than"), "{refused}");
+    }
+
     #[test]
     fn a_column_an_upload_declared_keeps_what_the_document_said() {
         use datafusion::arrow::array::FixedSizeListArray;
