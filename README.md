@@ -758,7 +758,7 @@ WHERE phot_g_mean_mag < 15
 one of three things:
 
 - **a VOTable**, sent in the request or named by URL. `TABLEDATA`, `BINARY` and `BINARY2`
-  are read; a VOTable whose rows are FITS, or are in a file its `STREAM` points to, is
+  are supported; a VOTable whose rows are FITS, or are in a file its `STREAM` points to, is
   refused.
 - **a parquet file**, sent in the request or named by URL.
 - **a HATS catalog**, named by URL.
