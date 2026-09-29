@@ -9,7 +9,7 @@ Release dates are in the UTC time zone.
 ### Added
 
 - `/simple/hats` and a mounted catalog's query choose partitions by a collection's index catalogs.
-- TAP `UPLOAD` reads a VOTable — `TABLEDATA`, `BINARY` or `BINARY2` — sent inline or by URL.
+- TAP `UPLOAD` takes a VOTable — `TABLEDATA`, `BINARY` or `BINARY2` — sent inline or by URL.
 - TAP `UPLOAD` reads a parquet file sent inline as a multipart part.
 - `UPLOAD_TYPE` takes `votable`.
 - `/adql` tables take `"type": "votable"`.
