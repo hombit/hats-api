@@ -4,8 +4,12 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
     hooks:
+      # The VOTable corpus is documents as their writers wrote them — a blank that ends a
+      # TD, a missing final newline, CRLF — and a fixer "correcting" one changes the case.
       - id: trailing-whitespace
+        exclude: ^tests/data/votable/
       - id: end-of-file-fixer
+        exclude: ^tests/data/votable/
       - id: check-yaml
       - id: check-toml
       - id: check-json
@@ -13,6 +17,7 @@ repos:
       - id: check-case-conflict
       - id: check-symlinks
       - id: mixed-line-ending
+        exclude: ^tests/data/votable/
       - id: check-added-large-files
         args: [--maxkb=512]
       - id: detect-private-key

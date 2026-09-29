@@ -1683,6 +1683,17 @@ an inline part, or a VOTable at a url — becomes one the statement can read.
   refused, not fetched: followed, it is a caller's file naming `file:///etc/passwd` or an
   address behind the network rules. No entity beyond XML's five is expanded, so a `DOCTYPE`
   cannot grow a document. FITS inside a VOTable is refused rather than half-read.
+- **astropy's layout is read as well as the text's, and neither is refused.** Where
+  §5.3 leaves the count of a variable multi-dimensional array open ("the number of items of
+  the array"), STIL counts primitives and astropy and the CDS writer count slices of the last
+  dimension; and astropy writes a variable `bit` array one byte per bit where §6 packs them.
+  `binary::Dialect` is which; the second is tried only where a column is one the two read
+  differently and the first did not parse, with `nrows` and whole slices as the checks. A
+  reader that follows only the text refuses what pyvo sends, which is not an option — and a
+  finding that astropy writes something its own way is a dialect to add, not a file to refuse.
+- **A document that says its query failed is refused, whatever it carries.** A
+  `QUERY_STATUS` of `ERROR` may follow the rows (DALI §4.4), so the document is walked to its
+  end after the table is read.
 - **What a document may expand into is bounded by its own size.** An empty `TD` under a
   `FIELD` of `arraysize="100000000"` is five bytes asking for a hundred million values, and a
   fixed-size list holds them whether the cell is there or not. `ITEMS_PER_BYTE` is checked

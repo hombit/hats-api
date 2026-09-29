@@ -412,13 +412,35 @@ fn declaration(field: &Field) -> Result<Declaration, ApiError> {
         }
         _ => {
             let spelled = spelling(field)?;
-            let datatype = match (field.data_type(), datatype.as_deref()) {
-                (DataType::Boolean, Some("bit")) => "bit",
-                _ => spelled.datatype,
+            let text = matches!(
+                field.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            );
+            let (datatype, arraysize) = match (field.data_type(), datatype.as_deref()) {
+                (DataType::Boolean, Some("bit")) => ("bit", spelled.arraysize.map(str::to_owned)),
+                // A string an upload declared keeps its own character type and width: DALI
+                // §3.3.3 has a timestamp be `char` in so many words, and a client that
+                // uploaded a `char` reads a `unicodeChar` back as a different type. A width of
+                // more than one dimension is an array of strings, which this column is not.
+                // No arraysize is one character, and so is `arraysize="1"`, which is deprecated
+                // (VOTable 1.3 erratum 3) and is written as the former.
+                (_, Some(declared @ ("char" | "unicodeChar"))) if text => (
+                    if declared == "char" {
+                        "char"
+                    } else {
+                        "unicodeChar"
+                    },
+                    match arraysize.as_deref().map(str::trim) {
+                        None | Some("1") => None,
+                        Some(size) if !size.contains('x') => Some(size.to_owned()),
+                        Some(_) => Some("*".to_owned()),
+                    },
+                ),
+                _ => (spelled.datatype, spelled.arraysize.map(str::to_owned)),
             };
             Declaration {
                 datatype: datatype.to_owned(),
-                arraysize: spelled.arraysize.map(str::to_owned),
+                arraysize,
                 xtype: spelled.xtype.map(str::to_owned),
                 ..Declaration::default()
             }
@@ -1226,6 +1248,36 @@ mod tests {
         assert!(document.contains("datatype=\"bit\""), "{document}");
         assert!(
             document.contains("<TD>1 -2 0.5 0.25</TD><TD>3 -32768</TD><TD>1</TD>"),
+            "{document}"
+        );
+
+        // A string keeps its character type and width, which DALI §3.3.3 needs `char` to be
+        // for a timestamp, and a one-character one is written without the deprecated `1`.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Utf8, true).with_metadata(said(&[
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "23"),
+                (votable_field::XTYPE, "timestamp"),
+            ])),
+            Field::new("c", DataType::Utf8, true).with_metadata(said(&[
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "1"),
+            ])),
+        ]));
+        let document = encode(&QueryResult {
+            schema,
+            batches: Vec::new(),
+            data_bytes_read: 0,
+        })
+        .unwrap();
+        assert!(
+            document.contains(
+                "name=\"t\" ID=\"t\" datatype=\"char\" arraysize=\"23\" xtype=\"timestamp\"/>"
+            ),
+            "{document}"
+        );
+        assert!(
+            document.contains("name=\"c\" ID=\"c\" datatype=\"char\"/>"),
             "{document}"
         );
 

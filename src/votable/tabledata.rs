@@ -219,8 +219,19 @@ fn strings(builder: &mut Builder, text: &str) -> Result<(), String> {
 pub fn fixed_or_counted(text: &str, width: Width) -> String {
     let text = text.split('\0').next().unwrap_or_default();
     match width {
-        Width::Fixed(n) if n > 1 => text.trim_end_matches(' ').to_owned(),
-        _ => text.to_owned(),
+        Width::Fixed(n) => {
+            // Longer than its width is only possible in TABLEDATA, and is cut to it, the way
+            // astropy and STILTS both read it: the width is what the FIELD says the column is.
+            let cut = match text.char_indices().nth(n) {
+                Some((at, _)) => text.get(..at).unwrap_or(text),
+                None => text,
+            };
+            match n > 1 {
+                true => cut.trim_end_matches(' ').to_owned(),
+                false => cut.to_owned(),
+            }
+        }
+        Width::Counted => text.to_owned(),
     }
 }
 

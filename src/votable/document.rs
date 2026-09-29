@@ -12,7 +12,7 @@ use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
-use crate::votable::binary::{self, Cursor};
+use crate::votable::binary::{self, Cursor, Dialect};
 use crate::votable::column::Builder;
 use crate::votable::field::Declared;
 use crate::votable::tabledata;
@@ -97,6 +97,7 @@ pub fn read(bytes: &[u8]) -> Result<Table, String> {
         error: None,
         budget,
         items: 0,
+        astropy: false,
     }
     .walk()
 }
@@ -106,9 +107,20 @@ pub fn read(bytes: &[u8]) -> Result<Table, String> {
 struct Open {
     id: Option<String>,
     reference: Option<String>,
+    /// The row count the `TABLE` declares, which is optional and is asked only to tell two
+    /// readings of a stream apart.
+    nrows: Option<usize>,
     fields: Vec<Declared>,
     /// The `FIELD` whose children are being read.
     field: Option<Declared>,
+}
+
+/// A decoded `BINARY` or `BINARY2` stream, and what its `TABLE` says about it.
+struct Stream<'a> {
+    bytes: &'a [u8],
+    /// Whether each row starts with `BINARY2`'s null flags.
+    flagged: bool,
+    nrows: Option<usize>,
 }
 
 struct Walker<'a> {
@@ -128,11 +140,18 @@ struct Walker<'a> {
     budget: usize,
     /// Items read so far, against `budget`.
     items: usize,
+    /// Whether the document says astropy wrote it, which it does in a comment ahead of the
+    /// root: astropy lays two kinds of cell out differently from STIL.
+    astropy: bool,
 }
 
 impl Walker<'_> {
     fn walk(mut self) -> Result<Table, String> {
         let mut rooted = false;
+        // The table, once read. The document is still walked to its end: DALI §4.4 lets a
+        // service say its query failed after the rows it had, and a table a failed query left
+        // behind is not one to answer from as though it were whole.
+        let mut found: Option<Table> = None;
         loop {
             let event = self
                 .reader
@@ -154,14 +173,14 @@ impl Walker<'_> {
                 }
                 Event::Start(element) => {
                     let name = local(&element).to_owned();
-                    if let Some(table) = self.opened(&name, &element, false)? {
-                        return Ok(table);
+                    if let Some(table) = self.opened(&name, &element, false, found.is_some())? {
+                        found = Some(table);
                     }
                 }
                 Event::Empty(element) => {
                     let name = local(&element).to_owned();
-                    if let Some(table) = self.opened(&name, &element, true)? {
-                        return Ok(table);
+                    if let Some(table) = self.opened(&name, &element, true, found.is_some())? {
+                        found = Some(table);
                     }
                 }
                 Event::End(_) => {
@@ -169,6 +188,7 @@ impl Walker<'_> {
                     self.closed(&name)?;
                 }
                 Event::Eof => break,
+                Event::Comment(comment) if comment.contains("astropy") => self.astropy = true,
                 Event::Text(text) if !rooted && !text.trim_ascii().is_empty() => {
                     return Err("this is not a VOTable: it is not XML".to_owned());
                 }
@@ -178,16 +198,16 @@ impl Walker<'_> {
         if !rooted {
             return Err("this is not a VOTable: it holds no element at all".to_owned());
         }
-        match self.first.take() {
-            Some(fields) => finish(&builders(fields)?, Vec::new()),
-            None => Err(match self.error {
-                Some(said) if !said.trim().is_empty() => format!(
-                    "this VOTable is an error document rather than a table; it says: {}",
-                    said.trim()
-                ),
-                Some(_) => "this VOTable is an error document rather than a table".to_owned(),
-                None => "this VOTable holds no TABLE".to_owned(),
-            }),
+        if let Some(said) = self.error.take() {
+            return Err(match said.trim() {
+                "" => "this VOTable says the query that produced it failed".to_owned(),
+                said => format!("this VOTable says the query that produced it failed: {said}"),
+            });
+        }
+        match (found, self.first.take()) {
+            (Some(table), _) => Ok(table),
+            (None, Some(fields)) => finish(&builders(fields)?, Vec::new()),
+            (None, None) => Err("this VOTable holds no TABLE".to_owned()),
         }
     }
 
@@ -195,13 +215,21 @@ impl Walker<'_> {
         self.stack.last().map(String::as_str).unwrap_or_default()
     }
 
-    /// An element opened. `Some` is the table, read whole.
+    /// An element opened. `Some` is the table, read whole. `read` is whether the table has
+    /// been already, after which only a failed `QUERY_STATUS` is looked for.
     fn opened(
         &mut self,
         name: &str,
         element: &BytesStart<'_>,
         empty: bool,
+        read: bool,
     ) -> Result<Option<Table>, String> {
+        if read && name != "INFO" {
+            if !empty {
+                self.stack.push(name.to_owned());
+            }
+            return Ok(None);
+        }
         let attributes = attributes(element)?;
         let get = |key: &str| {
             attributes
@@ -215,6 +243,7 @@ impl Walker<'_> {
                 self.open = Some(Open {
                     id: get("ID"),
                     reference: get("ref"),
+                    nrows: get("nrows").and_then(|rows| rows.trim().parse().ok()),
                     ..Open::default()
                 });
                 if empty {
@@ -273,11 +302,12 @@ impl Walker<'_> {
                 let Some(open) = self.open.take() else {
                     return Ok(None);
                 };
+                let nrows = open.nrows;
                 let fields = self.fields_of(open)?;
                 let mut builders = builders(fields)?;
                 let batches = match empty {
                     true => Vec::new(),
-                    false => self.data(&mut builders)?,
+                    false => self.data(&mut builders, nrows)?,
                 };
                 return finish(&builders, batches).map(Some);
             }
@@ -335,7 +365,11 @@ impl Walker<'_> {
     }
 
     /// The inside of a `DATA`, through its end.
-    fn data(&mut self, builders: &mut [Builder]) -> Result<Vec<RecordBatch>, String> {
+    fn data(
+        &mut self,
+        builders: &mut Vec<Builder>,
+        nrows: Option<usize>,
+    ) -> Result<Vec<RecordBatch>, String> {
         let mut batches = Vec::new();
         loop {
             match self
@@ -355,7 +389,12 @@ impl Walker<'_> {
                                 .map_err(|error| {
                                     format!("the {name} STREAM is not base64: {error}")
                                 })?;
-                            self.binary(builders, &decoded, name == "BINARY2", &mut batches)?;
+                            let stream = Stream {
+                                bytes: &decoded,
+                                flagged: name == "BINARY2",
+                                nrows,
+                            };
+                            self.binary(builders, &stream, &mut batches)?;
                         }
                         "FITS" => {
                             return Err("this VOTable carries its rows as FITS, which this \
@@ -561,13 +600,57 @@ impl Walker<'_> {
         }
     }
 
+    /// A `BINARY` or `BINARY2` stream, in whichever [`Dialect`] it parses in.
+    ///
+    /// The second is tried only where a column is one the two read differently, and only
+    /// where the first did not parse; the document's own `nrows`, where it has one, has to
+    /// agree as well. astropy's first, where the document says astropy wrote it, and
+    /// otherwise STIL's.
     fn binary(
         &mut self,
-        builders: &mut [Builder],
-        bytes: &[u8],
-        flagged: bool,
+        builders: &mut Vec<Builder>,
+        stream: &Stream<'_>,
         batches: &mut Vec<RecordBatch>,
     ) -> Result<(), String> {
+        let ambiguous = builders.iter().any(binary::is_ambiguous);
+        let nrows = stream.nrows.filter(|_| ambiguous);
+        let first = match self.astropy {
+            true => Dialect::Astropy,
+            false => Dialect::Stil,
+        };
+        let spent = self.items;
+        let error = match self.rows_of(builders, stream, first, nrows) {
+            Ok(read) => {
+                batches.extend(read);
+                return Ok(());
+            }
+            Err(error) if !ambiguous => return Err(error),
+            Err(error) => error,
+        };
+        self.items = spent;
+        let mut fresh = builders
+            .iter()
+            .map(|builder| Builder::new(builder.column.clone()))
+            .collect::<Result<Vec<_>, _>>()?;
+        match self.rows_of(&mut fresh, stream, first.other(), nrows) {
+            Ok(read) => {
+                *builders = fresh;
+                batches.extend(read);
+                Ok(())
+            }
+            Err(_) => Err(error),
+        }
+    }
+
+    fn rows_of(
+        &mut self,
+        builders: &mut [Builder],
+        stream: &Stream<'_>,
+        dialect: Dialect,
+        nrows: Option<usize>,
+    ) -> Result<Vec<RecordBatch>, String> {
+        let (bytes, flagged) = (stream.bytes, stream.flagged);
+        let mut batches = Vec::new();
         let flag_bytes = match flagged {
             true => builders.len().div_ceil(8),
             false => 0,
@@ -585,7 +668,7 @@ impl Walker<'_> {
                 let flag = flags.get(at / 8).copied().unwrap_or_default();
                 let null = flagged && flag & (0x80 >> (at % 8)) != 0;
                 let before = builder.appended();
-                binary::push(builder, &mut cursor, null).map_err(|error| {
+                binary::push(builder, &mut cursor, null, dialect).map_err(|error| {
                     format!("row {rows}, column {}: {error}", builder.column.name)
                 })?;
                 let spent = builder.appended() - before;
@@ -605,10 +688,17 @@ impl Walker<'_> {
                 pending = 0;
             }
         }
+        if let Some(declared) = nrows
+            && declared != rows
+        {
+            return Err(format!(
+                "the stream holds {rows} rows, and its TABLE says nrows=\"{declared}\""
+            ));
+        }
         if pending > 0 {
             batches.push(batch(builders)?);
         }
-        Ok(())
+        Ok(batches)
     }
 
     /// Whether so many more items fit.
@@ -935,6 +1025,52 @@ mod tests {
             wrapped.join("\n")
         );
         check(&one(&binary2));
+    }
+
+    /// A variable multi-dimensional array written with its count as primitives, the way STIL
+    /// writes it, and as slices, the way astropy does, reads back as the same cells.
+    #[test]
+    fn both_readings_of_a_variable_array_count_are_read() {
+        let head = r#"<VOTABLE><RESOURCE><TABLE nrows="2">
+<FIELD name="pairs" datatype="short" arraysize="2x*"/>
+<FIELD name="names" datatype="char" arraysize="3x*"/>
+<DATA><BINARY><STREAM encoding="base64">"#;
+        let tail = "</STREAM></BINARY></DATA></TABLE></RESOURCE></VOTABLE>";
+        let rows = |slices: bool| {
+            let mut out = Vec::new();
+            for (pairs, names) in [(&[1i16, 2, 3, 4][..], "abcdef"), (&[5, 6][..], "ghi")] {
+                let (short_count, char_count) = match slices {
+                    true => (pairs.len() / 2, names.len() / 3),
+                    false => (pairs.len(), names.len()),
+                };
+                out.extend(u32::try_from(short_count).unwrap().to_be_bytes());
+                for value in pairs {
+                    out.extend(value.to_be_bytes());
+                }
+                out.extend(u32::try_from(char_count).unwrap().to_be_bytes());
+                out.extend(names.as_bytes());
+            }
+            general_purpose::STANDARD.encode(out)
+        };
+        for (slices, astropy) in [(false, false), (true, false), (true, true), (false, true)] {
+            let comment = match astropy {
+                true => "<!-- Produced with astropy.io.votable -->",
+                false => "",
+            };
+            let document = format!("{comment}{head}{}{tail}", rows(slices));
+            let batch = one(&document);
+            let pairs = batch.column(0).as_list::<i32>();
+            assert_eq!(
+                pairs.value(0).as_primitive::<Int16Type>().values().to_vec(),
+                [1, 2, 3, 4],
+                "slices {slices}, astropy {astropy}"
+            );
+            let names = batch.column(1).as_list::<i32>();
+            let first = names.value(0);
+            let first = first.as_string::<i32>();
+            assert_eq!((first.value(0), first.value(1)), ("abc", "def"));
+            assert_eq!(names.value(1).len(), 1);
+        }
     }
 
     #[test]
