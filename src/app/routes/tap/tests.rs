@@ -1504,14 +1504,20 @@ async fn an_inline_part_that_is_no_table_is_refused_by_name() {
 }
 
 /// A url into a mount is refused in terms of the url the caller wrote, never of what is on
-/// the disk beneath it: a file that is not there, and a parquet file under a name the
-/// data-file globs do not list — which its bytes alone do not make one to read in place.
+/// the disk beneath it: a file that is not there; a parquet file under a name the data-file
+/// globs do not list, which its bytes alone do not make one to read in place; a file named as
+/// a catalog; and a file named as parquet that is not one.
 #[tokio::test]
 async fn an_upload_url_into_a_mount_is_refused_without_naming_the_disk() {
     let dir = hats::query::tests::fixture(true);
     std::fs::copy(
         dir.path().join("dataset/Norder=3/Dir=0/Npix=64.parquet"),
         dir.path().join("rows.dat"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("junk.parquet"),
+        b"not a parquet file at all",
     )
     .unwrap();
     let source = dir.path().display().to_string();
@@ -1528,6 +1534,19 @@ async fn an_upload_url_into_a_mount_is_refused_without_naming_the_disk() {
             vec![("UPLOAD", "t,file:///rows.dat")],
             StatusCode::NOT_FOUND,
             "names no data file",
+        ),
+        (
+            vec![
+                ("UPLOAD", "t,file:///dataset/Norder=3/Dir=0/Npix=64.parquet"),
+                ("UPLOAD_TYPE", "t,hats"),
+            ],
+            StatusCode::BAD_REQUEST,
+            "cannot be read",
+        ),
+        (
+            vec![("UPLOAD", "t,file:///junk.parquet")],
+            StatusCode::BAD_REQUEST,
+            "cannot be read",
         ),
     ] {
         let mut asked = vec![("QUERY", "SELECT * FROM TAP_UPLOAD.t"), ("LANG", "ADQL")];
