@@ -260,10 +260,8 @@ max_catalog_cache_bytes = "256MiB"
 # limit bounds it.
 max_request_body_bytes = "2MiB"
 
-# How many bytes of tables one request may upload: the VOTables and parquet files a TAP
-# request sends, and the VOTables a TAP UPLOAD or an /adql table names by URL, together.
-# Over it, 413. "0" refuses every one of them. A multipart TAP request may be this much
-# larger than max_request_body_bytes.
+# How many bytes of uploaded tables one request may bring, sent or fetched by URL; over
+# it, 413. "0" turns uploads off.
 max_upload_bytes = "64MiB"
 
 # How much SQL one request may carry, in "select" and "where". Both bound the text the
