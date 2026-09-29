@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/votable-1.3.xsd">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="CDS">SIMBAD TAP Service</INFO>
+<INFO name="QUERY" value="SELECT TOP 12 oid, main_id, ra, dec, coo_err_maj, coo_qual, plx_value, rvz_redshift, rvz_type, otype, nbref, update_date, coo_bibcode FROM basic WHERE ra BETWEEN 10 AND 10.2 AND dec BETWEEN 41 AND 41.5 ORDER BY oid"/>
+<TABLE name="result_S1790648298185">
+<FIELD datatype="long" name="oid" ucd="meta.record">
+<DESCRIPTION>Object internal identifier</DESCRIPTION>
+<VALUES null='-9223372036854775808'/>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="main_id" ucd="meta.id;meta.main" utype="mango:MangoObject.identifier">
+<DESCRIPTION>Main identifier for an object</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="ra" ucd="pos.eq.ra;meta.main" unit="deg" utype="mango:EpochPosition.longitude[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Right ascension</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="dec" ucd="pos.eq.dec;meta.main" unit="deg" utype="mango:EpochPosition.latitude[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Declination</DESCRIPTION>
+</FIELD>
+<FIELD datatype="float" name="coo_err_maj" ucd="phys.angSize.smajAxis;pos.errorEllipse;pos.eq" unit="mas" utype="mango:EpochPosition.errors.position/mango:error.PErrorEllipse.semiMajorAxis[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Coordinate error major axis</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="1" datatype="char" name="coo_qual" ucd="meta.code.qual;pos.eq">
+<DESCRIPTION>Coordinate quality</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="plx_value" ucd="pos.parallax.trig" unit="mas" utype="mango:EpochPosition.parallax[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Parallax</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="rvz_redshift" ucd="src.redshift">
+<DESCRIPTION>redshift</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="1" datatype="char" name="rvz_type">
+<DESCRIPTION>Radial velocity / redshift type</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="otype" ucd="src.class" utype="mango:Label.text[CT.vocabulary=https://www.ivoa.net/rdf/uat#classification]">
+<DESCRIPTION>Object type</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="nbref" ucd="meta.bib;arith.sum">
+<DESCRIPTION>number of references</DESCRIPTION>
+<VALUES null='-2147483648'/>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="update_date" ucd="time.processing">
+<DESCRIPTION>Date of last modification</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="coo_bibcode" ucd="meta.bib.bibcode;pos.eq">
+<DESCRIPTION>Coordinate reference</DESCRIPTION>
+</FIELD>
+<DATA>
+<BINARY>
+<STREAM encoding='base64'>
+AAAAAAAXv7oAAAATTlZTUyBKMDA0MDEzKzQxMDg0NUAkHNNahYeTQESSwyIpH7RF
+nEAARH/4AAAAAAAAf/gAAAAAAAAAAAAAA1JhZAAAAA0AAAAKMjAyNS0wOC0xNgAA
+ABMyMDE3QSZBLi4uNTk4QS4uNzhJAAAAAAAXv7sAAAAKV1NUQiAzN1c1M0AkJmZm
+ZmZmQES9sFsFsFt/wAAARX/4AAAAAAAAf/gAAAAAAAAAAAAAA1JhZAAAAAQAAAAK
+MjAyNS0wOC0yNQAAAAAAAAAAABe/vAAAAApXU1RCIDM3VzU2QCQ0DadA2nRARKuF
+HrhR7H/AAABFf/gAAAAAAAB/+AAAAAAAAAAAAAADUmFkAAAABQAAAAoyMDI1LTA4
+LTI1AAAAAAAAAAAAF7+9AAAACldTVEIgMzdXNTdAJDToG06BtUBEj3d3d3d5f8AA
+AEV/+AAAAAAAAH/4AAAAAAAAAAAAAANSYWQAAAAKAAAACjIwMjUtMDgtMjUAAAAA
+AAAAAAAXwBcAAAAJViogUFQgQW5kQCQ0BReW9XtARIiliDpLrEIKZmZDf/gAAAAA
+AAB/+AAAAAAAAAAAAAADQ1YqAAAAGAAAAAoyMDI1LTAyLTI4AAAAEzIwMTd5Q2F0
+LjIzNDkuLi4uMEMAAAAAABfAdQAAAApXU1RCIDM3VzU0QCQk6BtOgbVARJU9quTr
+wH/AAABFf/gAAAAAAAB/+AAAAAAAAAAAAAADUmFkAAAAAQAAAAoyMDI1LTA4LTI1
+AAAAAAAAAAAAF8B2AAAAE05WU1MgSjAwNDAyMys0MTI5MjhAJDPTG5tm+UBEvvzO
+HFgkRZxAAER/+AAAAAAAAH/4AAAAAAAAAAAAAANSYWQAAAADAAAACjIwMjUtMDgt
+MTYAAAATMjAxN0EmQS4uLjU5OEEuLjc4SQAAAAAAF8B5AAAACldTVEIgMzdXNjFA
+JExJul41P0BEiqU0kLmwf8AAAEV/+AAAAAAAAH/4AAAAAAAAAAAAAANSYWQAAAAB
+AAAACjIwMjUtMDgtMjUAAAAAAAAAAAAXwHoAAAAKV1NUQiAzN1c2MkAkTgmOrWW3
+QESSiP0KsfN/wAAARX/4AAAAAAAAf/gAAAAAAAAAAAAAA1JhZAAAAAIAAAAKMjAy
+NS0wOC0yNQAAAAAAAAAAABfBowAAAAhCQSAxLTQxN0AkT0vGp++eQESgJyO56bN/
+wAAARH/4AAAAAAAAf/gAAAAAAAAAAAAAA0VtTwAAAAEAAAAKMjAwNi0wOS0zMAAA
+AAAAAAAAABfBtQAAAAhCQSAxLTQ0MkAkTMdWstvRQESCq5Ou/YB/wAAARH/4AAAA
+AAAAf/gAAAAAAAAAAAAAA0VtTwAAAAEAAAAKMjAwNi0wOS0zMAAAAAAAAAAAABfC
+JgAAAAhCQSAxLTQ0NUAkISbpeNT9QESCQua9yAV/wAAARH/4AAAAAAAAf/gAAAAA
+AAAAAAAAA0VtTwAAAAIAAAAKMjAxNS0wMS0xNAAAAAA=
+</STREAM>
+</BINARY>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

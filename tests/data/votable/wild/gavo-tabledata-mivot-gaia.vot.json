@@ -1,0 +1,150 @@
+{
+ "producer": "GAVO DaCHS 2.12.2 (Python), per INFO server_software",
+ "source_url": "https://dc.g-vo.org/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=vodml&QUERY=SELECT+TOP+5+source_id%2c+ra%2c+dec%2c+pmra%2c+pmdec%2c+parallax%2c+phot_g_mean_mag%2c+radial_velocity+FROM+gaia.dr3lite+WHERE+1%3dCONTAINS%28POINT%28ra%2c+dec%29%2c+CIRCLE%2856.75%2c+24.12%2c+0.05%29%29",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "source_id",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "Gaia DR3 unique source identifier. Note that this *cannot* be matched against the DR1 or DR2 source_ids.",
+   "null": "-1"
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": null,
+   "description": "Barycentric Right Ascension in ICRS at epoch J2016.0",
+   "null": null
+  },
+  {
+   "name": "dec",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": null,
+   "description": "Barycentric Declination in ICRS at epoch J2016.0",
+   "null": null
+  },
+  {
+   "name": "pmra",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas/yr",
+   "ucd": "pos.pm;pos.eq.ra",
+   "utype": null,
+   "description": "Proper motion in right ascension of the source in ICRS at J2016.0. This is the tangent plane projection (i.e., multiplied by cos(δ)) of the proper motion vector in the direction of increasing right ascension.",
+   "null": null
+  },
+  {
+   "name": "pmdec",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas/yr",
+   "ucd": "pos.pm;pos.eq.dec",
+   "utype": null,
+   "description": "Proper motion in declination at J2016.0.",
+   "null": null
+  },
+  {
+   "name": "parallax",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas",
+   "ucd": "pos.parallax",
+   "utype": null,
+   "description": "Absolute barycentric stellar parallax of the source at the reference epoch J2016.0. If looking for a distance, consider joining with gedr3dist.main and using the distances from there.",
+   "null": null
+  },
+  {
+   "name": "phot_g_mean_mag",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag;em.opt;stat.mean",
+   "utype": null,
+   "description": "Mean magnitude in the G band. This is computed from the G-band mean flux applying the magnitude zero-point in the Vega scale. To obtain error estimates, see phot_g_mean_flux_over_error.",
+   "null": null
+  },
+  {
+   "name": "radial_velocity",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "km/s",
+   "ucd": "spect.dopplerVeloc.opt;em.opt.I",
+   "utype": null,
+   "description": "Spectroscopic radial velocity in the solar barycentric reference frame. For stars brighter than about 12 mag, this is the median of all single-epoch measurements. For fainter stars, RV estimation is from a co-added spectrum.",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   65225782834282624,
+   56.733831700770125,
+   24.096177960065152,
+   2.0849177837371826,
+   -3.668733596801758,
+   -0.3139660060405731,
+   19.367563247680664,
+   "NaN"
+  ],
+  [
+   65213649552182784,
+   56.735865396946814,
+   24.08917700733694,
+   37.06606674194336,
+   -19.6354923248291,
+   1.673240303993225,
+   19.598983764648438,
+   "NaN"
+  ],
+  [
+   65214061869072512,
+   56.75299349590958,
+   24.10819715261423,
+   0.4158066213130951,
+   0.882714033126831,
+   0.8154088854789734,
+   18.889612197875977,
+   "NaN"
+  ],
+  [
+   65213786991141120,
+   56.77783558399322,
+   24.09046993328604,
+   7.997622489929199,
+   -2.9428229331970215,
+   0.3799683749675751,
+   18.207416534423828,
+   "NaN"
+  ],
+  [
+   65213894364799488,
+   56.78628232693614,
+   24.098902907873672,
+   0.649394690990448,
+   -0.6882430911064148,
+   -0.29858162999153137,
+   20.18773078918457,
+   "NaN"
+  ]
+ ],
+ "refuse": null,
+ "notes": "RESPONSEFORMAT=vodml: VOTable 1.6 media type with a MIVOT (mivot:VODML) annotation block in a RESOURCE type=meta.\nastropy has null where the contract has NaN: radial_velocity (5/5)"
+}

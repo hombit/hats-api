@@ -1,0 +1,10 @@
+{
+ "producer": "SIMBAD TAP, TAPLibrary (VOLLT, Java)",
+ "source_url": "https://simbad.cds.unistra.fr/simbad/sim-tap/sync?REQUEST=doQuery&LANG=ADQL&FORMAT=votable&QUERY=SELECT+TOP+3+no_such_column+FROM+basic",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "HTTP 400. The INFO USER value was the requester's address and is replaced by 192.0.2.1 (TEST-NET-1)."
+}

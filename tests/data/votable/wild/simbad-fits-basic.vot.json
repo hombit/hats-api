@@ -1,0 +1,86 @@
+{
+ "producer": "SIMBAD TAP, TAPLibrary (VOLLT, Java); INFO PROVIDER 'CDS'",
+ "source_url": "https://simbad.cds.unistra.fr/simbad/sim-tap/sync?REQUEST=doQuery&LANG=ADQL&FORMAT=votable%2ffits&QUERY=SELECT+TOP+5+oid%2c+main_id%2c+ra%2c+dec+FROM+basic+WHERE+ra+BETWEEN+10+AND+10.2+AND+dec+BETWEEN+41+AND+41.5+ORDER+BY+oid",
+ "fetched": "2026-09-29",
+ "serialization": "FITS",
+ "columns": [
+  {
+   "name": "oid",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.record",
+   "utype": null,
+   "description": "Object internal identifier",
+   "null": "-9223372036854775808"
+  },
+  {
+   "name": "main_id",
+   "datatype": "char",
+   "arraysize": "19",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": "mango:MangoObject.identifier",
+   "description": "Main identifier for an object",
+   "null": null
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": "mango:EpochPosition.longitude[CS.spaceSys=ICRS CT.epoch=J2000]",
+   "description": "Right ascension",
+   "null": null
+  },
+  {
+   "name": "dec",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": "mango:EpochPosition.latitude[CS.spaceSys=ICRS CT.epoch=J2000]",
+   "description": "Declination",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   1556410,
+   "NVSS J004013+410845",
+   10.056299999999998,
+   41.14658
+  ],
+  [
+   1556411,
+   "WSTB 37W53",
+   10.075,
+   41.481944444444444
+  ],
+  [
+   1556412,
+   "WSTB 37W56",
+   10.101666666666667,
+   41.34
+  ],
+  [
+   1556413,
+   "WSTB 37W57",
+   10.103333333333333,
+   41.120833333333344
+  ],
+  [
+   1556503,
+   "V* PT And",
+   10.101601350000001,
+   41.067551640000005
+  ]
+ ],
+ "refuse": "FITS serialization: DATA holds a base64 FITS file in STREAM, not a VOTable encoding",
+ "notes": "TAPLibrary ignores RESPONSEFORMAT and answers BINARY whatever it names; this one was fetched with the TAP 1.0 FORMAT parameter.\nRows are astropy.io.fits's reading of the embedded FITS table."
+}

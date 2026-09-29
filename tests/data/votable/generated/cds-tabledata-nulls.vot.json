@@ -1,0 +1,8 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": null,
+  "columns": [],
+  "rows": [],
+  "refuse": "4 elements in 'iarr_n', arraysize 3",
+  "notes": "The writer produced a document that is not valid VOTable, so a reader must refuse it; astropy 8.0.1 reads it without an error; STILTS reads it without an error."
+}

@@ -1,0 +1,68 @@
+{
+ "producer": "astropy test data, a MIVOT-annotated table",
+ "source_url": "https://raw.githubusercontent.com/astropy/astropy/006f4960ab7311b83c36ca66d5df70274419e144/astropy/io/votable/tests/data/mivot_annotated_table.xml",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "source_id",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "Gaia DR3 unique source identifier. Note that this *cannot* be matched against the DR1 or DR2 source_ids.",
+   "null": "-1"
+  },
+  {
+   "name": "phot_g_mean_mag",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag;em.opt;stat.mean",
+   "utype": null,
+   "description": "Mean magnitude in the G band. This is computed from the G-band mean flux applying the magnitude\n          zero-point\n          in the Vega scale. To obtain error estimates, see phot_g_mean_flux_over_error.",
+   "null": null
+  },
+  {
+   "name": "phot_rp_mean_mag",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag;em.opt.R",
+   "utype": null,
+   "description": "Mean magnitude in the integrated RP band. This is computed from the RP-band mean flux applying the\n          magnitude zero-point in the Vega scale. To obtain error estimates, see phot_rp_mean_flux_over_error.",
+   "null": null
+  },
+  {
+   "name": "phot_bp_mean_mag",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag;em.opt.B",
+   "utype": null,
+   "description": "Mean magnitude in the integrated BP band. This is computed from the BP-band mean flux applying the\n          magnitude zero-point in the Vega scale. To obtain error estimates, see phot_bp_mean_flux_over_error.",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   2165092154924732928,
+   19.63309669494629,
+   18.230663299560547,
+   21.654430389404297
+  ],
+  [
+   2165092159226514688,
+   20.997982025146484,
+   20.10654640197754,
+   21.164270401000977
+  ]
+ ],
+ "refuse": null,
+ "notes": null
+}

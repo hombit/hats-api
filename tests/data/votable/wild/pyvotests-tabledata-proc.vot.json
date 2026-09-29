@@ -1,0 +1,150 @@
+{
+ "producer": "pyvo test data, a DataLink response with a processing service descriptor",
+ "source_url": "https://raw.githubusercontent.com/astropy/pyvo/4909bc046f144258eb45b70fa9d4a23418bc33e6/pyvo/dal/tests/data/datalink/proc.xml",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "ID",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "Publisher data set id; this is an identifier for the dataset in question and can be used to retrieve the data.",
+   "null": null
+  },
+  {
+   "name": "access_url",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref.url",
+   "utype": null,
+   "description": "URL to retrieve the data or access the service.",
+   "null": null
+  },
+  {
+   "name": "service_def",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code",
+   "utype": null,
+   "description": "Identifier for the type of service if accessURL refers to a service.",
+   "null": null
+  },
+  {
+   "name": "error_message",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code.error",
+   "utype": null,
+   "description": "If accessURL is empty, this column gives the reason why.",
+   "null": null
+  },
+  {
+   "name": "description",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.note",
+   "utype": null,
+   "description": "More information on this link",
+   "null": null
+  },
+  {
+   "name": "semantics",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code",
+   "utype": null,
+   "description": "What kind of data is linked here? Standard identifiers here include science, calibration, preview, info, auxiliary",
+   "null": null
+  },
+  {
+   "name": "content_type",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code.mime",
+   "utype": null,
+   "description": "Media type for the data returned.",
+   "null": null
+  },
+  {
+   "name": "content_length",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "byte",
+   "ucd": "phys.size;meta.file",
+   "utype": null,
+   "description": "Size of the resource at access_url",
+   "null": "-1"
+  }
+ ],
+ "rows": [
+  [
+   "ivo://org.gavo.dc/~?bgds/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   null,
+   "procsvc",
+   null,
+   "An interactive service on this dataset.",
+   "#proc",
+   null,
+   null
+  ],
+  [
+   "ivo://org.gavo.dc/~?bgds/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   "http://dc.zah.uni-heidelberg.de/getproduct/bgds/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   null,
+   null,
+   "The full dataset.",
+   "#this",
+   "image/fits",
+   68708160
+  ],
+  [
+   "ivo://org.gavo.dc/~?bgds/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   "http://dc.zah.uni-heidelberg.de/getproduct/bgds/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz?preview=True",
+   null,
+   null,
+   "A preview for the dataset.",
+   "#preview-image",
+   "image/jpeg",
+   null
+  ],
+  [
+   "ivo://org.gavo.dc/s/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   "http://dc.zah.uni-heidelberg.de/wider.dat",
+   null,
+   null,
+   "An artificial thing.",
+   "#preview",
+   "image/jpeg",
+   null
+  ],
+  [
+   "ivo://org.gavo.dc/s/data/gds_big/v6a/2010/GDS_0644-0035/i_s/eq010000ms/20100927.comb_avg.0001.fits.fz",
+   "http://example.edu/when-will-it-be-back",
+   null,
+   null,
+   "Something requiring custom semantics.",
+   "urn:example:rdf/dlext#oracle",
+   "text/x-prediction",
+   null
+  ]
+ ],
+ "refuse": null,
+ "notes": "astropy has an empty string where the contract has null: access_url (1/5), service_def (4/5), error_message (5/5), content_type (1/5)"
+}

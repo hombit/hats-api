@@ -1,0 +1,142 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:29
+ !-->
+<RESOURCE>
+<TABLE name="scalars" nrows="7">
+<FIELD datatype="boolean" name="b"/>
+<FIELD datatype="boolean" name="bit"/>
+<FIELD datatype="unsignedByte" name="ub"/>
+<FIELD datatype="short" name="s"/>
+<FIELD datatype="int" name="i"/>
+<FIELD datatype="long" name="l"/>
+<FIELD datatype="char" name="c"/>
+<FIELD datatype="unicodeChar" name="u"/>
+<FIELD datatype="float" name="f"/>
+<FIELD datatype="double" name="d"/>
+<FIELD arraysize="2" datatype="float" name="fc"/>
+<FIELD arraysize="2" datatype="double" name="dc"/>
+<FIELD arraysize="*" datatype="char" name="str"/>
+<FIELD arraysize="*" datatype="unicodeChar" name="ustr"/>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>T</TD>
+    <TD>T</TD>
+    <TD>0</TD>
+    <TD>-32768</TD>
+    <TD>-2147483648</TD>
+    <TD>-9223372036854775808</TD>
+    <TD>a</TD>
+    <TD>Я</TD>
+    <TD>1.5</TD>
+    <TD>1.5</TD>
+    <TD>1.5 -1.5</TD>
+    <TD>1.5 -1.5</TD>
+    <TD>hello</TD>
+    <TD>Привет</TD>
+  </TR>
+  <TR>
+    <TD>F</TD>
+    <TD>F</TD>
+    <TD>255</TD>
+    <TD>32767</TD>
+    <TD>2147483647</TD>
+    <TD>9223372036854775807</TD>
+    <TD>Z</TD>
+    <TD>λ</TD>
+    <TD>-3.4028235E38</TD>
+    <TD>1.7976931348623157E308</TD>
+    <TD>0.1 -0.2</TD>
+    <TD>0.1 -0.2</TD>
+    <TD></TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD></TD>
+    <TD>T</TD>
+    <TD>1</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD>&lt;</TD>
+    <TD>中</TD>
+    <TD>1.1754944E-38</TD>
+    <TD>4.9E-324</TD>
+    <TD>NaN NaN</TD>
+    <TD>NaN 0.0</TD>
+    <TD>x y</TD>
+    <TD>日本語</TD>
+  </TR>
+  <TR>
+    <TD>T</TD>
+    <TD>F</TD>
+    <TD>128</TD>
+    <TD>-1</TD>
+    <TD>-1</TD>
+    <TD>-1</TD>
+    <TD>&amp;</TD>
+    <TD>é</TD>
+    <TD>NaN</TD>
+    <TD>NaN</TD>
+    <TD>0.0 0.0</TD>
+    <TD>0.0 0.0</TD>
+    <TD>&lt;&amp;&gt;"'</TD>
+    <TD>&lt;&amp;&gt;"'</TD>
+  </TR>
+  <TR>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>NaN</TD>
+    <TD>NaN</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>F</TD>
+    <TD>T</TD>
+    <TD>42</TD>
+    <TD>12345</TD>
+    <TD>123456789</TD>
+    <TD>1234567890123456789</TD>
+    <TD>0</TD>
+    <TD>Ω</TD>
+    <TD>+Inf</TD>
+    <TD>+Inf</TD>
+    <TD>+Inf 1.0</TD>
+    <TD>-Inf 1.0</TD>
+    <TD>  lead and trail  </TD>
+    <TD>  ведущие </TD>
+  </TR>
+  <TR>
+    <TD>T</TD>
+    <TD>F</TD>
+    <TD>7</TD>
+    <TD>1</TD>
+    <TD>2</TD>
+    <TD>3</TD>
+    <TD>~</TD>
+    <TD>a</TD>
+    <TD>-Inf</TD>
+    <TD>-Inf</TD>
+    <TD>3.0 4.0</TD>
+    <TD>3.0 4.0</TD>
+    <TD>multi word</TD>
+    <TD>Ελληνικά</TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

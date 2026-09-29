@@ -1,0 +1,45 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "f",
+   "datatype": "boolean",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   true
+  ],
+  [
+   false
+  ],
+  [
+   true
+  ],
+  [
+   false
+  ],
+  [
+   true
+  ],
+  [
+   false
+  ],
+  [
+   null
+  ],
+  [
+   null
+  ]
+ ],
+ "refuse": null,
+ "notes": "Every spelling of a boolean §6 allows, and both of its nulls."
+}

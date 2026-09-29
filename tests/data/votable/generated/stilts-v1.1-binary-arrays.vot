@@ -1,0 +1,54 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.1"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.1">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:37
+ !-->
+<RESOURCE>
+<TABLE name="arrays" nrows="4">
+<FIELD arraysize="3" datatype="int" name="i3"/>
+<FIELD arraysize="3" datatype="double" name="d3"/>
+<FIELD arraysize="*" datatype="int" name="iv"/>
+<FIELD arraysize="*" datatype="float" name="fv"/>
+<FIELD arraysize="*" datatype="short" name="s10"/>
+<FIELD arraysize="*" datatype="long" name="lv"/>
+<FIELD arraysize="*" datatype="unsignedByte" name="ubv"/>
+<FIELD arraysize="2x3" datatype="int" name="i2x3"/>
+<FIELD arraysize="2x*" datatype="double" name="d2xs"/>
+<FIELD arraysize="8x*" datatype="char" name="c8xs"/>
+<FIELD arraysize="8x3" datatype="char" name="c8x3"/>
+<FIELD arraysize="4" datatype="boolean" name="bool4"/>
+<FIELD arraysize="5" datatype="boolean" name="bit5"/>
+<FIELD arraysize="12" datatype="boolean" name="bit12"/>
+<FIELD arraysize="*" datatype="boolean" name="bitv"/>
+<FIELD arraysize="2x2" datatype="float" name="fc2"/>
+<FIELD arraysize="2x*" datatype="double" name="dcv"/>
+<DATA>
+<BINARY>
+<STREAM encoding='base64'>
+AAAAAQAAAAIAAAADP/gAAAAAAADABAAAAAAAAH435DyIAHWcAAAABQAAAAEAAAAC
+AAAABAAAAAgAAAAQAAAAAz/AAAB/wAAAwAAAAAAAAAIAAQACAAAAAoAAAAAAAAAA
+f/////////8AAAADAP8QAAAAAAAAAAEAAAACAAAAAwAAAAQAAAAFAAAABj/wAAAA
+AAAAQAAAAAAAAABACAAAAAAAAEAQAAAAAAAAQBQAAAAAAABAGAAAAAAAAAAAABBh
+YmMAAAAAAGRlZmdoAAAAYQAAAAAAAABiYgAAAAAAAGNjYwAAAAAAVEZGVFRGVFRG
+VEZGRlRUVFRGRlRGAAAAA1RGVD+AAABAAAAAQEAAAECAAAAAAAAEP/AAAAAAAABA
+AAAAAAAAAEAIAAAAAAAAQBAAAAAAAACAAAAAAAAAAH////9/+AAAAAAAAH/wAAAA
+AAAA//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/////////+/////f////z/
+///7////+gAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAAARkZGRkZGRkZG
+RkZGRkZGRkZGRkZGAAAAAD8AAAC/AAAAf8AAAH/AAAAAAAAAAAAAAAAAAAAAAAAA
+f/gAAAAAAAB/+AAAAAAAAH/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAACAgICAgICAgICAgICAgICAgICAgIAAAAAB/wAAAf8AAAH/AAAB/wAAAAAAA
+AAAAAAcAAAAIAAAACQAAAAAAAAAAP/AAAAAAAABAAAAAAAAAAAAAAAH////5AAAA
+AX+AAAAAAAAKgAB//wAAAAEAAgADAAQABQAGAAcAAAABAAAAAAAAAAAAAAABAQAA
+AAoAAAAUAAAAHgAAACgAAAAyAAAAPAAAAAI/4AAAAAAAAL/gAAAAAAAAAAAACDEy
+MzQ1Njc4MTIzNDU2NzggbGVhZAAAAHoAAAAAAAAARkZUVFRUVFRUVFRUVFRUVFRU
+VFRUAAAACVRGVEZURlRGVAAAAAAAAAAAAAAAAAAAAAAAAAACP+AAAAAAAAC/4AAA
+AAAAAA==
+</STREAM>
+</BINARY>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

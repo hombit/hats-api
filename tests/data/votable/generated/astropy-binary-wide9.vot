@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="wide9" name="wide9">
+   <FIELD ID="c00" datatype="short" name="c00">
+    <VALUES null="-32768"/>
+   </FIELD>
+   <FIELD ID="c01" datatype="int" name="c01">
+    <VALUES null="-2147483648"/>
+   </FIELD>
+   <FIELD ID="c02" datatype="double" name="c02"/>
+   <FIELD ID="c03" arraysize="*" datatype="char" name="c03"/>
+   <FIELD ID="c04" datatype="boolean" name="c04"/>
+   <FIELD ID="c05" datatype="float" name="c05"/>
+   <FIELD ID="c06" datatype="long" name="c06">
+    <VALUES null="-9223372036854775808"/>
+   </FIELD>
+   <FIELD ID="c07" datatype="unsignedByte" name="c07">
+    <VALUES null="255"/>
+   </FIELD>
+   <FIELD ID="c08" arraysize="3" datatype="char" name="c08"/>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+gAAAAAPoQAIAAAAAAAAAAAACdjNUP6AAAP//+osEIaAAB3Y4AP/7gAAAAEACAAAAAAAAAAAAAnYzVD+gAAD///qLBCGgAAd2OAD/+wAAA+h/+AAAAAAAAAAAAAJ2M1Q/oAAA///6iwQhoAAHdjgA//sAAAPoQAIAAAAAAAAAAAAAVD+gAAD///qLBCGgAAd2OAD/+wAAA+hAAgAAAAAAAAAAAAJ2Mz8/oAAA///6iwQhoAAHdjgA//sAAAPoQAIAAAAAAAAAAAACdjNUf8AAAP//+osEIaAAB3Y4AP/7AAAD6EACAAAAAAAAAAAAAnYzVD+gAACAAAAAAAAAAAd2OAD/+wAAA+hAAgAAAAAAAAAAAAJ2M1Q/oAAA///6iwQhoAD/djgA//sAAAPoQAIAAAAAAAAAAAACdjNUP6AAAP//+osEIaAABwAAAP/7AAAD6EACAAAAAAAAAAAAAnYzVD+gAAD///qLBCGgAAd2OACAAIAAAAB/+AAAAAAAAAAAAAA/f8AAAIAAAAAAAAAA/wAAAA==     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

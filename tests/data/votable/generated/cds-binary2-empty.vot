@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="empty">
+            <FIELD name="b" datatype="boolean"/>
+            <FIELD name="ub" datatype="unsignedByte"/>
+            <FIELD name="s" datatype="short"/>
+            <FIELD name="i" datatype="int"/>
+            <FIELD name="l" datatype="long"/>
+            <FIELD name="c" datatype="char"/>
+            <FIELD name="u" datatype="unicodeChar"/>
+            <FIELD name="f" datatype="float"/>
+            <FIELD name="d" datatype="double"/>
+            <FIELD name="fc" datatype="floatComplex"/>
+            <FIELD name="dc" datatype="doubleComplex"/>
+            <FIELD name="str" datatype="char" arraysize="*"/>
+            <FIELD name="ustr" datatype="unicodeChar" arraysize="*"/>
+            <FIELD name="i3" datatype="int" arraysize="3"/>
+            <FIELD name="iv" datatype="int" arraysize="*"/>
+            <FIELD name="i2x3" datatype="int" arraysize="2x3"/>
+            <FIELD name="d2xs" datatype="double" arraysize="2x*"/>
+            <DATA>
+                <BINARY2>
+                    <STREAM encoding="base64">
+
+                    </STREAM>
+                </BINARY2>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

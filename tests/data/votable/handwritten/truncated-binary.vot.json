@@ -1,0 +1,8 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "the stream ends inside a row",
+ "notes": null
+}

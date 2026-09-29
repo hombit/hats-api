@@ -1,0 +1,46 @@
+{
+ "producer": "pyvo test data, written by astropy.io.votable 5.0.1",
+ "source_url": "https://raw.githubusercontent.com/astropy/pyvo/4909bc046f144258eb45b70fa9d4a23418bc33e6/pyvo/dal/tests/data/query/errorstatus.xml",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "1",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "foo;bar",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "2",
+   "datatype": "char",
+   "arraysize": "37",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": "foobar",
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   23,
+   "Illuminatus"
+  ],
+  [
+   42,
+   "Don't panic, and always carry a towel"
+  ],
+  [
+   1337,
+   "Elite"
+  ]
+ ],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "The error document carries a TABLE with rows; its QUERY_STATUS still says ERROR."
+}

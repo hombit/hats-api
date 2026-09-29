@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+xsi:noNamespaceSchemaLocation="xmlns:http://www.ivoa.net/xml/VOTable-1.2.xsd" version="1.2">
+<RESOURCE type="results">
+<DESCRIPTION>DALServer TAP Query</DESCRIPTION>
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="QUERY" value="SELECT TOP 10 coadd_object_id, ra, dec, mag_auto_g, magerr_auto_g, flags_g, extended_class_coadd, tilename FROM des_dr2.main WHERE ra BETWEEN 10.0 AND 10.02 AND dec BETWEEN -40.02 AND -40.0"/>
+<INFO name="INPUT:RESPONSEFORMAT" value="votable"/>
+<INFO name="TableRows" value="10"/>
+<TABLE>
+<FIELD ID="coadd_object_id" name="coadd_object_id" datatype="long" ucd="meta.id;meta.main">
+<DESCRIPTION>unique identifier for the coadded objects</DESCRIPTION>
+</FIELD>
+<FIELD ID="ra" name="ra" datatype="double" ucd="pos.eq.ra;meta.main" unit="degrees">
+<DESCRIPTION>right ascension, with quantized precision for indexing (alphawin_j2000 has full precision but not indexed) [degrees]</DESCRIPTION>
+</FIELD>
+<FIELD ID="dec" name="dec" datatype="double" ucd="pos.eq.dec;meta.main" unit="degrees">
+<DESCRIPTION>declination, with quantized precision for indexing (deltawin_j2000 has full precision but not indexed) [degrees]</DESCRIPTION>
+</FIELD>
+<FIELD ID="mag_auto_g" name="mag_auto_g" datatype="float" unit="mag">
+<DESCRIPTION>g-band magnitude estimation, for an elliptical model based on the kron radius [mag]</DESCRIPTION>
+</FIELD>
+<FIELD ID="magerr_auto_g" name="magerr_auto_g" datatype="float" unit="mag">
+<DESCRIPTION>g-band uncertainty in magnitude estimation, for an elliptical model based on the kron radius [mag]</DESCRIPTION>
+</FIELD>
+<FIELD ID="flags_g" name="flags_g" datatype="short">
+<DESCRIPTION>g-band additive flag describing cautionary advice about source extraction process. use less than 4 for well behaved objects</DESCRIPTION>
+</FIELD>
+<FIELD ID="extended_class_coadd" name="extended_class_coadd" datatype="short">
+<DESCRIPTION>0: high confidence stars; 1: candidate stars; 2: mostly galaxies; 3: high confidence galaxies; -9: no data; using sextractor photometry</DESCRIPTION>
+</FIELD>
+<FIELD ID="tilename" name="tilename" datatype="char" arraysize="1">
+<DESCRIPTION>identifier of each one of the tiles on which the survey is gridded</DESCRIPTION>
+</FIELD>
+<DATA>
+<TABLEDATA>
+<TR><TD>1088615568</TD><TD>10.001677</TD><TD>-40.016566</TD><TD>26.013441</TD><TD>0.31970215</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615817</TD><TD>10.004069</TD><TD>-40.019359</TD><TD>27.53993</TD><TD>1.649668</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615820</TD><TD>10.00773</TD><TD>-40.019421</TD><TD>26.149889</TD><TD>0.35432476</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615728</TD><TD>10.008305</TD><TD>-40.018369</TD><TD>26.452217</TD><TD>0.5669167</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615669</TD><TD>10.013476</TD><TD>-40.017765</TD><TD>25.329052</TD><TD>0.20641246</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615581</TD><TD>10.011843</TD><TD>-40.016736</TD><TD>23.24847</TD><TD>0.04603696</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615612</TD><TD>10.014646</TD><TD>-40.016955</TD><TD>25.138603</TD><TD>0.25295046</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615580</TD><TD>10.016973</TD><TD>-40.016712</TD><TD>26.147596</TD><TD>0.59737325</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615663</TD><TD>10.018982</TD><TD>-40.017696</TD><TD>26.716106</TD><TD>0.6682253</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+<TR><TD>1088615421</TD><TD>10.0041</TD><TD>-40.015242</TD><TD>25.503128</TD><TD>0.39545122</TD><TD>0</TD><TD>2</TD><TD>DES0040-3957</TD></TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

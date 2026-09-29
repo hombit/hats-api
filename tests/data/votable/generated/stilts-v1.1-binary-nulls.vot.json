@@ -1,0 +1,25 @@
+{
+  "producer": "STILTS 3.5-6 (STIL 4.3-6)",
+  "serialization": "BINARY",
+  "columns": [
+    {"name": "ub_n", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "255"},
+    {"name": "s_n", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-32768"},
+    {"name": "i_n", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-999"},
+    {"name": "l_n", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-9223372036854775808"},
+    {"name": "iarr_n", "datatype": "int", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "svar_n", "datatype": "short", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "b_n", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "f_n", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d_n", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "str_n", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [0, null, 1, null, [1, -1, 3], [1, 0, 2], true, "NaN", "NaN", "a"],
+    [null, 32767, null, 9223372036854775807, [-1, -1, -1], [], null, 1.0, "NaN", ""],
+    [254, -32767, -998, 0, [4, 5, 6], [], false, "NaN", 1.0, ""],
+    [null, 0, null, null, [0, 0, 0], [0], null, 2.0, "NaN", "b"],
+    [1, null, 2147483647, 1, [0, 0, -1], [5], true, "NaN", 3.0, ""]
+  ],
+  "refuse": null,
+  "notes": "VOTable version 1.1.\nWritten by STILTS from a TABLEDATA document, so an empty string or an empty variable-length array in the source was already null on the way in.\ndiffers from the source data: column 'iarr_n' row 0 was [1, null, 3], the file says [1, -1, 3] (and 3 more rows)\ndiffers from the source data: column 'svar_n' row 0 was [1, null, 2], the file says [1, 0, 2] (and 3 more rows)\ndiffers from the source data: column 'd_n' row 0 was null, the file says \"NaN\" (and 1 more rows)\ndiffers from the source data: column 'str_n' row 1 was null, the file says \"\" (and 2 more rows)\ndiffers from the source data: column 'f_n' row 2 was null, the file says \"NaN\"\nastropy 8.0.1 reads: column 'f_n' row 0 is null where the file says \"NaN\" (and 2 more rows)\nastropy 8.0.1 reads: column 'd_n' row 0 is null where the file says \"NaN\" (and 2 more rows)\nSTILTS reads (as its BINARY2 output says): column 'svar_n' row 1 is null where the file says [] (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'str_n' row 1 is null where the file says \"\" (and 2 more rows)"
+}

@@ -1,0 +1,10 @@
+{
+ "producer": "ESA Gaia Archive TAP+ (ESAC, Java)",
+ "source_url": "https://gea.esac.esa.int/tap-server/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable&QUERY=SELECT+TOP+3+%2a+FROM+gaiadr3.no_such_table",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "HTTP 400. VOTable 1.2 namespace and no XML declaration."
+}

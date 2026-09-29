@@ -1,0 +1,3 @@
+<!-- Produced with astropy.io.votable -->
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE><FIELD name="pairs" datatype="short" arraysize="2x*"/><DATA><BINARY><STREAM encoding="base64">AAAAAgABAAIAAwAEAAAAAQAFAAY=</STREAM></BINARY></DATA></TABLE></RESOURCE></VOTABLE>

@@ -1,0 +1,10 @@
+{
+ "producer": "GAVO DaCHS 2.12.2 (Python), per INFO server_software",
+ "source_url": "https://dc.g-vo.org/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable&QUERY=SELECT+TOP+10+obj_id%2c+ra%2c+dec%2c+u%2c+err_u%2c+mode%2c+class%2c+photo_flags%2c+psfmags%2c+flags%2c+types%2c+field_mjds%2c+spec_z%2c+spec_class%2c+sdss_id+FROM+sdssdr16.main+WHERE+ra+BETWEEN+180+AND+180.01+ORDER+BY+obj_id",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "HTTP 500 with a query timeout. Starts with an xml-stylesheet processing instruction and has no XML declaration."
+}

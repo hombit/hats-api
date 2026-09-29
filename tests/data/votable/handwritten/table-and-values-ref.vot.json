@@ -1,0 +1,40 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "n",
+   "datatype": "short",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": "-99"
+  },
+  {
+   "name": "m",
+   "datatype": "short",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": "-99"
+  }
+ ],
+ "rows": [
+  [
+   null,
+   4
+  ],
+  [
+   5,
+   null
+  ]
+ ],
+ "refuse": null,
+ "notes": "A template TABLE with no DATA, a later TABLE taking its FIELDs by ref, and a VALUES taking its null by ref."
+}

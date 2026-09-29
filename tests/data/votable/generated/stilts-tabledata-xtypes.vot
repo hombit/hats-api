@@ -1,0 +1,74 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:33
+ !-->
+<RESOURCE>
+<TABLE name="xtypes" nrows="5">
+<FIELD arraysize="*" datatype="char" name="ts" xtype="timestamp"/>
+<FIELD arraysize="10" datatype="char" name="tsfix" xtype="timestamp"/>
+<FIELD arraysize="2" datatype="double" name="pt" ucd="pos.eq" unit="deg" xtype="point"/>
+<FIELD arraysize="2" datatype="float" name="fpt" unit="deg" xtype="point"/>
+<FIELD arraysize="3" datatype="double" name="circ" unit="deg" xtype="circle"/>
+<FIELD arraysize="*" datatype="double" name="poly" unit="deg" xtype="polygon"/>
+<FIELD arraysize="2" datatype="double" name="intv" xtype="interval"/>
+<FIELD arraysize="2" datatype="long" name="lintv" xtype="interval"/>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>2000-01-02T15:20:30.456</TD>
+    <TD>2002-03-04</TD>
+    <TD>12.3 45.6</TD>
+    <TD>12.3 45.6</TD>
+    <TD>12.3 45.6 0.5</TD>
+    <TD>10.0 10.0 10.2 10.0 10.2 10.2 10.0 10.2</TD>
+    <TD>0.5 1.0</TD>
+    <TD>0 2</TD>
+  </TR>
+  <TR>
+    <TD>2001-02-03T04:05:06</TD>
+    <TD>1999-12-31</TD>
+    <TD>0.0 -90.0</TD>
+    <TD>0.0 -90.0</TD>
+    <TD>0.0 90.0 180.0</TD>
+    <TD>0.0 0.0 1.0 0.0 1.0 1.0</TD>
+    <TD>-Inf 0.0</TD>
+    <TD>-5 5</TD>
+  </TR>
+  <TR>
+    <TD>2002-03-04</TD>
+    <TD>2020-02-29</TD>
+    <TD>359.9 90.0</TD>
+    <TD>359.9 90.0</TD>
+    <TD>359.9 -89.5 1.0E-6</TD>
+    <TD>350.0 -10.0 10.0 -10.0 10.0 10.0 350.0 10.0</TD>
+    <TD>0.0 +Inf</TD>
+    <TD>0 0</TD>
+  </TR>
+  <TR>
+    <TD>2000-01-02T15:20:30Z</TD>
+    <TD>2000-01-01</TD>
+    <TD>180.0 0.0</TD>
+    <TD>180.0 0.0</TD>
+    <TD>1.0 2.0 3.0</TD>
+    <TD></TD>
+    <TD>-Inf +Inf</TD>
+    <TD>-9223372036854775808 9223372036854775807</TD>
+  </TR>
+  <TR>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

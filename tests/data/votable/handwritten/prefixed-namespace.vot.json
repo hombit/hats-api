@@ -1,0 +1,27 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "a",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   1
+  ],
+  [
+   2
+  ]
+ ],
+ "refuse": null,
+ "notes": "Every element under a namespace prefix: elements are matched by local name."
+}

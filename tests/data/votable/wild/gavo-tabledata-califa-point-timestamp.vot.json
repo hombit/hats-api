@@ -1,0 +1,178 @@
+{
+ "producer": "GAVO DaCHS 2.12.2 (Python), per INFO server_software",
+ "source_url": "https://dc.g-vo.org/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable%2ftd&QUERY=SELECT+TOP+6+ssa_pubdid%2c+ssa_cdate%2c+ssa_pdate%2c+ssa_targname%2c+ssa_targetpos%2c+ssa_location%2c+ssa_snr%2c+ssa_length+FROM+califadr3.spectra",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "ssa_pubDID",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref.ivoid",
+   "utype": "ssa:Curation.PublisherDID",
+   "description": "Dataset identifier assigned by the publisher",
+   "null": null
+  },
+  {
+   "name": "ssa_cdate",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": "timestamp",
+   "unit": null,
+   "ucd": "time;meta.dataset",
+   "utype": "ssa:DataID.Date",
+   "description": "Processing/Creation date",
+   "null": ""
+  },
+  {
+   "name": "ssa_pdate",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": "timestamp",
+   "unit": null,
+   "ucd": null,
+   "utype": "ssa:Curation.Date",
+   "description": "Date last published.",
+   "null": ""
+  },
+  {
+   "name": "ssa_targname",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;src",
+   "utype": "ssa:Target.Name",
+   "description": "Common name of object observed.",
+   "null": null
+  },
+  {
+   "name": "ssa_targetpos",
+   "datatype": "double",
+   "arraysize": "2",
+   "xtype": "point",
+   "unit": null,
+   "ucd": "pos.eq;src",
+   "utype": "ssa:Target.pos.spoint",
+   "description": "Equatorial (ICRS) position of the target object.",
+   "null": null
+  },
+  {
+   "name": "ssa_location",
+   "datatype": "double",
+   "arraysize": "2",
+   "xtype": "point",
+   "unit": "deg",
+   "ucd": "pos.eq",
+   "utype": "ssa:Char.SpatialAxis.Coverage.Location.Value",
+   "description": "ICRS location of aperture center",
+   "null": null
+  },
+  {
+   "name": "ssa_snr",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "stat.snr",
+   "utype": "ssa:Derived.SNR",
+   "description": "Signal-to-noise ratio at 500 nm (V500 spectra) or 400 nm (V1200 spectra)",
+   "null": null
+  },
+  {
+   "name": "ssa_length",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": "ssa:Dataset.Length",
+   "description": "Number of points in the spectrum",
+   "null": "-1"
+  }
+ ],
+ "rows": [
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/COMB/NGC7684.COMB-24-58",
+   null,
+   "2017-11-15T19:29:34.577714",
+   "NGC7684",
+   null,
+   [
+    352.6359442075057,
+    0.08832406826611809
+   ],
+   1.3215044736862183,
+   1901
+  ],
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/V1200/NGC7684.V1200-25-58",
+   null,
+   "2017-11-15T20:33:01.690447",
+   "NGC7684",
+   null,
+   [
+    352.6359442075057,
+    0.08832406826611809
+   ],
+   1.6657215356826782,
+   1701
+  ],
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/COMB/NGC7684.COMB-23-58",
+   null,
+   "2017-11-15T19:29:34.513712",
+   "NGC7684",
+   null,
+   [
+    352.6362219831743,
+    0.08832406826611809
+   ],
+   1.7739473581314087,
+   1901
+  ],
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/V1200/NGC7684.V1200-24-58",
+   null,
+   "2017-11-15T20:33:01.638596",
+   "NGC7684",
+   null,
+   [
+    352.6362219831743,
+    0.08832406826611809
+   ],
+   1.9838577508926392,
+   1701
+  ],
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/COMB/NGC7684.COMB-22-58",
+   null,
+   "2017-11-15T19:29:34.450582",
+   "NGC7684",
+   null,
+   [
+    352.63649976457253,
+    0.08832406826611809
+   ],
+   1.257051944732666,
+   1901
+  ],
+  [
+   "ivo://org.gavo.dc/~?califa/datadr3/V1200/NGC7684.V1200-23-58",
+   null,
+   "2017-11-15T20:33:01.586757",
+   "NGC7684",
+   null,
+   [
+    352.63649976457253,
+    0.08832406826611809
+   ],
+   1.080960750579834,
+   1701
+  ]
+ ],
+ "refuse": null,
+ "notes": "Char columns here declare VALUES null='' and VOTable 1.5 §5.5 has the null value respected for every type, so their empty strings are null; astropy ignores VALUES null on strings.\nastropy has an empty string where the contract has null: ssa_cdate (6/6)\nastropy: column 'ssa_targetpos' differs in 6 of 6 rows, e.g. [null, null] where the contract gives null"
+}

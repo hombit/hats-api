@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<!DOCTYPE VOTABLE [<!ENTITY x SYSTEM "file:///etc/passwd">]><VOTABLE xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE><FIELD name="s" datatype="char" arraysize="*"/><DATA><TABLEDATA><TR><TD>&x;</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

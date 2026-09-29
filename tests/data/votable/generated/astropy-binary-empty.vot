@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="empty" name="empty">
+   <FIELD ID="b" datatype="boolean" name="b"/>
+   <FIELD ID="bit" datatype="bit" name="bit"/>
+   <FIELD ID="ub" datatype="unsignedByte" name="ub"/>
+   <FIELD ID="s" datatype="short" name="s"/>
+   <FIELD ID="i" datatype="int" name="i"/>
+   <FIELD ID="l" datatype="long" name="l"/>
+   <FIELD ID="c" arraysize="1" datatype="char" name="c"/>
+   <FIELD ID="u" arraysize="1" datatype="unicodeChar" name="u"/>
+   <FIELD ID="f" datatype="float" name="f"/>
+   <FIELD ID="d" datatype="double" name="d"/>
+   <FIELD ID="fc" datatype="floatComplex" name="fc"/>
+   <FIELD ID="dc" datatype="doubleComplex" name="dc"/>
+   <FIELD ID="str" arraysize="*" datatype="char" name="str"/>
+   <FIELD ID="ustr" arraysize="*" datatype="unicodeChar" name="ustr"/>
+   <FIELD ID="i3" arraysize="3" datatype="int" name="i3"/>
+   <FIELD ID="iv" arraysize="*" datatype="int" name="iv"/>
+   <FIELD ID="i2x3" arraysize="2x3" datatype="int" name="i2x3"/>
+   <FIELD ID="d2xs" arraysize="2x*" datatype="double" name="d2xs"/>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

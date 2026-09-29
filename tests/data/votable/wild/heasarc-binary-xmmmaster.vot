@@ -1,0 +1,80 @@
+<?xml version="1.0"?>
+<VOTABLE xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" version="1.4">
+ <RESOURCE type="results">
+  <INFO name="QUERY_STATUS" value="OK">No errors detected in query preprocessing</INFO>
+  <TABLE>
+   <DESCRIPTION>Query result for:&#xA;SELECT TOP 10 obsid, name, ra, dec, time, end_time, duration, pi_lname, status, data_in_heasarc, public_date FROM xmmmaster WHERE CONTAINS(POINT(&apos;ICRS&apos;, ra, dec), CIRCLE(&apos;ICRS&apos;, 83.63, 22.01, 0.5))=1</DESCRIPTION>
+   <FIELD datatype="char" arraysize="*" ucd="meta.id;meta.main" name="obsid" ID="DataLinkID">
+    <DESCRIPTION>Unique Observation Identifier</DESCRIPTION>
+   </FIELD>
+   <FIELD datatype="char" arraysize="*" ucd="meta.id;src" name="name">
+    <DESCRIPTION>Target Designation</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="deg" datatype="double" ucd="pos.eq.ra;meta.main" precision="F5" name="ra">
+    <DESCRIPTION>Right Ascension of Target</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="deg" datatype="double" ucd="pos.eq.dec;meta.main" precision="F5" name="dec">
+    <DESCRIPTION>Declination of Target</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="d" datatype="double" ucd="time.start;obs" name="time">
+    <DESCRIPTION>Observation Start Time</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="d" datatype="double" ucd="time.end;obs" name="end_time">
+    <DESCRIPTION>Observation End Time</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="s" datatype="int" ucd="time.duration;obs" name="duration">
+    <DESCRIPTION>Observation On-Time or Duration As Determined by Processing (s)</DESCRIPTION>
+    <VALUES null="-2147483648"/>
+   </FIELD>
+   <FIELD datatype="char" arraysize="*" ucd="meta.id.PI" name="pi_lname">
+    <DESCRIPTION>Family Name of Principal Investigator</DESCRIPTION>
+   </FIELD>
+   <FIELD datatype="char" arraysize="*" name="status">
+    <DESCRIPTION>Status of Observation: scheduled, observed, processed, archived</DESCRIPTION>
+   </FIELD>
+   <FIELD datatype="char" arraysize="*" name="data_in_heasarc">
+    <DESCRIPTION>Flag Indicates Whether Dataset Is Available in HEASARC Archive [YN]</DESCRIPTION>
+   </FIELD>
+   <FIELD unit="d" datatype="int" ucd="time.release" name="public_date">
+    <DESCRIPTION>Date That Data Products Become Public</DESCRIPTION>
+    <VALUES null="-2147483648"/>
+   </FIELD>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+AAAACjAzMTI3OTA1MDEAAAALQ3JhYiBvZmZzZXRAVOlcKw6hg0A15UFNqCl/QOpE
+AZp0DaxA6kQHp6HxnAAAO88AAAAUSmFuc2VuIFhNTS1OZXd0b24gTU0AAAAI
+YXJjaGl2ZWQAAAABWQAA0iAAAAAKMDMxMjc5MDMwMQAAAAtDcmFiIG9mZnNl
+dEBU6QNsnAqNQDX0Ia3PsYRA6kP6awvByUDqQ/z8xrtdAAAXFQAAABRKYW5z
+ZW4gWE1NLU5ld3RvbiBNTQAAAAhhcmNoaXZlZAAAAAFZAADSHwAAAAowODEx
+MDIyODAxAAAABENyYWJAVOg8s+V1OkA1/ac7QswtQOyAs1UMg/VA7IDKvUAY
+TAAA9t8AAAANWE1NLU5ld3RvbiBNTQAAAAhhcmNoaXZlZAAAAAFZAADkCgAA
+AAowODExMDIyOTAxAAAABENyYWJAVOg8s+V1OkA1/ac7QswtQOyAyr1AGExA
+7IDlhFyKDAABGmwAAAANWE1NLU5ld3RvbiBNTQAAAAhhcmNoaXZlZAAAAAFZ
+AADkCgAAAAowNjExMTgyNTAxAAAABENyYWJAVOg9cKPXCkA1/ac7QswtQOvM
+hLsqGQVA68yN/YjpowAAYagAAAAUSmFuc2VuIFhNTS1OZXd0b24gTU0AAAAI
+YXJjaGl2ZWQAAAABWQAA3mgAAAAKMDE2MDk2MDQwMQAAAARDcmFiQFToPXCj
+1wpANf2nQEtJqkDqAgJ2bHfWQOoCCKIiIicAAD0BAAAAFEphbnNlbiBYTU0t
+TmV3dG9uIFBTAAAACGFyY2hpdmVkAAAAAVkAANAQAAAACjAxNjA5NjA1MDEA
+AAAEQ3JhYkBU6D1wo9cKQDX9p0BLSapA6gIcD6T6TUDqAh525dTFAAAVRQAA
+ABRKYW5zZW4gWE1NLU5ld3RvbiBQUwAAAAhhcmNoaXZlZAAAAAFZAADQEAAA
+AAowMTYwOTYwNjAxAAAABENyYWJAVOg9cKPXCkA1/adAS0mqQOoCMUbr5jVA
+6gI1QGEXIwAAJdMAAAAUSmFuc2VuIFhNTS1OZXd0b24gUFMAAAAIYXJjaGl2
+ZWQAAAABWQAA0BAAAAAKMDMxMjc5MDEwMQAAAARDcmFiQFTop0OmR/5ANgMC
+DEm6XkDqQ9ZvgJGhQOpD9ubHfYkAAVInAAAAFEphbnNlbiBYTU0tTmV3dG9u
+IE1NAAAACGFyY2hpdmVkAAAAAVkAANIeAAAACjA2MTExODA0MDEAAAAEQ3Jh
+YkBU6Iikfs/qQDYDslb/wRZA6xHHRxxxzUDrEcqXCj1xAAAi7wAAABRKYW5z
+ZW4gWE1NLU5ld3RvbiBNTQAAAAhhcmNoaXZlZAAAAAFZAADYmA==
+     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+ <RESOURCE utype="adhoc:service" type="meta">
+  <PARAM datatype="char" arraysize="*" name="standardID" value="ivo://ivoa.net/std/DataLink#links-1.1"/>
+  <PARAM datatype="char" arraysize="*" name="accessURL" value="https://heasarc.gsfc.nasa.gov/xamin/vo/datalink/xmmmaster?datalink_key&amp;"/>
+  <GROUP name="inputParams">
+   <PARAM ref="DataLinkID" datatype="char" arraysize="*" name="id" value=""/>
+  </GROUP>
+ </RESOURCE>
+</VOTABLE>

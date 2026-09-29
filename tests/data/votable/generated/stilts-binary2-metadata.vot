@@ -1,0 +1,51 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:34
+ !-->
+<RESOURCE>
+<RESOURCE>
+  <COOSYS ID="t1-coosys-1" epoch="J2000" system="ICRS"/>
+  <TIMESYS ID="t1-timesys-1" refposition="TOPOCENTER" timeorigin="MJD-origin" timescale="TT"/>
+</RESOURCE>
+<TABLE name="metadata" nrows="3">
+<DESCRIPTION>
+A table whose metadata is the point
+</DESCRIPTION>
+<PARAM arraysize="6" datatype="char" name="survey" ucd="meta.id" value="corpus"/>
+<PARAM ID="epoch" datatype="double" name="epoch" unit="yr" value="2000.0"/>
+<PARAM arraysize="2" datatype="char" name="QUERY_STATUS" value="OK"/>
+<FIELD ID="col_ra" datatype="double" name="ra" precision="6" ref="t1-coosys-1" ucd="pos.eq.ra;meta.main" unit="deg" utype="stc:AstroCoords.Position2D.Value2.C1" width="10">
+<DESCRIPTION>Right ascension (ICRS)</DESCRIPTION>
+</FIELD>
+<FIELD ID="col_dec" datatype="double" name="dec" precision="6" ref="t1-coosys-1" ucd="pos.eq.dec;meta.main" unit="deg" utype="stc:AstroCoords.Position2D.Value2.C2" width="10">
+<DESCRIPTION>Declination (ICRS)</DESCRIPTION>
+</FIELD>
+<FIELD ID="col_mag" datatype="float" name="mag" precision="3" ucd="phot.mag;em.opt.V" unit="mag" width="6">
+<DESCRIPTION>V magnitude</DESCRIPTION>
+</FIELD>
+<FIELD ID="col_flag" datatype="short" name="flag" ucd="meta.code">
+<DESCRIPTION>Quality flag; -1 when unknown</DESCRIPTION>
+</FIELD>
+<FIELD ID="col_mjd" datatype="double" name="obs_mjd" precision="5" ref="t1-timesys-1" ucd="time.epoch" unit="d" width="12" xtype="mjd">
+<DESCRIPTION>Epoch of observation</DESCRIPTION>
+</FIELD>
+<FIELD ID="col_url" arraysize="*" datatype="char" name="url" ucd="meta.ref.url">
+<DESCRIPTION>Where the &lt;preview&gt; &amp; "notes" live</DESCRIPTION>
+<LINK title="LINK" href="file:/Users/hombit/projects/supernovaAD/hats-api/https:/example.org/preview%3Fid=$%7Bcol_ra%7D&amp;amp=1"/>
+</FIELD>
+<DATA>
+<BINARY2>
+<STREAM encoding='base64'>
+AEAlXpIMBp6AQESiZmZmZmZAXCj2AABA7FIQAAAAAAAAABVodHRwczovL2V4YW1w
+bGUub3JnL2EEQFT0nQID5j/AFZB/ZuhsZkCAAAAAAUDsUigAAAAAAAAAABB/+AAA
+AAAAAH/4AAAAAAAAf8AAAAAAf/gAAAAAAAAAAAAdaHR0cHM6Ly9leGFtcGxlLm9y
+Zy9jP3g9MSZ5PTI=
+</STREAM>
+</BINARY2>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

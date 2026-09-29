@@ -1,0 +1,10 @@
+{
+ "producer": "NOIRLab Astro Data Lab, 'DALServer TAP Query' (Java)",
+ "source_url": "https://datalab.noirlab.edu/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable&QUERY=SELECT+TOP+10+coadd_object_id%2c+ra%2c+dec%2c+mag_auto_g%2c+magerr_auto_g%2c+flags_g%2c+extended_class_coadd%2c+tilename+FROM+des_dr2.main+WHERE+CONTAINS%28POINT%28%27ICRS%27%2c+ra%2c+dec%29%2c+CIRCLE%28%27ICRS%27%2c+10.0%2c+-40.0%2c+0.02%29%29%3d1",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "HTTP 200 for an error. CRLF line endings, VOTable 1.2 namespace; the message is a PostgreSQL exception."
+}

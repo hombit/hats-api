@@ -1,0 +1,23 @@
+{
+  "producer": "STILTS 3.5-6 (STIL 4.3-6)",
+  "serialization": "TABLEDATA",
+  "columns": [
+    {"name": "ts", "datatype": "char", "arraysize": "*", "xtype": "timestamp", "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "tsfix", "datatype": "char", "arraysize": "10", "xtype": "timestamp", "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "pt", "datatype": "double", "arraysize": "2", "xtype": "point", "unit": "deg", "ucd": "pos.eq", "utype": null, "description": null, "null": null},
+    {"name": "fpt", "datatype": "float", "arraysize": "2", "xtype": "point", "unit": "deg", "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "circ", "datatype": "double", "arraysize": "3", "xtype": "circle", "unit": "deg", "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "poly", "datatype": "double", "arraysize": "*", "xtype": "polygon", "unit": "deg", "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "intv", "datatype": "double", "arraysize": "2", "xtype": "interval", "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "lintv", "datatype": "long", "arraysize": "2", "xtype": "interval", "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    ["2000-01-02T15:20:30.456", "2002-03-04", [12.3, 45.6], [12.300000190734863, 45.599998474121094], [12.3, 45.6, 0.5], [10.0, 10.0, 10.2, 10.0, 10.2, 10.2, 10.0, 10.2], [0.5, 1.0], [0, 2]],
+    ["2001-02-03T04:05:06", "1999-12-31", [0.0, -90.0], [0.0, -90.0], [0.0, 90.0, 180.0], [0.0, 0.0, 1.0, 0.0, 1.0, 1.0], ["-Infinity", 0.0], [-5, 5]],
+    ["2002-03-04", "2020-02-29", [359.9, 90.0], [359.8999938964844, 90.0], [359.9, -89.5, 1e-06], [350.0, -10.0, 10.0, -10.0, 10.0, 10.0, 350.0, 10.0], [0.0, "Infinity"], [0, 0]],
+    ["2000-01-02T15:20:30Z", "2000-01-01", [180.0, 0.0], [180.0, 0.0], [1.0, 2.0, 3.0], null, ["-Infinity", "Infinity"], [-9223372036854775808, 9223372036854775807]],
+    [null, null, null, null, null, null, null, null]
+  ],
+  "refuse": null,
+  "notes": "Written by STILTS from a TABLEDATA document, so an empty string or an empty variable-length array in the source was already null on the way in.\nastropy 8.0.1 reads: column 'poly' row 3 is [] where the file says null (and 1 more rows)\nastropy 8.0.1 reads: column 'ts' row 4 is \"\" where the file says null\nastropy 8.0.1 reads: column 'tsfix' row 4 is \"\" where the file says null"
+}

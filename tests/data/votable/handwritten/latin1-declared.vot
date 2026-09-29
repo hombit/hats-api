@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE><FIELD name="s" datatype="char" arraysize="*"/><DATA><TABLEDATA><TR><TD>café</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

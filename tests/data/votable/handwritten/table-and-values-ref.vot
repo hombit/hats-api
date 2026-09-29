@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE ID="template"><FIELD name="n" datatype="short"><VALUES ID="nulls" null="-99"/></FIELD><FIELD name="m" datatype="short"><VALUES ref="nulls"/></FIELD></TABLE><TABLE ref="template"><DATA><TABLEDATA><TR><TD>-99</TD><TD>4</TD></TR><TR><TD>5</TD><TD>-99</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

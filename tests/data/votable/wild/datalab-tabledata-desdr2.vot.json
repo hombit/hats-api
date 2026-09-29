@@ -1,0 +1,200 @@
+{
+ "producer": "NOIRLab Astro Data Lab, 'DALServer TAP Query' (Java)",
+ "source_url": "https://datalab.noirlab.edu/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable&QUERY=SELECT+TOP+10+coadd_object_id%2c+ra%2c+dec%2c+mag_auto_g%2c+magerr_auto_g%2c+flags_g%2c+extended_class_coadd%2c+tilename+FROM+des_dr2.main+WHERE+ra+BETWEEN+10.0+AND+10.02+AND+dec+BETWEEN+-40.02+AND+-40.0",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "coadd_object_id",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "unique identifier for the coadded objects",
+   "null": null
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "degrees",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": null,
+   "description": "right ascension, with quantized precision for indexing (alphawin_j2000 has full precision but not indexed) [degrees]",
+   "null": null
+  },
+  {
+   "name": "dec",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "degrees",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": null,
+   "description": "declination, with quantized precision for indexing (deltawin_j2000 has full precision but not indexed) [degrees]",
+   "null": null
+  },
+  {
+   "name": "mag_auto_g",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": null,
+   "utype": null,
+   "description": "g-band magnitude estimation, for an elliptical model based on the kron radius [mag]",
+   "null": null
+  },
+  {
+   "name": "magerr_auto_g",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": null,
+   "utype": null,
+   "description": "g-band uncertainty in magnitude estimation, for an elliptical model based on the kron radius [mag]",
+   "null": null
+  },
+  {
+   "name": "flags_g",
+   "datatype": "short",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "g-band additive flag describing cautionary advice about source extraction process. use less than 4 for well behaved objects",
+   "null": null
+  },
+  {
+   "name": "extended_class_coadd",
+   "datatype": "short",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "0: high confidence stars; 1: candidate stars; 2: mostly galaxies; 3: high confidence galaxies; -9: no data; using sextractor photometry",
+   "null": null
+  },
+  {
+   "name": "tilename",
+   "datatype": "char",
+   "arraysize": "1",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "identifier of each one of the tiles on which the survey is gridded",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   1088615568,
+   10.001677,
+   -40.016566,
+   26.01344108581543,
+   0.3197021484375,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615817,
+   10.004069,
+   -40.019359,
+   27.53993034362793,
+   1.6496679782867432,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615820,
+   10.00773,
+   -40.019421,
+   26.14988899230957,
+   0.3543247580528259,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615728,
+   10.008305,
+   -40.018369,
+   26.45221710205078,
+   0.5669167041778564,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615669,
+   10.013476,
+   -40.017765,
+   25.329051971435547,
+   0.20641246438026428,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615581,
+   10.011843,
+   -40.016736,
+   23.248470306396484,
+   0.04603695869445801,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615612,
+   10.014646,
+   -40.016955,
+   25.13860321044922,
+   0.2529504597187042,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615580,
+   10.016973,
+   -40.016712,
+   26.14759635925293,
+   0.5973732471466064,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615663,
+   10.018982,
+   -40.017696,
+   26.716106414794922,
+   0.6682252883911133,
+   0,
+   2,
+   "D"
+  ],
+  [
+   1088615421,
+   10.0041,
+   -40.015242,
+   25.503128051757812,
+   0.39545121788978577,
+   0,
+   2,
+   "D"
+  ]
+ ],
+ "refuse": null,
+ "notes": "VOTable 1.2 in no namespace at all, with xsi:noNamespaceSchemaLocation set to 'xmlns:http://...'. BINARY2 is not offered: asking for it returns TABLEDATA."
+}

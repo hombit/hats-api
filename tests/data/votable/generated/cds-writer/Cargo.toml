@@ -1,0 +1,14 @@
+[package]
+name = "cds-writer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# A standalone package: it is not part of the hats-api build.
+[workspace]
+
+[dependencies]
+# votable 0.7.0 reaches into serde's private `__private228` module, which only 1.0.228 has.
+serde = "=1.0.228"
+serde_json = "1"
+votable = "=0.7.0"

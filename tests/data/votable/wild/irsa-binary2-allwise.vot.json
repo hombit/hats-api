@@ -1,0 +1,211 @@
+{
+ "producer": "IRSA TAP (IPAC, Java)",
+ "source_url": "https://irsa.ipac.caltech.edu/TAP/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable%2fb2&QUERY=SELECT+TOP+10+cntr%2c+designation%2c+ra%2c+dec%2c+w1mpro%2c+w1sigmpro%2c+w4mpro%2c+w4sigmpro%2c+cc_flags%2c+ext_flg%2c+nb%2c+na%2c+ph_qual%2c+w1mjdmean%2c+pmra+FROM+allwise_p3as_psd+WHERE+CONTAINS%28POINT%28%27ICRS%27%2c+ra%2c+dec%29%2c+CIRCLE%28%27ICRS%27%2c+10.68%2c+41.27%2c+0.02%29%29%3d1",
+ "fetched": "2026-09-29",
+ "serialization": "BINARY2",
+ "columns": [
+  {
+   "name": "cntr",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.record",
+   "utype": null,
+   "description": "unique entry counter (key) number",
+   "null": null
+  },
+  {
+   "name": "designation",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "WISE source designation",
+   "null": null
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": null,
+   "description": "right ascension (J2000)",
+   "null": null
+  },
+  {
+   "name": "dec",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": null,
+   "description": "declination (J2000)",
+   "null": null
+  },
+  {
+   "name": "w1mpro",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag",
+   "utype": null,
+   "description": "instrumental profile-fit photometry magnitude, band 1",
+   "null": null
+  },
+  {
+   "name": "w1sigmpro",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "stat.error",
+   "utype": null,
+   "description": "instrumental profile-fit photometry flux uncertainty in mag units, band 1",
+   "null": null
+  },
+  {
+   "name": "w4mpro",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag",
+   "utype": null,
+   "description": "instrumental profile-fit photometry magnitude, band 4",
+   "null": null
+  },
+  {
+   "name": "w4sigmpro",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "stat.error",
+   "utype": null,
+   "description": "instrumental profile-fit photometry flux uncertainty in mag units, band 4",
+   "null": null
+  },
+  {
+   "name": "cc_flags",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code",
+   "utype": null,
+   "description": "prioritized artifacts affecting the source in each band",
+   "null": null
+  },
+  {
+   "name": "ext_flg",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "stat.probability",
+   "utype": null,
+   "description": "probability that source morphology is not consistent with single PSF",
+   "null": null
+  },
+  {
+   "name": "nb",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.number;stat.fit.param",
+   "utype": null,
+   "description": "number of blend components used in each fit",
+   "null": null
+  },
+  {
+   "name": "na",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code",
+   "utype": null,
+   "description": "active deblend flag (=1 if actively deblended)",
+   "null": null
+  },
+  {
+   "name": "ph_qual",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code.qual",
+   "utype": null,
+   "description": "photometric quality of each band (A=highest, U=upper limit)",
+   "null": null
+  },
+  {
+   "name": "w1mjdmean",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "time.epoch",
+   "utype": null,
+   "description": "mean modified Julian Date of frame extractions, band 1",
+   "null": null
+  },
+  {
+   "name": "pmra",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas/yr",
+   "ucd": "pos.pm",
+   "utype": null,
+   "description": "Apparent motion in RA",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   98140801351043764,
+   "J004242.95+411721.6",
+   10.6789613,
+   41.2893443,
+   9.831000328063965,
+   0.03799999877810478,
+   6.769000053405762,
+   0.12700000405311584,
+   "hh00",
+   3,
+   1,
+   0,
+   "AAAB",
+   55422.98120251,
+   244
+  ],
+  [
+   98140801351043708,
+   "J004244.32+411608.1",
+   10.6846947,
+   41.2689392,
+   5.818999767303467,
+   0.04500000178813934,
+   4.328999996185303,
+   0.029999999329447746,
+   "0000",
+   5,
+   1,
+   0,
+   "AAAA",
+   55307.90022822,
+   203
+  ]
+ ],
+ "refuse": null,
+ "notes": "FIELDs carry a non-standard irsa_format attribute."
+}

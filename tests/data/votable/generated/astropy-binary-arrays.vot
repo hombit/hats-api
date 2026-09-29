@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="arrays" name="arrays">
+   <FIELD ID="i3" arraysize="3" datatype="int" name="i3">
+    <VALUES null="-2147483647"/>
+   </FIELD>
+   <FIELD ID="d3" arraysize="3" datatype="double" name="d3"/>
+   <FIELD ID="iv" arraysize="*" datatype="int" name="iv">
+    <VALUES null="-2147483648"/>
+   </FIELD>
+   <FIELD ID="fv" arraysize="*" datatype="float" name="fv"/>
+   <FIELD ID="s10" arraysize="10*" datatype="short" name="s10">
+    <VALUES null="-32767"/>
+   </FIELD>
+   <FIELD ID="lv" arraysize="*" datatype="long" name="lv">
+    <VALUES null="-9223372036854775807"/>
+   </FIELD>
+   <FIELD ID="ubv" arraysize="*" datatype="unsignedByte" name="ubv">
+    <VALUES null="254"/>
+   </FIELD>
+   <FIELD ID="i2x3" arraysize="2x3" datatype="int" name="i2x3">
+    <VALUES null="-2147483648"/>
+   </FIELD>
+   <FIELD ID="d2xs" arraysize="2x*" datatype="double" name="d2xs"/>
+   <FIELD ID="bool4" arraysize="4" datatype="boolean" name="bool4"/>
+   <FIELD ID="bit5" arraysize="5" datatype="bit" name="bit5"/>
+   <FIELD ID="bit12" arraysize="12" datatype="bit" name="bit12"/>
+   <FIELD ID="fc2" arraysize="2" datatype="floatComplex" name="fc2"/>
+   <FIELD ID="dcv" arraysize="*" datatype="doubleComplex" name="dcv"/>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+AAAAAQAAAAIAAAADP/gAAAAAAADABAAAAAAAAH435DyIAHWcAAAABQAAAAEAAAACAAAABAAAAAgAAAAQAAAAAz/AAAB/wAAAwAAAAAAAAAIAAQACAAAAAoAAAAAAAAAAf/////////8AAAADAP8QAAAAAAAAAAEAAAACAAAAAwAAAAQAAAAFAAAAAz/wAAAAAAAAQAAAAAAAAABACAAAAAAAAEAQAAAAAAAAQBQAAAAAAABAGAAAAAAAAFRGP1SwjyA/gAAAQAAAAEBAAABAgAAAAAAAAj/wAAAAAAAAQAAAAAAAAABACAAAAAAAAEAQAAAAAAAAgAAAAAAAAAB/////f/gAAAAAAAB/8AAAAAAAAP/wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//////////v////3////8////+/////oAAAAARkZGRgAAAD8AAAC/AAAAf8AAAH/AAAAAAAAAgAAAAYAAAAGAAAABf/gAAAAAAAB/+AAAAAAAAH/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAAAAAAAAPz8/PwAAAH/AAAAAAAAAf8AAAAAAAAAAAAAAAAAABwAAAAgAAAAJAAAAAAAAAAA/8AAAAAAAAEAAAAAAAAAAAAAAAf////kAAAABf4AAAAAAAAqAAH//AAAAAQACAAMABAAFAAYABwAAAAEAAAAAAAAAAAAAAAEBAAAACgAAABQAAAAeAAAAKAAAADIAAAA8AAAAAT/gAAAAAAAAv+AAAAAAAAA/P1RU+P/wAAAAAAAAAAAAAAAAAAAAAAAAAAE/4AAAAAAAAL/gAAAAAAAA     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

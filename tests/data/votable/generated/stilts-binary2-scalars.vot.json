@@ -1,0 +1,31 @@
+{
+  "producer": "STILTS 3.5-6 (STIL 4.3-6)",
+  "serialization": "BINARY2",
+  "columns": [
+    {"name": "b", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ub", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "l", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c", "datatype": "char", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "u", "datatype": "unicodeChar", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "f", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc", "datatype": "float", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dc", "datatype": "double", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "str", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ustr", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [true, true, 0, -32768, -2147483648, -9223372036854775808, "a", "Я", 1.5, 1.5, [1.5, -1.5], [1.5, -1.5], "hello", "Привет"],
+    [false, false, 255, 32767, 2147483647, 9223372036854775807, "Z", "λ", -3.4028234663852886e+38, 1.7976931348623157e+308, [0.10000000149011612, -0.20000000298023224], [0.1, -0.2], null, null],
+    [null, true, 1, 0, 0, 0, "<", "中", 1.1754943508222875e-38, 5e-324, ["NaN", "NaN"], ["NaN", 0.0], "x y", "日本語"],
+    [true, false, 128, -1, -1, -1, "&", "é", "NaN", "NaN", [0.0, 0.0], [0.0, 0.0], "<&>\"'", "<&>\"'"],
+    [null, null, null, null, null, null, null, null, "NaN", "NaN", null, null, null, null],
+    [false, true, 42, 12345, 123456789, 1234567890123456789, "0", "Ω", "Infinity", "Infinity", ["Infinity", 1.0], ["-Infinity", 1.0], "  lead and trail  ", "  ведущие "],
+    [true, false, 7, 1, 2, 3, "~", "a", "-Infinity", "-Infinity", [3.0, 4.0], [3.0, 4.0], "multi word", "Ελληνικά"]
+  ],
+  "refuse": null,
+  "notes": "Written by STILTS from a TABLEDATA document, so an empty string or an empty variable-length array in the source was already null on the way in.\ndiffers from the source data: column 'f' row 4 was null, the file says \"NaN\"\ndiffers from the source data: column 'd' row 4 was null, the file says \"NaN\"\nastropy 8.0.1 reads: column 'str' row 1 is \"\" where the file says null (and 1 more rows)\nastropy 8.0.1 reads: column 'ustr' row 1 is \"\" where the file says null (and 1 more rows)\nastropy 8.0.1 reads: column 'fc' row 2 is [null, null] where the file says [\"NaN\", \"NaN\"]\nastropy 8.0.1 reads: column 'dc' row 2 is [null, 0.0] where the file says [\"NaN\", 0.0]\nastropy 8.0.1 reads: column 'f' row 3 is null where the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'd' row 3 is null where the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'c' row 4 is \"\" where the file says null\nastropy 8.0.1 reads: column 'u' row 4 is \"\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'str' row 5 is \"  lead and trail\" where the file says \"  lead and trail  \"\nSTILTS reads (as its BINARY2 output says): column 'ustr' row 5 is \"  ведущие\" where the file says \"  ведущие \""
+}

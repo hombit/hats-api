@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.1" xmlns="http://www.ivoa.net/xml/VOTable/v1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.ivoa.net/xml/VOTable/v1.1">
+ <RESOURCE type="results">
+  <TABLE ID="nulls" name="nulls">
+   <FIELD ID="ub_n" datatype="unsignedByte" name="ub_n">
+    <VALUES null="255"/>
+   </FIELD>
+   <FIELD ID="s_n" datatype="short" name="s_n">
+    <VALUES null="-32768"/>
+   </FIELD>
+   <FIELD ID="i_n" datatype="int" name="i_n">
+    <VALUES null="-999"/>
+   </FIELD>
+   <FIELD ID="l_n" datatype="long" name="l_n">
+    <VALUES null="-9223372036854775808"/>
+   </FIELD>
+   <FIELD ID="iarr_n" arraysize="3" datatype="int" name="iarr_n">
+    <VALUES null="-1"/>
+   </FIELD>
+   <FIELD ID="svar_n" arraysize="*" datatype="short" name="svar_n">
+    <VALUES null="0"/>
+   </FIELD>
+   <FIELD ID="b_n" datatype="boolean" name="b_n"/>
+   <FIELD ID="f_n" datatype="float" name="f_n"/>
+   <FIELD ID="d_n" datatype="double" name="d_n"/>
+   <FIELD ID="str_n" arraysize="*" datatype="char" name="str_n"/>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+AIAAAAAAAYAAAAAAAAAAAAAAAf////8AAAADAAAAAwABAAAAAlR/wAAAf/gAAAAAAAAAAAABYf9//////Bl//////////////////////////wAAAAA/P4AAAH/4AAAAAAAAAAAAAP6AAf///BoAAAAAAAAAAAAAAAQAAAAFAAAABgAAAABGf8AAAD/wAAAAAAAAAAAAAP8AAP///BmAAAAAAAAAAP///////////////wAAAAEAAD9AAAAAf/gAAAAAAAAAAAABYgGAAH////8AAAAAAAAAAQAAAAAAAAAA/////wAAAAEABVR/wAAAQAgAAAAAAAAAAAAA     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

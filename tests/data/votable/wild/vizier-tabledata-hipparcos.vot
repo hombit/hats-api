@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns="http://www.ivoa.net/xml/VOTable/v1.3"
+  xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3">
+ <DESCRIPTION>
+   VizieR Astronomical Server vizier.cds.unistra.fr
+    Date: 2026-09-29T02:31:19 [V7.6]
+   Explanations and Statistics of UCDs:			See LINK below
+   In case of problem, please report to:	cds-question@unistra.fr
+ </DESCRIPTION>
+<!-- VOTable description at http://www.ivoa.net/Documents/latest/VOT.html -->
+<INFO name="service_protocol" value="ASU">  IVOID of the protocol through which the data was retrieved</INFO>
+<INFO name="request_date" value="2026-09-29T02:31:19">  Query execution date</INFO>
+<INFO name="request" value="https://vizier.cds.unistra.fr/viz-bin/votable?-source=I/239/hip_main&amp;-out.max=10&amp;-out=HIP,RAICRS,DEICRS,Vmag,Plx,e_Plx,B-V,SpType,CCDM,Nsys&amp;-c=10.68+41.27&amp;-c.rd=5">  Full request URL</INFO>
+<INFO name="contact" value="cds-question@unistra.fr">  Email or URL to contact publisher</INFO>
+<INFO name="server_software" value="VizieR/7.6">  Software version</INFO>
+<INFO name="publisher" value="CDS">  Data centre that produced the VOTable</INFO>
+
+<!--
+Execution Reports
+ -->
+<INFO ID="Target" name="-c" value="010.680000+41.270000,rd=5.">
+Constraint -c.rd=5</INFO>
+
+<RESOURCE ID="yCat_1239" name="I/239" type="results">
+  <DESCRIPTION>The Hipparcos and Tycho Catalogues (ESA 1997)</DESCRIPTION>  <INFO name="ivoid" value="ivo://cds.vizier/i/239">    IVOID of underlying data collection  </INFO>
+  <INFO name="data_ivoid" value="ivo://cds.vizier/i/239">    IVOID of underlying data collection  </INFO>
+  <INFO name="creator" value="ESA 1997">    First author or institution  </INFO>
+  <INFO name="cites" value="1997HIP...C......0E">    Article or Data origin sources  </INFO>
+  <INFO name="reference_url" value="https://cdsarc.cds.unistra.fr/viz-bin/cat/I/239">    Dataset landing page  </INFO>
+  <INFO name="publication_date" value="2021-11-18">    Date of first publication in the data centre  </INFO>
+  <INFO name="rights_uri" value="https://cds.unistra.fr/vizier-org/licences_vizier.html">    Licence URI  </INFO>
+
+  <COOSYS ID="H_1991.250" system="ICRS" epoch="1991.250"/>
+  <TABLE ID="I_239_hip_main" name="I/239/hip_main">
+    <DESCRIPTION>The Hipparcos Main Catalogue</DESCRIPTION>
+<!-- The Hipparcos Main Catalogue\vizContent{timeSerie} -->
+
+    <!-- RowName: ${HIP} -->
+    <!-- Definitions of GROUPs and FIELDs -->
+    <FIELD name="HIP" ucd="meta.id;meta.main" datatype="int" width="6"><!-- ucd="ID_MAIN" -->
+      <DESCRIPTION>Identifier (HIP number) (H1)</DESCRIPTION>
+      <LINK href="http://vizier.cds.unistra.fr/viz-bin/VizieR-5?-info=XML&amp;-out.add=.&amp;-source=I/239/hip_main&amp;recno=${recno}"/>
+    </FIELD>
+    <FIELD name="RAICRS" ucd="pos.eq.ra;meta.main" ref="H_1991.250" datatype="double" width="12" precision="8" unit="deg"><!-- ucd="POS_EQ_RA_MAIN" -->
+      <DESCRIPTION>? alpha, degrees (ICRS, Epoch=J1991.25) (H8)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="DEICRS" ucd="pos.eq.dec;meta.main" ref="H_1991.250" datatype="double" width="12" precision="8" unit="deg"><!-- ucd="POS_EQ_DEC_MAIN" -->
+      <DESCRIPTION>? delta, degrees (ICRS, Epoch=J1991.25) (H9)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Vmag" ucd="phot.mag;em.opt.V" datatype="float" width="5" precision="2" unit="mag"><!-- ucd="PHOT_JHN_V" -->
+      <DESCRIPTION>? Magnitude in Johnson V (H5)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Plx" ucd="pos.parallax.trig" datatype="float" width="7" precision="2" unit="mas"><!-- ucd="POS_PARLX_TRIG" -->
+      <DESCRIPTION>? Trigonometric parallax (H11)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="e_Plx" ucd="stat.error;pos.parallax" datatype="float" width="6" precision="2" unit="mas"><!-- ucd="ERROR" -->
+      <DESCRIPTION>? Standard error in Plx (H16)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="B-V" ucd="phot.color;em.opt.B;em.opt.V" datatype="float" width="6" precision="3" unit="mag"><!-- ucd="PHOT_JHN_B-V" -->
+      <DESCRIPTION>? Johnson B-V colour (H37)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="SpType" ucd="src.spType" datatype="char" arraysize="12*"><!-- ucd="SPECT_TYPE_MK" -->
+      <DESCRIPTION>Spectral type (H76)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="CCDM" ucd="meta.id.cross" datatype="char" arraysize="10"><!-- ucd="ID_CROSSID" -->
+      <DESCRIPTION>CCDM identifier (H55)</DESCRIPTION>
+      <LINK href="http://vizier.cds.unistra.fr/viz-bin/VizieR-4?-info=XML&amp;-out.add=.&amp;-source=I/239/h_dm_com,h_dm_cor,I/196/annex1&amp;CCDM===${CCDM}"/>
+    </FIELD>
+    <FIELD name="Nsys" ucd="meta.number" datatype="short" width="2"><!-- ucd="NUMBER" -->
+      <DESCRIPTION>? Number of entries with same CCDM (H57)</DESCRIPTION>
+      <VALUES null="-32768" />
+    </FIELD>
+    <FIELD name="recno" ucd="meta.record" datatype="int" width="8" type="hidden"><!-- ucd="RECORD" -->
+      <DESCRIPTION>Record number assigned by the VizieR team. Should Not be used for identification.</DESCRIPTION>
+      <LINK href="http://vizier.cds.unistra.fr/viz-bin/VizieR-5?-info=XML&amp;-out.add=.&amp;-source=I/239/hip_main&amp;recno=${recno}"/>
+    </FIELD>
+<DATA><TABLEDATA>
+<TR><TD>1335</TD><TD>004.18103104</TD><TD>+41.84943398</TD><TD>8.58</TD><TD>10.38</TD><TD>0.96</TD><TD>0.590</TD><TD>F8</TD><TD></TD><TD></TD><TD>1334</TD></TR>
+<TR><TD>1368</TD><TD>004.27473316</TD><TD>+40.94809407</TD><TD>8.99</TD><TD>66.71</TD><TD>1.12</TD><TD>1.370</TD><TD>M0</TD><TD></TD><TD></TD><TD>1367</TD></TR>
+<TR><TD>1442</TD><TD>004.49036207</TD><TD>+40.22750372</TD><TD>9.94</TD><TD>16.75</TD><TD>1.48</TD><TD>0.820</TD><TD>G9</TD><TD></TD><TD></TD><TD>1441</TD></TR>
+<TR><TD>1445</TD><TD>004.49781357</TD><TD>+40.74679871</TD><TD>7.71</TD><TD>1.67</TD><TD>0.93</TD><TD>1.382</TD><TD>K0</TD><TD></TD><TD></TD><TD>1444</TD></TR>
+<TR><TD>1490</TD><TD>004.63372115</TD><TD>+41.98442698</TD><TD>8.40</TD><TD>0.87</TD><TD>0.98</TD><TD>1.490</TD><TD>K2</TD><TD></TD><TD></TD><TD>1489</TD></TR>
+<TR><TD>1575</TD><TD>004.92324681</TD><TD>+40.72950687</TD><TD>6.35</TD><TD>6.03</TD><TD>0.77</TD><TD>1.179</TD><TD>K1III</TD><TD></TD><TD></TD><TD>1573</TD></TR>
+<TR><TD>1591</TD><TD>004.97083884</TD><TD>+42.87999295</TD><TD>8.66</TD><TD>4.40</TD><TD>1.01</TD><TD>0.348</TD><TD>F2III</TD><TD></TD><TD></TD><TD>1589</TD></TR>
+<TR><TD>1594</TD><TD>004.98074437</TD><TD>+39.54285880</TD><TD>8.09</TD><TD>4.02</TD><TD>0.98</TD><TD>1.054</TD><TD>K0</TD><TD></TD><TD></TD><TD>1592</TD></TR>
+<TR><TD>1634</TD><TD>005.11847601</TD><TD>+40.92217204</TD><TD>8.15</TD><TD>8.32</TD><TD>0.96</TD><TD>0.519</TD><TD>F8</TD><TD></TD><TD></TD><TD>1632</TD></TR>
+<TR><TD>1641</TD><TD>005.13260063</TD><TD>+43.69432614</TD><TD>7.93</TD><TD>3.60</TD><TD>0.95</TD><TD>0.174</TD><TD>A2</TD><TD></TD><TD></TD><TD>1639</TD></TR>
+</TABLEDATA></DATA>
+</TABLE>
+<INFO name="matches" value="10">matching records</INFO>
+
+<INFO name="Warning" value="truncated result (maxtup=10)"/><INFO name="QUERY_STATUS" value="OVERFLOW"> value="truncated result (maxtup=10)"</INFO>
+
+</RESOURCE>
+</VOTABLE>

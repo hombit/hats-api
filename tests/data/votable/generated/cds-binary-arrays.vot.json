@@ -1,0 +1,28 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": "BINARY",
+  "columns": [
+    {"name": "i3", "datatype": "int", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d3", "datatype": "double", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "iv", "datatype": "int", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fv", "datatype": "float", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s10", "datatype": "short", "arraysize": "10*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "lv", "datatype": "long", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ubv", "datatype": "unsignedByte", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i2x3", "datatype": "int", "arraysize": "2x3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d2xs", "datatype": "double", "arraysize": "2x*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c8xs", "datatype": "char", "arraysize": "8x*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c8x3", "datatype": "char", "arraysize": "8x3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bool4", "datatype": "boolean", "arraysize": "4", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc2", "datatype": "floatComplex", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dcv", "datatype": "doubleComplex", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [[1, 2, 3], [1.5, -2.5, 1e+300], [1, 2, 4, 8, 16], [1.5, "NaN", -2.0], [1, 2], [-9223372036854775808, 9223372036854775807], [0, 255, 16], [0, 1, 2, 3, 4, 5], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], ["abc", "defgh"], ["a", "bb", "ccc"], [true, false, null, true], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]],
+    [[-2147483648, 0, 2147483647], ["NaN", "Infinity", "-Infinity"], [], [], [], [], [], [-1, -2, -3, -4, -5, -6], [], [], ["", "x", ""], [false, false, false, false], [0.5, -0.5, "NaN", "NaN"], []],
+    [[0, 0, 0], [0.0, 0.0, 0.0], [], [], [], [], [], [0, 0, 0, 0, 0, 0], [], [], ["", "", ""], [null, null, null, null], [0.0, 0.0, 0.0, 0.0], []],
+    [[7, 8, 9], [0.0, 1.0, 2.0], [-7], ["Infinity"], [-32768, 32767, 0, 1, 2, 3, 4, 5, 6, 7], [0], [1], [10, 20, 30, 40, 50, 60], [0.5, -0.5], ["12345678"], ["12345678", " lead", "z"], [null, null, true, true], [0.0, 0.0, 0.0, 0.0], [0.5, -0.5]]
+  ],
+  "refuse": null,
+  "notes": "columns bit5, bit12, bitv of the source table are omitted: this writer cannot write them\na variable multi-dimensional array's 4-byte count is written as the number of last-dimension items; read as primitives, the stream does not parse\ndiffers from the source data: column 'i3' row 2 was null, the file says [0, 0, 0]\ndiffers from the source data: column 'd3' row 2 was null, the file says [0.0, 0.0, 0.0]\ndiffers from the source data: column 'iv' row 2 was null, the file says []\ndiffers from the source data: column 'fv' row 2 was null, the file says []\ndiffers from the source data: column 's10' row 2 was null, the file says []\ndiffers from the source data: column 'lv' row 2 was null, the file says []\ndiffers from the source data: column 'ubv' row 2 was null, the file says []\ndiffers from the source data: column 'i2x3' row 2 was null, the file says [0, 0, 0, 0, 0, 0]\ndiffers from the source data: column 'd2xs' row 2 was null, the file says []\ndiffers from the source data: column 'c8xs' row 2 was null, the file says []\ndiffers from the source data: column 'c8x3' row 2 was null, the file says [\"\", \"\", \"\"]\ndiffers from the source data: column 'bool4' row 2 was null, the file says [null, null, null, null]\ndiffers from the source data: column 'fc2' row 2 was null, the file says [0.0, 0.0, 0.0, 0.0]\ndiffers from the source data: column 'dcv' row 2 was null, the file says []\nastropy 8.0.1 fails to read it: E01: cds-binary-arrays.vot:?:?: E01: Invalid size specifier '8x' for a char field (in field 'c8xs')\nSTILTS reads (as its BINARY2 output says): 0 rows where the file has 4"
+}

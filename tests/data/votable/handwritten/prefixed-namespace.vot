@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<vot:VOTABLE version="1.4" xmlns:vot="http://www.ivoa.net/xml/VOTable/v1.3"><vot:RESOURCE><vot:TABLE><vot:FIELD name="a" datatype="int"/><vot:DATA><vot:TABLEDATA><vot:TR><vot:TD>1</vot:TD></vot:TR><vot:TR><vot:TD>2</vot:TD></vot:TR></vot:TABLEDATA></vot:DATA></vot:TABLE></vot:RESOURCE></vot:VOTABLE>

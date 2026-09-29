@@ -1,0 +1,42 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:33
+ !-->
+<RESOURCE>
+<TABLE name="xtypes" nrows="5">
+<FIELD arraysize="*" datatype="char" name="ts" xtype="timestamp"/>
+<FIELD arraysize="10" datatype="char" name="tsfix" xtype="timestamp"/>
+<FIELD arraysize="2" datatype="double" name="pt" ucd="pos.eq" unit="deg" xtype="point"/>
+<FIELD arraysize="2" datatype="float" name="fpt" unit="deg" xtype="point"/>
+<FIELD arraysize="3" datatype="double" name="circ" unit="deg" xtype="circle"/>
+<FIELD arraysize="*" datatype="double" name="poly" unit="deg" xtype="polygon"/>
+<FIELD arraysize="2" datatype="double" name="intv" xtype="interval"/>
+<FIELD arraysize="2" datatype="long" name="lintv" xtype="interval"/>
+<DATA>
+<BINARY>
+<STREAM encoding='base64'>
+AAAAFzIwMDAtMDEtMDJUMTU6MjA6MzAuNDU2MjAwMi0wMy0wNEAomZmZmZmaQEbM
+zMzMzM1BRMzNQjZmZkAomZmZmZmaQEbMzMzMzM0/4AAAAAAAAAAAAAhAJAAAAAAA
+AEAkAAAAAAAAQCRmZmZmZmZAJAAAAAAAAEAkZmZmZmZmQCRmZmZmZmZAJAAAAAAA
+AEAkZmZmZmZmP+AAAAAAAAA/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAATMjAw
+MS0wMi0wM1QwNDowNTowNjE5OTktMTItMzEAAAAAAAAAAMBWgAAAAAAAAAAAAMK0
+AAAAAAAAAAAAAEBWgAAAAAAAQGaAAAAAAAAAAAAGAAAAAAAAAAAAAAAAAAAAAD/w
+AAAAAAAAAAAAAAAAAAA/8AAAAAAAAD/wAAAAAAAA//AAAAAAAAAAAAAAAAAAAP//
+///////7AAAAAAAAAAUAAAAKMjAwMi0wMy0wNDIwMjAtMDItMjlAdn5mZmZmZkBW
+gAAAAAAAQ7PzM0K0AABAdn5mZmZmZsBWYAAAAAAAPrDG96C17Y0AAAAIQHXgAAAA
+AADAJAAAAAAAAEAkAAAAAAAAwCQAAAAAAABAJAAAAAAAAEAkAAAAAAAAQHXgAAAA
+AABAJAAAAAAAAAAAAAAAAAAAf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFDIw
+MDAtMDEtMDJUMTU6MjA6MzBaMjAwMC0wMS0wMUBmgAAAAAAAAAAAAAAAAABDNAAA
+AAAAAD/wAAAAAAAAQAAAAAAAAABACAAAAAAAAAAAAAD/8AAAAAAAAH/wAAAAAAAA
+gAAAAAAAAAB//////////wAAAAAAAAAAAAAAAAAAf/gAAAAAAAB/+AAAAAAAAH/A
+AAB/wAAAf/gAAAAAAAB/+AAAAAAAAH/4AAAAAAAAAAAAAH/4AAAAAAAAf/gAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAA
+</STREAM>
+</BINARY>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

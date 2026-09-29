@@ -1,0 +1,64 @@
+<?xml version='1.0' encoding='utf-8'?>
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://vo.ari.uni-heidelberg.de/docs/schemata/VOTable.xsd"><DESCRIPTION> The catalogue ARIHIP has been constructed by selecting the 'best
+data' for a given star from combinations of HIPPARCOS data with Boss'
+GC and/or the Tycho-2 catalogue as well as the FK6. It provides 'best
+data' for 90 842 stars with a typical mean error of 0.89 mas/year
+(about a factor of 1.3 better than Hipparcos for this sample of
+stars).</DESCRIPTION><RESOURCE type="results"><INFO name="queryPars" value="spoint(radians(raj2000), radians(dej2000))  &lt;@ scircle(spoint(radians(%(RA0)s), radians(%(DEC0)s)), radians(%(SR0)s))">{'RA0': 10.68, 'DEC0': 41.27, 'SR0': 1.5}</INFO><INFO name="QUERY_STATUS" value="OK"></INFO><INFO name="standardID" value="ivo://ivoa.net/std/ConeSearch">Written by DaCHS 2.12.2 SCSRenderer</INFO><INFO name="server_software" value="DaCHS/2.12.2 twistedWeb/22.4.0">Software that produced this VOTable</INFO><INFO name="server" value="http://dc.g-vo.org">Base URI of the server</INFO><INFO name="citation" ucd="" value="http://dc.g-vo.org/tableinfo/arihip.main#ti-citing">Advice on citing this resource</INFO><INFO name="citation" ucd="" value="https://dc.g-vo.org/arihip/q/cone/howtocite">Advice on citing this resource</INFO><INFO name="publication_id" ucd="meta.bib.bibcode" value="2001VeARI..40....1W">A bibliographic source citable for (parts of) this data</INFO><INFO name="request" ucd="meta.ref.url" value="http://dc.g-vo.org/arihip/q/cone/scs.xml?RA=10.68&amp;DEC=41.27&amp;SR=1.5&amp;VERB=1">Request string that led up to this result.</INFO><INFO name="ivoid" ucd="meta.ref.ivoid" value="ivo://org.gavo.dc/arihip/q/cone">Originating VO resource</INFO><INFO name="ivoid_service" ucd="meta.ref.ivoid" value="ivo://org.gavo.dc/arihip/q/cone">Originating VO service</INFO><INFO name="publisher" value="The GAVO DC team">Data centre that has delivered the data</INFO><INFO name="rights" value="ARIHIP is licensed under the `Creative Commons Attribution 4.0 License &lt;http://creativecommons.org/licenses/by/4.0/&gt;`_
+
+.. image:: /static/img/ccby.png
+   :alt: [CC-BY]
+
+">Legal conditions applicable to (parts of) the data contained</INFO><INFO name="rights_uri" value="https://spdx.org/licenses/CC-BY-4.0.html">URI of legal conditions applicable to (parts of) the data contained</INFO><INFO name="request_date" ucd="time.creation" value="2026-09-29T02:32:43Z"></INFO><INFO name="contact" ucd="meta.email" value="gavo@ari.uni-heidelberg.de">Contact option</INFO><INFO name="reference_url" ucd="meta.ref.url" value="http://dc.g-vo.org/tableinfo/arihip.main">More information on the data Source</INFO><INFO name="reference_url" ucd="meta.ref.url" value="https://dc.g-vo.org/arihip/q/cone/info">More information on the data Source</INFO><INFO name="creator" ucd="meta.bib.author" value="Wielen, R.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Schwan, H.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Dettbarn, C.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Lenhardt, H.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Jahreiß, H.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Jährling, R">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Khalisi, E.">Name of a person or entity that produced a contributing resource</INFO><COOSYS ID="system" epoch="J2000.0" system="ICRS"/><TABLE name="result"><GROUP utype="stc:CatalogEntryLocation"><PARAM arraysize="*" datatype="char" name="CoordFlavor" utype="stc:AstroCoordSystem.SpaceFrame.CoordFlavor" value="SPHERICAL"/><PARAM arraysize="*" datatype="char" name="CoordRefFrame" utype="stc:AstroCoordSystem.SpaceFrame.CoordRefFrame" value="ICRS"/><PARAM arraysize="*" datatype="char" name="Epoch" utype="stc:AstroCoords.Position2D.Epoch" value="2000.0"/><PARAM arraysize="*" datatype="char" name="yearDef" utype="stc:AstroCoords.Position2D.Epoch.yearDef" value="J"/><PARAM arraysize="*" datatype="char" name="URI" utype="stc:DataModel.URI" value="http://www.ivoa.net/xml/STC/stc-v1.30.xsd"/><FIELDref ref="raj2000" utype="stc:AstroCoords.Position2D.Value2.C1"/><FIELDref ref="dej2000" utype="stc:AstroCoords.Position2D.Value2.C2"/><FIELDref ref="pmra" utype="stc:AstroCoords.Velocity2D.Value2.C1"/><FIELDref ref="pmde" utype="stc:AstroCoords.Velocity2D.Value2.C2"/></GROUP><GROUP ID="ndiwiwihhgea" name="note-bin"><DESCRIPTION>
+The column Kbin describes the multiplicity of the object.  In
+consists of up to two digits.
+
+The first digit describes the evidence for the multiplicity of the object
+based on proper-motion differences.  For details on the method and the
+various test parameters F see Wielen et al (1999a).
+
++---+---------------------------------------------------------+
+| 1 | all values of  F (F_{FH}, F_{0H}, F_{0(GC)H}, F_{0F},   |
+|   | F_{TH})  are below 2.49                                 |
++---+---------------------------------------------------------+
+| 2 | at least one value of  F (F_{FH}, F_{0H}, F_{0(GC)H},   |
+|   | F_{0F}, F_{TH})  is larger than 3.44                    |
++---+---------------------------------------------------------+
+| 3 | all other (intermediate) cases                          |
++---+---------------------------------------------------------+
+|   | empty means no F value(s) are available                 |
++---+---------------------------------------------------------+
+
+The second digit gives evidence for the multiplicity of the object based
+on non-PM methods. If the data indicate various kinds of binarity, the
+'astrometrically most disturbing' effect is given.  :
+
+1
+  single star indicated
+2
+  the star is a member of a visual binary (gravitationally
+  bound system), or the object is  resolved by speckle interferometry
+3
+  the object is suspected to be a visual binary (mainly due to HIP)
+4
+  the star has at least one optical companion with
+  a separation of rho &lt; 60"
+5
+  the star has at least one optical companion, but all
+  companions have a separation of rho &lt;= 60"
+6
+  astrometric binary (mainly the non-standard solutions O, G,
+  V, X of HIP)
+7
+  spectroscopic binary with a known orbit, or the star is an
+  eclipsing binary
+8
+  the radial velocity of the star is variable (indicating a
+  spectroscopic binary), or the object shows a composite
+  spectrum (indicating a double star)
+9
+  the radial velocity of the star may be variable (possible
+  indication for a spectroscopic binary), or the object may
+  show a composite spectrum (possibly indicating a double
+  star), or other weak indications of binarity, or the star
+  has a (suspected) planetary companion</DESCRIPTION><FIELDref ref="kbin"/></GROUP><FIELD ID="_r" datatype="double" name="_r" ucd="pos.angDistance" unit="deg"><DESCRIPTION>Distance to cone center</DESCRIPTION></FIELD><FIELD ID="hipno" arraysize="*" datatype="char" name="hipno" ucd="ID_MAIN"><DESCRIPTION>Number of the star in the HIPPARCOS Catalogue (ESA 1997).</DESCRIPTION><VALUES><MIN value="1"></MIN><MAX value="120404"></MAX></VALUES></FIELD><FIELD ID="raj2000" datatype="double" name="raj2000" ref="system" ucd="POS_EQ_RA_MAIN" unit="deg"><DESCRIPTION>Right ascension from a single-star solution</DESCRIPTION><VALUES><MIN value="0.0009000083333333333"></MIN><MAX value="359.97945625833336"></MAX></VALUES></FIELD><FIELD ID="dej2000" datatype="double" name="dej2000" ref="system" ucd="POS_EQ_DEC_MAIN" unit="deg"><DESCRIPTION>Declination from a single-star solution</DESCRIPTION><VALUES><MIN value="-89.78242786944445"></MIN><MAX value="89.5694284"></MAX></VALUES></FIELD><FIELD ID="pmra" datatype="float" name="pmra" ref="system" ucd="pos.pm;pos.eq.ra" unit="deg/yr"><DESCRIPTION>Proper motion in right ascension times cos(delta) for a single-star solution.</DESCRIPTION><VALUES><MIN value="-0.000904975"></MIN><MAX value="0.0018796972"></MAX></VALUES></FIELD><FIELD ID="pmde" datatype="float" name="pmde" ref="system" ucd="pos.pm;pos.eq.dec" unit="deg/yr"><DESCRIPTION>Proper motion in declination for a single-star solution.</DESCRIPTION><VALUES><MIN value="-0.0016152972"></MIN><MAX value="0.002868889"></MAX></VALUES></FIELD><FIELD ID="kbin" arraysize="*" datatype="char" name="kbin" ucd="meta.code.multip"><DESCRIPTION>Binarity flag. See note.</DESCRIPTION><VALUES null=" "></VALUES></FIELD><DATA><BINARY><STREAM encoding="base64">P9Rjje0sYdgAAAAEMzMzM0AlQhzNuesAQER6FBWEhO44OkAat1VNvQAAAAIzMT/ZHwJP5LayAAAABDM0NDdAJghOqWmpoEBEyREslgGONkPrrLZINUcAAAACMzM/4htiidLfKwAAAAQzMjIzQCR7s+tUd1FARN2MRqzsLrTTxAi2PWVpAAAAAjExP+MVsbQEMp0AAAAEMzI5M0AlAwqLCN0eQERYGNdJhwK2Qa8Dt5HeWwAAAAIxMT/k8wNgGaWsAAAABDM0NjFAJiOwtl1mVUBEV7Or7RGfNarBObauY80AAAACMTE/6PKlr8SLhAAAAAQzNTk3QCcG5zV1dGhARGeKZR9uQjfLoiq3i14OAAAAAjExP+wARW8tiDIAAAAEMzQ0OEAmCuTx8iBDQEQ3ilEbS843CHRntr6zdgAAAAIxMT/tMeSsrQ22AAAABDMwOTFAI6mTlgLEj0BE9nGkZD+MNtxXPbYr344AAAACMTM/71CrFjmZkgAAAAQyOTU4QCLIf+nFKxhARLWSGYp0MzW00jS3KcavAAAAAjEzP/AFfTQORfIAAAAEMjk3MkAi7DvAxDk5QERvkgXZ1SM2C89lNfQzowAAAAIxMT/wgw4ckTb5AAAABDM0MzJAJeZtQrHkokBFJB2xdCJBthWA7rWc9c4AAAACMTE/8kGXd9vOaQAAAAQzMjA2QCRpHADnho1ARBf1TRKokDjPj0+5QtKQAAAAAjExP/MkFyf6vm0AAAAEMzgxN0AohM/jJY0RQESQ5gw+6oE3N/GLtvCRDwAAAAIyMT/z1tSG2+vMAAAABDMxMzBAI+VkRWuLsUBFMRhTy7igNlXQ+bbhR94AAAACMTE/8/JKsGo3NAAAAAQzODQwQCiidKOHoLpARIp3L6yV9rYlWUq20YdfAAAAAjExP/SVSbkahtsAAAAEMzUxMEAmZjJNEpC0QEU/mtuPNyi2XjR1tiW4vAAAAAIxMT/17GGySbKHAAAABDI5NDhAIrhR75MSB0BEKotZTRm+tpFnDbTPSrUAAAACMTE/9z0RbeubwQAAAAQyNzQwQCGAccalI8pARK+vujGnuTZK0WI1BXjaAAAAAjEx</STREAM></BINARY></DATA></TABLE></RESOURCE></VOTABLE>

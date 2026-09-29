@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="strings" name="strings">
+   <FIELD ID="cfix" arraysize="10" datatype="char" name="cfix"/>
+   <FIELD ID="cvar" arraysize="*" datatype="char" name="cvar"/>
+   <FIELD ID="cbnd" arraysize="5*" datatype="char" name="cbnd"/>
+   <FIELD ID="ufix" arraysize="6" datatype="unicodeChar" name="ufix"/>
+   <FIELD ID="uvar" arraysize="*" datatype="unicodeChar" name="uvar"/>
+   <DATA>
+    <BINARY2>
+     <STREAM encoding="base64">
+AEFwcGxlAAAAAAAAAAAFQXBwbGUAAAADYWJjBC8EMQQ7BD4EOgQ+AAAACgQfBEAEOAQyBDUEQgAgBDwEOARAACAgbGVhZAAAAAAAAAAGICBsZWFkAAAAAyBiIAO7A8wDswO/A8IAAAAAAAgDlQO7A7sDtwO9A7kDugOsAHRyYWlsICAgAAAAAAAIdHJhaWwgICAAAAAFYWJjZGVOLWWHAAAAAAAAAAAAAAAHZeVnLIqeMMYwrTC5MMgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwmPiInAAAAAAAAAAAFPCY+IicAAAACPD4AIABhAGIAIAAgAAAAAAAPBEEEPAQ1BEgEMAQ9BD0ESwQ5ACAAQQBTAEMASQBJAGV4YWN0bHkxMCEAAAAPbXVsdGkgd29yZCB0ZXh0AAAAAXgAxQDEANYAAAAAAAAAAAAHAHQAcgBhAGkAbAAgACAAdGFiCWluAAAAAAAAAAZ0YWIJaW4AAAACICAgrAAAAAAAAAAAAAAAAAAGACAAIABsAGUAYQBk     </STREAM>
+    </BINARY2>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

@@ -1,0 +1,52 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:29
+ !-->
+<RESOURCE>
+<TABLE name="scalars" nrows="7">
+<FIELD datatype="boolean" name="b"/>
+<FIELD datatype="boolean" name="bit"/>
+<FIELD datatype="unsignedByte" name="ub">
+<VALUES null='255'/>
+</FIELD>
+<FIELD datatype="short" name="s">
+<VALUES null='-32768'/>
+</FIELD>
+<FIELD datatype="int" name="i">
+<VALUES null='-2147483648'/>
+</FIELD>
+<FIELD datatype="long" name="l">
+<VALUES null='-9223372036854775808'/>
+</FIELD>
+<FIELD datatype="char" name="c"/>
+<FIELD datatype="unicodeChar" name="u"/>
+<FIELD datatype="float" name="f"/>
+<FIELD datatype="double" name="d"/>
+<FIELD arraysize="2" datatype="float" name="fc"/>
+<FIELD arraysize="2" datatype="double" name="dc"/>
+<FIELD arraysize="*" datatype="char" name="str"/>
+<FIELD arraysize="*" datatype="unicodeChar" name="ustr"/>
+<DATA>
+<BINARY>
+<STREAM encoding='base64'>
+VFQAgACAAAAAgAAAAAAAAABhBC8/wAAAP/gAAAAAAAA/wAAAv8AAAD/4AAAAAAAA
+v/gAAAAAAAAAAAAFaGVsbG8AAAAGBB8EQAQ4BDIENQRCRkb/f/9/////f///////
+//9aA7v/f///f+////////89zMzNvkzMzT+5mZmZmZmav8mZmZmZmZoAAAAAAAAA
+ACBUAQAAAAAAAAAAAAAAAAAAPE4tAIAAAAAAAAAAAAABf8AAAH/AAAB/+AAAAAAA
+AAAAAAAAAAAAAAAAA3ggeQAAAANl5Wcsip5URoD//////////////////yYA6X/A
+AAB/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAU8Jj4iJwAAAAUA
+PAAmAD4AIgAnICD/gACAAAAAgAAAAAAAAAAAAAB/wAAAf/gAAAAAAAB/wAAAf8AA
+AH/4AAAAAAAAf/gAAAAAAAAAAAAAAAAAAEZUKjA5B1vNFREiEPR96YEVMAOpf4AA
+AH/wAAAAAAAAf4AAAD+AAAD/8AAAAAAAAD/wAAAAAAAAAAAAEiAgbGVhZCBhbmQg
+dHJhaWwgIAAAAAoAIAAgBDIENQQ0BEMESQQ4BDUAIFRGBwABAAAAAgAAAAAAAAAD
+fgBh/4AAAP/wAAAAAAAAQEAAAECAAABACAAAAAAAAEAQAAAAAAAAAAAACm11bHRp
+IHdvcmQAAAAIA5UDuwO7A7cDvQO5A7oDrA==
+</STREAM>
+</BINARY>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

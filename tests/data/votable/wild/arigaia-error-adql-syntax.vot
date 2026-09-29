@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/votable-1.4.xsd">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="ERROR">Incorrect ADQL query:  Encountered ")". Was expecting one of: "." "," "+" "-" "*" "/" "." "*" "/" "+" "-" "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," "," </INFO>
+<INFO name="PROVIDER" value="ARI (Astronomisches Rechen Institut - Heidelberg, Germany)">ARI's TAP access to the Gaia Archive.</INFO>
+<INFO  name="REQ_ID" value="S1790648780488"/>
+<INFO  name="ERROR_TYPE" value="fatal"/>
+<INFO  name="USER" value="a420363511708525640826e36aa4e503 (ANONYMOUS)"/>
+<INFO  name="ACTION" value="sync"/>
+</RESOURCE>
+</VOTABLE>

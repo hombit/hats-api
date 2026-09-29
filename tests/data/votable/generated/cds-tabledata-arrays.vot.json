@@ -1,0 +1,8 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": null,
+  "columns": [],
+  "rows": [],
+  "refuse": "4 elements in 'i3', arraysize 3",
+  "notes": "columns bit5, bit12, bitv of the source table are omitted: this writer cannot write them\nThe writer produced a document that is not valid VOTable, so a reader must refuse it; astropy 8.0.1 refuses it too (E01); STILTS reads it without an error."
+}

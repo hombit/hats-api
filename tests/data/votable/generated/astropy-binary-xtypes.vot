@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="xtypes" name="xtypes">
+   <FIELD ID="ts" arraysize="*" datatype="char" name="ts" xtype="timestamp"/>
+   <FIELD ID="tsfix" arraysize="10" datatype="char" name="tsfix" xtype="timestamp"/>
+   <FIELD ID="pt" arraysize="2" datatype="double" name="pt" ucd="pos.eq" unit="deg" xtype="point"/>
+   <FIELD ID="fpt" arraysize="2" datatype="float" name="fpt" unit="deg" xtype="point"/>
+   <FIELD ID="circ" arraysize="3" datatype="double" name="circ" unit="deg" xtype="circle"/>
+   <FIELD ID="poly" arraysize="*" datatype="double" name="poly" unit="deg" xtype="polygon"/>
+   <FIELD ID="intv" arraysize="2" datatype="double" name="intv" xtype="interval"/>
+   <FIELD ID="lintv" arraysize="2" datatype="long" name="lintv" xtype="interval">
+    <VALUES null="-9223372036854775807"/>
+   </FIELD>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+AAAAFzIwMDAtMDEtMDJUMTU6MjA6MzAuNDU2MjAwMi0wMy0wNEAomZmZmZmaQEbMzMzMzM1BRMzNQjZmZkAomZmZmZmaQEbMzMzMzM0/4AAAAAAAAAAAAAhAJAAAAAAAAEAkAAAAAAAAQCRmZmZmZmZAJAAAAAAAAEAkZmZmZmZmQCRmZmZmZmZAJAAAAAAAAEAkZmZmZmZmP+AAAAAAAAA/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAATMjAwMS0wMi0wM1QwNDowNTowNjE5OTktMTItMzEAAAAAAAAAAMBWgAAAAAAAAAAAAMK0AAAAAAAAAAAAAEBWgAAAAAAAQGaAAAAAAAAAAAAGAAAAAAAAAAAAAAAAAAAAAD/wAAAAAAAAAAAAAAAAAAA/8AAAAAAAAD/wAAAAAAAA//AAAAAAAAAAAAAAAAAAAP/////////7AAAAAAAAAAUAAAAKMjAwMi0wMy0wNDIwMjAtMDItMjlAdn5mZmZmZkBWgAAAAAAAQ7PzM0K0AABAdn5mZmZmZsBWYAAAAAAAPrDG96C17Y0AAAAIQHXgAAAAAADAJAAAAAAAAEAkAAAAAAAAwCQAAAAAAABAJAAAAAAAAEAkAAAAAAAAQHXgAAAAAABAJAAAAAAAAAAAAAAAAAAAf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFDIwMDAtMDEtMDJUMTU6MjA6MzBaMjAwMC0wMS0wMUBmgAAAAAAAAAAAAAAAAABDNAAAAAAAAD/wAAAAAAAAQAAAAAAAAABACAAAAAAAAAAAAAD/8AAAAAAAAH/wAAAAAAAAgAAAAAAAAAB//////////wAAAAAAAAAAAAAAAAAAf/gAAAAAAAB/+AAAAAAAAH/AAAB/wAAAf/gAAAAAAAB/+AAAAAAAAH/4AAAAAAAAAAAAAH/4AAAAAAAAf/gAAAAAAACAAAAAAAAAAYAAAAAAAAAB     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

@@ -1,0 +1,34 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.3"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:36
+ !-->
+<RESOURCE>
+<TABLE name="nulls" nrows="5">
+<FIELD datatype="unsignedByte" name="ub_n"/>
+<FIELD datatype="short" name="s_n"/>
+<FIELD datatype="int" name="i_n"/>
+<FIELD datatype="long" name="l_n"/>
+<FIELD arraysize="3" datatype="int" name="iarr_n"/>
+<FIELD arraysize="*" datatype="short" name="svar_n"/>
+<FIELD datatype="boolean" name="b_n"/>
+<FIELD datatype="float" name="f_n"/>
+<FIELD datatype="double" name="d_n"/>
+<FIELD arraysize="*" datatype="char" name="str_n"/>
+<DATA>
+<BINARY2>
+<STREAM encoding='base64'>
+UAAAAAAAAAABAAAAAAAAAAAAAAAB/////wAAAAMAAAADAAEAAAACVH/AAAB/+AAA
+AAAAAAAAAAFhpkAAf/8AAAAAf/////////////////////////8AAAAAID+AAAB/
++AAAAAAAAAAAAAAEQP6AAf///BoAAAAAAAAAAAAAAAQAAAAFAAAABgAAAABGf8AA
+AD/wAAAAAAAAAAAAALoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA
+IEAAAAB/+AAAAAAAAAAAAAFiQEABAAB/////AAAAAAAAAAEAAAAAAAAAAP////8A
+AAABAAVUf8AAAEAIAAAAAAAAAAAAAA==
+</STREAM>
+</BINARY2>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE><FIELD name="f" datatype="boolean"/><DATA><TABLEDATA><TR><TD>T</TD></TR><TR><TD>f</TD></TR><TR><TD>1</TD></TR><TR><TD>0</TD></TR><TR><TD>true</TD></TR><TR><TD>FalsE</TD></TR><TR><TD>?</TD></TR><TR><TD/></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

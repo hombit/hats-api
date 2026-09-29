@@ -1,0 +1,24 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "s",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "café"
+  ]
+ ],
+ "refuse": null,
+ "notes": "Declared ISO-8859-1, with é as the single byte 0xE9."
+}

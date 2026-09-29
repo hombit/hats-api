@@ -1,0 +1,10 @@
+<VOTABLE version="1.2" xmlns="http://www.ivoa.net/xml/VOTable/v1.2">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="ERROR">
+Cannot parse query 'SELECT TOP 3 * FROM gaiadr3.no_such_table' for job '1a51302b-bbad-11f1-b34c-bc97e148b76b-O': 1 unresolved identifiers: no_such_table [l.1 c.21 - l.1 c.42] !
+ - Unknown table "gaiadr3.no_such_table" !
+</INFO>
+<INFO name="HttpErrorCode" value="400"/>
+<INFO name="Action" value="Handling request"/>
+</RESOURCE>
+</VOTABLE>

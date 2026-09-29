@@ -1,0 +1,30 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": "TABLEDATA",
+  "columns": [
+    {"name": "b", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ub", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "l", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c", "datatype": "char", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "u", "datatype": "unicodeChar", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "f", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc", "datatype": "floatComplex", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dc", "datatype": "doubleComplex", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "str", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ustr", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [true, 0, -32768, -2147483648, -9223372036854775808, "a", "Я", 1.5, 1.5, [1.5, -1.5], [1.5, -1.5], "hello", "Привет"],
+    [false, 255, 32767, 2147483647, 9223372036854775807, "Z", "λ", -3.4028234663852886e+38, 1.7976931348623157e+308, [0.10000000149011612, -0.20000000298023224], [0.1, -0.2], null, null],
+    [null, 1, 0, 0, 0, "<", "中", 1.1754943508222875e-38, 5e-324, ["NaN", "NaN"], ["NaN", 0.0], "x y", "日本語"],
+    [true, 128, -1, -1, -1, "&", "é", "NaN", "NaN", [0.0, 0.0], [0.0, 0.0], "<&>\"'", "<&>\"'"],
+    [null, null, null, null, null, null, null, null, null, null, null, null, null],
+    [false, 42, 12345, 123456789, 1234567890123456789, "0", "Ω", "Infinity", "Infinity", ["Infinity", 1.0], ["-Infinity", 1.0], "  lead and trail  ", "  ведущие "],
+    [true, 7, 1, 2, 3, "~", "a", "-Infinity", "-Infinity", [3.0, 4.0], [3.0, 4.0], "multi word", "Ελληνικά"]
+  ],
+  "refuse": null,
+  "notes": "columns bit of the source table are omitted: this writer cannot write them\nnot conformant, and the ground truth takes the evident meaning: double written as '-inf', which is not a TABLEDATA literal; double written as 'inf', which is not a TABLEDATA literal; float written as '-inf', which is not a TABLEDATA literal; float written as 'inf', which is not a TABLEDATA literal\nastropy 8.0.1 reads: column 'str' row 1 is \"\" where the file says null (and 2 more rows)\nastropy 8.0.1 reads: column 'ustr' row 1 is \"\" where the file says null (and 2 more rows)\nastropy 8.0.1 reads: column 'fc' row 2 is null where the file says [\"NaN\", \"NaN\"]\nastropy 8.0.1 reads: column 'dc' row 2 is null where the file says [\"NaN\", 0.0]\nastropy 8.0.1 reads: column 'f' row 3 is null where the file says \"NaN\"\nastropy 8.0.1 reads: column 'd' row 3 is null where the file says \"NaN\"\nastropy 8.0.1 reads: column 'c' row 4 is \"\" where the file says null\nastropy 8.0.1 reads: column 'u' row 4 is \"\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'f' row 4 is \"NaN\" where the file says null (and 2 more rows)\nSTILTS reads (as its BINARY2 output says): column 'd' row 4 is \"NaN\" where the file says null (and 2 more rows)\nSTILTS reads (as its BINARY2 output says): column 'fc' row 5 is [\"NaN\", 1.0] where the file says [\"Infinity\", 1.0]\nSTILTS reads (as its BINARY2 output says): column 'dc' row 5 is [\"NaN\", 1.0] where the file says [\"-Infinity\", 1.0]"
+}
