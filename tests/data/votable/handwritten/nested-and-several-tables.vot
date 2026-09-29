@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><INFO name="QUERY_STATUS" value="OK"/><RESOURCE><TABLE><FIELD name="first" datatype="int"/><DATA><TABLEDATA><TR><TD>1</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE><TABLE><FIELD name="second" datatype="int"/><DATA><TABLEDATA><TR><TD>2</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

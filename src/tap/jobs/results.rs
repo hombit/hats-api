@@ -146,6 +146,31 @@ impl Results {
         self.remove(&partial(&id.to_string())).await;
     }
 
+    /// Keep a table a job was sent inline until it runs.
+    ///
+    /// In this run's directory, so a crash leaves it where the sweep reclaims it, and under a
+    /// name of its own for every one: a job may be sent several, over several posts.
+    pub async fn keep_upload(&self, id: &JobId, bytes: &[u8]) -> Result<PathBuf, ApiError> {
+        let path = self
+            .directory
+            .join(format!("{id}.upload.{}", JobId::new()?));
+        tokio::fs::write(&path, bytes).await.map_err(|error| {
+            tracing::warn!(path = %path.display(), %error, "an upload could not be kept");
+            ApiError::internal("cannot keep this job's uploaded table")
+        })?;
+        Ok(path)
+    }
+
+    /// Drop a table [`Self::keep_upload`] kept, best effort for the reason
+    /// [`Self::remove`] is.
+    pub fn forget_upload(&self, path: &Path) {
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), %error, "an upload could not be removed");
+        }
+    }
+
     /// Drop one job's answer, a destroyed job's file going with it.
     ///
     /// Best effort and deliberately so: the record is already gone, the caller cannot be told

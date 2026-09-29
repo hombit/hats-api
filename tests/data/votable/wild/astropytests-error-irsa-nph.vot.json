@@ -1,0 +1,10 @@
+{
+ "producer": "IRSA nph cone search (as captured in astropy's test data)",
+ "source_url": "https://raw.githubusercontent.com/astropy/astropy/006f4960ab7311b83c36ca66d5df70274419e144/astropy/io/votable/tests/data/irsa-nph-error.xml",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "no RESOURCE and no TABLE; an INFO named ERROR, not a QUERY_STATUS",
+ "notes": null
+}

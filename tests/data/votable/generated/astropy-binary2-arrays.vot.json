@@ -1,0 +1,28 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "BINARY2",
+  "columns": [
+    {"name": "i3", "datatype": "int", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-2147483647"},
+    {"name": "d3", "datatype": "double", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "iv", "datatype": "int", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-2147483648"},
+    {"name": "fv", "datatype": "float", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s10", "datatype": "short", "arraysize": "10*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-32767"},
+    {"name": "lv", "datatype": "long", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-9223372036854775807"},
+    {"name": "ubv", "datatype": "unsignedByte", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "254"},
+    {"name": "i2x3", "datatype": "int", "arraysize": "2x3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": "-2147483648"},
+    {"name": "d2xs", "datatype": "double", "arraysize": "2x*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bool4", "datatype": "boolean", "arraysize": "4", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit5", "datatype": "bit", "arraysize": "5", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit12", "datatype": "bit", "arraysize": "12", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc2", "datatype": "floatComplex", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dcv", "datatype": "doubleComplex", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [[1, 2, 3], [1.5, -2.5, 1e+300], [1, 2, 4, 8, 16], [1.5, "NaN", -2.0], [1, 2], [-9223372036854775808, 9223372036854775807], [0, 255, 16], [0, 1, 2, 3, 4, 5], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [true, false, null, true], [true, false, true, true, false], [true, false, false, false, true, true, true, true, false, false, true, false], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]],
+    [[-2147483648, 0, 2147483647], ["NaN", "Infinity", "-Infinity"], [], [], [], [], [], [-1, -2, -3, -4, -5, -6], [], [false, false, false, false], [false, false, false, false, false], [false, false, false, false, false, false, false, false, false, false, false, false], [0.5, -0.5, "NaN", "NaN"], []],
+    [null, null, null, null, null, null, null, null, null, null, null, null, null, null],
+    [[7, 8, 9], [0.0, 1.0, 2.0], [-7], ["Infinity"], [-32768, 32767, 0, 1, 2, 3, 4, 5, 6, 7], [0], [1], [10, 20, 30, 40, 50, 60], [0.5, -0.5], [null, null, true, true], [true, true, true, true, true], [true, true, true, true, true, true, true, true, true, true, true, true], [0.0, 0.0, 0.0, 0.0], [0.5, -0.5]]
+  ],
+  "refuse": null,
+  "notes": "columns c8xs, c8x3, bitv of the source table are omitted: this writer cannot write them\nastropy will not write a null integer array into this serialization without a VALUES null (W31), so the generator declared one where the source had none: i3: VALUES null=-2147483647; iv: VALUES null=-2147483648; s10: VALUES null=-32767; lv: VALUES null=-9223372036854775807; ubv: VALUES null=254; i2x3: VALUES null=-2147483648.\na variable multi-dimensional array's 4-byte count is written as the number of last-dimension items; read as primitives, the stream does not parse\nastropy 8.0.1 reads: column 'fv' row 0 is [1.5, null, -2.0] where the file says [1.5, \"NaN\", -2.0]\nastropy 8.0.1 reads: column 'd3' row 1 is [null, \"Infinity\", \"-Infinity\"] where the file says [\"NaN\", \"Infinity\", \"-Infinity\"]\nastropy 8.0.1 reads: column 'fc2' row 1 is [0.5, -0.5, null, null] where the file says [0.5, -0.5, \"NaN\", \"NaN\"]\nSTILTS reads (as its BINARY2 output says): 0 rows where the file has 4"
+}

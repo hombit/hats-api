@@ -1,0 +1,10 @@
+{
+ "producer": "VizieR 7.6, per INFO server_software",
+ "source_url": "https://vizier.cds.unistra.fr/viz-bin/votable/-b2?-source=I/355/gaiadr3&-out.max=10&-out=Source,RA_ICRS,DE_ICRS,Plx,pmRA,RUWE,Gmag,RV,VarFlag,NSS,PQSO,Teff,SolID&-c=56.75+24.12&-c.rm=3",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "not well-formed XML: the DATA is '<BINARY><STREAM</STREAM></BINARY>'",
+ "notes": "What VizieR answered for votable/-b2, HTTP 200. The same query as vizier-binary-gaiadr3.vot, which has ten rows."
+}

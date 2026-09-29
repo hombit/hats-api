@@ -1,0 +1,147 @@
+<?xml version='1.0' encoding='utf-8'?>
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://vo.ari.uni-heidelberg.de/docs/schemata/VOTable.xsd"><DESCRIPTION> This is a redacted version of the SDSS DR16 table prepared for VizieR
+(V/154/sdss16). It is mainly here to facilitate local matches; for
+original SDSS-related research, it is probably better to somewhere
+else.
+
+Over VizieR and SDSS, we are keeping most of the per-band values in
+arrays to keep the column list manageable. Note that in ADQL, array
+indexes are 1-based.
+
+We are trying to orient our column names on SDSS but use underscores
+instead of camel-casing (e.g. spec_obj_id instead of SpecObjID), since
+mixed-case identifiers in SQL is asking for trouble.
+
+To save space, we do not keep psf-based classifications, per-band
+offsets, spectrum metadata, and USNO-related information in this
+table. Let the operators know if you need any of that.</DESCRIPTION><INFO name="legal" value="
+Please see   http://www.sdss.org/collaboration/citing-sdss/ for
+the authors' requests on how to cite this material."></INFO><RESOURCE type="results"><INFO name="sql_query" value="SELECT obj_id, ra, dec, u, err_u, mode, class, photo_flags, psfmags, flags, types, field_mjds, spec_z, spec_class, sdss_id FROM sdssdr16.main WHERE q3c_join(180, 0.5, ra, dec, 0.03) LIMIT 10">ADQL query translated to local SQL (for debugging)</INFO><INFO name="query" value="SELECT TOP 10 obj_id, ra, dec, u, err_u, mode, class, photo_flags, psfmags, flags, types, field_mjds, spec_z, spec_class, sdss_id FROM sdssdr16.main WHERE 1=CONTAINS(POINT(ra, dec), CIRCLE(180, 0.5, 0.03))">Original ADQL query</INFO><INFO name="QUERY_STATUS" value="OK">Query successful</INFO><INFO name="server_software" value="DaCHS/2.12.2 twistedWeb/22.4.0">Software that produced this VOTable</INFO><INFO name="server" value="http://dc.g-vo.org">Base URI of the server</INFO><INFO name="citation" ucd="" value="http://dc.g-vo.org/tableinfo/sdssdr16.main#ti-citing">Advice on citing this resource</INFO><INFO name="citation" ucd="" value="http://dc.g-vo.org/__system__/tap/run/howtocite">Advice on citing this resource</INFO><INFO name="publication_id" ucd="meta.bib.bibcode" value="2020ApJS..249....3A">A bibliographic source citable for (parts of) this data</INFO><INFO name="ivoid" ucd="meta.ref.ivoid" value="ivo://org.gavo.dc/sdssdr16/q/cone">Originating VO resource</INFO><INFO name="ivoid_service" ucd="meta.ref.ivoid" value="ivo://org.gavo.dc/tap">Originating VO service</INFO><INFO name="publisher" value="The GAVO DC team">Data centre that has delivered the data</INFO><INFO name="rights" value="
+Please see   http://www.sdss.org/collaboration/citing-sdss/ for
+the authors' requests on how to cite this material.">Legal conditions applicable to (parts of) the data contained</INFO><INFO name="request_date" ucd="time.creation" value="2026-09-29T02:21:54Z"></INFO><INFO name="contact" ucd="meta.email" value="gavo@ari.uni-heidelberg.de">Contact option</INFO><INFO name="reference_url" ucd="meta.ref.url" value="http://dc.g-vo.org/tableinfo/sdssdr16.main">More information on the data Source</INFO><INFO name="reference_url" ucd="meta.ref.url" value="http://dc.g-vo.org/__system__/tap/run/info">More information on the data Source</INFO><INFO name="creator" ucd="meta.bib.author" value="humada, Romina">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Prieto, Carlos Allende">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Almeida, Andrés">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Anders, Friedrich">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Anderson, Scott F.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Andrews, Brett H.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Anguiano, Borja">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Arcodia, Riccardo">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Armengaud, Eric">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Aubert, Marie">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Avila, Santiago">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Avila-Reese, Vladimir">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Badenes, Carles">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Balland, Christophe">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Barger, Kat">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Barrera-Ballesteros, Jorge K.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Basu, Sarbani">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bautista, Julian">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Beaton, Rachael L.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Beers, Timothy C.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Benavides, B. Izamar T.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bender, Chad F.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bernardi, Mariangela">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bershady, Matthew">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Beutler, Florian">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bidin, Christian Moni">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bird, Jonathan">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bizyaev, Dmitry">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Blanc, Guillermo A.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Blanton, Michael R.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Boquien, Médéric">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Borissova, Jura">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bovy, Jo">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Brandt, W. N.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Brinkmann, Jonathan">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Brownstein, Joel R.">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bundy, Kevin">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Bureau, Martin">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Burgasser, Adam">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Burtin, Etienne">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Cano-Díaz, Mariana">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Capasso, Raffaella">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Cappellari, Michele">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Carrera, Ricardo">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Chabanier, Solène">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Chaplin, William">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Chapman, Michael">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Cherinka, Brian">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Chiappini, Cristina">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="Doohyun Choi, Peter">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="et al">Name of a person or entity that produced a contributing resource</INFO><INFO name="creator" ucd="meta.bib.author" value="GAVO Data Centre">Name of a person or entity that produced a contributing resource</INFO><COOSYS ID="system" system="ICRS"/><TABLE name="main"><GROUP utype="stc:CatalogEntryLocation"><PARAM arraysize="*" datatype="char" name="CoordFlavor" utype="stc:AstroCoordSystem.SpaceFrame.CoordFlavor" value="SPHERICAL"/><PARAM arraysize="*" datatype="char" name="CoordRefFrame" utype="stc:AstroCoordSystem.SpaceFrame.CoordRefFrame" value="ICRS"/><PARAM arraysize="*" datatype="char" name="URI" utype="stc:DataModel.URI" value="http://www.ivoa.net/xml/STC/stc-v1.30.xsd"/><FIELDref ref="ra" utype="stc:AstroCoords.Position2D.Value2.C1"/><FIELDref ref="dec" utype="stc:AstroCoords.Position2D.Value2.C2"/></GROUP><GROUP ID="ndiwiohhotsa" name="note-1"><DESCRIPTION>
+The SDSS identifier is composed of the 5 numbers run, rerun
+(301), camcol (1-6), field (11-1001) and object (1-16000).
+The SDSS-ID is written run-rerun-cam-field-obj (5 numbers and 4
+dashes).
+
+The objID is also combined from these numbers (the ≪n operator
+represents the left shift of n bits, i.e. a multiplication by
+:math:`2^n`)::
+
+	objID = skyVersion &lt;&lt; 59 + rerun &lt;&lt; 48 + run &lt;&lt; 32
+		+ camcol&lt;&lt;29 + field&lt;&lt;16 + obj
+
+(objID is in the range 1237645876861272065-1237680531356583125).</DESCRIPTION><FIELDref ref="obj_id"/><FIELDref ref="sdss_id"/></GROUP><GROUP ID="ndiwiohnbpsa" name="note-7"><DESCRIPTION>
+The response curves of the SDSS filters (u g r i z) can be found on
+the SDSS page http://classic.sdss.org/dr7/instruments/imager
+The central wavelength and FWHM are:
+
+======== ======== ======= ======= ======= =====
+(nm)      u'      g'      r'      i'      z'
+======== ======== ======= ======= ======= =====
+lambda   354.3    477.0   623.1   762.5   913.4
+FWHM      56.7    138.7   137.3   152.6    95.0
+======== ======== ======= ======= ======= =====
+
+Note that the ugriz magnitudes are not exactly on the AB scale
+for the u-band (:math:`u_{AB}=u0.04`) and z-band
+(:math:`z_{AB}=z+0.02`)
+(http://www.sdss.org/dr16/algorithms/fluxcal/#SDSStoAB)</DESCRIPTION><FIELDref ref="u"/></GROUP><GROUP ID="ndiwiohhosea" name="note-2"><DESCRIPTION>
+The type (class) is numbered as follows:
+
+:0:
+	Unknown: Object type is not known.
+:1:
+	Cosmic-ray track (not used).
+:2:
+	Defect (not used)
+:3:
+	Galaxy: An extended object composed of many stars and other matter
+:4:
+	Ghost: Object created by reflected or refracted light. (not used)
+:5:
+	KnownObject: Object came from some other catalog (not yet used)
+:6:
+	Star: A a self-luminous gaseous celestial body
+:7:
+	Trail: A satellite or asteroid or meteor trail. (not yet used)
+:8:
+	Sky: Blank sky spectrogram (no objects in this arcsecond area).</DESCRIPTION><FIELDref ref="class"/><FIELDref ref="types"/></GROUP><GROUP ID="ndiwiohnbwsa" name="note-3"><DESCRIPTION>
+Flags written in hexadecimal (`full description`_)
+
+.. _full description: http://skyserver.sdss.org/dr16/en/help/browser/browser.aspx#&amp;&amp;history=enum+PhotoFlags+E
+
+================= ============================================================
+0000000000000001   CANONICAL_CENTER   Measurements used the center in r*
+0000000000000002   BRIGHT             Object detected in bright object-finding
+0000000000000004   EDGE               Object is too close to edge of frame
+0000000000000008   BLENDED            Multiple peaks detected
+0000000000000010   CHILD              Product of deblending a BLENDED object.
+0000000000000020   PEAKCENTER         Position of peak pixel rather than ML
+0000000000000040   NODEBLEND          No deblending attempted on BLENDED object
+0000000000000080   NOPROFILE          Radial profile could not be estimated
+0000000000000100   NOPETRO            No valid Petrosian radius found
+0000000000000200   MANYPETRO          More than one Petrosian radius found.
+0000000000000400   NOPETRO_BIG        Petrosian radius beyond radial profile.
+0000000000000800   DEBLENDTOOMANY_PEAKS More than 25 peaks in this object
+0000000000001000   COSMIC_RAY         Contains a pixel part of a cosmic ray.
+0000000000002000   MANYR50            More than one 50% light radius.
+0000000000004000   MANYR90            More than one 90% light radius.
+0000000000008000   BAD_RADIAL         Some points in radial profile S/N&lt;0
+0000000000010000   INCOMPLETE_PROFILE Petrosian radius intersects frame edge
+0000000000020000   INTERP             Pixel(s) determined by interpolation.
+0000000000040000   SATURATED          Saturated pixel(s)
+0000000000080000   NOTCHECKED         Not checked for local peaks
+0000000000100000   SUBTRACTED         BRIGHT object, wings subtracted
+0000000000200000   NOSTOKES           No measured Stokes params
+0000000000400000   BADSKY             Sky level so bad that highest pixel &lt;0.
+0000000000800000   PETROFAINT         Petrosian radius(es) rejected for low SB
+0000000001000000   TOO_LARGE          Object too large to measure its profile
+0000000002000000   DEBLENDEDASPSF     Deblender treated obj as PSF
+0000000004000000   DEBLEND_PRUNED     At least one child was removed
+0000000008000000   ELLIPFAINT         Object center fainter than the isophote
+0000000010000000   BINNED1            Object detected in 1x1 binned image
+0000000020000000   BINNED2            Object detected in 2x2 binned image
+0000000040000000   BINNED4            Object detected in 4x4 binned image
+0000000080000000   MOVED              Possibly moving object
+0000000100000000   DEBLENDEDASMOVING  A MOVED object treated as moving.
+0000000200000000   NODEBLEND_MOVING   A MOVED object not treated as moving.
+0000000400000000   TOOFEWDETECTIONS   Too few detections to deblend as moving.
+0000000800000000   BADMOVINGFIT       Moving fit too poor to be believable.
+0000001000000000   STATIONARY         Object consistent with being stationary.
+0000002000000000   PEAKSTOOCLOSE      Some peaks merged into a single peak.
+0000004000000000   MEDIAN_CENTER      Center given is of median-smoothed image.
+0000008000000000   LOCAL_EDGE         Center too close to an edge.
+0000010000000000   BADCOUNTSERROR     Too few good pixels, error underestimated
+0000020000000000   BADMOVINGFIT_CHILD Moving child's velocity fit too poor
+0000040000000000   DEBLENDUNASSIGNEDFLUX  After deblending flux not assigned
+0000080000000000   SATUR_CENTER       Center is close to saturated pixel(s)
+0000100000000000   INTERP_CENTER      Center is close to interpolated pixel(s)
+0000200000000000   DEBLENDEDATEDGE    Object close to edge was deblended
+0000400000000000   DEBLEND_NOPEAK     No detected peak within this child
+0000800000000000   PSFFLUXINTERP      PSF flux from interpolated pixels &gt; 20%
+0001000000000000   TOOFEWGOOD_DETECTIONS Too few good detections
+0002000000000000   CENTEROFFAIMAGE    At least one peak's center lay off image
+0004000000000000   DEBLEND_DEGENERATE Identical candidate children, 1 retained
+0008000000000000   BRIGHTESTGALAXYCHILD Brightest member classified as galaxy
+0010000000000000   CANONICAL_BAND     Band chosen as 'Canonical', generally r
+0020000000000000   AMOMENT_FAINT      Object too faint to measure moments
+0040000000000000   AMOMENT_SHIFT      Centroid shift too large
+0080000000000000   AMOMENT_MAXITER    Maximum number of iterations exceeded
+0100000000000000   MAYBE_CR           Object could actually be a cosmic ray
+0200000000000000   MAYBE_EGHOST       Object could actually be a ghost
+0400000000000000   NOTCHECKED_CENTER  Object center in a region not searched
+0800000000000000   OBJECT2HASSATUR_DN Trails included in estimated flux.
+1000000000000020   OBJECT2DEBLENDPEEPHOLE Deblend modified by peephole
+2000000000000020   GROWN_MERGED       Growing led to a merger
+4000000000000020   HAS_CENTER         Object has a canonical center
+8000000000000020   RESERVED           Not used
+================= ============================================================</DESCRIPTION><FIELDref ref="photo_flags"/><FIELDref ref="flags"/></GROUP><GROUP ID="ndiwiohnbwha" name="note-4"><DESCRIPTION>
+We have retained the CDS practice of setting PSF and Petrosian magnitudes
+to NaN values when corresponding errors&gt;100; errors &gt;100 have been set
+to NaN values.</DESCRIPTION><FIELDref ref="psfmags"/></GROUP><GROUP ID="ndiwiohhuisa" name="note-13"><DESCRIPTION>
+Columns from the `Field table`
+
+.. _Field table: http://skyserver.sdss.org/dr16/en/help/browser/browser.aspx#&amp;&amp;history=description+Field+U</DESCRIPTION><FIELDref ref="field_mjds"/></GROUP><GROUP ID="ndiwiohnblea" name="note-6"><DESCRIPTION>Columns from the `SpecObjAll table`_
+
+.. _SpecObjAll table: http://skyserver.sdss.org/dr16/en/help/browser/browser.aspx#&amp;&amp;history=description+SpecObjAll+U</DESCRIPTION><FIELDref ref="spec_z"/><FIELDref ref="spec_class"/></GROUP><FIELD ID="obj_id" datatype="long" name="obj_id" ucd="meta.id;meta.main"><DESCRIPTION>SDSS unique object identifier</DESCRIPTION><VALUES null="-9223372036854775808"><MIN value="1237645876861272072"></MIN><MAX value="1237680531356583116"></MAX></VALUES></FIELD><FIELD ID="ra" datatype="double" name="ra" ref="system" ucd="pos.eq.ra;meta.main" unit="deg"><DESCRIPTION>Right Ascension of the object (ICRS)</DESCRIPTION><VALUES><MIN value="8.155915054430807e-07"></MIN><MAX value="359.9999984825439"></MAX></VALUES></FIELD><FIELD ID="dec" datatype="double" name="dec" ref="system" ucd="pos.eq.dec;meta.main" unit="deg"><DESCRIPTION>Declination of the object (ICRS)</DESCRIPTION><VALUES><MIN value="-25.009056638152625"></MIN><MAX value="84.97914498763215"></MAX></VALUES></FIELD><FIELD ID="u" datatype="float" name="u" ucd="phot.mag;em.opt.u" unit="mag"><DESCRIPTION>Model magnitude in u filter AB scale</DESCRIPTION><VALUES><MIN value="4.9787893"></MIN><MAX value="37.238983"></MAX></VALUES></FIELD><FIELD ID="err_u" datatype="float" name="err_u" ucd="stat.error;phot.mag;em.opt.u" unit="mag"><DESCRIPTION>Error in the model magnitude in u filter AB scale</DESCRIPTION><VALUES><MIN value="2.6570459e-07"></MIN><MAX value="1984.4062"></MAX></VALUES></FIELD><FIELD ID="mode" datatype="short" name="mode" ucd="meta.code.class"><DESCRIPTION>Photo mode (1=primary, 2=secondary, 3=family, 4=outside)</DESCRIPTION><VALUES null="-32768"><MIN value="1"></MIN><MAX value="4"></MAX></VALUES></FIELD><FIELD ID="class" datatype="short" name="class" ucd="src.class"><DESCRIPTION>Type of object (3=galaxy, 6=star)</DESCRIPTION><VALUES null="-32768"><MIN value="0"></MIN><MAX value="8"></MAX></VALUES></FIELD><FIELD ID="photo_flags" datatype="long" name="photo_flags" ucd="meta.code.error"><DESCRIPTION>Photo Object Attribute flags</DESCRIPTION><VALUES null="-9223372036854775808"><MIN value="268435456"></MIN><MAX value="1371273791833248590"></MAX></VALUES></FIELD><FIELD ID="psfmags" arraysize="5" datatype="float" name="psfmags" ucd="phot.mag" unit="mag"><DESCRIPTION>Array of PSF magnitudes, in ugriz sequence</DESCRIPTION></FIELD><FIELD ID="flags" arraysize="5" datatype="long" name="flags" ucd="meta.code"><DESCRIPTION>Array of detection flags, in ugriz sequence</DESCRIPTION></FIELD><FIELD ID="types" arraysize="5" datatype="short" name="types" ucd="src.class.starGalaxy"><DESCRIPTION>Array of phototypes (6=Star ; 3=galaxy) in ugriz sequence</DESCRIPTION></FIELD><FIELD ID="field_mjds" arraysize="5" datatype="double" name="field_mjds" ucd="time.epoch" unit="d"><DESCRIPTION>Array of dates of observation per ugriz band</DESCRIPTION></FIELD><FIELD ID="spec_z" datatype="float" name="spec_z" ucd="src.redshift"><DESCRIPTION>Spectroscopic final redshift (when SpObjID&gt;0)</DESCRIPTION><VALUES><MIN value="-0.01019341"></MIN><MAX value="7.0130897"></MAX></VALUES></FIELD><FIELD ID="spec_class" arraysize="*" datatype="char" name="spec_class" ucd="meta.code.class;pos.parallax.spect"><DESCRIPTION>Spectroscopic class: "GALAXY"; "QSO"; "STAR"</DESCRIPTION></FIELD><FIELD ID="sdss_id" arraysize="*" datatype="char" name="sdss_id" ucd="meta.id"><DESCRIPTION>SDSS object identifier (run-rerun-camcol-field-object)</DESCRIPTION></FIELD><DATA><BINARY><STREAM encoding="base64">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</STREAM></BINARY></DATA></TABLE></RESOURCE></VOTABLE>

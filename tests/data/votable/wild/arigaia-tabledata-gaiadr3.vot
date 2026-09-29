@@ -1,0 +1,171 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/votable-1.4.xsd">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="ARI (Astronomisches Rechen Institut - Heidelberg, Germany)">ARI's TAP access to the Gaia Archive.</INFO>
+<INFO name="QUERY" value="SELECT TOP 8 source_id, designation, ra, dec, parallax, ruwe, phot_g_mean_mag, radial_velocity, phot_variable_flag, has_xp_continuous, in_qso_candidates, libname_gspphot FROM gaiadr3.gaia_source WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 56.75, 24.12, 0.05))"/>
+<COOSYS ID="GDR3_ICRS" system="ICRS" epoch="2016" />
+<TABLE name="result_S1790648815461">
+<FIELD ID="source_id" datatype="long" name="source_id" ucd="meta.id;meta.main">
+<DESCRIPTION>Unique source identifier (unique within a particular Data Release)</DESCRIPTION>
+</FIELD>
+<FIELD ID="designation" arraysize="*" datatype="char" name="designation" ucd="meta.id">
+<DESCRIPTION>Unique source designation (unique across all Data Releases)</DESCRIPTION>
+</FIELD>
+<FIELD ID="ra" datatype="double" name="ra" ref="GDR3_ICRS" ucd="pos.eq.ra;meta.main" unit="deg">
+<DESCRIPTION>Right ascension</DESCRIPTION>
+</FIELD>
+<FIELD ID="dec" datatype="double" name="dec" ref="GDR3_ICRS" ucd="pos.eq.dec;meta.main" unit="deg">
+<DESCRIPTION>Declination</DESCRIPTION>
+</FIELD>
+<FIELD ID="parallax" datatype="double" name="parallax" ucd="pos.parallax.trig" unit="mas">
+<DESCRIPTION>Parallax</DESCRIPTION>
+</FIELD>
+<FIELD ID="ruwe" datatype="float" name="ruwe" ucd="stat.error">
+<DESCRIPTION>Renormalised unit weight error</DESCRIPTION>
+</FIELD>
+<FIELD ID="phot_g_mean_mag" datatype="float" name="phot_g_mean_mag" ucd="phot.mag;em.opt" unit="mag">
+<DESCRIPTION>G-band mean magnitude</DESCRIPTION>
+</FIELD>
+<FIELD ID="radial_velocity" datatype="float" name="radial_velocity" ucd="spect.dopplerVeloc.opt;em.opt.I" unit="km.s**-1">
+<DESCRIPTION>Radial velocity</DESCRIPTION>
+</FIELD>
+<FIELD ID="phot_variable_flag" arraysize="*" datatype="char" name="phot_variable_flag" ucd="meta.code;src.var">
+<DESCRIPTION>Photometric variability flag</DESCRIPTION>
+</FIELD>
+<FIELD ID="has_xp_continuous" datatype="short" name="has_xp_continuous" ucd="meta.code.status">
+<DESCRIPTION>Flag indicating the availability of mean BP/RP spectrum in continuous representation for this source</DESCRIPTION>
+</FIELD>
+<FIELD ID="in_qso_candidates" datatype="short" name="in_qso_candidates" ucd="meta.code.status">
+<DESCRIPTION>Flag indicating the availability of additional information in the QSO candidates table</DESCRIPTION>
+</FIELD>
+<FIELD ID="libname_gspphot" arraysize="*" datatype="char" name="libname_gspphot" ucd="meta.note">
+<DESCRIPTION>Name of library that achieves the highest mean log-posterior in MCMC samples and was used to derive GSP-Phot parameters in this table</DESCRIPTION>
+</FIELD>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>66715410636984192</TD>
+    <TD>Gaia DR3 66715410636984192</TD>
+    <TD>56.79197187528736</TD>
+    <TD>24.131100390060347</TD>
+    <TD>-0.5421278230850755</TD>
+    <TD>0.92791706</TD>
+    <TD>19.483833</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>65213585129623168</TD>
+    <TD>Gaia DR3 65213585129623168</TD>
+    <TD>56.750414145152725</TD>
+    <TD>24.07048394439947</TD>
+    <TD>0.5671514998591323</TD>
+    <TD>1.0136292</TD>
+    <TD>18.912132</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD>PHOENIX</TD>
+  </TR>
+  <TR>
+    <TD>65213653847596672</TD>
+    <TD>Gaia DR3 65213653847596672</TD>
+    <TD>56.73700775460741</TD>
+    <TD>24.079387575389962</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>20.890017</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>65213756926363520</TD>
+    <TD>Gaia DR3 65213756926363520</TD>
+    <TD>56.75768768457376</TD>
+    <TD>24.07365521518176</TD>
+    <TD>-0.7663788782282388</TD>
+    <TD>1.0509312</TD>
+    <TD>20.027557</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>65213786991129472</TD>
+    <TD>Gaia DR3 65213786991129472</TD>
+    <TD>56.775812843555876</TD>
+    <TD>24.07634686764644</TD>
+    <TD>0.9391979640134143</TD>
+    <TD>1.0416842</TD>
+    <TD>18.53352</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD>PHOENIX</TD>
+  </TR>
+  <TR>
+    <TD>65213786991141120</TD>
+    <TD>Gaia DR3 65213786991141120</TD>
+    <TD>56.77783558399322</TD>
+    <TD>24.09046993328604</TD>
+    <TD>0.3799683718977715</TD>
+    <TD>1.0309161</TD>
+    <TD>18.207417</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>65213791286486912</TD>
+    <TD>Gaia DR3 65213791286486912</TD>
+    <TD>56.769434074081985</TD>
+    <TD>24.07998482291654</TD>
+    <TD>1.271707985682452</TD>
+    <TD>1.5384527</TD>
+    <TD>20.62545</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>0</TD>
+    <TD>0</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>65213791287548288</TD>
+    <TD>Gaia DR3 65213791287548288</TD>
+    <TD>56.77476233611747</TD>
+    <TD>24.086583355774273</TD>
+    <TD>1.6050204515873066</TD>
+    <TD>1.0145903</TD>
+    <TD>15.56611</TD>
+    <TD></TD>
+    <TD>NOT_AVAILABLE</TD>
+    <TD>1</TD>
+    <TD>0</TD>
+    <TD>PHOENIX</TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE><RESOURCE type="meta" utype="adhoc:service" name="Datalink_GaiaDR3">
+<DESCRIPTION>Get all the linked data the specified Gaia-DR3 source ID.</DESCRIPTION>
+<PARAM arraysize="51" datatype="char" name="accessURL" ucd="meta.ref.url" value="https://gaia.ari.uni-heidelberg.de/datalink/gaiadr3">
+<DESCRIPTION>URL to invoke the service.</DESCRIPTION>
+</PARAM>
+<GROUP name="inputParams">
+<PARAM name="sourceid" datatype="long" ref="source_id" value=""/>
+</GROUP>
+</RESOURCE>
+</VOTABLE>

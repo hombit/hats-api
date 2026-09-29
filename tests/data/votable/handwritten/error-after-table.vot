@@ -1,0 +1,2 @@
+<?xml version="1.0"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE type="results"><INFO name="QUERY_STATUS" value="OK"/><TABLE><FIELD name="a" datatype="int"/><DATA><TABLEDATA><TR><TD>1</TD></TR></TABLEDATA></DATA></TABLE><INFO name="QUERY_STATUS" value="ERROR">the read failed part-way</INFO></RESOURCE></VOTABLE>

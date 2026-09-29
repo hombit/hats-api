@@ -1,0 +1,40 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "s",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "n",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "<b>&",
+   1
+  ],
+  [
+   "a & b <c> ЯA",
+   2
+  ]
+ ],
+ "refuse": null,
+ "notes": "CDATA, the predefined entities and character references in a TD, and a comment and a processing instruction between rows."
+}

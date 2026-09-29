@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="strings">
+            <FIELD name="cfix" datatype="char" arraysize="10"/>
+            <FIELD name="cvar" datatype="char" arraysize="*"/>
+            <FIELD name="cbnd" datatype="char" arraysize="5*"/>
+            <FIELD name="ufix" datatype="unicodeChar" arraysize="6"/>
+            <FIELD name="uvar" datatype="unicodeChar" arraysize="*"/>
+            <DATA>
+                <BINARY>
+                    <STREAM encoding="base64">
+QXBwbGUAAAAAAAAAAAVBcHBsZQAAAANhYmMELwQxBDsEPgQ6BD4AAAAKBB8EQAQ4
+BDIENQRCACAEPAQ4BEAgIGxlYWQAAAAAAAAABiAgbGVhZAAAAAMgYiADuwPMA7MD
+vwPCAAAAAAAIA5UDuwO7A7cDvQO5A7oDrHRyYWlsICAgAAAAAAAIdHJhaWwgICAA
+AAAFYWJjZGVOLWWHAAAAAAAAAAAAAAAHZeVnLIqeMMYwrTC5MMgAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAADwmPiInAAAAAAAAAAAFPCY+IicAAAACPD4AIABhAGIAIAAgAAAA
+AAAPBEEEPAQ1BEgEMAQ9BD0ESwQ5ACAAQQBTAEMASQBJZXhhY3RseTEwIQAAAA9t
+dWx0aSB3b3JkIHRleHQAAAABeADFAMQA1gAAAAAAAAAAAAcAdAByAGEAaQBsACAA
+IHRhYglpbgAAAAAAAAAGdGFiCWluAAAAAiAgIKwAAAAAAAAAAAAAAAAABgAgACAA
+bABlAGEAZA==
+                    </STREAM>
+                </BINARY>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

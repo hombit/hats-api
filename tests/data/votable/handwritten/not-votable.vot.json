@@ -1,0 +1,8 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "the root element is not VOTABLE",
+ "notes": null
+}

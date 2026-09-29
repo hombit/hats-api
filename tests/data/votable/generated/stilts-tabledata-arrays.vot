@@ -1,0 +1,109 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:30
+ !-->
+<RESOURCE>
+<TABLE name="arrays" nrows="4">
+<FIELD arraysize="3" datatype="int" name="i3"/>
+<FIELD arraysize="3" datatype="double" name="d3"/>
+<FIELD arraysize="*" datatype="int" name="iv"/>
+<FIELD arraysize="*" datatype="float" name="fv"/>
+<FIELD arraysize="*" datatype="short" name="s10"/>
+<FIELD arraysize="*" datatype="long" name="lv"/>
+<FIELD arraysize="*" datatype="unsignedByte" name="ubv"/>
+<FIELD arraysize="2x3" datatype="int" name="i2x3"/>
+<FIELD arraysize="2x*" datatype="double" name="d2xs"/>
+<FIELD arraysize="8x*" datatype="char" name="c8xs"/>
+<FIELD arraysize="8x3" datatype="char" name="c8x3"/>
+<FIELD arraysize="4" datatype="boolean" name="bool4"/>
+<FIELD arraysize="5" datatype="boolean" name="bit5"/>
+<FIELD arraysize="12" datatype="boolean" name="bit12"/>
+<FIELD arraysize="*" datatype="boolean" name="bitv"/>
+<FIELD arraysize="2x2" datatype="float" name="fc2"/>
+<FIELD arraysize="2x*" datatype="double" name="dcv"/>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>1 2 3</TD>
+    <TD>1.5 -2.5 1.0E300</TD>
+    <TD>1 2 4 8 16</TD>
+    <TD>1.5 NaN -2.0</TD>
+    <TD>1 2</TD>
+    <TD>-9223372036854775808 9223372036854775807</TD>
+    <TD>0 255 16</TD>
+    <TD>0 1 2 3 4 5</TD>
+    <TD>1.0 2.0 3.0 4.0 5.0 6.0</TD>
+    <TD>abc     defgh   </TD>
+    <TD>a       bb      ccc     </TD>
+    <TD>true false false true</TD>
+    <TD>true false true true false</TD>
+    <TD>true false false false true true true true false false true false</TD>
+    <TD>true false true</TD>
+    <TD>1.0 2.0 3.0 4.0</TD>
+    <TD>1.0 2.0 3.0 4.0</TD>
+  </TR>
+  <TR>
+    <TD>-2147483648 0 2147483647</TD>
+    <TD>NaN +Inf -Inf</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>-1 -2 -3 -4 -5 -6</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>        x               </TD>
+    <TD>false false false false</TD>
+    <TD>false false false false false</TD>
+    <TD>false false false false false false false false false false false false</TD>
+    <TD></TD>
+    <TD>0.5 -0.5 NaN NaN</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>7 8 9</TD>
+    <TD>0.0 1.0 2.0</TD>
+    <TD>-7</TD>
+    <TD>+Inf</TD>
+    <TD>-32768 32767 0 1 2 3 4 5 6 7</TD>
+    <TD>0</TD>
+    <TD>1</TD>
+    <TD>10 20 30 40 50 60</TD>
+    <TD>0.5 -0.5</TD>
+    <TD>12345678</TD>
+    <TD>12345678 lead   z       </TD>
+    <TD>false false true true</TD>
+    <TD>true true true true true</TD>
+    <TD>true true true true true true true true true true true true</TD>
+    <TD>true false true false true false true false true</TD>
+    <TD>0.0 0.0 0.0 0.0</TD>
+    <TD>0.5 -0.5</TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

@@ -43,18 +43,31 @@ pub struct Rendered {
 
 /// Whatever it is that a job does.
 ///
-/// One method, taking the job, the credentials held for it, and the sink its answer goes
-/// into. The credentials arrive as an argument rather than off the record precisely because
-/// they are not on the record; the sink arrives as one because where a job's answer is kept
-/// is the runner's business and not the work's.
+/// One method, taking the job, what is held for it beside the record, and the sink its
+/// answer goes into. What is held arrives as an argument rather than off the record
+/// precisely because it is not on the record; the sink arrives as one because where a job's
+/// answer is kept is the runner's business and not the work's.
 #[async_trait]
 pub trait Work: std::fmt::Debug + Send + Sync + 'static {
-    async fn run(
-        &self,
-        job: Job,
-        credentials: Vec<String>,
-        into: &mut Writing,
-    ) -> Result<Rendered, ApiError>;
+    async fn run(&self, job: Job, held: Held, into: &mut Writing) -> Result<Rendered, ApiError>;
+}
+
+/// What a job was created with that its record does not hold.
+#[derive(Debug, Clone, Default)]
+pub struct Held {
+    /// The `UPLOAD_STORAGE_OPTION` values, which must never reach a store.
+    pub credentials: Vec<String>,
+    /// The tables the job was sent inline, which are bytes rather than parameters.
+    pub files: Vec<HeldFile>,
+}
+
+/// One inline table, kept on disk until the job has run.
+#[derive(Debug, Clone)]
+pub struct HeldFile {
+    /// The part's name, which the job's `UPLOAD` refers to as `param:<name>`.
+    pub name: String,
+    pub content_type: Option<String>,
+    pub path: std::path::PathBuf,
 }
 
 /// What the runner will spend.
@@ -78,13 +91,14 @@ pub struct Runner {
     limits: Slots,
     /// How a running job is stopped. Present only while it runs.
     running: Mutex<HashMap<JobId, AbortHandle>>,
-    /// The `UPLOAD_STORAGE_OPTION` values a job was created with.
+    /// The `UPLOAD_STORAGE_OPTION` values a job was created with, and its inline tables.
     ///
-    /// Here and nowhere else. A job outlives the request that made it, so the value has to
-    /// be kept somewhere, and the store is the one place it must not be: a row-backed store
-    /// would write a caller's secret to disk, and a job document would hand it to whoever
-    /// holds the id.
-    credentials: Mutex<HashMap<JobId, Vec<String>>>,
+    /// Here and nowhere else. A job outlives the request that made it, so the values have to
+    /// be kept somewhere, and the store is the one place a credential must not be: a
+    /// row-backed store would write a caller's secret to disk, and a job document would hand
+    /// it to whoever holds the id. An inline table is kept in the job's scratch directory and
+    /// named here, being bytes a record has no place for.
+    held: Mutex<HashMap<JobId, Held>>,
 }
 
 /// How one run ended, which is the whole of what decides the phase.
@@ -113,16 +127,37 @@ impl Runner {
             slots: Arc::new(Semaphore::new(limits.max_running)),
             limits,
             running: Mutex::new(HashMap::new()),
-            credentials: Mutex::new(HashMap::new()),
+            held: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Keep a job's credentials for as long as this process runs it.
-    pub fn hold(&self, id: &JobId, credentials: Vec<String>) {
-        if credentials.is_empty() {
-            return;
+    /// Keep a job's credentials and its inline tables for as long as this process runs it.
+    ///
+    /// Added to what the job holds already: UWS has parameters accumulate over posts to a
+    /// pending job, and `UPLOAD` among them (TAP §2.7.6).
+    pub async fn hold(
+        &self,
+        id: &JobId,
+        credentials: Vec<String>,
+        files: Vec<(String, Option<String>, bytes::Bytes)>,
+    ) -> Result<(), ApiError> {
+        if credentials.is_empty() && files.is_empty() {
+            return Ok(());
         }
-        locked(&self.credentials).insert(id.clone(), credentials);
+        let mut kept = Vec::with_capacity(files.len());
+        for (name, content_type, bytes) in files {
+            let path = self.results.keep_upload(id, &bytes).await?;
+            kept.push(HeldFile {
+                name,
+                content_type,
+                path,
+            });
+        }
+        let mut held = locked(&self.held);
+        let entry = held.entry(id.clone()).or_default();
+        entry.credentials.extend(credentials);
+        entry.files.extend(kept);
+        Ok(())
     }
 
     /// `PHASE=RUN`: commit the job and set it going.
@@ -155,7 +190,10 @@ impl Runner {
         if let Some(handle) = locked(&self.running).remove(id) {
             handle.abort();
         }
-        locked(&self.credentials).remove(id);
+        let held = locked(&self.held).remove(id);
+        for file in held.map(|held| held.files).unwrap_or_default() {
+            self.results.forget_upload(&file.path);
+        }
     }
 
     /// The whole of one job's run, from waiting for a slot to recording how it ended.
@@ -171,10 +209,7 @@ impl Runner {
         let Ok(job) = self.store.apply(&id, Change::Start).await else {
             return;
         };
-        let credentials = locked(&self.credentials)
-            .get(&id)
-            .cloned()
-            .unwrap_or_default();
+        let held = locked(&self.held).get(&id).cloned().unwrap_or_default();
 
         let work = Arc::clone(&self.work);
         // Made here rather than inside the work, because the ceiling and the directory are
@@ -184,7 +219,7 @@ impl Runner {
         let mut running = tokio::spawn({
             let job = job.clone();
             async move {
-                let rendered = work.run(job, credentials, &mut into).await;
+                let rendered = work.run(job, held, &mut into).await;
                 (rendered, into)
             }
         });
@@ -366,10 +401,18 @@ mod tests {
         async fn run(
             &self,
             _job: Job,
-            credentials: Vec<String>,
+            held: Held,
             into: &mut Writing,
         ) -> Result<Rendered, ApiError> {
-            locked(&self.seen).extend(credentials);
+            locked(&self.seen).extend(held.credentials);
+            for file in held.files {
+                let bytes = tokio::fs::read(&file.path).await.unwrap_or_default();
+                locked(&self.seen).push(format!(
+                    "{}={}",
+                    file.name,
+                    String::from_utf8_lossy(&bytes)
+                ));
+            }
             match self.doing {
                 // A byte at a time, so that a ceiling reached part-way is reached where a
                 // real answer would reach it rather than on one whole write.
@@ -610,7 +653,13 @@ mod tests {
         let id = submitted(&harness, 30).await;
         harness
             .runner
-            .hold(&id, vec!["t,secret_access_key,hunter2".to_owned()]);
+            .hold(
+                &id,
+                vec!["t,secret_access_key,hunter2".to_owned()],
+                Vec::new(),
+            )
+            .await
+            .unwrap();
         harness.runner.start(&id).await.unwrap();
 
         let job = settled(&harness, &id).await;
@@ -622,7 +671,90 @@ mod tests {
         // Not on the record, and not in what a Debug of it would print.
         assert!(!format!("{job:?}").contains("hunter2"));
         // And forgotten once the job is over, so nothing holds it longer than the run.
-        assert!(locked(&harness.runner.credentials).is_empty());
+        assert!(locked(&harness.runner.held).is_empty());
+    }
+
+    /// An inline table is kept on disk until the job runs, reaches the work, and is gone once
+    /// the job is over — two posts' worth of them, UWS having parameters accumulate.
+    #[tokio::test]
+    async fn an_inline_table_is_kept_until_the_job_has_run() {
+        let harness = harness(Doing::Answer("x"), 2, 1 << 20);
+        let id = submitted(&harness, 30).await;
+        for (name, body) in [("a", "first"), ("b", "second")] {
+            harness
+                .runner
+                .hold(
+                    &id,
+                    Vec::new(),
+                    vec![(name.to_owned(), None, bytes::Bytes::from(body))],
+                )
+                .await
+                .unwrap();
+        }
+        let paths: Vec<_> = locked(&harness.runner.held)[&id]
+            .files
+            .iter()
+            .map(|file| file.path.clone())
+            .collect();
+        assert!(paths.iter().all(|path| path.exists()), "{paths:?}");
+
+        harness.runner.start(&id).await.unwrap();
+        assert_eq!(settled(&harness, &id).await.phase, Phase::Completed);
+        assert_eq!(
+            locked(&harness.work.seen).as_slice(),
+            ["a=first".to_owned(), "b=second".to_owned()]
+        );
+        assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
+    }
+
+    /// A job that never ran takes its kept tables with it, whether a caller destroyed it or
+    /// its destruction time came — the run being the other thing that removes them, and a
+    /// pending job being one that may never have one.
+    #[tokio::test]
+    async fn a_pending_job_destroyed_or_expired_leaves_no_table_behind() {
+        let harness = harness(Doing::Answer("x"), 2, 1 << 20);
+        let destroyed = submitted(&harness, 30).await;
+        let now = Utc::now();
+        let expiring = Job::new(
+            JobId::new().unwrap(),
+            vec![("QUERY".to_owned(), "SELECT 1".to_owned())],
+            None,
+            TimeDelta::seconds(30),
+            now - TimeDelta::seconds(1),
+            now - TimeDelta::seconds(2),
+        );
+        let expired = expiring.id.clone();
+        harness.store.create(expiring).await.unwrap();
+
+        let mut paths = Vec::new();
+        for id in [&destroyed, &expired] {
+            harness
+                .runner
+                .hold(
+                    id,
+                    Vec::new(),
+                    vec![("t".to_owned(), None, bytes::Bytes::from("table"))],
+                )
+                .await
+                .unwrap();
+            paths.extend(
+                locked(&harness.runner.held)[id]
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone()),
+            );
+        }
+        assert!(paths.iter().all(|path| path.exists()), "{paths:?}");
+
+        harness.runner.stop(&destroyed);
+        harness.runner.expire().await;
+        assert!(harness.store.get(&expired).await.unwrap().is_none());
+        assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
+        assert!(locked(&harness.runner.held).is_empty());
+        assert_eq!(
+            std::fs::read_dir(harness.results.path("")).unwrap().count(),
+            0
+        );
     }
 
     /// A job destroyed while it was finishing keeps no file: the transition is refused, a

@@ -1,0 +1,36 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:35
+ !-->
+<RESOURCE>
+<TABLE name="empty">
+<FIELD datatype="boolean" name="b"/>
+<FIELD datatype="boolean" name="bit"/>
+<FIELD datatype="unsignedByte" name="ub"/>
+<FIELD datatype="short" name="s"/>
+<FIELD datatype="int" name="i"/>
+<FIELD datatype="long" name="l"/>
+<FIELD datatype="char" name="c"/>
+<FIELD datatype="unicodeChar" name="u"/>
+<FIELD datatype="float" name="f"/>
+<FIELD datatype="double" name="d"/>
+<FIELD arraysize="2" datatype="float" name="fc"/>
+<FIELD arraysize="2" datatype="double" name="dc"/>
+<FIELD arraysize="*" datatype="char" name="str"/>
+<FIELD arraysize="*" datatype="unicodeChar" name="ustr"/>
+<FIELD arraysize="3" datatype="int" name="i3"/>
+<FIELD arraysize="*" datatype="int" name="iv"/>
+<FIELD arraysize="2x3" datatype="int" name="i2x3"/>
+<FIELD arraysize="2x*" datatype="double" name="d2xs"/>
+<DATA>
+<BINARY2>
+<STREAM encoding='base64'>
+</STREAM>
+</BINARY2>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

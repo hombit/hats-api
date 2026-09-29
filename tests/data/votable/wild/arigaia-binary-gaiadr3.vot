@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/votable-1.4.xsd">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="ARI (Astronomisches Rechen Institut - Heidelberg, Germany)">ARI's TAP access to the Gaia Archive.</INFO>
+<INFO name="QUERY" value="SELECT TOP 8 source_id, designation, ra, dec, parallax, ruwe, phot_g_mean_mag, radial_velocity, phot_variable_flag, has_xp_continuous, in_qso_candidates, libname_gspphot FROM gaiadr3.gaia_source WHERE 1=CONTAINS(POINT('ICRS', ra, dec), CIRCLE('ICRS', 56.75, 24.12, 0.05))"/>
+<COOSYS ID="GDR3_ICRS" system="ICRS" epoch="2016" />
+<TABLE name="result_S1790648799781">
+<FIELD ID="source_id" datatype="long" name="source_id" ucd="meta.id;meta.main">
+<DESCRIPTION>Unique source identifier (unique within a particular Data Release)</DESCRIPTION>
+<VALUES null='-9223372036854775808'/>
+</FIELD>
+<FIELD ID="designation" arraysize="*" datatype="char" name="designation" ucd="meta.id">
+<DESCRIPTION>Unique source designation (unique across all Data Releases)</DESCRIPTION>
+</FIELD>
+<FIELD ID="ra" datatype="double" name="ra" ref="GDR3_ICRS" ucd="pos.eq.ra;meta.main" unit="deg">
+<DESCRIPTION>Right ascension</DESCRIPTION>
+</FIELD>
+<FIELD ID="dec" datatype="double" name="dec" ref="GDR3_ICRS" ucd="pos.eq.dec;meta.main" unit="deg">
+<DESCRIPTION>Declination</DESCRIPTION>
+</FIELD>
+<FIELD ID="parallax" datatype="double" name="parallax" ucd="pos.parallax.trig" unit="mas">
+<DESCRIPTION>Parallax</DESCRIPTION>
+</FIELD>
+<FIELD ID="ruwe" datatype="float" name="ruwe" ucd="stat.error">
+<DESCRIPTION>Renormalised unit weight error</DESCRIPTION>
+</FIELD>
+<FIELD ID="phot_g_mean_mag" datatype="float" name="phot_g_mean_mag" ucd="phot.mag;em.opt" unit="mag">
+<DESCRIPTION>G-band mean magnitude</DESCRIPTION>
+</FIELD>
+<FIELD ID="radial_velocity" datatype="float" name="radial_velocity" ucd="spect.dopplerVeloc.opt;em.opt.I" unit="km.s**-1">
+<DESCRIPTION>Radial velocity</DESCRIPTION>
+</FIELD>
+<FIELD ID="phot_variable_flag" arraysize="*" datatype="char" name="phot_variable_flag" ucd="meta.code;src.var">
+<DESCRIPTION>Photometric variability flag</DESCRIPTION>
+</FIELD>
+<FIELD ID="has_xp_continuous" datatype="short" name="has_xp_continuous" ucd="meta.code.status">
+<DESCRIPTION>Flag indicating the availability of mean BP/RP spectrum in continuous representation for this source</DESCRIPTION>
+<VALUES null='-32768'/>
+</FIELD>
+<FIELD ID="in_qso_candidates" datatype="short" name="in_qso_candidates" ucd="meta.code.status">
+<DESCRIPTION>Flag indicating the availability of additional information in the QSO candidates table</DESCRIPTION>
+<VALUES null='-32768'/>
+</FIELD>
+<FIELD ID="libname_gspphot" arraysize="*" datatype="char" name="libname_gspphot" ucd="meta.note">
+<DESCRIPTION>Name of library that achieves the highest mean log-posterior in MCMC samples and was used to derive GSP-Phot parameters in this table</DESCRIPTION>
+</FIELD>
+<DATA>
+<BINARY>
+<STREAM encoding='base64'>
+AO0FUAAPz4AAAAAaR2FpYSBEUjMgNjY3MTU0MTA2MzY5ODQxOTJATGVfVZvbAkA4
+IY/Lj81Sv+FZHHLM3cg/bYv5QZve5H/AAAAAAAANTk9UX0FWQUlMQUJMRQAAAAAA
+AAAAAOevaQAuToAAAAAaR2FpYSBEUjMgNjUyMTM1ODUxMjk2MjMxNjhATGANkhnx
+gUA4Egs8XBa8P+ImGub4ttw/gb6aQZdMDH/AAAAAAAANTk9UX0FWQUlMQUJMRQAA
+AAAAAAAHUEhPRU5JWADnr3kAF16AAAAAGkdhaWEgRFIzIDY1MjEzNjUzODQ3NTk2
+NjcyQExeVkUld/dAOBRSvoACNX/4AAAAAAAAf8AAAEGnHsF/wAAAAAAADU5PVF9B
+VkFJTEFCTEUAAAAAAAAAAADnr5EAEIeAAAAAGkdhaWEgRFIzIDY1MjEzNzU2OTI2
+MzYzNTIwQExg++j46cNAOBLbEXRisL/ohiz/SrwGP4aE6kGgOHB/wAAAAAAADU5P
+VF9BVkFJTEFCTEUAAAAAAAAAAADnr5gAEHOAAAAAGkdhaWEgRFIzIDY1MjEzNzg2
+OTkxMTI5NDcyQExjTdXTcdNAOBOLd+OxiT/uDejjfQlqP4VV6EGURKZ/wAAAAAAA
+DU5PVF9BVkFJTEFCTEUAAAAAAAAAB1BIT0VOSVgA56+YABChAAAAABpHYWlhIERS
+MyA2NTIxMzc4Njk5MTE0MTEyMEBMY5AdzXU+QDgXKQmcvB8/2FFm3LQtxz+D9Q9B
+kajKf8AAAAAAAA1OT1RfQVZBSUxBQkxFAAAAAAAAAAAA56+ZABZngAAAABpHYWlh
+IERSMyA2NTIxMzc5MTI4NjQ4NjkxMkBMYnzQ1E4aQDgUeeKmmlc/9FjqeQkXNz/E
+7AVBpQDsf8AAAAAAAA1OT1RfQVZBSUxBQkxFAAAAAAAAAAAA56+ZACaZgAAAABpH
+YWlhIERSMyA2NTIxMzc5MTI4NzU0ODI4OEBMYytph+YHQDgWKlOpba4/+a4p7M+o
+ez+B3hhBeQ7Jf8AAAAAAAA1OT1RfQVZBSUxBQkxFAAEAAAAAAAdQSE9FTklY
+</STREAM>
+</BINARY>
+</DATA>
+</TABLE>
+</RESOURCE><RESOURCE type="meta" utype="adhoc:service" name="Datalink_GaiaDR3">
+<DESCRIPTION>Get all the linked data the specified Gaia-DR3 source ID.</DESCRIPTION>
+<PARAM arraysize="51" datatype="char" name="accessURL" ucd="meta.ref.url" value="https://gaia.ari.uni-heidelberg.de/datalink/gaiadr3">
+<DESCRIPTION>URL to invoke the service.</DESCRIPTION>
+</PARAM>
+<GROUP name="inputParams">
+<PARAM name="sourceid" datatype="long" ref="source_id" value=""/>
+</GROUP>
+</RESOURCE>
+</VOTABLE>

@@ -60,11 +60,11 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.5 | VOSI capabilities, availability, tables | done | |
 | 11.6 | `csv` and `tsv` | done | |
 | 11.13 | a region over `Float32` coordinates | done | |
-| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | after §11.11. Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it, adds `TABLE`, and fixes the names of its own resources. `VERB` and the id column are settled; the url space, the circle's spelling and the row bound are not |
-| 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. Inline `UPLOAD` is still §11.11's, and a job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
+| 11.7 | Simple Cone Search, 1.03 and 2.0 | todo | Days, TAP having paid for all of it. 1.03 inherits none of DALI — its own error shape, UCD1, no `MAXREC`; the 2.0 draft inherits nearly all of it, adds `TABLE`, and fixes the names of its own resources. `VERB` and the id column are settled; the url space, the circle's spelling and the row bound are not |
+| 11.8 | `/async` and UWS | done | the job store is in-process, so a job is one replica's and a restart loses it; a shared store is what `JobStore` exists for. A job cannot carry an operator credential any more than `/sync` can. Was §9.4 |
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
-| 11.11 | table upload | in progress | a url as `UPLOAD`, queried as `TAP_UPLOAD.name`, with this service's own `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, is built. Inline VOTable upload stays later — the one capability the four reference services do not share |
+| 11.11 | table upload | done | an array of strings from an upload is readable and not yet writable as VOTable, which is §7.5's |
 | 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half waits on §7.5 and nobody can be asked about it |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
@@ -322,9 +322,9 @@ Beside it, once that is settled: the same notebook's actual subject is **VOTable
 a whole VOTable header in the file's key/value metadata under
 `IVOA.VOTable-Parquet.content`. A catalog carrying one has already said what its columns'
 `unit`, `ucd` and `DESCRIPTION` are — metadata no answer here can otherwise have, and what
-would make this output worth reading in an IVOA client. It needs a VOTable *parser*, which
-nothing here has; `votable` on crates.io is the CDS implementation, weighed once for the
-writing side and turned down, so the reading is where it earns its dependencies.
+would make this output worth reading in an IVOA client. The header is a VOTable with no
+`DATA`, which `votable::read` already answers with the fields' metadata under the keys
+`output::votable` writes back.
 
 ## 10. Phase 7 — ADQL
 
@@ -580,13 +580,9 @@ Tier 1 was `/async`, alone, and it is built. What is left is what the four refer
 services do *not* agree on, so the ordering rule that set tier 1 says nothing about any of
 it and each piece has to argue for itself.
 
-**Naming a catalog by url as `UPLOAD` (§11.11)** came ahead of tier 1 and is built: it is
-the only way a TAP client can ask about a catalog this service does not publish, and
-`/adql` already answered it in its own body. Inline upload stays later, IRSA offering none
-and MAST half, so the ecosystem has not settled it and the four agree only on *declaring*
-what they have. The formats this service has of its own — `parquet`, `json` — and how a
-nested column is declared are questions no reference service can be asked, because none of
-them has such a column.
+The formats this service has of its own — `parquet`, `json` — and how a nested column is
+declared are questions no reference service can be asked, because none of them has such a
+column.
 
 **What a job still cannot do is carry an operator's credential**, which is not a gap in the
 job model but the same one `/sync` has: a `[[tap.table]]` takes no storage options, and a
@@ -757,53 +753,6 @@ message naming where such a column is answered.
 in its own page rather than bent into the OpenAPI document. What it has to say, once, and in
 the README as well: the base url to paste into TOPCAT, the table names, whether `/async` is
 there yet and what to do instead while it is not, and which formats carry a nested column.
-
-### 11.11 Table upload
-
-Two halves, and only the first is planned. **A caller names a catalog by url and queries it
-as `TAP_UPLOAD.name`**, which is what `POST /adql` already does with its `tables` and what a
-TAP client has no other way to ask for. **Inline upload** — a VOTable sent in the request —
-is the second half and stays later: it is the one capability the four reference services do
-not share (IRSA offers none, MAST half), so the ecosystem has not settled it, and it is
-caller-supplied bytes rather than a url, which reopens what a request may spend.
-
-`UPLOAD=name,uri`, the `TAP_UPLOAD` schema and a uri that is an `http(s)` url rather than
-`param:` are all TAP §2.7.6's own, uploads accumulating over repeated parameters the way DALI
-§3.2 has anything repeat. What is this service's is what the url may point at — a HATS catalog
-or a parquet file, neither of them the VOTable the standard means — and the storage options
-such a url needs. So a client can write the parameter and nothing else about it is borrowed.
-
-**Neither TAP nor DALI keys a value by anything but `UPLOAD`'s one comma**, so the two
-parameters below take that shape and no other: `<upload>,…`, repeated for more. A sub-parameter
-syntax would be invented twice over, and DALI's own structured values are fixed tuples of
-numbers rather than anything keyed. TAP's answer to an upload url needing authentication is
-credential delegation, a service holding the caller's certificate; these are this service's
-answer instead and are not that.
-
-- **`UPLOAD_STORAGE_OPTION=<upload>,<option>,<value>`**, one option to a value, holding what
-  `/adql`'s `storage` holds. One spelling of storage options in the service, or the two drift.
-  **The value runs to the end**, so a secret carrying a comma, a space or an `=` arrives
-  whole; a separator inside a value truncates a credential, which is a request that reads as
-  anonymous. The option's own name says how many fields follow it, which is how DALI reads a
-  shape — `CIRCLE` three numbers, `RANGE` four — so `header`, the one option that is a map,
-  takes a name before its value. It is accepted on `GET` as on `POST`: TAP gives the two carriers one
-  syntax, and a credential in a url is already spent by the time this service could refuse it.
-  What the service can do is not make it worse — the log records a path and never a query
-  string, and that has to stay true.
-- **`UPLOAD_TYPE`**, optional, `name,hats`. Absent, the type is worked out: a
-  name matching the data-file globs is a parquet file, and a directory holding
-  `hats.properties`, `properties` or `collection.properties` is a catalog. Guessing costs a
-  request or two and must fail as a refusal naming what was looked for, never as a broken
-  catalog.
-- **Nothing is declared in `/capabilities`.** A `uploadMethod` tells a client it may send a
-  VOTable, which this half refuses, so it waits for the inline half. Which means the feature
-  is found by reading the README rather than by a client discovering it, and that is the
-  price of not advertising what is not there.
-
-Every url goes through the access policy exactly as `/adql`'s tables do, and a catalog reached
-this way is bounded by the same three bounds; `[[tap.table]]` stays credential-free, an
-operator's secret having no place in a published surface. The two reserved schemas are already
-reserved. The suite's upload checks are inline VOTable and stay red.
 
 ### 11.12 `json` over TAP, and a nested column in `TAP_SCHEMA`
 

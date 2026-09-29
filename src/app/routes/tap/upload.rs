@@ -1,13 +1,14 @@
-//! `UPLOAD`: the tables a request names by url, queried as `TAP_UPLOAD.<name>`.
+//! `UPLOAD`: the tables a request brings with it, queried as `TAP_UPLOAD.<name>`.
 //!
 //! TAP §2.7.6's parameter is `name,uri`, and uploads accumulate over repeated parameters. A
-//! uri that is an `http(s)` url is the standard's own *referenced* upload, `param:` its
-//! inline one.
+//! uri that is a url is the standard's *referenced* upload, `param:` its *inline* one — the
+//! name of a part of the same `multipart/form-data` request (DALI §3.4.5).
 //!
-//! **What this service reads at that url is a HATS catalog or a parquet file, never the
-//! VOTable the standard means.** So a client may write the parameter and nothing else about
-//! it is borrowed, which is why `/capabilities` declares no `uploadMethod`: declaring one
-//! tells a client it may send a VOTable, and this refuses that.
+//! **What an upload is, is a VOTable, a parquet file or a HATS catalog.** The first is the
+//! standard's (TAP §2.7.6: "the service must accept tables in VOTable format"); the other two
+//! are this service's, read where they are rather than copied in. `UPLOAD_TYPE` says which,
+//! and where it says nothing [`Kind`] is worked out from what the request has: a part's
+//! media type, then the bytes themselves.
 //!
 //! Two parameters of this service's own go with it, both named in the README because no
 //! capabilities document can describe them, and both written `<upload>,…` the way `UPLOAD`
@@ -30,8 +31,8 @@
 //!   written into a url has already been sent by the time this service could refuse to read
 //!   it. What is left to protect is that it goes no further, which is the log recording a path
 //!   and never a query string.
-//! - `UPLOAD_TYPE=<upload>,<kind>`, saying which of the two a url is. Absent, [`Upload::kind`]
-//!   is `None` and the url is judged by its own name.
+//! - `UPLOAD_TYPE=<upload>,<kind>`, `votable`, `parquet` or `hats`. Absent, [`Upload::kind`]
+//!   is `None` and what the upload holds is worked out when it is opened.
 //!
 //! TAP's own answer to an upload url that needs authentication is credential delegation, a
 //! service of its own that hands this one the caller's certificate. These two parameters are
@@ -39,6 +40,7 @@
 
 use std::collections::BTreeMap;
 
+use axum::body::Bytes;
 use serde::Deserialize;
 use serde::de::{self, Visitor};
 use url::Url;
@@ -71,16 +73,24 @@ const HEADER: &str = "header";
 pub(super) struct Uploads(Vec<Upload>);
 
 /// One uploaded table.
+#[derive(Debug)]
 pub(super) struct Upload {
     /// The name it answers to under `TAP_UPLOAD`, as the request spelled it.
     pub name: String,
-    /// Where it is. The caller's own url, which is theirs to have written and so may be
-    /// named back to them in a refusal.
-    pub url: Url,
-    /// What the url holds, where `UPLOAD_TYPE` said; otherwise the url is judged by its name.
+    pub source: Source,
+    /// What it holds, where `UPLOAD_TYPE` said; otherwise it is worked out when opened.
     pub kind: Option<Kind>,
-    /// How to reach the store.
+    /// How to reach the store, for a url.
     pub storage: StorageOptions,
+}
+
+/// Where an upload's table is.
+pub(super) enum Source {
+    /// The caller's own url, which is theirs to have written and so may be named back to
+    /// them in a refusal.
+    Url(Url),
+    /// A part of the request itself, which `param:<name>` named.
+    Inline(Part),
 }
 
 /// `Url`'s own `Debug` prints its `password` field, and this url is the caller's.
@@ -89,21 +99,66 @@ pub(super) struct Upload {
 /// url is opened rather than where it is read — so between the two an `Upload` holds one
 /// that a derive would print in full. [`storage::file_url`] is the same stripping every
 /// message about an unopened url already goes through.
-impl std::fmt::Debug for Upload {
+impl std::fmt::Debug for Source {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Upload")
+        match self {
+            Self::Url(url) => f
+                .debug_tuple("Url")
+                .field(&storage::file_url(url).as_str())
+                .finish(),
+            Self::Inline(part) => f.debug_tuple("Inline").field(part).finish(),
+        }
+    }
+}
+
+/// A file part of a multipart request, which an inline upload's `param:` names.
+#[derive(Clone)]
+pub(super) struct Part {
+    /// The part's `name`, which is what `param:` refers to.
+    pub name: String,
+    /// The part's own `Content-Type`, without its parameters.
+    pub content_type: Option<String>,
+    pub bytes: Bytes,
+}
+
+/// The bytes are the caller's table, and a log line or a panic message is no place for them.
+impl std::fmt::Debug for Part {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Part")
             .field("name", &self.name)
-            .field("url", &storage::file_url(&self.url).as_str())
-            .field("kind", &self.kind)
-            .field("storage", &self.storage)
+            .field("content_type", &self.content_type)
+            .field("bytes", &self.bytes.len())
             .finish()
     }
 }
 
-/// The two things an upload's url may name, which are the `/adql` body's two table types.
+/// Every file part a request carried, whether or not an `UPLOAD` names it.
+#[derive(Debug, Default, Clone)]
+pub(super) struct Parts(Vec<Part>);
+
+impl Parts {
+    pub fn push(&mut self, part: Part) {
+        self.0.push(part);
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Part> {
+        self.0.iter()
+    }
+
+    /// The part `param:<name>` refers to. DALI §3.4.5: the part's `name` "must match that
+    /// used in the UPLOAD parameter", so this is matched exactly.
+    fn named(&self, name: &str) -> Option<&Part> {
+        self.0.iter().find(|part| part.name == name)
+    }
+}
+
+/// What an upload may hold. `votable` and `parquet` name a file and `hats` a catalog, the
+/// last two being the `/adql` body's table types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum Kind {
+    /// A VOTable, whose table is read into memory for the request.
+    Votable,
     /// A whole HATS catalog: the directory holding `hats.properties`.
     Hats,
     /// One parquet file.
@@ -261,7 +316,12 @@ impl Uploads {
     ///
     /// Each is every value it was given: TAP §2.7.6 has uploads accumulate over repeated
     /// `UPLOAD` parameters, which is DALI §3.2's rule for several values of anything.
-    pub fn read(uploads: &[&str], types: &[&str], storage: &[&str]) -> Result<Self, ApiError> {
+    pub fn read(
+        uploads: &[&str],
+        types: &[&str],
+        storage: &[&str],
+        parts: &Parts,
+    ) -> Result<Self, ApiError> {
         let mut named = Vec::new();
         for value in uploads {
             // TAP 1.0 §2.5.1 joined pairs with `;` and 1.1 dropped it for repetition. Both
@@ -288,17 +348,27 @@ impl Uploads {
                 )));
             }
             list.push(Upload {
+                source: source_of(&name, &uri, parts)?,
                 name,
-                url: url_of(&uri)?,
                 kind: None,
                 storage: StorageOptions::default(),
             });
         }
 
         for value in types {
-            let (name, kind) =
-                read_value::<(String, Kind)>(value, TYPE, "<upload>,hats or <upload>,parquet")?;
-            find(&mut list, &name, TYPE)?.kind = Some(kind);
+            let (name, kind) = read_value::<(String, Kind)>(
+                value,
+                TYPE,
+                "<upload>,votable, <upload>,parquet or <upload>,hats",
+            )?;
+            let upload = find(&mut list, &name, TYPE)?;
+            if kind == Kind::Hats && matches!(upload.source, Source::Inline(_)) {
+                return Err(ApiError::bad_request(format!(
+                    "{TYPE} says {name} is a catalog, and a catalog is a directory; name it by \
+                     url rather than sending it inline"
+                )));
+            }
+            upload.kind = Some(kind);
         }
 
         // An entry naming no upload is refused rather than dropped: dropped, it is a request
@@ -311,7 +381,15 @@ impl Uploads {
                 STORAGE_OPTION,
                 "<upload>,<option>,<value>",
             )?;
-            let name = find(&mut list, &name, STORAGE_OPTION)?.name.clone();
+            let upload = find(&mut list, &name, STORAGE_OPTION)?;
+            // Refused rather than dropped, for the reason an unknown name is: a credential
+            // that was never used is a request the caller reads as having been let in.
+            if let Source::Inline(_) = upload.source {
+                return Err(ApiError::bad_request(format!(
+                    "{STORAGE_OPTION} names {name}, which is sent inline and read from no store"
+                )));
+            }
+            let name = upload.name.clone();
             declared
                 .entry(name.clone())
                 .or_default()
@@ -349,6 +427,10 @@ impl Uploads {
         self.0
             .iter()
             .find(|upload| upload.name.eq_ignore_ascii_case(table))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Upload> {
+        self.0.iter()
     }
 
     /// Whether a statement naming `TAP_UPLOAD` has anything to name, for the refusal.
@@ -427,18 +509,29 @@ fn check_name(name: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// The url an upload's uri names.
-///
-/// `param:` is TAP's inline upload, which this service does not implement, and it is refused
-/// by what it is rather than as a url that will not parse.
-fn url_of(uri: &str) -> Result<Url, ApiError> {
-    if uri.starts_with("param:") {
-        return Err(ApiError::bad_request(format!(
-            "UPLOAD {uri} is an inline table, which this service does not implement; name a \
-             catalog or a parquet file by url instead"
-        )));
+/// Where an upload's uri points: a url, or with `param:` a part of this request.
+fn source_of(name: &str, uri: &str, parts: &Parts) -> Result<Source, ApiError> {
+    let Some(part) = uri.strip_prefix("param:") else {
+        return parse_url(uri).map(Source::Url);
+    };
+    match parts.named(part) {
+        Some(part) => Ok(Source::Inline(part.clone())),
+        None => Err(ApiError::bad_request(format!(
+            "UPLOAD {name} is {uri}, and this request carries no file part named {part:?}; \
+             an inline table is sent as a multipart/form-data file part of that name{}",
+            match parts.iter().next() {
+                None => String::new(),
+                Some(_) => format!(
+                    ", and the parts it carries are {}",
+                    parts
+                        .iter()
+                        .map(|part| format!("{:?}", part.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            }
+        ))),
     }
-    parse_url(uri)
 }
 
 #[cfg(test)]
@@ -446,7 +539,14 @@ mod tests {
     use super::*;
 
     fn read(uploads: &[&str], types: &[&str], storage: &[&str]) -> Result<Uploads, String> {
-        Uploads::read(uploads, types, storage).map_err(|error| error.to_string())
+        Uploads::read(uploads, types, storage, &Parts::default()).map_err(|error| error.to_string())
+    }
+
+    fn url_of(upload: &Upload) -> &str {
+        match &upload.source {
+            Source::Url(url) => url.as_str(),
+            Source::Inline(part) => &part.name,
+        }
     }
 
     /// TAP §2.5.2: several pairs to a value, and the parameter repeatable.
@@ -463,7 +563,7 @@ mod tests {
         .unwrap();
         assert_eq!(uploads.names(), ["a", "b", "c"]);
         assert_eq!(
-            uploads.named("TAP_UPLOAD.b").unwrap().url.as_str(),
+            url_of(uploads.named("TAP_UPLOAD.b").unwrap()),
             "https://example.org/b.parquet"
         );
         // The schema and the name are matched the way ADQL matches an unquoted name.
@@ -626,13 +726,39 @@ mod tests {
         assert!(refused.contains("UPLOAD_STORAGE_OPTION"), "{refused}");
     }
 
-    /// The inline form is the standard's, so it says what it is rather than failing as a
-    /// url nobody can parse.
+    /// DALI §3.4.5: `param:<name>` is a part of the same request, matched by its exact name.
     #[test]
-    fn an_inline_upload_says_it_is_not_implemented() {
+    fn an_inline_upload_is_the_part_its_param_names() {
+        let mut parts = Parts::default();
+        parts.push(Part {
+            name: "doc".to_owned(),
+            content_type: Some("application/x-votable+xml".to_owned()),
+            bytes: Bytes::from_static(b"<VOTABLE/>"),
+        });
+        let uploads = Uploads::read(&["t,param:doc"], &["t,votable"], &[], &parts).unwrap();
+        let upload = uploads.named("TAP_UPLOAD.t").unwrap();
+        assert!(matches!(&upload.source, Source::Inline(part) if part.name == "doc"));
+        assert_eq!(upload.kind, Some(Kind::Votable));
+
+        // A part of another name is not this one, and the refusal says which there are.
+        let refused = Uploads::read(&["t,param:DOC"], &[], &[], &parts)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("\"doc\""), "{refused}");
+
+        // A request with no parts at all says how an inline table is sent.
         let refused = read(&["t,param:doc"], &[], &[]).unwrap_err();
+        assert!(refused.contains("multipart"), "{refused}");
+
+        // An inline table is read from no store and is no directory, so neither applies.
+        let refused = Uploads::read(&["t,param:doc"], &[], &["t,region,x"], &parts)
+            .unwrap_err()
+            .to_string();
         assert!(refused.contains("inline"), "{refused}");
-        assert!(refused.contains("url"), "{refused}");
+        let refused = Uploads::read(&["t,param:doc"], &["t,hats"], &[], &parts)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("directory"), "{refused}");
     }
 
     #[test]

@@ -1,0 +1,19 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "TABLEDATA",
+  "columns": [
+    {"name": "ra", "datatype": "double", "arraysize": null, "xtype": null, "unit": "deg", "ucd": "pos.eq.ra;meta.main", "utype": "stc:AstroCoords.Position2D.Value2.C1", "description": "Right ascension (ICRS)", "null": null},
+    {"name": "dec", "datatype": "double", "arraysize": null, "xtype": null, "unit": "deg", "ucd": "pos.eq.dec;meta.main", "utype": "stc:AstroCoords.Position2D.Value2.C2", "description": "Declination (ICRS)", "null": null},
+    {"name": "mag", "datatype": "float", "arraysize": null, "xtype": null, "unit": "mag", "ucd": "phot.mag;em.opt.V", "utype": null, "description": "V magnitude", "null": null},
+    {"name": "flag", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": "meta.code", "utype": null, "description": "Quality flag; -1 when unknown", "null": "-1"},
+    {"name": "obs_mjd", "datatype": "double", "arraysize": null, "xtype": "mjd", "unit": "d", "ucd": "time.epoch", "utype": null, "description": "Epoch of observation", "null": null},
+    {"name": "url", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": "meta.ref.url", "utype": null, "description": "Where the <preview> & \"notes\" live", "null": null}
+  ],
+  "rows": [
+    [10.684708, 41.26875, 3.440000057220459, 0, 58000.5, "https://example.org/a"],
+    [83.822083, -5.391111, 4.0, 1, 58001.25, null],
+    [null, null, null, null, null, "https://example.org/c?x=1&y=2"]
+  ],
+  "refuse": null,
+  "notes": "astropy 8.0.1 reads: column 'url' row 1 is \"\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'ra' row 2 is \"NaN\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'dec' row 2 is \"NaN\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'mag' row 2 is \"NaN\" where the file says null\nSTILTS reads (as its BINARY2 output says): column 'obs_mjd' row 2 is \"NaN\" where the file says null"
+}

@@ -30,6 +30,7 @@ use std::time::Instant;
 use axum::body::Body;
 use datafusion::arrow::array::RecordBatch;
 use futures::{Stream, StreamExt as _};
+use url::Url;
 
 use crate::access::data::DataFiles;
 use crate::adql;
@@ -38,8 +39,9 @@ use crate::app::request::Format;
 use crate::app::routes::tap::format::Answering;
 use crate::app::routes::tap::parameters::Parameters;
 use crate::app::routes::tap::published::describe;
-use crate::app::routes::tap::upload::{Kind, UPLOAD_SCHEMA, Upload};
+use crate::app::routes::tap::upload::{Kind, Part, Source as UploadSource, UPLOAD_SCHEMA, Upload};
 use crate::app::service::Service;
+use crate::app::uploaded::{self, Budget, Sniffed};
 use crate::error::ApiError;
 use crate::output::{dsv, parquet, stream, votable};
 use crate::storage::{self, Authorities, StorageOptions};
@@ -342,6 +344,14 @@ async fn prepare(
 
     let mut tables = Vec::new();
     let mut data_files: Option<DataFiles> = None;
+    // Every table the request brings with it comes out of one allowance: the parts it sent,
+    // which were counted as they arrived, and the VOTables its urls name, counted here.
+    let mut budget = Budget::new(service.max_upload_bytes);
+    for upload in parameters.uploads.iter() {
+        if let UploadSource::Inline(part) = &upload.source {
+            budget.spend(part.bytes.len() as u64)?;
+        }
+    }
     // Two tables naming one authority — an upload and a published catalog, or two uploads —
     // would share DataFusion's one store for it; see `Authorities`. A published table has no
     // storage of its own, so every one of them shares this empty value.
@@ -363,7 +373,8 @@ async fn prepare(
                         }
                     ))
                 })?;
-                let (source, files) = uploaded(service, upload, spelling, &mut authorities)?;
+                let (source, files) =
+                    uploaded(service, upload, spelling, &mut authorities, &mut budget).await?;
                 if let Some(files) = files {
                     data_files = Some(files);
                 }
@@ -430,53 +441,138 @@ fn names_an_upload(spelling: &str) -> bool {
 
 /// One uploaded table as something a statement can read, and the data-file list a catalog
 /// brings with it.
-///
-/// **Where `UPLOAD_TYPE` said nothing, the url's own name decides**: one matching the
-/// data-file globs is a parquet file and anything else is a catalog directory. A directory
-/// that is not one fails where a catalog is opened, which is the read that looks for
-/// `hats.properties`, `properties` and `collection.properties` and says so by name.
-fn uploaded<'a>(
+async fn uploaded<'a>(
     service: &'a Service,
     upload: &'a Upload,
     spelling: &'a str,
     authorities: &mut Authorities<'a>,
+    budget: &mut Budget,
 ) -> Result<(Source, Option<DataFiles>), ApiError> {
-    let files = service.data_files_for(&upload.url);
-    let kind = upload.kind.unwrap_or(match files.matches_url(&upload.url) {
-        true => Kind::Parquet,
-        false => Kind::Hats,
-    });
+    match &upload.source {
+        UploadSource::Inline(part) => Ok((inline(upload, part).await?, None)),
+        UploadSource::Url(url) => at_url(service, upload, url, spelling, authorities, budget).await,
+    }
+}
+
+/// A table sent as a part of the request.
+///
+/// **Where `UPLOAD_TYPE` said nothing, the part's media type decides, and then its bytes.**
+/// `pyvo` sends a part with no type at all, so the bytes are the ordinary case: a parquet
+/// file says so in its first four, and a VOTable is XML whose root is `VOTABLE`.
+async fn inline(upload: &Upload, part: &Part) -> Result<Source, ApiError> {
+    let kind = match upload.kind {
+        Some(kind) => kind,
+        None => match part
+            .content_type
+            .as_deref()
+            .and_then(uploaded::of_media_type)
+            .unwrap_or_else(|| uploaded::sniff(&part.bytes))
+        {
+            Sniffed::Votable => Kind::Votable,
+            Sniffed::Parquet => Kind::Parquet,
+            Sniffed::Other => {
+                return Err(ApiError::bad_request(format!(
+                    "UPLOAD {} is neither a VOTable nor a parquet file; say which with \
+                     UPLOAD_TYPE={},votable or UPLOAD_TYPE={},parquet",
+                    upload.name, upload.name, upload.name
+                )));
+            }
+        },
+    };
+    let provider = match kind {
+        Kind::Votable => uploaded::votable_table(part.bytes.clone(), &upload.name).await?,
+        Kind::Parquet => uploaded::parquet_table(part.bytes.clone(), &upload.name).await?,
+        // `Uploads::read` refuses the pairing, a catalog being a directory.
+        Kind::Hats => {
+            return Err(ApiError::bad_request(format!(
+                "UPLOAD {} is sent inline, and a catalog is a directory; name it by url",
+                upload.name
+            )));
+        }
+    };
+    Ok(Source::Memory(provider))
+}
+
+/// A table a url names.
+///
+/// **Where `UPLOAD_TYPE` said nothing, the url is worked out in two steps.** A name matching
+/// the data-file globs is a parquet file, read in place. Anything else is asked for its
+/// first bytes: a VOTable is fetched and read into memory, and a url naming no object —
+/// which is how a store answers a directory — is a catalog, as is an `http(s)` url answered
+/// with a page.
+///
+/// **A VOTable is not held to the data-file globs, and a parquet file is.** The globs say
+/// which files are *queried in place*, and a VOTable never is: it is read whole, which is
+/// what serving its bytes would hand over anyway. A directory that is not one fails where a
+/// catalog is opened, which is the read that looks for `hats.properties`, `properties` and
+/// `collection.properties` and says so by name. The question costs one small read, and only
+/// for a request that did not say.
+async fn at_url<'a>(
+    service: &'a Service,
+    upload: &'a Upload,
+    url: &'a Url,
+    spelling: &'a str,
+    authorities: &mut Authorities<'a>,
+    budget: &mut Budget,
+) -> Result<(Source, Option<DataFiles>), ApiError> {
+    let files = service.data_files_for(url);
+    let kind = match upload.kind {
+        Some(kind) => kind,
+        None if files.matches_url(url) => Kind::Parquet,
+        // A url with no name at its end is a directory by construction, and `open` would
+        // refuse it for naming no object.
+        None if url.path().ends_with('/') || url.path().is_empty() => Kind::Hats,
+        None => {
+            let file = storage::open(url, &upload.storage, &service.policy, &service.transfers)?;
+            match uploaded::head_of(&file)
+                .await
+                .map(|head| uploaded::sniff(&head))
+            {
+                Some(Sniffed::Votable) => Kind::Votable,
+                // Refused below, by name, the data-file globs being what says which files
+                // are read as data whatever their bytes are.
+                Some(Sniffed::Parquet) => Kind::Parquet,
+                None => Kind::Hats,
+                // A page is how an HTTP server answers a directory's url, so there it is
+                // still a catalog. Anywhere else a file that is there and is not a table is
+                // neither, and says so rather than failing as a catalog.
+                Some(Sniffed::Other) if matches!(url.scheme(), "http" | "https") => Kind::Hats,
+                Some(Sniffed::Other) => {
+                    return Err(ApiError::bad_request(format!(
+                        "UPLOAD {} names a file that is neither a VOTable nor a parquet \
+                         file; say which it is with UPLOAD_TYPE",
+                        upload.name
+                    )));
+                }
+            }
+        }
+    };
     match kind {
+        Kind::Votable => {
+            // Read whole and held for the request, so it is never registered as a store
+            // and shares nobody's authority.
+            let file = storage::open(url, &upload.storage, &service.policy, &service.transfers)?;
+            let bytes = uploaded::fetch(&file, url, budget).await?;
+            let provider = uploaded::votable_table(bytes, &upload.name).await?;
+            Ok((Source::Memory(provider), None))
+        }
         Kind::Parquet => {
-            if !files.matches_url(&upload.url) {
+            if !files.matches_url(url) {
                 return Err(ApiError::not_found(format!(
                     "UPLOAD {} names no data file; a parquet url ends in a name matching {}",
                     upload.name,
                     files.describe()
                 )));
             }
-            let file = storage::open(
-                &upload.url,
-                &upload.storage,
-                &service.policy,
-                &service.transfers,
-            )?;
+            let file = storage::open(url, &upload.storage, &service.policy, &service.transfers)?;
             authorities.check(spelling, file.opened(&upload.storage))?;
             Ok((Source::File(file), None))
         }
         Kind::Hats => {
             let files = files.clone();
-            let dir = storage::open_dir(
-                &upload.url,
-                &upload.storage,
-                &service.policy,
-                &service.transfers,
-            )?;
+            let dir = storage::open_dir(url, &upload.storage, &service.policy, &service.transfers)?;
             authorities.check(spelling, dir.opened(&upload.storage))?;
-            Ok((
-                Source::Catalog(dir, service.catalogs_for(&upload.url)),
-                Some(files),
-            ))
+            Ok((Source::Catalog(dir, service.catalogs_for(url)), Some(files)))
         }
     }
 }

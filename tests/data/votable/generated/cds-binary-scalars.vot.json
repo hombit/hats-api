@@ -1,0 +1,30 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": "BINARY",
+  "columns": [
+    {"name": "b", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ub", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "l", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c", "datatype": "char", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "u", "datatype": "unicodeChar", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "f", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc", "datatype": "floatComplex", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dc", "datatype": "doubleComplex", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "str", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ustr", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [true, 0, -32768, -2147483648, -9223372036854775808, "a", "Я", 1.5, 1.5, [1.5, -1.5], [1.5, -1.5], "hello", "Привет"],
+    [false, 255, 32767, 2147483647, 9223372036854775807, "Z", "λ", -3.4028234663852886e+38, 1.7976931348623157e+308, [0.10000000149011612, -0.20000000298023224], [0.1, -0.2], "", ""],
+    [null, 1, 0, 0, 0, "<", "中", 1.1754943508222875e-38, 5e-324, ["NaN", "NaN"], ["NaN", 0.0], "x y", "日本語"],
+    [true, 128, -1, -1, -1, "&", "é", "NaN", "NaN", [0.0, 0.0], [0.0, 0.0], "<&>\"'", "<&>\"'"],
+    [null, 255, -32768, -2147483648, -9223372036854775808, "", "", "NaN", "NaN", ["NaN", "NaN"], ["NaN", "NaN"], "", ""],
+    [false, 42, 12345, 123456789, 1234567890123456789, "0", "Ω", "Infinity", "Infinity", ["Infinity", 1.0], ["-Infinity", 1.0], "  lead and trail  ", "  ведущие "],
+    [true, 7, 1, 2, 3, "~", "a", "-Infinity", "-Infinity", [3.0, 4.0], [3.0, 4.0], "multi word", "Ελληνικά"]
+  ],
+  "refuse": null,
+  "notes": "columns bit of the source table are omitted: this writer cannot write them\ndiffers from the source data: column 'ub' row 4 was null, the file says 255\ndiffers from the source data: column 's' row 4 was null, the file says -32768\ndiffers from the source data: column 'i' row 4 was null, the file says -2147483648\ndiffers from the source data: column 'l' row 4 was null, the file says -9223372036854775808\ndiffers from the source data: column 'c' row 4 was null, the file says \"\"\ndiffers from the source data: column 'u' row 4 was null, the file says \"\"\ndiffers from the source data: column 'f' row 4 was null, the file says \"NaN\"\ndiffers from the source data: column 'd' row 4 was null, the file says \"NaN\"\ndiffers from the source data: column 'fc' row 4 was null, the file says [\"NaN\", \"NaN\"]\ndiffers from the source data: column 'dc' row 4 was null, the file says [\"NaN\", \"NaN\"]\ndiffers from the source data: column 'str' row 4 was null, the file says \"\"\ndiffers from the source data: column 'ustr' row 4 was null, the file says \"\"\nastropy 8.0.1 reads: column 'fc' row 2 is null where the file says [\"NaN\", \"NaN\"] (and 1 more rows)\nastropy 8.0.1 reads: column 'dc' row 2 is null where the file says [\"NaN\", 0.0] (and 1 more rows)\nastropy 8.0.1 reads: column 'f' row 3 is null where the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'd' row 3 is null where the file says \"NaN\" (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'str' row 1 is null where the file says \"\" (and 2 more rows)\nSTILTS reads (as its BINARY2 output says): column 'ustr' row 1 is null where the file says \"\" (and 2 more rows)"
+}

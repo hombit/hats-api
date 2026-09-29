@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="xtypes">
+            <FIELD name="ts" datatype="char" arraysize="*" xtype="timestamp"/>
+            <FIELD name="tsfix" datatype="char" arraysize="10" xtype="timestamp"/>
+            <FIELD name="pt" datatype="double" arraysize="2" unit="deg" ucd="pos.eq" xtype="point"/>
+            <FIELD name="fpt" datatype="float" arraysize="2" unit="deg" xtype="point"/>
+            <FIELD name="circ" datatype="double" arraysize="3" unit="deg" xtype="circle"/>
+            <FIELD name="poly" datatype="double" arraysize="*" unit="deg" xtype="polygon"/>
+            <FIELD name="intv" datatype="double" arraysize="2" xtype="interval"/>
+            <FIELD name="lintv" datatype="long" arraysize="2" xtype="interval"/>
+            <DATA>
+                <BINARY2>
+                    <STREAM encoding="base64">
+AAAAABcyMDAwLTAxLTAyVDE1OjIwOjMwLjQ1NjIwMDItMDMtMDRAKJmZmZmZmkBG
+zMzMzMzNQUTMzUI2ZmZAKJmZmZmZmkBGzMzMzMzNP+AAAAAAAAAAAAAIQCQAAAAA
+AABAJAAAAAAAAEAkZmZmZmZmQCQAAAAAAABAJGZmZmZmZkAkZmZmZmZmQCQAAAAA
+AABAJGZmZmZmZj/gAAAAAAAAP/AAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAABMy
+MDAxLTAyLTAzVDA0OjA1OjA2MTk5OS0xMi0zMQAAAAAAAAAAwFaAAAAAAAAAAAAA
+wrQAAAAAAAAAAAAAQFaAAAAAAABAZoAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAAAAA
+P/AAAAAAAAAAAAAAAAAAAD/wAAAAAAAAP/AAAAAAAAD/8AAAAAAAAAAAAAAAAAAA
+//////////sAAAAAAAAABQAAAAAKMjAwMi0wMy0wNDIwMjAtMDItMjlAdn5mZmZm
+ZkBWgAAAAAAAQ7PzM0K0AABAdn5mZmZmZsBWYAAAAAAAPrDG96C17Y0AAAAIQHXg
+AAAAAADAJAAAAAAAAEAkAAAAAAAAwCQAAAAAAABAJAAAAAAAAEAkAAAAAAAAQHXg
+AAAAAABAJAAAAAAAAAAAAAAAAAAAf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+ABQyMDAwLTAxLTAyVDE1OjIwOjMwWjIwMDAtMDEtMDFAZoAAAAAAAAAAAAAAAAAA
+QzQAAAAAAAA/8AAAAAAAAEAAAAAAAAAAQAgAAAAAAAAAAAAA//AAAAAAAAB/8AAA
+AAAAAIAAAAAAAAAAf///////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+                    </STREAM>
+                </BINARY2>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.4.xsd">
+ <RESOURCE type="results">
+  <TABLE>
+   <FIELD ID="id" datatype="long" name="id"/>
+   <FIELD ID="ra" datatype="double" name="ra" unit="deg">
+    <DESCRIPTION>
+     Right ascension
+    </DESCRIPTION>
+   </FIELD>
+   <FIELD ID="mag" datatype="float" name="mag"/>
+   <FIELD ID="name" arraysize="7" datatype="unicodeChar" name="name"/>
+   <FIELD ID="flag" datatype="bit" name="flag"/>
+   <FIELD ID="vec" arraysize="3" datatype="short" name="vec"/>
+   <FIELD ID="small" datatype="unsignedByte" name="small"/>
+   <DATA>
+    <BINARY2>
+     <STREAM encoding="base64">
+AAAAAAAAAAABQCUAAAAAAABBeAAAAGEAbABwAGgAYQAAAAAIAAEAAgADAIAAAAAAAAAAAkA0QAAAAAAAQYAAAAAAAAAAAAAAAAAAAAAAAAAEAAUABv8IAAAAAAAAAAN/+AAAAAAAAEGKAAAAZwBhAG0AbQBhACAAIAgABwAIAAkHIAAAAAAAAAAEQHZ///7zkIYAAAAAA7QDrQO7A8QDsQAAAAAA/////v/9AQ==     </STREAM>
+    </BINARY2>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

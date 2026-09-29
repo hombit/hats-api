@@ -1,0 +1,72 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "only_id",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "col2",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "my ra",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "2mass.J",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "Mixed",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   1,
+   2,
+   3,
+   4,
+   5
+  ]
+ ],
+ "refuse": null,
+ "notes": "A FIELD with only an ID is called by it, one with neither by its position; names ADQL cannot write unquoted are kept as written."
+}

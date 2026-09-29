@@ -1,0 +1,46 @@
+{
+ "producer": "ESA Gaia Archive TAP+ (ESAC, Java)",
+ "source_url": "https://gea.esac.esa.int/tap-server/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable_gzip&QUERY=SELECT+TOP+3+source_id%2c+ra+FROM+gaiadr3.gaia_source+WHERE+1%3dCONTAINS%28POINT%28ra%2c+dec%29%2c+CIRCLE%2856.75%2c+24.12%2c+0.02%29%29",
+ "fetched": "2026-09-29",
+ "serialization": "BINARY2",
+ "columns": [
+  {
+   "name": "source_id",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id",
+   "utype": null,
+   "description": "Unique source identifier (unique within a particular Data Release)",
+   "null": null
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": "stc:AstroCoords.Position3D.Value3.C1",
+   "description": "Right ascension",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   65225984700165248,
+   56.7426206829527
+  ],
+  [
+   65225950338575616,
+   56.76450957838271
+  ],
+  [
+   65214061869072512,
+   56.75299349590958
+  ]
+ ],
+ "refuse": "not XML: a gzip file served as application/x-votable+xml with no Content-Encoding",
+ "notes": "Rows are those of the document inside the gzip (BINARY2), for a reader that decompresses rather than refuses."
+}

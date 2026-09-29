@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="scalars">
+            <FIELD name="b" datatype="boolean"/>
+            <FIELD name="ub" datatype="unsignedByte"/>
+            <FIELD name="s" datatype="short"/>
+            <FIELD name="i" datatype="int"/>
+            <FIELD name="l" datatype="long"/>
+            <FIELD name="c" datatype="char"/>
+            <FIELD name="u" datatype="unicodeChar"/>
+            <FIELD name="f" datatype="float"/>
+            <FIELD name="d" datatype="double"/>
+            <FIELD name="fc" datatype="floatComplex"/>
+            <FIELD name="dc" datatype="doubleComplex"/>
+            <FIELD name="str" datatype="char" arraysize="*"/>
+            <FIELD name="ustr" datatype="unicodeChar" arraysize="*"/>
+            <DATA>
+                <BINARY2>
+                    <STREAM encoding="base64">
+AAAxAIAAgAAAAIAAAAAAAAAAYQQvP8AAAD/4AAAAAAAAP8AAAL/AAAA/+AAAAAAA
+AL/4AAAAAAAAAAAABWhlbGxvAAAABgQfBEAEOAQyBDUEQgAAMP9//3////9/////
+/////1oDu/9///9/7////////z3MzM2+TMzNP7mZmZmZmZq/yZmZmZmZmgAAAAAA
+AAAAgAA/AQAAAAAAAAAAAAAAAAAAPE4tAIAAAAAAAAAAAAABf8AAAH/AAAB/+AAA
+AAAAAAAAAAAAAAAAAAAAA3ggeQAAAANl5Wcsip4AADGA//////////////////8m
+AOl/wAAAf/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFPCY+IicA
+AAAFADwAJgA+ACIAJ//4P/+AAIAAAACAAAAAAAAAAAAAAH/AAAB/+AAAAAAAAH/A
+AAB/wAAAf/gAAAAAAAB/+AAAAAAAAAAAAAAAAAAAAAAwKjA5B1vNFREiEPR96YEV
+MAOpf4AAAH/wAAAAAAAAf4AAAD+AAAD/8AAAAAAAAD/wAAAAAAAAAAAAEiAgbGVh
+ZCBhbmQgdHJhaWwgIAAAAAoAIAAgBDIENQQ0BEMESQQ4BDUAIAAAMQcAAQAAAAIA
+AAAAAAAAA34AYf+AAAD/8AAAAAAAAEBAAABAgAAAQAgAAAAAAABAEAAAAAAAAAAA
+AAptdWx0aSB3b3JkAAAACAOVA7sDuwO3A70DuQO6A6w=
+                    </STREAM>
+                </BINARY2>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

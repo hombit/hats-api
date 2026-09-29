@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="strings">
+            <FIELD name="cfix" datatype="char" arraysize="10"/>
+            <FIELD name="cvar" datatype="char" arraysize="*"/>
+            <FIELD name="cbnd" datatype="char" arraysize="5*"/>
+            <FIELD name="ufix" datatype="unicodeChar" arraysize="6"/>
+            <FIELD name="uvar" datatype="unicodeChar" arraysize="*"/>
+            <DATA>
+                <TABLEDATA>
+                    <TR>
+                        <TD>Apple</TD>
+                        <TD>Apple</TD>
+                        <TD>abc</TD>
+                        <TD>Яблоко</TD>
+                        <TD>Привет мир</TD>
+                    </TR>
+                    <TR>
+                        <TD>  lead</TD>
+                        <TD>  lead</TD>
+                        <TD> b </TD>
+                        <TD>λόγος</TD>
+                        <TD>Ελληνικά</TD>
+                    </TR>
+                    <TR>
+                        <TD>trail   </TD>
+                        <TD>trail   </TD>
+                        <TD>abcde</TD>
+                        <TD>中文</TD>
+                        <TD>日本語テキスト</TD>
+                    </TR>
+                    <TR>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                    </TR>
+                    <TR>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                    </TR>
+                    <TR>
+                        <TD>&lt;&amp;&gt;&quot;&apos;</TD>
+                        <TD>&lt;&amp;&gt;&quot;&apos;</TD>
+                        <TD>&lt;&gt;</TD>
+                        <TD> ab  </TD>
+                        <TD>смешанный ASCII</TD>
+                    </TR>
+                    <TR>
+                        <TD>exactly10!</TD>
+                        <TD>multi word text</TD>
+                        <TD>x</TD>
+                        <TD>ÅÄÖ</TD>
+                        <TD>trail  </TD>
+                    </TR>
+                    <TR>
+                        <TD>tab	in</TD>
+                        <TD>tab	in</TD>
+                        <TD>  </TD>
+                        <TD>€</TD>
+                        <TD>  lead</TD>
+                    </TR>
+                </TABLEDATA>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

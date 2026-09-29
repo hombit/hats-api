@@ -19,7 +19,8 @@
 
 use std::time::Instant;
 
-use axum::extract::rejection::StringRejection;
+use axum::body::Bytes;
+use axum::extract::rejection::BytesRejection;
 use axum::extract::{RawQuery, State};
 use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::{IntoResponse, Response};
@@ -29,6 +30,7 @@ use crate::app::routes::tap::answer::{OVERFLOW_HEADER, answered};
 use crate::app::routes::tap::format;
 use crate::app::routes::tap::parameters::{self, Parameters};
 use crate::app::routes::tap::run::{self, Answered};
+use crate::app::routes::tap::upload::Parts;
 use crate::app::service::Service;
 use crate::error::ApiError;
 
@@ -38,15 +40,15 @@ pub(in crate::app) async fn tap_sync_get(
     RawQuery(query): RawQuery,
 ) -> Response {
     let pairs = parameters::pairs(query.as_deref().unwrap_or_default());
-    answered(sync(&service, &pairs).await)
+    answered(sync(&service, &pairs, &Parts::default()).await)
 }
 
 /// The same parameters in a form body, which is what a client sends for a statement too
-/// long to put in a url.
+/// long to put in a url — or in a multipart one, which is how it sends a table inline.
 pub(in crate::app) async fn tap_sync_post(
     State(service): State<Service>,
     headers: HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     answered(posted(&service, &headers, body).await)
 }
@@ -54,16 +56,20 @@ pub(in crate::app) async fn tap_sync_post(
 async fn posted(
     service: &Service,
     headers: &HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
-    let pairs = parameters::posted(headers, body)?;
-    sync(service, &pairs).await
+    let submitted = parameters::submitted(service, headers, body).await?;
+    sync(service, &submitted.pairs, &submitted.parts).await
 }
 
 /// One statement, from the parameters to the response.
-async fn sync(service: &Service, pairs: &[(String, String)]) -> Result<Response, ApiError> {
+async fn sync(
+    service: &Service,
+    pairs: &[(String, String)],
+    parts: &Parts,
+) -> Result<Response, ApiError> {
     let started = Instant::now();
-    let parameters = Parameters::read(pairs)?;
+    let parameters = Parameters::read(pairs, parts)?;
     // Before the statement is even parsed: a format this service cannot write makes the
     // rest of the request moot, and refusing costs nothing.
     //

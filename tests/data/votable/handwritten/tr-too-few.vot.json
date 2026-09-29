@@ -1,0 +1,8 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "a row has fewer cells than the table has columns",
+ "notes": null
+}

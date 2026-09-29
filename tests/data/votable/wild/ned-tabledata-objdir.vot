@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="NASA/IPAC Extragalatic Database (NED)">NED VO Table Access Protocol (TAP) Service</INFO>
+<INFO name="QUERY" value="SELECT TOP 10 objid, prefname, prefphytype, ra, dec, uncmaja, zflag, z, zunc, n_crosref, n_notes FROM NEDTAP.objdir WHERE CONTAINS(POINT('J2000', ra, dec), CIRCLE('J2000', 10.68, 41.27, 0.05))=1"/>
+<TABLE name="result_S1790649034985">
+<FIELD datatype="long" name="objid" ucd="meta.id;src">
+<DESCRIPTION>Internal identifier for the object in NED</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="prefname" ucd="meta.id.cross">
+<DESCRIPTION>preferred object name</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="prefphytype" ucd="src.class">
+<DESCRIPTION>NED preferred object type</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="ra" ucd="pos.eq.ra" unit="deg">
+<DESCRIPTION>RA in decimal degrees of the object Equatorial Coordinate System, J2000.0</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="dec" ucd="pos.eq.dec" unit="deg">
+<DESCRIPTION>DEC in decimal degrees of the object Equatorial Coordinate System, J2000.0</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="uncmaja" ucd="stat.error;pos.errorEllipse;stat.max" unit="arcsec">
+<DESCRIPTION>Uncertainty Ellipse, Semimajor Axis in arcseconds</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="zflag" ucd="meta.code;src.redshift">
+<DESCRIPTION>Redshift flag</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="z" ucd="src.redshift">
+<DESCRIPTION>Redshift in z.</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="zunc" ucd="stat.error;src.redshift">
+<DESCRIPTION>Redshift Uncertainty</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="n_crosref" ucd="meta.number">
+<DESCRIPTION>Number of references</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="n_notes" ucd="meta.number">
+<DESCRIPTION>Number of notes data frames</DESCRIPTION>
+</FIELD>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>182324325</TD>
+    <TD>2XMM J004234.2+411437</TD>
+    <TD></TD>
+    <TD>10.64281</TD>
+    <TD>41.24379583333</TD>
+    <TD>22.4</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324326</TD>
+    <TD>2XMM J004234.6+411557</TD>
+    <TD></TD>
+    <TD>10.64448208333</TD>
+    <TD>41.26591194444</TD>
+    <TD>24.3</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324334</TD>
+    <TD>2XMM J004236.8+411702</TD>
+    <TD></TD>
+    <TD>10.65363916667</TD>
+    <TD>41.28410194444</TD>
+    <TD>13.7</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324336</TD>
+    <TD>2XMM J004237.0+411732</TD>
+    <TD></TD>
+    <TD>10.65447916667</TD>
+    <TD>41.29236</TD>
+    <TD>3.62</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324339</TD>
+    <TD>2XMM J004237.8+411647</TD>
+    <TD></TD>
+    <TD>10.65785</TD>
+    <TD>41.27997583333</TD>
+    <TD>14.2</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324340</TD>
+    <TD>2XMM J004237.9+411656</TD>
+    <TD></TD>
+    <TD>10.65809583333</TD>
+    <TD>41.28222777778</TD>
+    <TD>15.9</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324343</TD>
+    <TD>2XMM J004239.5+411511</TD>
+    <TD></TD>
+    <TD>10.66466208333</TD>
+    <TD>41.25316694444</TD>
+    <TD>7.65</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324348</TD>
+    <TD>2XMM J004241.4+411451</TD>
+    <TD></TD>
+    <TD>10.67275</TD>
+    <TD>41.24766083333</TD>
+    <TD>12.4</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324354</TD>
+    <TD>2XMM J004242.8+411341</TD>
+    <TD></TD>
+    <TD>10.678515</TD>
+    <TD>41.22806194444</TD>
+    <TD>25.3</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+  <TR>
+    <TD>182324359</TD>
+    <TD>2XMM J004243.9+411550</TD>
+    <TD></TD>
+    <TD>10.68301916667</TD>
+    <TD>41.26394694444</TD>
+    <TD>1.05</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>2</TD>
+    <TD>0</TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

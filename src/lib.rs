@@ -42,3 +42,4 @@ pub mod output;
 pub mod sky;
 pub mod storage;
 pub mod tap;
+pub mod votable;

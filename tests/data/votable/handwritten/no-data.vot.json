@@ -1,0 +1,20 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [
+  {
+   "name": "a",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [],
+ "refuse": null,
+ "notes": "A TABLE with no DATA is its columns and no rows."
+}

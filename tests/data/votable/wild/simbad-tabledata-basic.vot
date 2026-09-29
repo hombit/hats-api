@@ -1,0 +1,233 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/votable-1.3.xsd">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="CDS">SIMBAD TAP Service</INFO>
+<INFO name="QUERY" value="SELECT TOP 12 oid, main_id, ra, dec, coo_err_maj, coo_qual, plx_value, rvz_redshift, rvz_type, otype, nbref, update_date, coo_bibcode FROM basic WHERE ra BETWEEN 10 AND 10.2 AND dec BETWEEN 41 AND 41.5 ORDER BY oid"/>
+<TABLE name="result_S1790648337724">
+<FIELD datatype="long" name="oid" ucd="meta.record">
+<DESCRIPTION>Object internal identifier</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="main_id" ucd="meta.id;meta.main" utype="mango:MangoObject.identifier">
+<DESCRIPTION>Main identifier for an object</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="ra" ucd="pos.eq.ra;meta.main" unit="deg" utype="mango:EpochPosition.longitude[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Right ascension</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="dec" ucd="pos.eq.dec;meta.main" unit="deg" utype="mango:EpochPosition.latitude[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Declination</DESCRIPTION>
+</FIELD>
+<FIELD datatype="float" name="coo_err_maj" ucd="phys.angSize.smajAxis;pos.errorEllipse;pos.eq" unit="mas" utype="mango:EpochPosition.errors.position/mango:error.PErrorEllipse.semiMajorAxis[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Coordinate error major axis</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="1" datatype="char" name="coo_qual" ucd="meta.code.qual;pos.eq">
+<DESCRIPTION>Coordinate quality</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="plx_value" ucd="pos.parallax.trig" unit="mas" utype="mango:EpochPosition.parallax[CS.spaceSys=ICRS CT.epoch=J2000]">
+<DESCRIPTION>Parallax</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="rvz_redshift" ucd="src.redshift">
+<DESCRIPTION>redshift</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="1" datatype="char" name="rvz_type">
+<DESCRIPTION>Radial velocity / redshift type</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="otype" ucd="src.class" utype="mango:Label.text[CT.vocabulary=https://www.ivoa.net/rdf/uat#classification]">
+<DESCRIPTION>Object type</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="nbref" ucd="meta.bib;arith.sum">
+<DESCRIPTION>number of references</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="update_date" ucd="time.processing">
+<DESCRIPTION>Date of last modification</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="coo_bibcode" ucd="meta.bib.bibcode;pos.eq">
+<DESCRIPTION>Coordinate reference</DESCRIPTION>
+</FIELD>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD>1556410</TD>
+    <TD>NVSS J004013+410845</TD>
+    <TD>10.056299999999998</TD>
+    <TD>41.14658</TD>
+    <TD>5000.0</TD>
+    <TD>D</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>13</TD>
+    <TD>2025-08-16</TD>
+    <TD>2017A&amp;A...598A..78I</TD>
+  </TR>
+  <TR>
+    <TD>1556411</TD>
+    <TD>WSTB 37W53</TD>
+    <TD>10.075</TD>
+    <TD>41.481944444444444</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>4</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556412</TD>
+    <TD>WSTB 37W56</TD>
+    <TD>10.101666666666667</TD>
+    <TD>41.34</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>5</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556413</TD>
+    <TD>WSTB 37W57</TD>
+    <TD>10.103333333333333</TD>
+    <TD>41.120833333333344</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>10</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556503</TD>
+    <TD>V* PT And</TD>
+    <TD>10.101601350000001</TD>
+    <TD>41.067551640000005</TD>
+    <TD>34.6</TD>
+    <TD>C</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>CV*</TD>
+    <TD>24</TD>
+    <TD>2025-02-28</TD>
+    <TD>2017yCat.2349....0C</TD>
+  </TR>
+  <TR>
+    <TD>1556597</TD>
+    <TD>WSTB 37W54</TD>
+    <TD>10.072083333333333</TD>
+    <TD>41.16594444444445</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>1</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556598</TD>
+    <TD>NVSS J004023+412928</TD>
+    <TD>10.10122</TD>
+    <TD>41.49208999999999</TD>
+    <TD>5000.0</TD>
+    <TD>D</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>3</TD>
+    <TD>2025-08-16</TD>
+    <TD>2017A&amp;A...598A..78I</TD>
+  </TR>
+  <TR>
+    <TD>1556601</TD>
+    <TD>WSTB 37W61</TD>
+    <TD>10.149</TD>
+    <TD>41.08316666666667</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>1</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556602</TD>
+    <TD>WSTB 37W62</TD>
+    <TD>10.152416666666666</TD>
+    <TD>41.14480555555556</TD>
+    <TD></TD>
+    <TD>E</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>Rad</TD>
+    <TD>2</TD>
+    <TD>2025-08-25</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556899</TD>
+    <TD>BA 1-417</TD>
+    <TD>10.154875</TD>
+    <TD>41.251194444444444</TD>
+    <TD></TD>
+    <TD>D</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>EmO</TD>
+    <TD>1</TD>
+    <TD>2006-09-30</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1556917</TD>
+    <TD>BA 1-442</TD>
+    <TD>10.149958333333332</TD>
+    <TD>41.02086111111112</TD>
+    <TD></TD>
+    <TD>D</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>EmO</TD>
+    <TD>1</TD>
+    <TD>2006-09-30</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>1557030</TD>
+    <TD>BA 1-445</TD>
+    <TD>10.064749999999998</TD>
+    <TD>41.01766666666666</TD>
+    <TD></TD>
+    <TD>D</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>EmO</TD>
+    <TD>2</TD>
+    <TD>2015-01-14</TD>
+    <TD></TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns="http://www.ivoa.net/xml/VOTable/v1.3"
+  xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3">
+ <DESCRIPTION>
+   VizieR Astronomical Server vizier.cds.unistra.fr
+    Date: 2026-09-29T10:06:02 [V7.6]
+   Explanations and Statistics of UCDs:			See LINK below
+   In case of problem, please report to:	cds-question@unistra.fr
+ </DESCRIPTION>
+<!-- VOTable description at http://www.ivoa.net/Documents/latest/VOT.html -->
+<INFO name="service_protocol" value="ASU">  IVOID of the protocol through which the data was retrieved</INFO>
+<INFO name="request_date" value="2026-09-29T10:06:02">  Query execution date</INFO>
+<INFO name="request" value="https://vizier.cds.unistra.fr/viz-bin/votable?-source=I/355/gaiadr3&amp;-out.max=10&amp;-out=Source,RA_ICRS,DE_ICRS,Plx,pmRA,RUWE,Gmag,RV,VarFlag,NSS,PQSO,Teff,SolID&amp;-c=56.75+24.12&amp;-c.rm=3&amp;-out.form=bin64">  Full request URL</INFO>
+<INFO name="contact" value="cds-question@unistra.fr">  Email or URL to contact publisher</INFO>
+<INFO name="server_software" value="VizieR/7.6">  Software version</INFO>
+<INFO name="publisher" value="CDS">  Data centre that produced the VOTable</INFO>
+
+<!--
+Execution Reports
+ -->
+<INFO ID="Target" name="-c" value="056.750000+24.120000,rm=3.">
+Constraint -out.form=bin64</INFO>
+
+<RESOURCE ID="yCat_1355" name="I/355" type="results">
+  <DESCRIPTION>Gaia DR3 Part 1. Main source (Gaia Collaboration, 2022)</DESCRIPTION>  <INFO name="ivoid" value="ivo://cds.vizier/i/355">    IVOID of underlying data collection  </INFO>
+  <INFO name="data_ivoid" value="ivo://cds.vizier/i/355">    IVOID of underlying data collection  </INFO>
+  <INFO name="creator" value="Gaia collaboration">    First author or institution  </INFO>
+  <INFO name="cites" value="bibcode:2022yCat.1355....0G">    Bibcode of the dataset  </INFO>
+  <INFO name="journal" value="yCat">    Journal name  </INFO>
+  <INFO name="original_date" value="2022">    Year of the article publication  </INFO>
+  <INFO name="reference_url" value="https://cdsarc.cds.unistra.fr/viz-bin/cat/I/355">    Dataset landing page  </INFO>
+  <INFO name="citation" value="doi:10.26093/cds/vizier.1355">    Dataset identifier that can be used for citation  </INFO>
+  <INFO name="publication_date" value="2024-12-12">    Date of first publication in the data centre  </INFO>
+  <INFO name="rights_uri" value="https://cds.unistra.fr/vizier-org/licences_vizier.html">    Licence URI  </INFO>
+
+  <COOSYS ID="H_2016.000" system="ICRS" epoch="2016.000"/>
+  <TABLE ID="I_355_gaiadr3" name="I/355/gaiadr3">
+    <DESCRIPTION>Gaia DR3 source catalog (1811709771 sources)</DESCRIPTION>
+<!-- Gaia data release 3 (Gaia DR3). (\originalcolumnnames)\vizContent{timeSerie}\vizContent{spectrum} -->
+
+    <!-- RowName: -c=${$poseq}&-c.rs=0.004 -->
+    <!-- Definitions of GROUPs and FIELDs -->
+
+<!-- +++No column could be found to attach a LINK in table: I/355/gaiadr3 -->
+    <FIELD name="Source" ucd="meta.id;meta.main" datatype="long" width="19"><!-- ucd="ID_MAIN" -->
+      <DESCRIPTION>Unique source identifier (unique within a particular Data Release) (source_id)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="RA_ICRS" ucd="pos.eq.ra;meta.main" ref="H_2016.000" datatype="double" width="15" precision="11" unit="deg"><!-- ucd="POS_EQ_RA_MAIN" -->
+      <DESCRIPTION>Right ascension (ICRS) at Ep=2016.0 (ra)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="DE_ICRS" ucd="pos.eq.dec;meta.main" ref="H_2016.000" datatype="double" width="15" precision="11" unit="deg"><!-- ucd="POS_EQ_DEC_MAIN" -->
+      <DESCRIPTION>Declination (ICRS) at Ep=2016.0 (dec)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="Plx" ucd="pos.parallax.trig" datatype="double" width="9" precision="4" unit="mas"><!-- ucd="POS_PARLX_TRIG" -->
+      <DESCRIPTION>? Parallax (parallax)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="pmRA" ucd="pos.pm;pos.eq.ra" ref="H_2016.000" datatype="double" width="9" precision="3" unit="mas/yr"><!-- ucd="POS_EQ_PMRA" -->
+      <DESCRIPTION>? Proper motion in right ascension direction, pmRA*cosDE (pmra)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="RUWE" ucd="stat.error" datatype="double" width="7" precision="3"><!-- ucd="ERROR" -->
+      <DESCRIPTION>? Renormalised unit weight error (ruwe)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Gmag" ucd="phot.mag;em.opt" datatype="double" width="9" precision="6" unit="mag"><!-- ucd="PHOT_MAG_OPTICAL" -->
+      <DESCRIPTION>? G-band mean magnitude (phot_g_mean_mag)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="RV" ucd="spect.dopplerVeloc.opt;em.opt.I" datatype="double" width="7" precision="2" unit="km/s"><!-- ucd="VELOC_BARYCENTER" -->
+      <DESCRIPTION>? Radial velocity (radial_velocity)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="VarFlag" ucd="meta.code;src.var" datatype="char" arraysize="13*"><!-- ucd="CODE_VARIAB" -->
+      <DESCRIPTION>Photometric variability flag (phot_variable_flag)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="NSS" ucd="meta.code.status" datatype="unsignedByte" width="1"><!-- ucd="CODE_MISC" -->
+      <DESCRIPTION>[0/7] Flag indicating the availability of additional information in the various Non-Single Star tables (non_single_star)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="PQSO" ucd="stat.probability" datatype="double" width="9" precision="6"><!-- ucd="STAT_PROBABILITY" -->
+      <DESCRIPTION>? Probability from DSC-Combmod of being a quasar (data used: BP/RP spectrum) (classprob_dsc_combmod_quasar)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Teff" ucd="phys.temperature.effective" datatype="double" width="7" precision="1" unit="K"><!-- ucd="PHYS_TEMP_EFFEC" -->
+      <DESCRIPTION>? Effective temperature from GSP-Phot Aeneas best library using BP/RP spectra (teff_gspphot)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="SolID" ucd="meta.version" datatype="long" width="19"><!-- ucd="ID_VERSION" -->
+      <DESCRIPTION>Solution Identifier (solution_id)</DESCRIPTION>
+    </FIELD>
+<DATA><BINARY><STREAM encoding="base64">
+AOevaQAWaABATF+RZclqLkA4Es+GqWdl////////////////////////////////QDUVwWFe
+v6n//////////wAAAA1OT1RfQVZBSUxBQkxFAD8qHrAdglqC//////////8WtMQAAAAAAADn
+r2kALk6AQExgDZIZ8YFAOBILPFwWvD/iJhrm+LbcQA7aZWMjDZw/8DfTQIRUjkAy6YF7laKU
+//////////8AAAANTk9UX0FWQUlMQUJMRQA9zSH1ALj7vUCtlURaHKwIFrTEAAAAAAAA5694
+ABBLAEBMXftjH+kvQDgUGXHVD+4/8LyuH0jHtT/sAQAx6dp6P/AWLbl2rrNAM+/Kp1ie/v//
+////////AAAADU5PVF9BVkFJTEFCTEUAPvnEJlvOVZX//////////xa0xAAAAAAAAOeveAAQ
+jgBATF4w1lsSg0A4FtRN6hE7P/rFl6kDIFdAQoh07FspGj/vpcaY1iU7QDOZVwPy08j/////
+/////wAAAA1OT1RfQVZBSUxBQkxFAD3Qo+XcCyEs//////////8WtMQAAAAAAADnr3kAEIaA
+QExdtTV59WVAOBSfIM6B6T/3zth8YZqMwASRkakxTqc/8Ht4fBKgFkA0iI4EOiFk////////
+//8AAAANTk9UX0FWQUlMQUJMRQA948RvVN7Fef//////////FrTEAAAAAAAA5695ABdegEBM
+XlZFJXf3QDgUUr6AAjX///////////////////////////////9ANOPYJ3PiUP//////////
+AAAADU5PVF9BVkFJTEFCTEUAPzSSv7rfcj3//////////xa0xAAAAAAAAOevkQAQh4BATGD7
+6Pjpw0A4EtsRdGKwv+iGLP9KvAY/5UzDnL3PcD/w0J075YlcQDQHDfm9xqD//////////wAA
+AA1OT1RfQVZBSUxBQkxFAD9y9l+HEvMR//////////8WtMQAAAAAAADnr5gAEHOAQExjTdXT
+cdNAOBOLd+OxiT/uDejjfQlqQAsWVqTW+xI/8Kq9DTwopUAyiJTER8MN//////////8AAAAN
+Tk9UX0FWQUlMQUJMRQA9UjvtHrhJjECsv9bi6xxDFrTEAAAAAAAA56+YABChAEBMY5AdzXU+
+QDgXKQmcvB8/2FFm3LQtx0Af/ZDPGWfYP/B+oeFmt8VAMjUZR8+iav//////////AAAADU5P
+VF9BVkFJTEFCTEUAPe9BVJpubkH//////////xa0xAAAAAAAAOevmQAWZ4BATGJ80NROGkA4
+FHnipppXP/RY6nkJFzdAJX0/xZxMRT/4nYCUDxYdQDSgHX2/SID//////////wAAAA1OT1Rf
+QVZBSUxBQkxFAD6T+R/L+Wai//////////8WtMQAAAAA AA==
+</STREAM></BINARY></DATA>
+</TABLE>
+<INFO name="matches" value="10">matching records</INFO>
+
+<INFO name="Warning" value="truncated result (maxtup=10)"/><INFO name="QUERY_STATUS" value="OVERFLOW"> value="truncated result (maxtup=10)"</INFO>
+
+</RESOURCE>
+</VOTABLE>

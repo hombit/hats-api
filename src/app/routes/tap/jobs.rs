@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::extract::rejection::StringRejection;
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, StringRejection};
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -26,13 +27,14 @@ use crate::app::routes::tap::answer::{OVERFLOW_HEADER, XML_CONTENT_TYPE, answere
 use crate::app::routes::tap::format;
 use crate::app::routes::tap::parameters::{self, Parameters};
 use crate::app::routes::tap::run;
+use crate::app::routes::tap::upload::{Part, Parts};
 use crate::app::service::Service;
 use crate::config::{AsyncConfig, LimitsConfig};
 use crate::error::ApiError;
 use crate::output::votable;
 use crate::tap::jobs::{
-    Bounds, Change, Job, JobId, JobStore, MemoryJobStore, Rendered, Results, Runner, Slots, Work,
-    Writing,
+    Bounds, Change, Held, Job, JobId, JobStore, MemoryJobStore, Rendered, Results, Runner, Slots,
+    Work, Writing,
 };
 use crate::tap::uws;
 
@@ -161,22 +163,30 @@ struct Query {
 
 #[async_trait]
 impl Work for Query {
-    async fn run(
-        &self,
-        job: Job,
-        credentials: Vec<String>,
-        into: &mut Writing,
-    ) -> Result<Rendered, ApiError> {
+    async fn run(&self, job: Job, held: Held, into: &mut Writing) -> Result<Rendered, ApiError> {
         // The credentials go back where the caller wrote them, so that what is read here is
         // the request they sent rather than a second arrangement of it. They were taken out
         // on the way in, and only so that the store never holds one.
         let mut pairs = job.parameters.clone();
         pairs.extend(
-            credentials
+            held.credentials
                 .into_iter()
                 .map(|value| (CREDENTIAL.to_owned(), value)),
         );
-        let parameters = Parameters::read(&pairs)?;
+        // The inline tables likewise, read back off the disk they waited on.
+        let mut parts = Parts::default();
+        for file in held.files {
+            let bytes = tokio::fs::read(&file.path).await.map_err(|error| {
+                tracing::warn!(path = %file.path.display(), %error, "a kept upload is gone");
+                ApiError::internal("this job's uploaded table could not be read back")
+            })?;
+            parts.push(Part {
+                name: file.name,
+                content_type: file.content_type,
+                bytes: bytes.into(),
+            });
+        }
+        let parameters = Parameters::read(&pairs, &parts)?;
         // `STREAMING` is read and not acted on here, which is the one place in this service a
         // parameter is. TAP §2.7 is explicit that a spurious parameter "must" be ignored,
         // answered normally and not reported as an error, and on this resource the name is
@@ -214,7 +224,7 @@ impl Work for Query {
 pub(in crate::app) async fn create(
     State(state): State<crate::app::service::AppState>,
     headers: HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     answered(created(&state, &headers, body).await)
 }
@@ -222,13 +232,13 @@ pub(in crate::app) async fn create(
 async fn created(
     state: &crate::app::service::AppState,
     headers: &HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Result<Response, ApiError> {
     let jobs = state.jobs()?;
-    let pairs = parameters::posted(headers, body)?;
+    let submitted = parameters::submitted(&state.service, headers, body).await?;
     // The one thing read at submission, and only so that it is not written down: everything
     // else about these parameters is the runner's to check when the query runs.
-    let (kept, credentials) = split_credentials(pairs);
+    let (kept, credentials) = split_credentials(submitted.pairs);
     let run_id = value(&kept, "RUNID").map(str::to_owned);
 
     let now = Utc::now();
@@ -242,7 +252,9 @@ async fn created(
         now,
     );
     jobs.store.create(job).await?;
-    jobs.runner.hold(&id, credentials);
+    jobs.runner
+        .hold(&id, credentials, files(&submitted.parts))
+        .await?;
 
     // UWS §2.2.3.1 notes the facility: a client may have the job "placed into a potentially
     // running state by adding ?PHASE=RUN".
@@ -638,24 +650,46 @@ pub(in crate::app) async fn set_job_parameters(
     State(state): State<crate::app::service::AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
-    body: Result<String, StringRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let acted = async {
         let jobs = state.jobs()?;
-        let pairs = parameters::posted(&headers, body)?;
+        let submitted = parameters::submitted(&state.service, &headers, body).await?;
         let id: JobId = id.parse()?;
-        let (kept, credentials) = split_credentials(pairs);
+        let (kept, credentials) = split_credentials(submitted.pairs);
         for (name, value) in kept {
+            let accumulate = parameters::is_repeatable(&name);
             jobs.store
-                .apply(&id, Change::Parameter { name, value })
+                .apply(
+                    &id,
+                    Change::Parameter {
+                        name,
+                        value,
+                        accumulate,
+                    },
+                )
                 .await?;
         }
-        if !credentials.is_empty() {
-            jobs.runner.hold(&id, credentials);
-        }
+        jobs.runner
+            .hold(&id, credentials, files(&submitted.parts))
+            .await?;
         Ok(see_other(&where_job(&headers, &state.service, &id)))
     };
     answered(acted.await)
+}
+
+/// The tables a request sent, as what the runner keeps of them.
+fn files(parts: &Parts) -> Vec<(String, Option<String>, Bytes)> {
+    parts
+        .iter()
+        .map(|part| {
+            (
+                part.name.clone(),
+                part.content_type.clone(),
+                part.bytes.clone(),
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------- shared bits

@@ -5,12 +5,17 @@
 //! be smaller on the wire, but a response is compressed on the way out anyway, and base64
 //! of a packed buffer is not.
 //!
-//! **Flat columns only.** A struct or a list column is refused by name. A nested column
-//! becomes a `GROUP` of `FIELDref`s over dotted `FIELD`s, and what a `FIELD` under one
-//! says is not settled: a variable-length array of variable-length strings has no
-//! spelling in VOTable at all, and neither has a null inside an array. Guessing at those
-//! would put a value in an answer that a reader cannot tell from a different value, so
-//! the column is refused until they are decided.
+//! **A list of numbers or booleans is an array; anything deeper is refused by name.** A
+//! numeric array is what VOTable was built around, and one item that is missing has a
+//! spelling for a float (`NaN`) and a boolean (`?`), and for an integer only where the column
+//! carries a `VALUES` `null` — which a VOTable upload brings and nothing else does. A list of
+//! strings and a struct are the nested-column question: a nested column becomes a `GROUP` of
+//! `FIELDref`s over dotted `FIELD`s, and a variable-length array of variable-length strings
+//! has no spelling in VOTable at all. Guessing at those would put a value in an answer that a
+//! reader cannot tell from a different value, so the column is refused until they are decided.
+//!
+//! A column a VOTable upload declared is described as that document described it, which is
+//! what `declaration` decides.
 //!
 //! Three things the mapping decides, each because the alternative returns a wrong value
 //! rather than an error:
@@ -46,6 +51,7 @@ use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
 use crate::output::{instant, stream};
+use crate::votable::field as votable_field;
 
 /// The media type IVOA registers for a VOTable document.
 pub const CONTENT_TYPE: &str = "application/x-votable+xml";
@@ -126,21 +132,39 @@ impl stream::Encoder for Document {
         // statement can select one twice. The second one keeps its name and goes without.
         let mut identified = Vec::new();
         for field in schema.fields() {
-            let spelled = spelling(field)?;
+            let declared = declaration(field)?;
             let name = attribute(field.name())?;
             let _ = write!(out, "<FIELD name=\"{name}\"");
             if is_xml_name(field.name()) && !identified.contains(&field.name()) {
                 identified.push(field.name());
                 let _ = write!(out, " ID=\"{name}\"");
             }
-            let _ = write!(out, " datatype=\"{}\"", spelled.datatype);
-            if let Some(size) = spelled.arraysize {
-                let _ = write!(out, " arraysize=\"{size}\"");
+            let _ = write!(out, " datatype=\"{}\"", declared.datatype);
+            for (key, value) in [
+                ("arraysize", &declared.arraysize),
+                ("xtype", &declared.xtype),
+                ("unit", &declared.unit),
+                ("ucd", &declared.ucd),
+                ("utype", &declared.utype),
+            ] {
+                if let Some(value) = value {
+                    let _ = write!(out, " {key}=\"{}\"", attribute(value)?);
+                }
             }
-            if let Some(xtype) = spelled.xtype {
-                let _ = write!(out, " xtype=\"{xtype}\"");
+            if declared.description.is_none() && declared.null.is_none() {
+                out.push_str("/>\n");
+                continue;
             }
-            out.push_str("/>\n");
+            out.push('>');
+            if let Some(description) = &declared.description {
+                out.push_str("<DESCRIPTION>");
+                push_text(description, &mut out)?;
+                out.push_str("</DESCRIPTION>");
+            }
+            if let Some(null) = &declared.null {
+                let _ = write!(out, "<VALUES null=\"{}\"/>", attribute(null)?);
+            }
+            out.push_str("</FIELD>\n");
         }
         out.push_str("<DATA>\n<TABLEDATA>\n");
         Ok(out.into_bytes())
@@ -326,6 +350,160 @@ pub fn spelling(field: &Field) -> Result<Spelling, ApiError> {
     Ok(Spelling::plain(datatype, None))
 }
 
+/// Everything one `FIELD` of an answer says.
+///
+/// For a column a VOTable upload declared, that is what the document said of it —
+/// `field`'s keys, which survive a projection and are dropped by any expression — so a table
+/// uploaded and selected back is described the way its writer described it (TAP §3.5: "round
+/// trip all values"). What the document said is only taken where it still fits the column:
+/// a `bit` must still be a boolean and a complex number still a pair of floats, since a key
+/// that outlived the type it described would be a document claiming something false.
+#[derive(Debug, Default)]
+struct Declaration {
+    datatype: String,
+    arraysize: Option<String>,
+    xtype: Option<String>,
+    unit: Option<String>,
+    ucd: Option<String>,
+    utype: Option<String>,
+    description: Option<String>,
+    null: Option<String>,
+}
+
+fn declaration(field: &Field) -> Result<Declaration, ApiError> {
+    let said = |key: &str| {
+        field
+            .metadata()
+            .get(key)
+            .filter(|value| !value.is_empty())
+            .cloned()
+    };
+    let datatype = said(votable_field::DATATYPE);
+    let arraysize = said(votable_field::ARRAYSIZE);
+    let mut declared = match field.data_type() {
+        DataType::List(item) | DataType::LargeList(item) => {
+            let (datatype, _) = array_datatype(field, item, datatype.as_deref())?;
+            Declaration {
+                datatype: datatype.to_owned(),
+                arraysize: Some(
+                    arraysize
+                        .filter(|size| votable_field::is_variable(size))
+                        .unwrap_or_else(|| "*".to_owned()),
+                ),
+                ..Declaration::default()
+            }
+        }
+        DataType::FixedSizeList(item, size) => {
+            let (datatype, per_item) = array_datatype(field, item, datatype.as_deref())?;
+            let items = usize::try_from(*size).unwrap_or_default() / per_item;
+            let arraysize = match arraysize {
+                Some(written) if votable_field::fixed_count(&written) == Some(items) => {
+                    Some(written)
+                }
+                // A complex number is a pair already, so one of them is a scalar.
+                None if per_item == 2 && items == 1 => None,
+                _ => Some(items.to_string()),
+            };
+            Declaration {
+                datatype: datatype.to_owned(),
+                arraysize,
+                ..Declaration::default()
+            }
+        }
+        _ => {
+            let spelled = spelling(field)?;
+            let text = matches!(
+                field.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            );
+            let (datatype, arraysize) = match (field.data_type(), datatype.as_deref()) {
+                (DataType::Boolean, Some("bit")) => ("bit", spelled.arraysize.map(str::to_owned)),
+                // A string an upload declared keeps its own character type and width: DALI
+                // §3.3.3 has a timestamp be `char` in so many words, and a client that
+                // uploaded a `char` reads a `unicodeChar` back as a different type. A width of
+                // more than one dimension is an array of strings, which this column is not.
+                // No arraysize is one character, and so is `arraysize="1"`, which is deprecated
+                // (VOTable 1.3 erratum 3) and is written as the former.
+                (_, Some(declared @ ("char" | "unicodeChar"))) if text => (
+                    if declared == "char" {
+                        "char"
+                    } else {
+                        "unicodeChar"
+                    },
+                    match arraysize.as_deref().map(str::trim) {
+                        None | Some("1") => None,
+                        Some(size) if !size.contains('x') => Some(size.to_owned()),
+                        Some(_) => Some("*".to_owned()),
+                    },
+                ),
+                _ => (spelled.datatype, spelled.arraysize.map(str::to_owned)),
+            };
+            Declaration {
+                datatype: datatype.to_owned(),
+                arraysize,
+                xtype: spelled.xtype.map(str::to_owned),
+                ..Declaration::default()
+            }
+        }
+    };
+    if let Some(xtype) = said(votable_field::XTYPE) {
+        declared.xtype = Some(xtype);
+    }
+    declared.unit = said(votable_field::UNIT);
+    declared.ucd = said(votable_field::UCD);
+    declared.utype = said(votable_field::UTYPE);
+    declared.description = said(votable_field::DESCRIPTION);
+    // A magic value only means something for an integer, and only a VOTable's own column
+    // carries one.
+    if matches!(
+        declared.datatype.as_str(),
+        "unsignedByte" | "short" | "int" | "long"
+    ) {
+        declared.null = said(votable_field::NULL);
+    }
+    Ok(declared)
+}
+
+/// The primitive an array column's items are declared as, and how many Arrow values one of
+/// them is.
+///
+/// **Numbers and booleans only.** An array of strings has one spelling in VOTable, fixed-width
+/// and blank-padded, which loses a string's own trailing blanks; and a struct has none at all.
+/// Both are the nested-column question, refused by name until it is settled.
+fn array_datatype(
+    field: &Field,
+    item: &Field,
+    said: Option<&str>,
+) -> Result<(&'static str, usize), ApiError> {
+    let datatype = match (item.data_type(), said) {
+        (DataType::Boolean, Some("bit")) => "bit",
+        (DataType::Float32, Some("floatComplex")) => return Ok(("floatComplex", 2)),
+        (DataType::Float64, Some("doubleComplex")) => return Ok(("doubleComplex", 2)),
+        (
+            DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::UInt8
+            | DataType::Int32
+            | DataType::UInt16
+            | DataType::Int64
+            | DataType::UInt32
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64,
+            _,
+        ) => spelling(item)?.datatype,
+        (other, _) => {
+            return Err(ApiError::bad_request(format!(
+                "column {:?} is a list of {other}, and only a list of numbers or booleans has \
+                 a VOTable form here; ask for json or parquet, or leave the column out",
+                field.name()
+            )));
+        }
+    };
+    Ok((datatype, 1))
+}
+
 /// Appends one row's value to the document. The row is already known not to be null.
 type Push<'a> = Box<dyn Fn(usize, &mut String) -> Result<(), ApiError> + 'a>;
 
@@ -335,10 +513,12 @@ type Push<'a> = Box<dyn Fn(usize, &mut String) -> Result<(), ApiError> + 'a>;
 /// columnar, and deciding what a value is on every one of them is the whole cost of
 /// writing a wide table.
 fn push_rows(batch: &RecordBatch, out: &mut String) -> Result<(), ApiError> {
+    let schema = batch.schema();
     let columns = batch
         .columns()
         .iter()
-        .map(|array| Ok((array, writer(array)?)))
+        .zip(schema.fields())
+        .map(|(array, field)| Ok((array, writer(array, field)?)))
         .collect::<Result<Vec<(&ArrayRef, Push<'_>)>, ApiError>>()?;
     for row in 0..batch.num_rows() {
         out.push_str("<TR>");
@@ -364,8 +544,37 @@ fn push_rows(batch: &RecordBatch, out: &mut String) -> Result<(), ApiError> {
 /// The arms are [`spelling`]'s list, which has already run over the same schema — so the
 /// refusal at the end is what keeps the two from drifting rather than a case a request
 /// reaches.
-fn writer(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
+fn writer<'a>(array: &'a ArrayRef, field: &Field) -> Result<Push<'a>, ApiError> {
+    let declared = declaration(field)?;
     let push: Push<'_> = match array.data_type() {
+        DataType::List(_) => {
+            let lists = array.as_list::<i32>();
+            let offsets = lists.value_offsets();
+            let items = item_writer(lists.values(), &declared)?;
+            spans(items, &declared, move |row| between(offsets, row))
+        }
+        DataType::LargeList(_) => {
+            let lists = array.as_list::<i64>();
+            let offsets = lists.value_offsets();
+            let items = item_writer(lists.values(), &declared)?;
+            spans(items, &declared, move |row| between(offsets, row))
+        }
+        DataType::FixedSizeList(_, size) => {
+            let lists = array.as_fixed_size_list();
+            let size = usize::try_from(*size).unwrap_or_default();
+            let items = item_writer(lists.values(), &declared)?;
+            spans(items, &declared, move |row| {
+                let start = usize::try_from(lists.value_offset(row)).unwrap_or_default();
+                (start, start + size)
+            })
+        }
+        DataType::Boolean if declared.datatype == "bit" => {
+            let array = array.as_boolean();
+            Box::new(move |row, out| {
+                out.push(if array.value(row) { '1' } else { '0' });
+                Ok(())
+            })
+        }
         DataType::Boolean => {
             let array = array.as_boolean();
             // `T` and `F`, which is what the standard spells a boolean; `true` and
@@ -405,6 +614,105 @@ fn writer(array: &ArrayRef) -> Result<Push<'_>, ApiError> {
         }
     };
     Ok(push)
+}
+
+/// Where one row's items start and end among a list's values. Arrow's offsets are
+/// non-negative and one longer than the rows, so neither fallback is ever taken.
+fn between<O: Copy + TryInto<usize>>(offsets: &[O], row: usize) -> (usize, usize) {
+    let at = |index: usize| {
+        offsets
+            .get(index)
+            .and_then(|offset| (*offset).try_into().ok())
+            .unwrap_or_default()
+    };
+    (at(row), at(row + 1))
+}
+
+/// One cell of an array column: its items between two offsets into the list's values,
+/// separated the way §5.1 writes an array — whitespace between numbers, and a bit array as
+/// the unbroken run of `0` and `1` §6 spells it.
+fn spans<'a>(
+    items: Push<'a>,
+    declared: &Declaration,
+    span: impl Fn(usize) -> (usize, usize) + 'a,
+) -> Push<'a> {
+    let separator = match declared.datatype.as_str() {
+        "bit" => "",
+        _ => " ",
+    };
+    Box::new(move |row, out| {
+        let (start, end) = span(row);
+        for index in start..end {
+            if index > start {
+                out.push_str(separator);
+            }
+            items(index, out)?;
+        }
+        Ok(())
+    })
+}
+
+/// One item of an array column, by its index among the list's values.
+///
+/// **An item that is null has its own spelling or none.** A float is `NaN` and a boolean
+/// `?`, both of which §5.5 gives for exactly this; an integer has only its column's `VALUES`
+/// `null`, which a VOTable upload brings with it and nothing else does. An integer array with
+/// a null in it and no magic value is refused rather than written with a number that would
+/// read back as a measurement.
+fn item_writer<'a>(values: &'a ArrayRef, declared: &Declaration) -> Result<Push<'a>, ApiError> {
+    let bit = declared.datatype == "bit";
+    let inner: Push<'a> = match values.data_type() {
+        DataType::Boolean => {
+            let array = values.as_boolean();
+            Box::new(move |index, out| {
+                out.push(match (bit, array.value(index)) {
+                    (true, true) => '1',
+                    (true, false) => '0',
+                    (false, true) => 'T',
+                    (false, false) => 'F',
+                });
+                Ok(())
+            })
+        }
+        DataType::Int8 => integer::<Int8Type>(values),
+        DataType::Int16 => integer::<Int16Type>(values),
+        DataType::Int32 => integer::<Int32Type>(values),
+        DataType::Int64 => integer::<Int64Type>(values),
+        DataType::UInt8 => integer::<UInt8Type>(values),
+        DataType::UInt16 => integer::<UInt16Type>(values),
+        DataType::UInt32 => integer::<UInt32Type>(values),
+        DataType::Float16 => float::<Float16Type>(values),
+        DataType::Float32 => float::<Float32Type>(values),
+        DataType::Float64 => float::<Float64Type>(values),
+        other => {
+            return Err(ApiError::internal(format!(
+                "a list of {other} reached the VOTable writer"
+            )));
+        }
+    };
+    let magic = declared.null.clone();
+    let floating = matches!(
+        values.data_type(),
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    );
+    Ok(Box::new(move |index, out| {
+        if !values.is_null(index) {
+            return inner(index, out);
+        }
+        match (floating, bit, &magic) {
+            (true, _, _) => out.push_str("NaN"),
+            (false, false, _) if values.data_type() == &DataType::Boolean => out.push('?'),
+            (false, false, Some(magic)) => out.push_str(magic),
+            _ => {
+                return Err(ApiError::bad_request(
+                    "an array in this answer holds a missing integer or bit, which a VOTable \
+                     can write only with a magic value this column has none of; ask for \
+                     parquet",
+                ));
+            }
+        }
+        Ok(())
+    }))
 }
 
 /// DALI §3.3.3's form, as the formats arrow picks between. The strings are
@@ -811,14 +1119,15 @@ mod tests {
         );
     }
 
-    /// Not yet written, and refused by name rather than dropped from the answer.
+    /// A list of strings and a struct are not yet written, and are refused by name rather
+    /// than dropped from the answer.
     #[test]
     fn a_nested_column_is_refused_by_name() {
-        let item = Arc::new(Field::new("item", DataType::Int64, true));
+        let item = Arc::new(Field::new("item", DataType::Utf8, true));
         let list = ListArray::new_null(item, 1);
-        let refused = encode(&one("lightcurve", Arc::new(list))).unwrap_err();
-        assert!(refused.to_string().contains("lightcurve"), "{refused}");
-        assert!(refused.to_string().contains("nested"), "{refused}");
+        let refused = encode(&one("bands", Arc::new(list))).unwrap_err();
+        assert!(refused.to_string().contains("bands"), "{refused}");
+        assert!(refused.to_string().contains("list of"), "{refused}");
 
         let fields = Fields::from(vec![Field::new("mag", DataType::Float64, true)]);
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -833,6 +1142,190 @@ mod tests {
         })
         .unwrap_err();
         assert!(refused.to_string().contains("sources"), "{refused}");
+    }
+
+    /// A list of numbers is a VOTable array: whitespace between its items, `*` for a variable
+    /// one and the count for a fixed one, and `NaN` for a float item that is missing.
+    #[test]
+    fn a_list_of_numbers_is_an_array() {
+        use datafusion::arrow::array::FixedSizeListArray;
+        use datafusion::arrow::datatypes::{Float64Type, Int32Type};
+
+        let varying = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+            Some(vec![Some(1), Some(2), Some(4)]),
+            None,
+        ]);
+        let document = encode(&one("counts", Arc::new(varying))).unwrap();
+        assert!(
+            document.contains("datatype=\"int\" arraysize=\"*\""),
+            "{document}"
+        );
+        assert!(document.contains("<TD>1 2 4</TD>"), "{document}");
+        assert!(document.contains("<TD/>"), "{document}");
+
+        let fixed = FixedSizeListArray::from_iter_primitive::<Float64Type, _, _>(
+            vec![
+                Some(vec![Some(12.5), None]),
+                Some(vec![Some(0.0), Some(-1.0)]),
+            ],
+            2,
+        );
+        let document = encode(&one("position", Arc::new(fixed))).unwrap();
+        assert!(
+            document.contains("datatype=\"double\" arraysize=\"2\""),
+            "{document}"
+        );
+        assert!(document.contains("<TD>12.5 NaN</TD>"), "{document}");
+
+        // An integer item that is missing has no spelling of its own.
+        let missing =
+            ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![Some(1), None])]);
+        let refused = encode(&one("counts", Arc::new(missing))).unwrap_err();
+        assert!(refused.to_string().contains("magic"), "{refused}");
+    }
+
+    /// A parquet file's lists may be large and of any of the narrower numbers, and each is
+    /// written as the array it is.
+    #[test]
+    fn a_large_list_of_any_number_is_an_array() {
+        use datafusion::arrow::array::LargeListArray;
+        use datafusion::arrow::datatypes::{
+            ArrowPrimitiveType, Float16Type, Int8Type, UInt16Type, UInt32Type,
+        };
+
+        type Half = <Float16Type as ArrowPrimitiveType>::Native;
+
+        fn written<T: ArrowPrimitiveType>(values: [T::Native; 2]) -> String {
+            let list = LargeListArray::from_iter_primitive::<T, _, _>(vec![Some(values.map(Some))]);
+            encode(&one("a", Arc::new(list))).unwrap()
+        }
+        for (document, cell) in [
+            (written::<Int8Type>([-1, 2]), "<TD>-1 2</TD>"),
+            (written::<UInt16Type>([65535, 0]), "<TD>65535 0</TD>"),
+            (
+                written::<UInt32Type>([4294967295, 1]),
+                "<TD>4294967295 1</TD>",
+            ),
+            (
+                written::<Float16Type>([Half::from_f32(0.5), Half::from_f32(-2.0)]),
+                "<TD>0.5 -2</TD>",
+            ),
+        ] {
+            assert!(document.contains("arraysize=\"*\""), "{document}");
+            assert!(document.contains(cell), "{document}");
+        }
+    }
+
+    /// A column a VOTable upload declared is described the way that document described it —
+    /// and a declaration that no longer fits the column's type is not repeated.
+    #[test]
+    fn a_column_an_upload_declared_keeps_what_the_document_said() {
+        use datafusion::arrow::array::FixedSizeListArray;
+        use datafusion::arrow::datatypes::{Float32Type, Int16Type};
+
+        let said = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect::<std::collections::HashMap<_, _>>()
+        };
+        let complex = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+            vec![Some(vec![Some(1.0), Some(-2.0), Some(0.5), Some(0.25)])],
+            4,
+        );
+        let shorts =
+            ListArray::from_iter_primitive::<Int16Type, _, _>(vec![Some(vec![Some(3), None])]);
+        let bits = BooleanArray::from(vec![true]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("z", complex.data_type().clone(), true).with_metadata(said(&[
+                (votable_field::DATATYPE, "floatComplex"),
+                (votable_field::ARRAYSIZE, "2"),
+                (votable_field::UNIT, "Jy"),
+                (votable_field::DESCRIPTION, "visibility & phase"),
+            ])),
+            Field::new("counts", shorts.data_type().clone(), true).with_metadata(said(&[
+                (votable_field::DATATYPE, "short"),
+                (votable_field::ARRAYSIZE, "2x*"),
+                (votable_field::NULL, "-32768"),
+                (votable_field::UCD, "meta.number"),
+            ])),
+            Field::new("flag", DataType::Boolean, true)
+                .with_metadata(said(&[(votable_field::DATATYPE, "bit")])),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(complex), Arc::new(shorts), Arc::new(bits)],
+        )
+        .unwrap();
+        let document = encode(&QueryResult {
+            schema,
+            batches: vec![batch],
+            data_bytes_read: 0,
+        })
+        .unwrap();
+        assert!(
+            document.contains(
+                "datatype=\"floatComplex\" arraysize=\"2\" unit=\"Jy\">\
+                 <DESCRIPTION>visibility &amp; phase</DESCRIPTION></FIELD>"
+            ),
+            "{document}"
+        );
+        assert!(
+            document.contains(
+                "datatype=\"short\" arraysize=\"2x*\" ucd=\"meta.number\">\
+                 <VALUES null=\"-32768\"/></FIELD>"
+            ),
+            "{document}"
+        );
+        assert!(document.contains("datatype=\"bit\""), "{document}");
+        assert!(
+            document.contains("<TD>1 -2 0.5 0.25</TD><TD>3 -32768</TD><TD>1</TD>"),
+            "{document}"
+        );
+
+        // A string keeps its character type and width, which DALI §3.3.3 needs `char` to be
+        // for a timestamp, and a one-character one is written without the deprecated `1`.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("t", DataType::Utf8, true).with_metadata(said(&[
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "23"),
+                (votable_field::XTYPE, "timestamp"),
+            ])),
+            Field::new("c", DataType::Utf8, true).with_metadata(said(&[
+                (votable_field::DATATYPE, "char"),
+                (votable_field::ARRAYSIZE, "1"),
+            ])),
+        ]));
+        let document = encode(&QueryResult {
+            schema,
+            batches: Vec::new(),
+            data_bytes_read: 0,
+        })
+        .unwrap();
+        assert!(
+            document.contains(
+                "name=\"t\" ID=\"t\" datatype=\"char\" arraysize=\"23\" xtype=\"timestamp\"/>"
+            ),
+            "{document}"
+        );
+        assert!(
+            document.contains("name=\"c\" ID=\"c\" datatype=\"char\"/>"),
+            "{document}"
+        );
+
+        // A `bit` declaration on what is now a number is the document claiming something
+        // false, and is not repeated.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("n", DataType::Int16, true)
+                .with_metadata(said(&[(votable_field::DATATYPE, "bit")])),
+        ]));
+        let document = encode(&QueryResult {
+            schema,
+            batches: Vec::new(),
+            data_bytes_read: 0,
+        })
+        .unwrap();
+        assert!(document.contains("datatype=\"short\""), "{document}");
     }
 
     /// The schema is the whole of what is left to say when nothing matched, and a reader

@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3"><RESOURCE><TABLE><FIELD name="s" datatype="char" arraysize="*"/><FIELD name="n" datatype="int"/><DATA><TABLEDATA><!-- a comment --><TR><TD><![CDATA[<b>&]]></TD><TD>1</TD></TR><?pi ignored?><TR><TD>a &amp; b &lt;c&gt; &#x042F;&#65;</TD><TD>2</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>

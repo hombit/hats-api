@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="xtypes">
+            <FIELD name="ts" datatype="char" arraysize="*" xtype="timestamp"/>
+            <FIELD name="tsfix" datatype="char" arraysize="10" xtype="timestamp"/>
+            <FIELD name="pt" datatype="double" arraysize="2" unit="deg" ucd="pos.eq" xtype="point"/>
+            <FIELD name="fpt" datatype="float" arraysize="2" unit="deg" xtype="point"/>
+            <FIELD name="circ" datatype="double" arraysize="3" unit="deg" xtype="circle"/>
+            <FIELD name="poly" datatype="double" arraysize="*" unit="deg" xtype="polygon"/>
+            <FIELD name="intv" datatype="double" arraysize="2" xtype="interval"/>
+            <FIELD name="lintv" datatype="long" arraysize="2" xtype="interval"/>
+            <DATA>
+                <BINARY>
+                    <STREAM encoding="base64">
+AAAAFzIwMDAtMDEtMDJUMTU6MjA6MzAuNDU2MjAwMi0wMy0wNEAomZmZmZmaQEbM
+zMzMzM1BRMzNQjZmZkAomZmZmZmaQEbMzMzMzM0/4AAAAAAAAAAAAAhAJAAAAAAA
+AEAkAAAAAAAAQCRmZmZmZmZAJAAAAAAAAEAkZmZmZmZmQCRmZmZmZmZAJAAAAAAA
+AEAkZmZmZmZmP+AAAAAAAAA/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAATMjAw
+MS0wMi0wM1QwNDowNTowNjE5OTktMTItMzEAAAAAAAAAAMBWgAAAAAAAAAAAAMK0
+AAAAAAAAAAAAAEBWgAAAAAAAQGaAAAAAAAAAAAAGAAAAAAAAAAAAAAAAAAAAAD/w
+AAAAAAAAAAAAAAAAAAA/8AAAAAAAAD/wAAAAAAAA//AAAAAAAAAAAAAAAAAAAP//
+///////7AAAAAAAAAAUAAAAKMjAwMi0wMy0wNDIwMjAtMDItMjlAdn5mZmZmZkBW
+gAAAAAAAQ7PzM0K0AABAdn5mZmZmZsBWYAAAAAAAPrDG96C17Y0AAAAIQHXgAAAA
+AADAJAAAAAAAAEAkAAAAAAAAwCQAAAAAAABAJAAAAAAAAEAkAAAAAAAAQHXgAAAA
+AABAJAAAAAAAAAAAAAAAAAAAf/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFDIw
+MDAtMDEtMDJUMTU6MjA6MzBaMjAwMC0wMS0wMUBmgAAAAAAAAAAAAAAAAABDNAAA
+AAAAAD/wAAAAAAAAQAAAAAAAAABACAAAAAAAAAAAAAD/8AAAAAAAAH/wAAAAAAAA
+gAAAAAAAAAB//////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAA
+                    </STREAM>
+                </BINARY>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

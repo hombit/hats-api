@@ -1,0 +1,8 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "a STREAM whose data is elsewhere names a place for the reader to read",
+ "notes": null
+}

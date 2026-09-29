@@ -1,0 +1,28 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "TABLEDATA",
+  "columns": [
+    {"name": "i3", "datatype": "int", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d3", "datatype": "double", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "iv", "datatype": "int", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fv", "datatype": "float", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s10", "datatype": "short", "arraysize": "10*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "lv", "datatype": "long", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ubv", "datatype": "unsignedByte", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i2x3", "datatype": "int", "arraysize": "2x3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d2xs", "datatype": "double", "arraysize": "2x*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bool4", "datatype": "boolean", "arraysize": "4", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit5", "datatype": "bit", "arraysize": "5", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit12", "datatype": "bit", "arraysize": "12", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc2", "datatype": "floatComplex", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dcv", "datatype": "doubleComplex", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [[1, 2, 3], [1.5, -2.5, 1e+300], [1, 2, 4, 8, 16], [1.5, "NaN", -2.0], [1, 2], [-9223372036854775808, 9223372036854775807], [0, 255, 16], [0, 1, 2, 3, 4, 5], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [true, false, null, true], [true, false, true, true, false], [true, false, false, false, true, true, true, true, false, false, true, false], [1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]],
+    [[-2147483648, 0, 2147483647], ["NaN", "Infinity", "-Infinity"], null, null, null, null, null, [-1, -2, -3, -4, -5, -6], null, [false, false, false, false], [false, false, false, false, false], [false, false, false, false, false, false, false, false, false, false, false, false], [0.5, -0.5, "NaN", "NaN"], null],
+    [null, null, null, null, null, null, null, null, null, null, null, null, null, null],
+    [[7, 8, 9], [0.0, 1.0, 2.0], [-7], ["Infinity"], [-32768, 32767, 0, 1, 2, 3, 4, 5, 6, 7], [0], [1], [10, 20, 30, 40, 50, 60], [0.5, -0.5], [null, null, true, true], [true, true, true, true, true], [true, true, true, true, true, true, true, true, true, true, true, true], [0.0, 0.0, 0.0, 0.0], [0.5, -0.5]]
+  ],
+  "refuse": null,
+  "notes": "columns c8xs, c8x3, bitv of the source table are omitted: this writer cannot write them\nnot conformant, and the ground truth takes the evident meaning: double written as '+InF', which is not a TABLEDATA literal; double written as '-InF', which is not a TABLEDATA literal; float written as '+InF', which is not a TABLEDATA literal; float written as 'nan', which is not a TABLEDATA literal\nastropy 8.0.1 fails to read it: E02: astropy-tabledata-arrays.vot:68:6: E02: Incorrect number of elements in array. Expected multiple of 4, got 0\nSTILTS reads (as its BINARY2 output says): column 'bool4' row 0 is [true, false, false, true] where the file says [true, false, null, true] (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'bit5' row 0 is [true, false, false, false, false] where the file says [true, false, true, true, false] (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'bit12' row 0 is [true, false, false, false, false, false, false, false, false, false, false, false] where the file says [true, false, false, false, true, true, true, true, false, false, true, false] (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'd3' row 1 is [\"NaN\", \"NaN\", \"NaN\"] where the file says [\"NaN\", \"Infinity\", \"-Infinity\"]\nSTILTS reads (as its BINARY2 output says): column 'fv' row 3 is [\"NaN\"] where the file says [\"Infinity\"]"
+}

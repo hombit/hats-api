@@ -1,0 +1,30 @@
+{
+  "producer": "STILTS 3.5-6 (STIL 4.3-6)",
+  "serialization": "BINARY2",
+  "columns": [
+    {"name": "c00", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c01", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c02", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c03", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c04", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c05", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c06", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c07", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c08", "datatype": "char", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [null, 1000, 2.25, "v3", true, 1.25, -6000000000000, 7, "v8"],
+    [-5, null, 2.25, "v3", true, 1.25, -6000000000000, 7, "v8"],
+    [-5, 1000, "NaN", "v3", true, 1.25, -6000000000000, 7, "v8"],
+    [-5, 1000, 2.25, null, true, 1.25, -6000000000000, 7, "v8"],
+    [-5, 1000, 2.25, "v3", null, 1.25, -6000000000000, 7, "v8"],
+    [-5, 1000, 2.25, "v3", true, "NaN", -6000000000000, 7, "v8"],
+    [-5, 1000, 2.25, "v3", true, 1.25, null, 7, "v8"],
+    [-5, 1000, 2.25, "v3", true, 1.25, -6000000000000, null, "v8"],
+    [-5, 1000, 2.25, "v3", true, 1.25, -6000000000000, 7, null],
+    [-5, 1000, 2.25, "v3", true, 1.25, -6000000000000, 7, "v8"],
+    [null, null, "NaN", null, null, "NaN", null, null, null]
+  ],
+  "refuse": null,
+  "notes": "Written by STILTS from a TABLEDATA document, so an empty string or an empty variable-length array in the source was already null on the way in.\ndiffers from the source data: column 'c02' row 2 was null, the file says \"NaN\" (and 1 more rows)\ndiffers from the source data: column 'c05' row 5 was null, the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'c02' row 2 is null where the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'c03' row 3 is \"\" where the file says null (and 1 more rows)\nastropy 8.0.1 reads: column 'c05' row 5 is null where the file says \"NaN\" (and 1 more rows)\nastropy 8.0.1 reads: column 'c08' row 8 is \"\" where the file says null (and 1 more rows)"
+}

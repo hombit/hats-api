@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <INFO ID="producer_note" name="producer_note" value="corpus metadata table"/>
+ <RESOURCE type="results">
+  <INFO ID="QUERY_STATUS" name="QUERY_STATUS" value="OK"/>
+  <COOSYS ID="icrs" epoch="J2000" system="ICRS"/>
+  <TIMESYS ID="tt" refposition="TOPOCENTER" timeorigin="MJD-origin" timescale="TT"/>
+  <TABLE ID="metadata" name="metadata">
+   <DESCRIPTION>
+    A table whose metadata is the point
+   </DESCRIPTION>
+   <FIELD ID="col_ra" datatype="double" name="ra" precision="6" ref="icrs" ucd="pos.eq.ra;meta.main" unit="deg" utype="stc:AstroCoords.Position2D.Value2.C1" width="10">
+    <DESCRIPTION>
+     Right ascension (ICRS)
+    </DESCRIPTION>
+   </FIELD>
+   <FIELD ID="col_dec" datatype="double" name="dec" precision="6" ref="icrs" ucd="pos.eq.dec;meta.main" unit="deg" utype="stc:AstroCoords.Position2D.Value2.C2" width="10">
+    <DESCRIPTION>
+     Declination (ICRS)
+    </DESCRIPTION>
+   </FIELD>
+   <FIELD ID="col_mag" datatype="float" name="mag" precision="3" ucd="phot.mag;em.opt.V" unit="mag" width="6">
+    <DESCRIPTION>
+     V magnitude
+    </DESCRIPTION>
+    <VALUES>
+     <MIN inclusive="yes" value="-5.000"/>
+     <MAX inclusive="yes" value="30.000"/>
+    </VALUES>
+   </FIELD>
+   <FIELD ID="col_flag" datatype="short" name="flag" ucd="meta.code">
+    <DESCRIPTION>
+     Quality flag; -1 when unknown
+    </DESCRIPTION>
+    <VALUES null="-1">
+     <OPTION name="good" value="0"/>
+     <OPTION name="bad" value="1"/>
+    </VALUES>
+   </FIELD>
+   <FIELD ID="col_mjd" datatype="double" name="obs_mjd" precision="5" ref="tt" ucd="time.epoch" unit="d" width="12" xtype="mjd">
+    <DESCRIPTION>
+     Epoch of observation
+    </DESCRIPTION>
+   </FIELD>
+   <FIELD ID="col_url" arraysize="*" datatype="char" name="url" ucd="meta.ref.url">
+    <DESCRIPTION>
+     Where the &lt;preview&gt; &amp; "notes" live
+    </DESCRIPTION>
+    <LINK href="https://example.org/preview?id=${col_ra}&amp;amp=1"/>
+   </FIELD>
+   <PARAM ID="survey" arraysize="*" datatype="char" name="survey" ucd="meta.id" value="corpus"/>
+   <PARAM ID="epoch" datatype="double" name="epoch" unit="yr" value="2000"/>
+   <GROUP ID="position" name="position" ucd="pos.eq">
+    <DESCRIPTION>
+     Where the object is
+    </DESCRIPTION>
+    <FIELDref ref="col_ra"/>
+    <FIELDref ref="col_dec"/>
+    <PARAMref ref="epoch"/>
+   </GROUP>
+   <LINK href="https://example.org/table" title="about"/>
+   <DATA>
+    <BINARY>
+     <STREAM encoding="base64">
+QCVekgwGnoBARKJmZmZmZkBcKPYAAEDsUhAAAAAAAAAAFWh0dHBzOi8vZXhhbXBsZS5vcmcvYUBU9J0CA+Y/wBWQf2bobGZAgAAAAAFA7FIoAAAAAAAAAAB/+AAAAAAAAH/4AAAAAAAAf8AAAP//f/gAAAAAAAAAAAAdaHR0cHM6Ly9leGFtcGxlLm9yZy9jP3g9MSZ5PTI=     </STREAM>
+    </BINARY>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

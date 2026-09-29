@@ -27,7 +27,14 @@ class Unavailable(RuntimeError):
     """STILTS could not be run, which is not a fault of the service under test."""
 
 
-def query(command: list[str], base_url: str, adql: str, maxrec: int | None = None) -> Table:
+def query(
+    command: list[str],
+    base_url: str,
+    adql: str,
+    maxrec: int | None = None,
+    uploads: dict[str, Path] | None = None,
+    upload_format: str | None = None,
+) -> Table:
     """Run one ADQL statement through STILTS and read back what it got.
 
     The answer comes back as a VOTable written to a file and parsed by astropy, so what
@@ -36,6 +43,10 @@ def query(command: list[str], base_url: str, adql: str, maxrec: int | None = Non
 
     `sync=true` because that is what this suite is about, and because a service without
     an async resource would otherwise be asked to submit a job.
+
+    `uploads` maps a `TAP_UPLOAD` name to a table file, which STILTS reads and sends inline
+    the way TOPCAT does — `nupload`, `upload<n>` and `upname<n>` are its own parameters —
+    serialized as `upload_format` says, `TABLEDATA`, `BINARY` or `BINARY2`.
     """
     with tempfile.TemporaryDirectory() as scratch:
         out = Path(scratch) / "answer.vot"
@@ -50,6 +61,12 @@ def query(command: list[str], base_url: str, adql: str, maxrec: int | None = Non
         ]
         if maxrec is not None:
             arguments.append(f"maxrec={maxrec}")
+        if uploads:
+            arguments.append(f"nupload={len(uploads)}")
+            for number, (name, location) in enumerate(uploads.items(), start=1):
+                arguments += [f"upload{number}={location}", f"upname{number}={name}"]
+        if upload_format is not None:
+            arguments.append(f"upvotformat={upload_format}")
         try:
             spoken = subprocess.run(
                 arguments, capture_output=True, text=True, timeout=TIMEOUT

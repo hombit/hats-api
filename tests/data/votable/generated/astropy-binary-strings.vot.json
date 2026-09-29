@@ -1,0 +1,23 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "BINARY",
+  "columns": [
+    {"name": "cfix", "datatype": "char", "arraysize": "10", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "cvar", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "cbnd", "datatype": "char", "arraysize": "5*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ufix", "datatype": "unicodeChar", "arraysize": "6", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "uvar", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    ["Apple", "Apple", "abc", "Яблоко", "Привет мир"],
+    ["  lead", "  lead", " b ", "λόγος", "Ελληνικά"],
+    ["trail", "trail   ", "abcde", "中文", "日本語テキスト"],
+    ["", "", "", "", ""],
+    ["", "", "", "", ""],
+    ["<&>\"'", "<&>\"'", "<>", " ab", "смешанный ASCII"],
+    ["exactly10!", "multi word text", "x", "ÅÄÖ", "trail  "],
+    ["tab\tin", "tab\tin", "  ", "€", "  lead"]
+  ],
+  "refuse": null,
+  "notes": "differs from the source data: column 'cfix' row 4 was null, the file says \"\"\ndiffers from the source data: column 'cvar' row 4 was null, the file says \"\"\ndiffers from the source data: column 'cbnd' row 4 was null, the file says \"\"\ndiffers from the source data: column 'ufix' row 4 was null, the file says \"\"\ndiffers from the source data: column 'uvar' row 4 was null, the file says \"\"\nSTILTS reads (as its BINARY2 output says): column 'cbnd' row 1 is \" b\" where the file says \" b \" (and 3 more rows)\nSTILTS reads (as its BINARY2 output says): column 'cvar' row 2 is \"trail\" where the file says \"trail   \" (and 2 more rows)\nSTILTS reads (as its BINARY2 output says): column 'cfix' row 3 is null where the file says \"\" (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'ufix' row 3 is null where the file says \"\" (and 1 more rows)\nSTILTS reads (as its BINARY2 output says): column 'uvar' row 3 is null where the file says \"\" (and 2 more rows)"
+}

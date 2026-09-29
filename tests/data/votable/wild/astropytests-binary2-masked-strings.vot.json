@@ -1,0 +1,102 @@
+{
+ "producer": "astropy test data",
+ "source_url": "https://raw.githubusercontent.com/astropy/astropy/006f4960ab7311b83c36ca66d5df70274419e144/astropy/io/votable/tests/data/binary2_masked_strings.xml",
+ "fetched": "2026-09-29",
+ "serialization": "BINARY2",
+ "columns": [
+  {
+   "name": "source_id",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id",
+   "utype": null,
+   "description": "Unique source identifier (unique within a particular Data Release)",
+   "null": null
+  },
+  {
+   "name": "ra",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": "Char.SpatialAxis.Coverage.Location.Coord.Position2D.Value2.C1",
+   "description": "Right ascension",
+   "null": null
+  },
+  {
+   "name": "dec",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": "Char.SpatialAxis.Coverage.Location.Coord.Position2D.Value2.C2",
+   "description": "Declination",
+   "null": null
+  },
+  {
+   "name": "a_g_val",
+   "datatype": "float",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phys.absorption.gal",
+   "utype": null,
+   "description": "line-of-sight extinction in the G band, A_G)",
+   "null": null
+  },
+  {
+   "name": "datalink_url",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref.url",
+   "utype": "Acess.reference",
+   "description": "datalink url",
+   "null": null
+  },
+  {
+   "name": "epoch_photometry_url",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref.url",
+   "utype": "Acess.reference",
+   "description": "epoch photometry url",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   5966029325870896512,
+   257.32936063024,
+   -41.37970462030461,
+   null,
+   "http://geadata.esac.esa.int/data-server/datalink/links?ID=5966029325870896512",
+   null
+  ],
+  [
+   5966021186907903360,
+   257.239372393368,
+   -41.51098509006337,
+   null,
+   "http://geadata.esac.esa.int/data-server/datalink/links?ID=5966021186907903360",
+   null
+  ],
+  [
+   5966018231972730624,
+   257.4313028613871,
+   -41.331043504247376,
+   null,
+   "http://geadata.esac.esa.int/data-server/datalink/links?ID=5966018231972730624",
+   null
+  ]
+ ],
+ "refuse": null,
+ "notes": "astropy has an empty string where the contract has null: epoch_photometry_url (3/3)\nSTILTS has NaN where the contract has null: a_g_val (3/3)"
+}

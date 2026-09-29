@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.4.xsd">
+ <RESOURCE type="results">
+  <TABLE>
+   <FIELD ID="id" datatype="long" name="id"/>
+   <FIELD ID="ra" datatype="double" name="ra" unit="deg">
+    <DESCRIPTION>
+     Right ascension
+    </DESCRIPTION>
+   </FIELD>
+   <FIELD ID="mag" datatype="float" name="mag"/>
+   <FIELD ID="name" arraysize="7" datatype="unicodeChar" name="name"/>
+   <FIELD ID="flag" datatype="bit" name="flag"/>
+   <FIELD ID="vec" arraysize="3" datatype="short" name="vec"/>
+   <FIELD ID="small" datatype="unsignedByte" name="small"/>
+   <DATA>
+    <TABLEDATA>
+     <TR>
+      <TD>1</TD>
+      <TD>10.5</TD>
+      <TD>15.5</TD>
+      <TD>alpha</TD>
+      <TD>1</TD>
+      <TD>1 2 3</TD>
+      <TD>0</TD>
+     </TR>
+     <TR>
+      <TD/>
+      <TD>20.25</TD>
+      <TD>16</TD>
+      <TD/>
+      <TD>0</TD>
+      <TD>4 5 6</TD>
+      <TD>255</TD>
+     </TR>
+     <TR>
+      <TD>3</TD>
+      <TD>NaN</TD>
+      <TD>17.25</TD>
+      <TD>gamma  </TD>
+      <TD/>
+      <TD>7 8 9</TD>
+      <TD>7</TD>
+     </TR>
+     <TR>
+      <TD>4</TD>
+      <TD>359.999999</TD>
+      <TD/>
+      <TD>δέλτα</TD>
+      <TD>0</TD>
+      <TD>-1 -2 -3</TD>
+      <TD>1</TD>
+     </TR>
+    </TABLEDATA>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

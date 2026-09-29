@@ -1,0 +1,27 @@
+{
+  "producer": "STILTS 3.5-6 (STIL 4.3-6)",
+  "serialization": "BINARY2",
+  "columns": [
+    {"name": "b", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "bit", "datatype": "boolean", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ub", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "s", "datatype": "short", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "l", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "c", "datatype": "char", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "u", "datatype": "unicodeChar", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "f", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d", "datatype": "double", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "fc", "datatype": "float", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "dc", "datatype": "double", "arraysize": "2", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "str", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ustr", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i3", "datatype": "int", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "iv", "datatype": "int", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "i2x3", "datatype": "int", "arraysize": "2x3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "d2xs", "datatype": "double", "arraysize": "2x*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [],
+  "refuse": null,
+  "notes": "Written by STILTS from a TABLEDATA document, so an empty string or an empty variable-length array in the source was already null on the way in."
+}

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<VOTABLE version="1.3" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3">
+<RESOURCE type="results">
+<INFO name="QUERY_STATUS" value="OK"/>
+<INFO name="PROVIDER" value="NASA/IPAC Extragalatic Database (NED)">NED VO Table Access Protocol (TAP) Service</INFO>
+<INFO name="QUERY" value="SELECT TOP 10 objid, prefname, prefphytype, ra, dec, uncmaja, zflag, z, zunc, n_crosref, n_notes FROM NEDTAP.objdir WHERE CONTAINS(POINT('J2000', ra, dec), CIRCLE('J2000', 10.68, 41.27, 0.05))=1"/>
+<TABLE name="result_S1790649036131">
+<FIELD datatype="long" name="objid" ucd="meta.id;src">
+<DESCRIPTION>Internal identifier for the object in NED</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="prefname" ucd="meta.id.cross">
+<DESCRIPTION>preferred object name</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="prefphytype" ucd="src.class">
+<DESCRIPTION>NED preferred object type</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="ra" ucd="pos.eq.ra" unit="deg">
+<DESCRIPTION>RA in decimal degrees of the object Equatorial Coordinate System, J2000.0</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="dec" ucd="pos.eq.dec" unit="deg">
+<DESCRIPTION>DEC in decimal degrees of the object Equatorial Coordinate System, J2000.0</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="uncmaja" ucd="stat.error;pos.errorEllipse;stat.max" unit="arcsec">
+<DESCRIPTION>Uncertainty Ellipse, Semimajor Axis in arcseconds</DESCRIPTION>
+</FIELD>
+<FIELD arraysize="*" datatype="char" name="zflag" ucd="meta.code;src.redshift">
+<DESCRIPTION>Redshift flag</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="z" ucd="src.redshift">
+<DESCRIPTION>Redshift in z.</DESCRIPTION>
+</FIELD>
+<FIELD datatype="double" name="zunc" ucd="stat.error;src.redshift">
+<DESCRIPTION>Redshift Uncertainty</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="n_crosref" ucd="meta.number">
+<DESCRIPTION>Number of references</DESCRIPTION>
+</FIELD>
+<FIELD datatype="int" name="n_notes" ucd="meta.number">
+<DESCRIPTION>Number of notes data frames</DESCRIPTION>
+</FIELD>
+<DATA>
+<BINARY2>
+<STREAM encoding='base64'>
+I4AAAAAACt4MZQAAABUyWE1NIEowMDQyMzQuMis0MTE0MzcAAAAAQCVJHmRvFWJA
+RJ80s62G1kA2ZmZgAAAAAAAAAH/4AAAAAAAAf/gAAAAAAAAAAAACAAAAACOAAAAA
+AAreDGYAAAAVMlhNTSBKMDA0MjM0LjYrNDExNTU3AAAAAEAlSfmOPYVGQESiCWcQ
+fidAOEzMwAAAAAAAAAB/+AAAAAAAAH/4AAAAAAAAAAAAAgAAAAAjgAAAAAAK3gxu
+AAAAFTJYTU0gSjAwNDIzNi44KzQxMTcwMgAAAABAJU6pyvh29kBEpF1z2AzHQCtm
+ZmAAAAAAAAAAf/gAAAAAAAB/+AAAAAAAAAAAAAIAAAAAI4AAAAAACt4McAAAABUy
+WE1NIEowMDQyMzcuMCs0MTE3MzIAAAAAQCVPF+SxhaBARKVsDW9UTEAM9cKAAAAA
+AAAAAH/4AAAAAAAAf/gAAAAAAAAAAAACAAAAACOAAAAAAAreDHMAAAAVMlhNTSBK
+MDA0MjM3LjgrNDExNjQ3AAAAAEAlUNG3F1jiQESj1j+D6U5ALGZmYAAAAAAAAAB/
++AAAAAAAAH/4AAAAAAAAAAAAAgAAAAAjgAAAAAAK3gx0AAAAFTJYTU0gSjAwNDIz
+Ny45KzQxMTY1NgAAAABAJVDx7+OSi0BEpCAKMcs/QC/MzMAAAAAAAAAAf/gAAAAA
+AAB/+AAAAAAAAAAAAAIAAAAAI4AAAAAACt4MdwAAABUyWE1NIEowMDQyMzkuNSs0
+MTE1MTEAAAAAQCVUTpatllBARKBnxkFmJkAemZmgAAAAAAAAAH/4AAAAAAAAf/gA
+AAAAAAAAAAACAAAAACOAAAAAAAreDHwAAAAVMlhNTSBKMDA0MjQxLjQrNDExNDUx
+AAAAAEAlWHKwIMScQESfs1ml04RAKMzMwAAAAAAAAAB/+AAAAAAAAH/4AAAAAAAA
+AAAAAgAAAAAjgAAAAAAK3gyCAAAAFTJYTU0gSjAwNDI0Mi44KzQxMTM0MQAAAABA
+JVtmUW2w3kBEnTEiQGp+QDlMzMAAAAAAAAAAf/gAAAAAAAB/+AAAAAAAAAAAAAIA
+AAAAI4AAAAAACt4MhwAAABUyWE1NIEowMDQyNDMuOSs0MTE1NTAAAAAAQCVdtLAu
+xxRARKHJA3Mf3T/wzMzAAAAAAAAAAH/4AAAAAAAAf/gAAAAAAAAAAAACAAAAAA==
+</STREAM>
+</BINARY2>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

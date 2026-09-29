@@ -1,0 +1,21 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "BINARY2",
+  "columns": [
+    {"name": "id", "datatype": "long", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ra", "datatype": "double", "arraysize": null, "xtype": null, "unit": "deg", "ucd": null, "utype": null, "description": "Right ascension", "null": null},
+    {"name": "mag", "datatype": "float", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "name", "datatype": "unicodeChar", "arraysize": "7", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "flag", "datatype": "bit", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "vec", "datatype": "short", "arraysize": "3", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "small", "datatype": "unsignedByte", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [1, 10.5, 15.5, "alpha", true, [1, 2, 3], 0],
+    [null, 20.25, 16.0, "", false, [4, 5, 6], 255],
+    [3, "NaN", 17.25, "gamma", null, [7, 8, 9], 7],
+    [4, 359.999999, null, "δέλτα", false, [-1, -2, -3], 1]
+  ],
+  "refuse": null,
+  "notes": "An astropy Table written by Table.write(format='votable', tabledata_format='binary2'), the path pyvo takes to upload a table; the source data had id=[1,null,3,4], ra=[10.5,20.25,NaN,359.999999], mag=[15.5,16,17.25,null], name=['alpha','','gamma  ','δέλτα'], flag=[true,false,null,false], small uint8=[0,255,7,1].\nastropy 8.0.1 reads: column 'ra' row 2 is null where the file says \"NaN\"\nSTILTS fails to read it: java.lang.ClassCastException: class [Z cannot be cast to class java.lang.Boolean ([Z and java.lang.Boolean are in module java.base of loader 'bootstrap')"
+}

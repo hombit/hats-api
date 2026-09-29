@@ -1,0 +1,24 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "s",
+   "datatype": "unicodeChar",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "Ярослав"
+  ]
+ ],
+ "refuse": null,
+ "notes": "A UTF-8 byte-order mark ahead of the XML declaration."
+}

@@ -1,0 +1,23 @@
+{
+  "producer": "votable crate 0.7.0 (CDS, Rust)",
+  "serialization": "TABLEDATA",
+  "columns": [
+    {"name": "cfix", "datatype": "char", "arraysize": "10", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "cvar", "datatype": "char", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "cbnd", "datatype": "char", "arraysize": "5*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "ufix", "datatype": "unicodeChar", "arraysize": "6", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "uvar", "datatype": "unicodeChar", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    ["Apple", "Apple", "abc", "Яблоко", "Привет мир"],
+    ["  lead", "  lead", " b ", "λόγος", "Ελληνικά"],
+    ["trail", "trail   ", "abcde", "中文", "日本語テキスト"],
+    [null, null, null, null, null],
+    [null, null, null, null, null],
+    ["<&>\"'", "<&>\"'", "<>", " ab", "смешанный ASCII"],
+    ["exactly10!", "multi word text", "x", "ÅÄÖ", "trail  "],
+    ["tab\tin", "tab\tin", "  ", "€", "  lead"]
+  ],
+  "refuse": null,
+  "notes": "astropy 8.0.1 reads: column 'cfix' row 1 is \"lead\" where the file says \"  lead\" (and 2 more rows)\nastropy 8.0.1 reads: column 'cvar' row 1 is \"lead\" where the file says \"  lead\" (and 3 more rows)\nastropy 8.0.1 reads: column 'cbnd' row 1 is \"b\" where the file says \" b \" (and 3 more rows)\nastropy 8.0.1 reads: column 'ufix' row 3 is \"\" where the file says null (and 2 more rows)\nastropy 8.0.1 reads: column 'uvar' row 3 is \"\" where the file says null (and 3 more rows)"
+}

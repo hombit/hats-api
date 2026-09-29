@@ -1,0 +1,15 @@
+{
+  "producer": "astropy 8.0.1",
+  "serialization": "BINARY",
+  "columns": [
+    {"name": "bitv", "datatype": "bit", "arraysize": "*", "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null},
+    {"name": "after", "datatype": "int", "arraysize": null, "xtype": null, "unit": null, "ucd": null, "utype": null, "description": null, "null": null}
+  ],
+  "rows": [
+    [[true, false, true], 1],
+    [[], 2],
+    [[true, true, true, true, true, true, true, true, true], 3]
+  ],
+  "refuse": null,
+  "notes": "astropy 8.0.1 writes a variable-length bit array as the count of bits followed by one byte per bit, 0x08 for a set bit (and a bit scalar as 0x08 too, where the most significant bit is the one that counts). VOTable 1.5 packs eight bits to a byte; the ground truth reads astropy's layout, which is the 'items' reading's, since uploads written by astropy have to read.\nSTILTS reads (as its BINARY2 output says): 1 rows where the file has 3"
+}

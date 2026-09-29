@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="scalars" name="scalars">
+   <FIELD ID="b" datatype="boolean" name="b"/>
+   <FIELD ID="bit" datatype="bit" name="bit"/>
+   <FIELD ID="ub" datatype="unsignedByte" name="ub"/>
+   <FIELD ID="s" datatype="short" name="s"/>
+   <FIELD ID="i" datatype="int" name="i"/>
+   <FIELD ID="l" datatype="long" name="l"/>
+   <FIELD ID="c" arraysize="1" datatype="char" name="c"/>
+   <FIELD ID="u" arraysize="1" datatype="unicodeChar" name="u"/>
+   <FIELD ID="f" datatype="float" name="f"/>
+   <FIELD ID="d" datatype="double" name="d"/>
+   <FIELD ID="fc" datatype="floatComplex" name="fc"/>
+   <FIELD ID="dc" datatype="doubleComplex" name="dc"/>
+   <FIELD ID="str" arraysize="*" datatype="char" name="str"/>
+   <FIELD ID="ustr" arraysize="*" datatype="unicodeChar" name="ustr"/>
+   <DATA>
+    <BINARY2>
+     <STREAM encoding="base64">
+AABUCACAAIAAAACAAAAAAAAAAGEELz/AAAA/+AAAAAAAAD/AAAC/wAAAP/gAAAAAAAC/+AAAAAAAAAAAAAVoZWxsbwAAAAYEHwRABDgEMgQ1BEIAAEYA/3//f////3//////////WgO7/3///3/v////////PczMzb5MzM0/uZmZmZmZmr/JmZmZmZmaAAAAAAAAAACAAEYIAQAAAAAAAAAAAAAAAAAAPE4tAIAAAAAAAAAAAAABf8AAAH/AAAB/+AAAAAAAAAAAAAAAAAAAAAAAA3ggeQAAAANl5Wcsip4AAFQAgP//////////////////JgDpf8AAAH/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABTwmPiInAAAABQA8ACYAPgAiACf//EYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf8AAAAAAAAB/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEYIKjA5B1vNFREiEPR96YEVMAOpf4AAAH/wAAAAAAAAf4AAAD+AAAD/8AAAAAAAAD/wAAAAAAAAAAAAEiAgbGVhZCBhbmQgdHJhaWwgIAAAAAoAIAAgBDIENQQ0BEMESQQ4BDUAIAAAVAAHAAEAAAACAAAAAAAAAAN+AGH/gAAA//AAAAAAAABAQAAAQIAAAEAIAAAAAAAAQBAAAAAAAAAAAAAKbXVsdGkgd29yZAAAAAgDlQO7A7sDtwO9A7kDugOs     </STREAM>
+    </BINARY2>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

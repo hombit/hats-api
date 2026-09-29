@@ -260,6 +260,10 @@ max_catalog_cache_bytes = "256MiB"
 # limit bounds it.
 max_request_body_bytes = "2MiB"
 
+# How many bytes of uploaded tables one request may bring, sent or fetched by URL; over
+# it, 413. "0" turns uploads off.
+max_upload_bytes = "64MiB"
+
 # How much SQL one request may carry, in "select" and "where". Both bound the text the
 # caller wrote, not how many rows come back.
 

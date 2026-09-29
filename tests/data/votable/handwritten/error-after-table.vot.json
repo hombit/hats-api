@@ -1,0 +1,8 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "the document says the query that produced it failed, after the rows (DALI §4.4)",
+ "notes": null
+}

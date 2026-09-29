@@ -1,0 +1,104 @@
+{
+ "producer": "GAVO DaCHS 2.12.2 (Python), per INFO server_software",
+ "source_url": "https://dc.g-vo.org/tap/sync?REQUEST=doQuery&LANG=ADQL&RESPONSEFORMAT=votable%2ftd&QUERY=SELECT+TOP+8+ivoid%2c+role_name%2c+base_role%2c+role_ivoid+FROM+rr.res_role+WHERE+role_name+LIKE+%27%25%c3%b6%25%27+OR+role_name+LIKE+%27%25%c3%a9%25%27",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "ivoid",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": "xpath:/identifier",
+   "description": "The parent resource.",
+   "null": null
+  },
+  {
+   "name": "role_name",
+   "datatype": "unicodeChar",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "The real-world name or title of a person or organization.",
+   "null": null
+  },
+  {
+   "name": "base_role",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "The role played by this entity; this is one of contact, publisher, contributor, or creator.",
+   "null": null
+  },
+  {
+   "name": "role_ivoid",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": "An IVOA identifier of a person or organization.",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "ivo://lmd.jussieu/mars_dust/q/epn_core",
+   "Laboratoire Méteorologie Dynamique",
+   "publisher",
+   null
+  ],
+  [
+   "ivo://lmd.jussieu/mcd/q/epn_core",
+   "Laboratoire Méteorologie Dynamique",
+   "publisher",
+   null
+  ],
+  [
+   "ivo://lmd.jussieu/vcd/q/epn_core",
+   "Laboratoire Méteorologie Dynamique",
+   "publisher",
+   null
+  ],
+  [
+   "ivo://vopdc.obspm/lesia/bestars/besc",
+   "J. Brulé, B. de Batz, PADC",
+   "contributor",
+   null
+  ],
+  [
+   "ivo://vopdc.obspm/lesia/bestars/bess",
+   "J. Brulé, B. de Batz, PADC",
+   "contributor",
+   null
+  ],
+  [
+   "ivo://vopdc.obspm/lesia/bestars",
+   "J. Brulé, B. de Batz, PADC",
+   "contributor",
+   null
+  ],
+  [
+   "ivo://org.gavo.dc/ucdc/q/cone",
+   "Gagné, Jonathan",
+   "creator",
+   null
+  ],
+  [
+   "ivo://org.gavo.dc/ppmx/res/ppmx/scs",
+   "Röser, S.",
+   "creator",
+   null
+  ]
+ ],
+ "refuse": null,
+ "notes": "astropy has an empty string where the contract has null: role_ivoid (8/8)"
+}

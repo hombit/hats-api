@@ -1,0 +1,170 @@
+{
+ "producer": "Gemini Observatory Archive (as captured in astropy's test data)",
+ "source_url": "https://raw.githubusercontent.com/astropy/astropy/006f4960ab7311b83c36ca66d5df70274419e144/astropy/io/votable/tests/data/gemini.xml",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "ID",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "access_url",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref.url",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "service_def",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.ref",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "error_message",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code.error",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "semantics",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "description",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.note",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "content_type",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code.mime",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "content_length",
+   "datatype": "long",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "byte",
+   "ucd": "phys.size;meta.file",
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "product_type",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": "caom:Artifact.productType",
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "file_uri",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "caom:GEMINI/GS-2012A-Q-5-116-003/GS-2012A-Q-5-116-003",
+   "http://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/data/pub/GEMINI/S20120515S0064?runid=bx9b1o8cvk1qesrt",
+   null,
+   null,
+   "#this",
+   null,
+   "application/fits",
+   7068398,
+   "science",
+   null
+  ],
+  [
+   "caom:GEMINI/GS-2012A-Q-5-116-003/GS-2012A-Q-5-116-003",
+   null,
+   "cutout",
+   null,
+   "#cutout",
+   null,
+   "application/fits",
+   null,
+   "science",
+   "ad:GEMINI/S20120515S0064"
+  ],
+  [
+   "caom:GEMINI/GS-2012A-Q-5-116-003/GS-2012A-Q-5-116-003",
+   null,
+   "soda-62b3e0b3-2718-442f-920a-ce8028687c2b",
+   null,
+   "#cutout",
+   null,
+   "application/fits",
+   null,
+   "science",
+   "ad:GEMINI/S20120515S0064"
+  ],
+  [
+   "caom:GEMINI/GS-2012A-Q-5-116-003/GS-2012A-Q-5-116-003",
+   null,
+   "soda-d0378127-e438-46a2-880f-42df8884a2ff",
+   null,
+   "#cutout",
+   null,
+   "application/fits",
+   null,
+   "science",
+   "ad:GEMINI/S20120515S0064"
+  ]
+ ],
+ "refuse": null,
+ "notes": "astropy has an empty string where the contract has null: access_url (3/4), service_def (1/4), error_message (4/4), description (4/4), file_uri (1/4)\nastropy: column 'content_length' differs in 3 of 4 rows, e.g. 0 where the contract gives null"
+}

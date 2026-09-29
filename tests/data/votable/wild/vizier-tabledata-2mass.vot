@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns="http://www.ivoa.net/xml/VOTable/v1.3"
+  xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/v1.3">
+ <DESCRIPTION>
+   VizieR Astronomical Server vizier.cds.unistra.fr
+    Date: 2026-09-29T02:32:18 [V7.6]
+   Explanations and Statistics of UCDs:			See LINK below
+   In case of problem, please report to:	cds-question@unistra.fr
+ </DESCRIPTION>
+<!-- VOTable description at http://www.ivoa.net/Documents/latest/VOT.html -->
+<INFO name="service_protocol" value="ASU">  IVOID of the protocol through which the data was retrieved</INFO>
+<INFO name="request_date" value="2026-09-29T02:32:18">  Query execution date</INFO>
+<INFO name="request" value="https://vizier.cds.unistra.fr/viz-bin/votable?-source=II/246/out&amp;-out.max=8&amp;-out=2MASS,RAJ2000,DEJ2000,Jmag,e_Jmag,Kmag,Qflg,Rflg,Cflg,Xflg,Aflg,JD&amp;-c=83.63+22.01&amp;-c.rm=2&amp;-out.form=DTD">  Full request URL</INFO>
+<INFO name="contact" value="cds-question@unistra.fr">  Email or URL to contact publisher</INFO>
+<INFO name="server_software" value="VizieR/7.6">  Software version</INFO>
+<INFO name="publisher" value="CDS">  Data centre that produced the VOTable</INFO>
+
+<!--
+Execution Reports
+ -->
+<INFO ID="Target" name="-c" value="083.630000+22.010000,rm=2.">
+Constraint -out.form=DTD</INFO>
+
+<RESOURCE ID="yCat_2246" name="II/246" type="results">
+  <DESCRIPTION>2MASS All-Sky Catalog of Point Sources (Cutri+ 2003)</DESCRIPTION>  <INFO name="ivoid" value="ivo://cds.vizier/ii/246">    IVOID of underlying data collection  </INFO>
+  <INFO name="data_ivoid" value="ivo://cds.vizier/ii/246">    IVOID of underlying data collection  </INFO>
+  <INFO name="creator" value="Cutri R.M.">    First author or institution  </INFO>
+  <INFO name="cites" value="bibcode:2003yCat.2246....0C">    Bibcode of the dataset  </INFO>
+  <INFO name="journal" value="yCat">    Journal name  </INFO>
+  <INFO name="original_date" value="2003">    Year of the article publication  </INFO>
+  <INFO name="reference_url" value="https://cdsarc.cds.unistra.fr/viz-bin/cat/II/246">    Dataset landing page  </INFO>
+  <INFO name="publication_date" value="2025-03-11">    Date of first publication in the data centre  </INFO>
+  <INFO name="rights_uri" value="https://cds.unistra.fr/vizier-org/licences_vizier.html">    Licence URI  </INFO>
+
+  <COOSYS ID="J2000" system="eq_FK5" equinox="J2000"/>
+  <TIMESYS ID="time_1" refposition="UNKNOWN" timeorigin="0.000000" timescale="UNKNOWN"/>
+  <TABLE ID="II_246_out" name="II/246/out">
+    <DESCRIPTION>2MASS Point Source Catalogue, output (on a total of 470,992,970 sources)</DESCRIPTION>
+<!-- The Point Source catalogue of 470,992,970 sources. \inputViz{2mass.intro.htx} -->
+
+    <!-- RowName: ${2MASS}&-c=${$poseq}&-c.rs=0.004 -->
+    <!-- Definitions of GROUPs and FIELDs -->
+    <FIELD name="2MASS" ucd="meta.id;meta.main" datatype="char" arraysize="17*"><!-- ucd="ID_MAIN" -->
+      <DESCRIPTION>(designation) Source designation (1)</DESCRIPTION>
+      <LINK href="http://vizier.cds.unistra.fr/viz-bin/VizieR-5?-info=XML&amp;-out.add=.&amp;-source=II/246/out&amp;2MASS===${2MASS}&amp;-c=${+RAJ2000}${+DEJ2000}&amp;-c.eq=J2000.000&amp;-c.rs=0.004"/>
+    </FIELD>
+    <FIELD name="RAJ2000" ucd="pos.eq.ra;meta.main" ref="J2000" datatype="double" width="10" precision="6" unit="deg"><!-- ucd="POS_EQ_RA_MAIN" -->
+      <DESCRIPTION>(ra) Right ascension (J2000)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="DEJ2000" ucd="pos.eq.dec;meta.main" ref="J2000" datatype="double" width="10" precision="6" unit="deg"><!-- ucd="POS_EQ_DEC_MAIN" -->
+      <DESCRIPTION>(dec) Declination (J2000) (dec)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="Jmag" ucd="phot.mag;em.IR.J" datatype="float" width="6" precision="3" unit="mag"><!-- ucd="PHOT_JHN_J" -->
+      <DESCRIPTION>?(j_m) J selected default magnitude (2)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="e_Jmag" ucd="stat.error;phot.mag" datatype="float" width="6" precision="3" unit="mag"><!-- ucd="ERROR" -->
+      <DESCRIPTION>?(j_msigcom) J total magnitude uncertainty (4)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Kmag" ucd="phot.mag;em.IR.K" datatype="float" width="6" precision="3" unit="mag"><!-- ucd="PHOT_JHN_K" -->
+      <DESCRIPTION>?(k_m) K selected default magnitude (2)</DESCRIPTION>
+      <VALUES null="NaN" />
+    </FIELD>
+    <FIELD name="Qflg" ucd="meta.code.qual;phot" datatype="char" arraysize="3"><!-- ucd="CODE_QUALITY" -->
+      <DESCRIPTION>(ph_qual) JHK Photometric quality flag (5)</DESCRIPTION>
+
+<!-- No link in: \sed{s!\([^ABCD]\)!{\\fg{red3}\1}!g}{${}} -->
+    </FIELD>
+    <FIELD name="Rflg" ucd="meta.ref" datatype="char" arraysize="3"><!-- ucd="REFER_CODE" -->
+      <DESCRIPTION>(rd_flg) Source of JHK default mag (6)</DESCRIPTION>
+
+<!-- No link in: \sed{s!\([069]\)!{\\fg{red3}\1}!g}{${}} -->
+    </FIELD>
+    <FIELD name="Cflg" ucd="meta.code" datatype="char" arraysize="3"><!-- ucd="CODE_MISC" -->
+      <DESCRIPTION>(cc_flg) Artifact contamination, confusion (8)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="Xflg" ucd="meta.code" datatype="unsignedByte" width="1"><!-- ucd="CODE_MISC" -->
+      <DESCRIPTION>[0,2] (gal_contam) Extended source contamination (10)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="Aflg" ucd="meta.code" datatype="unsignedByte" width="1"><!-- ucd="CODE_MISC" -->
+      <DESCRIPTION>[0,1] (mp_flg) Association with asteroid or comet (11)</DESCRIPTION>
+    </FIELD>
+    <FIELD name="JD" ucd="time.epoch" ref="time_1" datatype="double" width="12" precision="4" unit="d"><!-- ucd="TIME_DATE" -->
+      <DESCRIPTION>(jdate) Julian date of source measurement (13)</DESCRIPTION>
+    </FIELD>
+<DATA><TABLEDATA>
+<TR><TD>05343420+2159101</TD><TD>083.642517</TD><TD>+21.986143</TD><TD>16.134</TD><TD>0.095</TD><TD>14.768</TD><TD>ABU</TD><TD>220</TD><TD>000</TD><TD>0</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343433+2159510</TD><TD>083.643081</TD><TD>+21.997507</TD><TD>15.100</TD><TD>0.171</TD><TD>12.502</TD><TD>CCU</TD><TD>220</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343467+2159238</TD><TD>083.644472</TD><TD>+21.989962</TD><TD>15.494</TD><TD>0.042</TD><TD>15.060</TD><TD>ABB</TD><TD>222</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343420+2159419</TD><TD>083.642520</TD><TD>+21.994976</TD><TD>14.412</TD><TD>0.030</TD><TD>13.689</TD><TD>AEA</TD><TD>222</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343643+2159046</TD><TD>083.651833</TD><TD>+21.984638</TD><TD>14.162</TD><TD>0.032</TD><TD>13.504</TD><TD>AAA</TD><TD>222</TD><TD>000</TD><TD>0</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343816+2159251</TD><TD>083.659007</TD><TD>+21.990311</TD><TD>16.515</TD><TD>0.203</TD><TD>13.889</TD><TD>CUU</TD><TD>200</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343749+2159318</TD><TD>083.656216</TD><TD>+21.992193</TD><TD>15.264</TD><TD>0.067</TD><TD>14.485</TD><TD>AAB</TD><TD>222</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+<TR><TD>05343716+2159120</TD><TD>083.654868</TD><TD>+21.986668</TD><TD>14.122</TD><TD>0.027</TD><TD>13.693</TD><TD>AAA</TD><TD>222</TD><TD>000</TD><TD>2</TD><TD>0</TD><TD>2450739.8838</TD></TR>
+</TABLEDATA></DATA>
+</TABLE>
+<INFO name="matches" value="8">matching records</INFO>
+
+<INFO name="Warning" value="truncated result (maxtup=8)"/><INFO name="QUERY_STATUS" value="OVERFLOW"> value="truncated result (maxtup=8)"</INFO>
+
+</RESOURCE>
+</VOTABLE>

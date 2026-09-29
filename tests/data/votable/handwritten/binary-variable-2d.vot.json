@@ -1,0 +1,35 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "BINARY",
+ "columns": [
+  {
+   "name": "pairs",
+   "datatype": "short",
+   "arraysize": "2x*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   [
+    1,
+    2,
+    3,
+    4
+   ]
+  ],
+  [
+   [
+    5,
+    6
+   ]
+  ]
+ ],
+ "refuse": null,
+ "notes": "A variable 2-D array whose count is its primitives, as STIL writes it."
+}

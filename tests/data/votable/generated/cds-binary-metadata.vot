@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="metadata">
+            <FIELD ID="col_ra" name="ra" datatype="double" width="10" precision="6" unit="deg" ucd="pos.eq.ra;meta.main" utype="stc:AstroCoords.Position2D.Value2.C1">
+                <DESCRIPTION>Right ascension (ICRS)</DESCRIPTION>
+            </FIELD>
+            <FIELD ID="col_dec" name="dec" datatype="double" width="10" precision="6" unit="deg" ucd="pos.eq.dec;meta.main" utype="stc:AstroCoords.Position2D.Value2.C2">
+                <DESCRIPTION>Declination (ICRS)</DESCRIPTION>
+            </FIELD>
+            <FIELD ID="col_mag" name="mag" datatype="float" width="6" precision="3" unit="mag" ucd="phot.mag;em.opt.V">
+                <DESCRIPTION>V magnitude</DESCRIPTION>
+                <VALUES>
+                    <MIN value="-5"/>
+                    <MAX value="30"/>
+                </VALUES>
+            </FIELD>
+            <FIELD ID="col_flag" name="flag" datatype="short" ucd="meta.code">
+                <DESCRIPTION>Quality flag; -1 when unknown</DESCRIPTION>
+                <VALUES null="-1">
+                    <OPTION name="good" value="0"/>
+                    <OPTION name="bad" value="1"/>
+                </VALUES>
+            </FIELD>
+            <FIELD ID="col_mjd" name="obs_mjd" datatype="double" width="12" precision="5" unit="d" ucd="time.epoch" xtype="mjd">
+                <DESCRIPTION>Epoch of observation</DESCRIPTION>
+            </FIELD>
+            <FIELD ID="col_url" name="url" datatype="char" arraysize="*" ucd="meta.ref.url">
+                <DESCRIPTION>Where the &lt;preview&gt; &amp; &quot;notes&quot; live</DESCRIPTION>
+                <LINK href="https://example.org/preview?id=${col_ra}&amp;amp=1"/>
+            </FIELD>
+            <DATA>
+                <BINARY>
+                    <STREAM encoding="base64">
+QCVekgwGnoBARKJmZmZmZkBcKPYAAEDsUhAAAAAAAAAAFWh0dHBzOi8vZXhhbXBs
+ZS5vcmcvYUBU9J0CA+Y/wBWQf2bobGZAgAAAAAFA7FIoAAAAAAAAAAB/+AAAAAAA
+AH/4AAAAAAAAf8AAAP//f/gAAAAAAAAAAAAdaHR0cHM6Ly9leGFtcGxlLm9yZy9j
+P3g9MSZ5PTI=
+                    </STREAM>
+                </BINARY>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

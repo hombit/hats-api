@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="arrays">
+            <FIELD name="i3" datatype="int" arraysize="3"/>
+            <FIELD name="d3" datatype="double" arraysize="3"/>
+            <FIELD name="iv" datatype="int" arraysize="*"/>
+            <FIELD name="fv" datatype="float" arraysize="*"/>
+            <FIELD name="s10" datatype="short" arraysize="10*"/>
+            <FIELD name="lv" datatype="long" arraysize="*"/>
+            <FIELD name="ubv" datatype="unsignedByte" arraysize="*"/>
+            <FIELD name="i2x3" datatype="int" arraysize="2x3"/>
+            <FIELD name="d2xs" datatype="double" arraysize="2x*"/>
+            <FIELD name="c8xs" datatype="char" arraysize="8x*"/>
+            <FIELD name="c8x3" datatype="char" arraysize="8x3"/>
+            <FIELD name="bool4" datatype="boolean" arraysize="4"/>
+            <FIELD name="fc2" datatype="floatComplex" arraysize="2"/>
+            <FIELD name="dcv" datatype="doubleComplex" arraysize="*"/>
+            <DATA>
+                <TABLEDATA>
+                    <TR>
+                        <TD>1 1 2 3</TD>
+                        <TD>1.5 1.5 -2.5 1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</TD>
+                        <TD>1 1 2 4 8 16</TD>
+                        <TD>1.5 1.5 NaN -2</TD>
+                        <TD>1 1 2</TD>
+                        <TD>-9223372036854775808 -9223372036854775808 9223372036854775807</TD>
+                        <TD>0 0 255 16</TD>
+                        <TD>0 0 1 2 3 4 5</TD>
+                        <TD>1 1 2 3 4 5 6</TD>
+                        <TD>abc     defgh   </TD>
+                        <TD>a       bb      ccc     </TD>
+                        <TD>true true false ? true</TD>
+                        <TD>1 2 1 2 3 4</TD>
+                        <TD>1 2 1 2 3 4</TD>
+                    </TR>
+                    <TR>
+                        <TD>-2147483648 -2147483648 0 2147483647</TD>
+                        <TD>NaN NaN inf -inf</TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD>-1 -1 -2 -3 -4 -5 -6</TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD>        x               </TD>
+                        <TD>false false false false false</TD>
+                        <TD>0.5 -0.5 0.5 -0.5 NaN NaN</TD>
+                        <TD></TD>
+                    </TR>
+                    <TR>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                    </TR>
+                    <TR>
+                        <TD>7 7 8 9</TD>
+                        <TD>0 0 1 2</TD>
+                        <TD>-7 -7</TD>
+                        <TD>inf inf</TD>
+                        <TD>-32768 -32768 32767 0 1 2 3 4 5 6 7</TD>
+                        <TD>0 0</TD>
+                        <TD>1 1</TD>
+                        <TD>10 10 20 30 40 50 60</TD>
+                        <TD>0.5 0.5 -0.5</TD>
+                        <TD>12345678</TD>
+                        <TD>12345678 lead   z       </TD>
+                        <TD>? ? ? true true</TD>
+                        <TD>0 0 0 0 0 0</TD>
+                        <TD>0.5 -0.5 0.5 -0.5</TD>
+                    </TR>
+                </TABLEDATA>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

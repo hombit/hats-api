@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="nulls">
+            <FIELD name="ub_n" datatype="unsignedByte">
+                <VALUES null="255"/>
+            </FIELD>
+            <FIELD name="s_n" datatype="short">
+                <VALUES null="-32768"/>
+            </FIELD>
+            <FIELD name="i_n" datatype="int">
+                <VALUES null="-999"/>
+            </FIELD>
+            <FIELD name="l_n" datatype="long">
+                <VALUES null="-9223372036854775808"/>
+            </FIELD>
+            <FIELD name="iarr_n" datatype="int" arraysize="3">
+                <VALUES null="-1"/>
+            </FIELD>
+            <FIELD name="svar_n" datatype="short" arraysize="*">
+                <VALUES null="0"/>
+            </FIELD>
+            <FIELD name="b_n" datatype="boolean"/>
+            <FIELD name="f_n" datatype="float"/>
+            <FIELD name="d_n" datatype="double"/>
+            <FIELD name="str_n" datatype="char" arraysize="*"/>
+            <DATA>
+                <BINARY>
+                    <STREAM encoding="base64">
+AIAAAAAAAYAAAAAAAAAAAAAAAf////8AAAADAAAAAwABAAAAAjF/wAAAf/gAAAAA
+AAAAAAABYf9//////Bl//////////////////////////wAAAAA/P4AAAH/4AAAA
+AAAAAAAAAP6AAf///BoAAAAAAAAAAAAAAAQAAAAFAAAABgAAAAAwf8AAAD/wAAAA
+AAAAAAAAAP8AAP///BmAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAD9AAAAAf/gA
+AAAAAAAAAAABYgGAAH////8AAAAAAAAAAQAAAAAAAAAA/////wAAAAEABTF/wAAA
+QAgAAAAAAAAAAAAA
+                    </STREAM>
+                </BINARY>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

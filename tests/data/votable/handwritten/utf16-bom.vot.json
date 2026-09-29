@@ -1,0 +1,36 @@
+{
+ "producer": "hand-written (make.py)",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "s",
+   "datatype": "unicodeChar",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  },
+  {
+   "name": "n",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": null,
+   "utype": null,
+   "description": null,
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   "Ω → ∞",
+   3
+  ]
+ ],
+ "refuse": null,
+ "notes": "UTF-16 with its byte-order mark, which is what decides the encoding."
+}

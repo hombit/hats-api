@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="scalars" name="scalars">
+   <FIELD ID="b" datatype="boolean" name="b"/>
+   <FIELD ID="bit" datatype="bit" name="bit"/>
+   <FIELD ID="ub" datatype="unsignedByte" name="ub"/>
+   <FIELD ID="s" datatype="short" name="s"/>
+   <FIELD ID="i" datatype="int" name="i"/>
+   <FIELD ID="l" datatype="long" name="l"/>
+   <FIELD ID="c" arraysize="1" datatype="char" name="c"/>
+   <FIELD ID="u" arraysize="1" datatype="unicodeChar" name="u"/>
+   <FIELD ID="f" datatype="float" name="f"/>
+   <FIELD ID="d" datatype="double" name="d"/>
+   <FIELD ID="fc" datatype="floatComplex" name="fc"/>
+   <FIELD ID="dc" datatype="doubleComplex" name="dc"/>
+   <FIELD ID="str" arraysize="*" datatype="char" name="str"/>
+   <FIELD ID="ustr" arraysize="*" datatype="unicodeChar" name="ustr"/>
+   <DATA>
+    <TABLEDATA>
+     <TR>
+      <TD>T</TD>
+      <TD>1</TD>
+      <TD>0</TD>
+      <TD>-32768</TD>
+      <TD>-2147483648</TD>
+      <TD>-9223372036854775808</TD>
+      <TD>a</TD>
+      <TD>Я</TD>
+      <TD>1.5</TD>
+      <TD>1.5</TD>
+      <TD>1.5 -1.5</TD>
+      <TD>1.5 -1.5</TD>
+      <TD>hello</TD>
+      <TD>Привет</TD>
+     </TR>
+     <TR>
+      <TD>F</TD>
+      <TD>0</TD>
+      <TD>255</TD>
+      <TD>32767</TD>
+      <TD>2147483647</TD>
+      <TD>9223372036854775807</TD>
+      <TD>Z</TD>
+      <TD>λ</TD>
+      <TD>-3.4028235e+38</TD>
+      <TD>1.7976931348623157e+308</TD>
+      <TD>0.10000000149011612 -0.20000000298023224</TD>
+      <TD>0.1 -0.2</TD>
+      <TD/>
+      <TD/>
+     </TR>
+     <TR>
+      <TD/>
+      <TD>1</TD>
+      <TD>1</TD>
+      <TD>0</TD>
+      <TD>0</TD>
+      <TD>0</TD>
+      <TD>&lt;</TD>
+      <TD>中</TD>
+      <TD>1.1754944e-38</TD>
+      <TD>5e-324</TD>
+      <TD>nan nan</TD>
+      <TD>nan 0</TD>
+      <TD>x y</TD>
+      <TD>日本語</TD>
+     </TR>
+     <TR>
+      <TD>T</TD>
+      <TD>0</TD>
+      <TD>128</TD>
+      <TD>-1</TD>
+      <TD>-1</TD>
+      <TD>-1</TD>
+      <TD>&amp;</TD>
+      <TD>é</TD>
+      <TD>NaN</TD>
+      <TD>NaN</TD>
+      <TD>0 0</TD>
+      <TD>0 0</TD>
+      <TD>&lt;&amp;&gt;"'</TD>
+      <TD>&lt;&amp;&gt;"'</TD>
+     </TR>
+     <TR>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+     </TR>
+     <TR>
+      <TD>F</TD>
+      <TD>1</TD>
+      <TD>42</TD>
+      <TD>12345</TD>
+      <TD>123456789</TD>
+      <TD>1234567890123456789</TD>
+      <TD>0</TD>
+      <TD>Ω</TD>
+      <TD>+InF</TD>
+      <TD>+InF</TD>
+      <TD>inf 1</TD>
+      <TD>-inf 1</TD>
+      <TD>  lead and trail  </TD>
+      <TD>  ведущие </TD>
+     </TR>
+     <TR>
+      <TD>T</TD>
+      <TD>0</TD>
+      <TD>7</TD>
+      <TD>1</TD>
+      <TD>2</TD>
+      <TD>3</TD>
+      <TD>~</TD>
+      <TD>a</TD>
+      <TD>-InF</TD>
+      <TD>-InF</TD>
+      <TD>3 4</TD>
+      <TD>3 4</TD>
+      <TD>multi word</TD>
+      <TD>Ελληνικά</TD>
+     </TR>
+    </TABLEDATA>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

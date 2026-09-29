@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Produced with astropy.io.votable version 8.0.1
+     http://www.astropy.org/ -->
+<VOTABLE version="1.5" xmlns="http://www.ivoa.net/xml/VOTable/v1.3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.ivoa.net/xml/VOTable/v1.3 http://www.ivoa.net/xml/VOTable/VOTable-1.5.xsd">
+ <RESOURCE type="results">
+  <TABLE ID="strings" name="strings">
+   <FIELD ID="cfix" arraysize="10" datatype="char" name="cfix"/>
+   <FIELD ID="cvar" arraysize="*" datatype="char" name="cvar"/>
+   <FIELD ID="cbnd" arraysize="5*" datatype="char" name="cbnd"/>
+   <FIELD ID="ufix" arraysize="6" datatype="unicodeChar" name="ufix"/>
+   <FIELD ID="uvar" arraysize="*" datatype="unicodeChar" name="uvar"/>
+   <DATA>
+    <TABLEDATA>
+     <TR>
+      <TD>Apple</TD>
+      <TD>Apple</TD>
+      <TD>abc</TD>
+      <TD>Яблоко</TD>
+      <TD>Привет мир</TD>
+     </TR>
+     <TR>
+      <TD>  lead</TD>
+      <TD>  lead</TD>
+      <TD> b </TD>
+      <TD>λόγος</TD>
+      <TD>Ελληνικά</TD>
+     </TR>
+     <TR>
+      <TD>trail   </TD>
+      <TD>trail   </TD>
+      <TD>abcde</TD>
+      <TD>中文</TD>
+      <TD>日本語テキスト</TD>
+     </TR>
+     <TR>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+     </TR>
+     <TR>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+      <TD/>
+     </TR>
+     <TR>
+      <TD>&lt;&amp;&gt;"'</TD>
+      <TD>&lt;&amp;&gt;"'</TD>
+      <TD>&lt;&gt;</TD>
+      <TD> ab  </TD>
+      <TD>смешанный ASCII</TD>
+     </TR>
+     <TR>
+      <TD>exactly10!</TD>
+      <TD>multi word text</TD>
+      <TD>x</TD>
+      <TD>ÅÄÖ</TD>
+      <TD>trail  </TD>
+     </TR>
+     <TR>
+      <TD>tab	in</TD>
+      <TD>tab	in</TD>
+      <TD>  </TD>
+      <TD>€</TD>
+      <TD>  lead</TD>
+     </TR>
+    </TABLEDATA>
+   </DATA>
+  </TABLE>
+ </RESOURCE>
+</VOTABLE>

@@ -1,0 +1,146 @@
+<?xml version='1.0'?>
+<VOTABLE version="1.4"
+ xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<!--
+ !  VOTable written by STIL version 4.3-6 (uk.ac.starlink.votable.VOTableWriter)
+ !  at 2026-09-29T10:44:32
+ !-->
+<RESOURCE>
+<TABLE name="wide9" nrows="11">
+<FIELD datatype="short" name="c00"/>
+<FIELD datatype="int" name="c01"/>
+<FIELD datatype="double" name="c02"/>
+<FIELD arraysize="*" datatype="char" name="c03"/>
+<FIELD datatype="boolean" name="c04"/>
+<FIELD datatype="float" name="c05"/>
+<FIELD datatype="long" name="c06"/>
+<FIELD datatype="unsignedByte" name="c07"/>
+<FIELD arraysize="3" datatype="char" name="c08"/>
+<DATA>
+<TABLEDATA>
+  <TR>
+    <TD></TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD></TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>NaN</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD></TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD></TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>NaN</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD></TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD></TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD></TD>
+  </TR>
+  <TR>
+    <TD>-5</TD>
+    <TD>1000</TD>
+    <TD>2.25</TD>
+    <TD>v3</TD>
+    <TD>T</TD>
+    <TD>1.25</TD>
+    <TD>-6000000000000</TD>
+    <TD>7</TD>
+    <TD>v8</TD>
+  </TR>
+  <TR>
+    <TD></TD>
+    <TD></TD>
+    <TD>NaN</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD>NaN</TD>
+    <TD></TD>
+    <TD></TD>
+    <TD></TD>
+  </TR>
+</TABLEDATA>
+</DATA>
+</TABLE>
+</RESOURCE>
+</VOTABLE>

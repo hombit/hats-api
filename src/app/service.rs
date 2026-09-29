@@ -75,7 +75,9 @@ pub struct Service {
     /// How long a request has to produce an answer; `None` where the operator set no bound.
     request_timeout: Option<Duration>,
     /// How large a request body may be, in bytes; `None` where the operator set no bound.
-    request_body_limit: Option<usize>,
+    pub(in crate::app) request_body_limit: Option<usize>,
+    /// How many bytes of tables one request may bring with it.
+    pub(in crate::app) max_upload_bytes: u64,
     /// How the service signs what it answers — the `Server` header, and the foot of a
     /// generated listing. `None` where `[server] show_version` says not to sign at all.
     pub(in crate::app) signature: Option<HeaderValue>,
@@ -213,11 +215,21 @@ impl Service {
                 0 => None,
                 bytes => Some(usize::try_from(bytes).unwrap_or(usize::MAX)),
             },
+            max_upload_bytes: limits.max_upload_bytes.as_u64(),
             signature: server.signature()?,
             contact: server.contact()?.map(Arc::from),
             serve_mounted_index_html: server.serve_mounted_index_html,
             serve_mounted_robots_txt: server.serve_mounted_robots_txt,
             api_prefix: api_prefix.map(Arc::from),
+        })
+    }
+
+    /// How large a body carrying uploads may be: the parameters' own allowance and the
+    /// tables' beside it, since a multipart TAP request is both at once. `None` where the
+    /// operator set no bound on a body.
+    pub(in crate::app) fn upload_body_limit(&self) -> Option<usize> {
+        self.request_body_limit.map(|bytes| {
+            bytes.saturating_add(usize::try_from(self.max_upload_bytes).unwrap_or(usize::MAX))
         })
     }
 
@@ -303,7 +315,7 @@ pub fn router_with(service: Service, jobs: Option<Arc<Jobs>>) -> Router {
         // client can learn nothing from, so this deployment says it has none by not
         // answering at all rather than by answering every query with a refusal.
         if !service.tap_tables.is_empty() {
-            router = with_tap(router, &prefix);
+            router = with_tap(router, &prefix, service.upload_body_limit());
         }
         router = with_description(router, &prefix, service.contact.clone());
     }
@@ -501,14 +513,28 @@ pub(in crate::app) fn with_queries(router: Router<AppState>, prefix: &str) -> Ro
 
 /// The TAP resources. `/sync` answers `GET` and `POST` alike, which TAP §2.1 asks of a
 /// DALI-sync resource: the two differ only in where the parameters are read from.
-fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
+fn with_tap(
+    router: Router<AppState>,
+    prefix: &str,
+    upload_body_limit: Option<usize>,
+) -> Router<AppState> {
     let job = |child: &str| route(prefix, &format!("tap/async/{{id}}{child}"));
+    // The three resources a request's parameters are posted to, each of which may carry an
+    // inline table (DALI §3.4.5) and so takes a body as large as the tables beside the
+    // parameters. The handler holds each half to its own bound; this is the sum of the two,
+    // set closer to the route than the router's own limit and so the one an extractor reads.
+    let uploads = || match upload_body_limit {
+        Some(bytes) => DefaultBodyLimit::max(bytes),
+        None => DefaultBodyLimit::disable(),
+    };
     router
         // The base url a person is handed, opened in a browser. TAP puts nothing here.
         .route(&route(prefix, "tap"), get(tap::page))
         .route(
             &route(prefix, "tap/sync"),
-            get(tap::tap_sync_get).post(tap::tap_sync_post),
+            get(tap::tap_sync_get)
+                .post(tap::tap_sync_post)
+                .layer(uploads()),
         )
         .route(&route(prefix, "tap/availability"), get(tap::availability))
         .route(&route(prefix, "tap/capabilities"), get(tap::capabilities))
@@ -524,7 +550,7 @@ fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
         // cannot send the first.
         .route(
             &route(prefix, "tap/async"),
-            get(tap::list).post(tap::create),
+            get(tap::list).post(tap::create).layer(uploads()),
         )
         .route(&job(""), get(tap::show).post(tap::act).delete(tap::destroy))
         // The child resources. Each is a value a client reads on its own and, where UWS
@@ -543,7 +569,9 @@ fn with_tap(router: Router<AppState>, prefix: &str) -> Router<AppState> {
         .route(&job("/error"), get(tap::error))
         .route(
             &job("/parameters"),
-            get(tap::job_parameters).post(tap::set_job_parameters),
+            get(tap::job_parameters)
+                .post(tap::set_job_parameters)
+                .layer(uploads()),
         )
         .route(&job("/results"), get(tap::results))
         // Named rather than fixed at `result`, so that asking for a name this job has not

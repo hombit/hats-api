@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+    <RESOURCE>
+        <TABLE name="xtypes">
+            <FIELD name="ts" datatype="char" arraysize="*" xtype="timestamp"/>
+            <FIELD name="tsfix" datatype="char" arraysize="10" xtype="timestamp"/>
+            <FIELD name="pt" datatype="double" arraysize="2" unit="deg" ucd="pos.eq" xtype="point"/>
+            <FIELD name="fpt" datatype="float" arraysize="2" unit="deg" xtype="point"/>
+            <FIELD name="circ" datatype="double" arraysize="3" unit="deg" xtype="circle"/>
+            <FIELD name="poly" datatype="double" arraysize="*" unit="deg" xtype="polygon"/>
+            <FIELD name="intv" datatype="double" arraysize="2" xtype="interval"/>
+            <FIELD name="lintv" datatype="long" arraysize="2" xtype="interval"/>
+            <DATA>
+                <TABLEDATA>
+                    <TR>
+                        <TD>2000-01-02T15:20:30.456</TD>
+                        <TD>2002-03-04</TD>
+                        <TD>12.3 12.3 45.6</TD>
+                        <TD>12.3 12.3 45.6</TD>
+                        <TD>12.3 12.3 45.6 0.5</TD>
+                        <TD>10 10 10 10.2 10 10.2 10.2 10 10.2</TD>
+                        <TD>0.5 0.5 1</TD>
+                        <TD>0 0 2</TD>
+                    </TR>
+                    <TR>
+                        <TD>2001-02-03T04:05:06</TD>
+                        <TD>1999-12-31</TD>
+                        <TD>0 0 -90</TD>
+                        <TD>0 0 -90</TD>
+                        <TD>0 0 90 180</TD>
+                        <TD>0 0 0 1 0 1 1</TD>
+                        <TD>-inf -inf 0</TD>
+                        <TD>-5 -5 5</TD>
+                    </TR>
+                    <TR>
+                        <TD>2002-03-04</TD>
+                        <TD>2020-02-29</TD>
+                        <TD>359.9 359.9 90</TD>
+                        <TD>359.9 359.9 90</TD>
+                        <TD>359.9 359.9 -89.5 0.000001</TD>
+                        <TD>350 350 -10 10 -10 10 10 350 10</TD>
+                        <TD>0 0 inf</TD>
+                        <TD>0 0 0</TD>
+                    </TR>
+                    <TR>
+                        <TD>2000-01-02T15:20:30Z</TD>
+                        <TD>2000-01-01</TD>
+                        <TD>180 180 0</TD>
+                        <TD>180 180 0</TD>
+                        <TD>1 1 2 3</TD>
+                        <TD></TD>
+                        <TD>-inf -inf inf</TD>
+                        <TD>-9223372036854775808 -9223372036854775808 9223372036854775807</TD>
+                    </TR>
+                    <TR>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                        <TD></TD>
+                    </TR>
+                </TABLEDATA>
+            </DATA>
+        </TABLE>
+    </RESOURCE>
+</VOTABLE>

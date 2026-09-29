@@ -117,7 +117,7 @@ the report reads as one list of features rather than one list per tool.
 | `test_adql.py` | ADQL 2.1 — the mandatory language, nothing optional |
 | `test_examples.py` | DALI §2.3 — the examples a client offers in a menu, and whether they run |
 | `test_async.py` | TAP §2.2, UWS — expected failures, plus that the absence is legible |
-| `test_upload.py` | TAP §2.5 — expected failures, plus that capabilities and behaviour agree |
+| `test_upload.py` | TAP §2.5 — an inline upload, and that capabilities and behaviour agree |
 | `test_cone_search.py` | Simple Cone Search 1.03 — a different protocol, inheriting nothing from DALI: UCD1 columns, its own error shape, no `MAXREC`. Version 2.0 is not here: no client implements it, and a check this suite composed itself would be measuring its own idea of the draft |
 | `test_reference_data.py` | not a standard: the same query, asked here through both clients and read against what a service that has been answering it for years said |
 

@@ -1,0 +1,3 @@
+# The VOTable corpus is documents byte for byte as their writers wrote them; a checkout
+# that converted a CRLF document's line endings would be testing a different document.
+tests/data/votable/**/*.vot -text
