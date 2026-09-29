@@ -1244,6 +1244,145 @@ async fn an_upload_over_the_cap_is_refused_with_an_error_document() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
 }
 
+/// A `POST` of `body` as it is, under the content type given.
+fn posted(uri: &str, content_type: &str, body: impl Into<Body>) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, content_type)
+        .body(body.into())
+        .unwrap()
+}
+
+/// Each way a query's body can be unreadable is refused with an error document saying which,
+/// before anything in it is acted on.
+#[tokio::test]
+async fn a_query_body_that_cannot_be_read_is_refused_saying_why() {
+    let dir = hats::query::tests::fixture(true);
+    let limits = LimitsConfig {
+        max_request_body_bytes: ByteSize::kib(1),
+        max_upload_bytes: ByteSize::kib(4),
+        ..LimitsConfig::default()
+    };
+    const FORM: &str = "application/x-www-form-urlencoded";
+    const MULTIPART: &str = "multipart/form-data; boundary=b";
+    let long = format!("QUERY=SELECT%201{}&LANG=ADQL", "%20".repeat(1024));
+    let unterminated = "--b\r\nContent-Disposition: form-data; name=\"LANG\"\r\n\r\nADQL";
+    let mut binary_parameter =
+        b"--b\r\nContent-Disposition: form-data; name=\"QUERY\"\r\n\r\n".to_vec();
+    binary_parameter.extend([0xFF, 0xFE, b'\r', b'\n']);
+    binary_parameter.extend(b"--b--\r\n");
+    let cases: [(&str, Vec<u8>, StatusCode, &str); 7] = [
+        // A form body past the parameters' bound but within the route's, which is the sum.
+        (
+            FORM,
+            long.into_bytes(),
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "larger",
+        ),
+        // And one past the route's own, which the extractor refuses.
+        (
+            FORM,
+            vec![b'a'; 8 * 1024],
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "larger",
+        ),
+        (FORM, vec![0xFF, 0xFE], StatusCode::BAD_REQUEST, "not text"),
+        (
+            "multipart/form-data",
+            b"--b--\r\n".to_vec(),
+            StatusCode::BAD_REQUEST,
+            "boundary",
+        ),
+        (
+            MULTIPART,
+            b"no parts at all".to_vec(),
+            StatusCode::BAD_REQUEST,
+            "malformed",
+        ),
+        (
+            MULTIPART,
+            unterminated.as_bytes().to_vec(),
+            StatusCode::BAD_REQUEST,
+            "malformed",
+        ),
+        (
+            MULTIPART,
+            binary_parameter,
+            StatusCode::BAD_REQUEST,
+            "send a table as a file",
+        ),
+    ];
+    for (content_type, body, expected, says) in cases {
+        let shown = String::from_utf8_lossy(&body)
+            .chars()
+            .take(80)
+            .collect::<String>();
+        let (status, answered_as, answer) = send(
+            published(dir.path(), &limits),
+            posted("/api/v1/tap/sync", content_type, body),
+        )
+        .await;
+        assert_eq!(status, expected, "{content_type} {shown}: {answer}");
+        assert_eq!(answered_as, "application/x-votable+xml", "{shown}");
+        assert!(answer.contains("value=\"ERROR\""), "{shown}: {answer}");
+        assert!(answer.contains(says), "{shown}: {answer}");
+    }
+
+    // Tables past their own bound, each within it alone, and the body within the route's.
+    let table = vec![b'x'; 2200];
+    let (status, _, answer) = send(
+        published(dir.path(), &limits),
+        multipart(
+            "/api/v1/tap/sync",
+            &[
+                ("QUERY", "SELECT * FROM TAP_UPLOAD.a"),
+                ("LANG", "ADQL"),
+                ("UPLOAD", "a,param:a"),
+                ("UPLOAD", "b,param:b"),
+            ],
+            &[("a", None, &table), ("b", None, &table)],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{answer}");
+    assert!(answer.contains("4096 bytes"), "{answer}");
+}
+
+/// A resource that takes one value — a job's phase, its destruction — refuses a multipart
+/// body for what it is, and a body it cannot read for that.
+#[tokio::test]
+async fn a_jobs_own_resources_take_a_form_and_nothing_else() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let job = harness
+        .submit(&[("QUERY", "SELECT 1 AS one"), ("LANG", "ADQL")])
+        .await;
+    let phase = format!("{job}/phase");
+    let response = harness
+        .send(multipart(&phase, &[("PHASE", "RUN")], &[]))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let answer = text_of(response).await;
+    assert!(answer.contains("multipart"), "{answer}");
+
+    const FORM: &str = "application/x-www-form-urlencoded";
+    let response = harness.send(posted(&phase, FORM, vec![0xFF, 0xFE])).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let answer = text_of(response).await;
+    assert!(answer.contains("not text"), "{answer}");
+
+    let response = harness
+        .send(posted(&phase, FORM, vec![b'a'; 3 * 1024 * 1024]))
+        .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    // None of those did anything to the job.
+    assert_eq!(
+        text_of(harness.get(&format!("{job}/phase")).await).await,
+        "PENDING"
+    );
+}
+
 /// A multipart body is two things held to two bounds: its tables to `max_upload_bytes` and
 /// its parameters to `max_request_body_bytes`, as a form body would be. A table larger than
 /// a form may be is still an upload, and a parameter is not made larger by arriving beside
@@ -1344,6 +1483,60 @@ async fn an_inline_part_that_is_no_table_is_refused_by_name() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(body.contains("row 1, column a"), "{body}");
+
+    // And a part declared parquet that is not one says so.
+    let (status, _, body) = send(
+        published(dir.path(), &LimitsConfig::default()),
+        multipart(
+            "/api/v1/tap/sync",
+            &[
+                ("QUERY", "SELECT * FROM TAP_UPLOAD.t"),
+                ("LANG", "ADQL"),
+                ("UPLOAD", "t,param:t"),
+                ("UPLOAD_TYPE", "t,parquet"),
+            ],
+            &[("t", None, b"PAR1 and then nothing")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body.contains("not a parquet file"), "{body}");
+}
+
+/// A url into a mount is refused in terms of the url the caller wrote, never of what is on
+/// the disk beneath it: a file that is not there, and a parquet file under a name the
+/// data-file globs do not list — which its bytes alone do not make one to read in place.
+#[tokio::test]
+async fn an_upload_url_into_a_mount_is_refused_without_naming_the_disk() {
+    let dir = hats::query::tests::fixture(true);
+    std::fs::copy(
+        dir.path().join("dataset/Norder=3/Dir=0/Npix=64.parquet"),
+        dir.path().join("rows.dat"),
+    )
+    .unwrap();
+    let source = dir.path().display().to_string();
+    for (pairs, expected, says) in [
+        (
+            vec![
+                ("UPLOAD", "t,file:///missing.xml"),
+                ("UPLOAD_TYPE", "t,votable"),
+            ],
+            StatusCode::NOT_FOUND,
+            "file:///missing.xml does not exist",
+        ),
+        (
+            vec![("UPLOAD", "t,file:///rows.dat")],
+            StatusCode::NOT_FOUND,
+            "names no data file",
+        ),
+    ] {
+        let mut asked = vec![("QUERY", "SELECT * FROM TAP_UPLOAD.t"), ("LANG", "ADQL")];
+        asked.extend(pairs);
+        let (status, _, body) = ask(published(dir.path(), &LimitsConfig::default()), &asked).await;
+        assert_eq!(status, expected, "{body}");
+        assert!(body.contains(says), "{body}");
+        assert!(!body.contains(&source), "{body}");
+    }
 }
 
 /// A table nobody published is a refusal naming what is published, rather than a planner

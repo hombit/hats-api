@@ -1184,6 +1184,38 @@ mod tests {
         assert!(refused.to_string().contains("magic"), "{refused}");
     }
 
+    /// A parquet file's lists may be large and of any of the narrower numbers, and each is
+    /// written as the array it is.
+    #[test]
+    fn a_large_list_of_any_number_is_an_array() {
+        use datafusion::arrow::array::LargeListArray;
+        use datafusion::arrow::datatypes::{
+            ArrowPrimitiveType, Float16Type, Int8Type, UInt16Type, UInt32Type,
+        };
+
+        type Half = <Float16Type as ArrowPrimitiveType>::Native;
+
+        fn written<T: ArrowPrimitiveType>(values: [T::Native; 2]) -> String {
+            let list = LargeListArray::from_iter_primitive::<T, _, _>(vec![Some(values.map(Some))]);
+            encode(&one("a", Arc::new(list))).unwrap()
+        }
+        for (document, cell) in [
+            (written::<Int8Type>([-1, 2]), "<TD>-1 2</TD>"),
+            (written::<UInt16Type>([65535, 0]), "<TD>65535 0</TD>"),
+            (
+                written::<UInt32Type>([4294967295, 1]),
+                "<TD>4294967295 1</TD>",
+            ),
+            (
+                written::<Float16Type>([Half::from_f32(0.5), Half::from_f32(-2.0)]),
+                "<TD>0.5 -2</TD>",
+            ),
+        ] {
+            assert!(document.contains("arraysize=\"*\""), "{document}");
+            assert!(document.contains(cell), "{document}");
+        }
+    }
+
     /// A column a VOTable upload declared is described the way that document described it —
     /// and a declaration that no longer fits the column's type is not repeated.
     #[test]

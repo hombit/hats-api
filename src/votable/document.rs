@@ -1390,6 +1390,14 @@ mod tests {
             ),
             (
                 single(
+                    "<FIELD name=\"n\" datatype=\"int\" \
+                     arraysize=\"4294967296x4294967296x4294967296\"/>",
+                    "<TABLEDATA/>",
+                ),
+                "larger than any cell",
+            ),
+            (
+                single(
                     &format!("{int}<FIELD name=\"n\" datatype=\"long\"/>"),
                     "<TABLEDATA/>",
                 ),

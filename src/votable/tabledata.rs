@@ -237,7 +237,71 @@ pub fn fixed_or_counted(text: &str, width: Width) -> String {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::arrow::array::{Array, AsArray, RecordBatch};
+    use datafusion::arrow::compute::concat_batches;
+
     use super::*;
+    use crate::votable::document;
+
+    /// The rows of a one-column document, `cells` being each row's `TD`.
+    fn column(field: &str, cells: &[&str]) -> Result<RecordBatch, String> {
+        let rows: String = cells
+            .iter()
+            .map(|cell| format!("<TR><TD>{cell}</TD></TR>"))
+            .collect();
+        let table = document::read(
+            format!(
+                "<VOTABLE><RESOURCE><TABLE>{field}<DATA><TABLEDATA>{rows}</TABLEDATA></DATA>\
+                 </TABLE></RESOURCE></VOTABLE>"
+            )
+            .as_bytes(),
+        )?;
+        Ok(concat_batches(&table.schema, &table.batches).unwrap())
+    }
+
+    /// A writer that pads its cells writes a missing number as blanks, which is the empty
+    /// cell §5.1 makes a null — for a scalar and for an array alike.
+    #[test]
+    fn a_numeric_cell_of_blanks_is_a_null() {
+        for field in [
+            "<FIELD name=\"a\" datatype=\"int\"/>",
+            "<FIELD name=\"a\" datatype=\"double\"/>",
+            "<FIELD name=\"a\" datatype=\"float\" arraysize=\"3\"/>",
+            "<FIELD name=\"a\" datatype=\"long\" arraysize=\"*\"/>",
+            "<FIELD name=\"a\" datatype=\"doubleComplex\"/>",
+        ] {
+            let batch = column(field, &["   ", " \n\t ", ""]).unwrap();
+            assert_eq!(batch.column(0).null_count(), 3, "{field}");
+        }
+    }
+
+    /// A two-dimensional `char` is strings of the first dimension's width. A cell short of
+    /// the count is filled out with empty strings, the way a writer that trims trailing
+    /// blanks leaves it; one with more strings than the count allows is refused.
+    #[test]
+    fn a_char_array_cell_is_strings_of_its_width_up_to_its_count() {
+        let fixed = "<FIELD name=\"a\" datatype=\"char\" arraysize=\"3x2\"/>";
+        let batch = column(fixed, &["abcdef", "abcd", "ab"]).unwrap();
+        let lists = batch.column(0).as_fixed_size_list();
+        let strings = |row: usize| {
+            let value = lists.value(row);
+            let value = value.as_string::<i32>();
+            (0..value.len())
+                .map(|at| value.value(at).to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strings(0), ["abc", "def"]);
+        assert_eq!(strings(1), ["abc", "d"]);
+        assert_eq!(strings(2), ["ab", ""]);
+        let refused = column(fixed, &["abcdefg"]).unwrap_err();
+        assert!(refused.contains("3 strings of 3 characters"), "{refused}");
+
+        // A variable count is filled out to whole slices, and has no upper bound to refuse.
+        let variable = "<FIELD name=\"a\" datatype=\"char\" arraysize=\"2x2x*\"/>";
+        let batch = column(variable, &["abcde"]).unwrap();
+        let lists = batch.column(0).as_list::<i32>();
+        assert_eq!(lists.value(0).len(), 4);
+    }
 
     #[test]
     fn an_integer_is_decimal_or_the_types_own_bits_in_hex() {
@@ -252,6 +316,9 @@ mod tests {
             integer(Primitive::Long, "-9223372036854775808"),
             Ok(i64::MIN)
         );
+        assert_eq!(integer(Primitive::Long, "0xFFFFFFFFFFFFFFFF"), Ok(-1));
+        assert_eq!(integer(Primitive::Long, "0x8000000000000000"), Ok(i64::MIN));
+        assert!(integer(Primitive::Long, "0x10000000000000000").is_err());
         assert!(integer(Primitive::Short, "32768").is_err());
         assert!(integer(Primitive::UnsignedByte, "-1").is_err());
         assert!(integer(Primitive::Short, "0x10000").is_err());
