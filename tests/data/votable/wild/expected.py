@@ -48,6 +48,7 @@ ARI = "https://gaia.ari.uni-heidelberg.de/tap/sync?REQUEST=doQuery&LANG=ADQL&"
 ESA = "https://gea.esac.esa.int/tap-server/tap/sync?REQUEST=doQuery&LANG=ADQL&"
 NED = "https://ned.ipac.caltech.edu/tap/sync?REQUEST=doQuery&LANG=ADQL&"
 IRSA = "https://irsa.ipac.caltech.edu/TAP/sync?REQUEST=doQuery&LANG=ADQL&"
+TAPVIZIER = "http://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync?REQUEST=doQuery&LANG=ADQL&"
 ASTROPY = (
     "https://raw.githubusercontent.com/astropy/astropy/"
     "006f4960ab7311b83c36ca66d5df70274419e144/astropy/io/votable/tests/data/"
@@ -111,6 +112,10 @@ Q_IRSA = (
     "+allwise_p3as_psd+WHERE+CONTAINS%28POINT%28%27ICRS%27%2c+ra%2c+dec%29%2c+CIRCLE%28%27ICRS"
     "%27%2c+10.68%2c+41.27%2c+0.02%29%29%3d1"
 )
+Q_HIPPARCOS = (
+    "QUERY=SELECT+TOP+10+HIP%2c+RAhms%2c+DEdms%2c+Vmag%2c+VarFlag%2c+RAICRS%2c+DEICRS%2c+Plx"
+    "%2c+pmRA%2c+SpType+FROM+%22I%2f239%2fhip_main%22+ORDER+BY+HIP"
+)
 VIZIER_GAIA = (
     "?-source=I/355/gaiadr3&-out.max=10&-out=Source,RA_ICRS,DE_ICRS,Plx,pmRA,RUWE,Gmag,RV,"
     "VarFlag,NSS,PQSO,Teff,SolID&-c=56.75+24.12&-c.rm=3"
@@ -158,6 +163,30 @@ SOURCES = {
         producer=f"SIMBAD TAP, {TAPLIB}",
         source_url=SIMBAD
         + "FORMAT=votable&QUERY=SELECT+TOP+3+no_such_column+FROM+basic",
+        refuse=QUERY_ERROR,
+        notes="HTTP 400. The INFO USER value was the requester's address and is replaced by "
+        "192.0.2.1 (TEST-NET-1).",
+    ),
+    # --- CDS TAPVizieR: TAPLibrary ------------------------------------------------------
+    "tapvizier-tabledata-hipparcos.vot": dict(
+        producer="TAPVizieR, per INFO server_software 'TAPVizieR-Vollt/1.1.3'",
+        source_url=TAPVIZIER + "FORMAT=votable%2ftd&" + Q_HIPPARCOS,
+        notes=TAPLIB_FORMAT,
+    ),
+    "tapvizier-binary-hipparcos.vot": dict(
+        producer="TAPVizieR, per INFO server_software 'TAPVizieR-Vollt/1.1.3'",
+        source_url=TAPVIZIER + "FORMAT=votable%2fb&" + Q_HIPPARCOS,
+        notes=TAPLIB_FORMAT,
+    ),
+    "tapvizier-binary2-hipparcos.vot": dict(
+        producer="TAPVizieR, per INFO server_software 'TAPVizieR-Vollt/1.1.3'",
+        source_url=TAPVIZIER + "FORMAT=votable%2fb2&" + Q_HIPPARCOS,
+        notes=TAPLIB_FORMAT,
+    ),
+    "tapvizier-error-column.vot": dict(
+        producer="TAPVizieR, per INFO PROVIDER 'CDS'",
+        source_url=TAPVIZIER
+        + "FORMAT=votable&QUERY=SELECT+TOP+10+no_such_column+FROM+%22I%2f239%2fhip_main%22",
         refuse=QUERY_ERROR,
         notes="HTTP 400. The INFO USER value was the requester's address and is replaced by "
         "192.0.2.1 (TEST-NET-1).",
@@ -375,7 +404,7 @@ SOURCES = {
         notes="HTTP 200 for an error. CRLF line endings, VOTable 1.2 namespace; the message is "
         "a PostgreSQL exception.",
     ),
-    # --- VizieR (classic ASU interface; TAPVizieR was unreachable) ------------------------
+    # --- VizieR, classic ASU interface --------------------------------------------------
     "vizier-tabledata-hipparcos.vot": dict(
         producer="VizieR 7.6, per INFO server_software",
         source_url="https://vizier.cds.unistra.fr/viz-bin/votable?-source=I/239/hip_main"

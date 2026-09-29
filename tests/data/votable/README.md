@@ -42,6 +42,7 @@ character as `¿`; those lines say what STILTS writes, not only what it reads.
 Fetched 2026-09-29 (UTC):
 
 - `simbad-*` — CDS SIMBAD TAP, TAPLibrary (Java): `basic` in BINARY, TABLEDATA, BINARY2 and FITS-in-VOTable, and an error.
+- `tapvizier-*` — CDS TAPVizieR, TAPLibrary (Java): Hipparcos in TABLEDATA, BINARY and BINARY2, and an error.
 - `gavo-*` — GAVO Data Center, DaCHS 2.12.2 (Python): ObsCore, SDSS DR16 arrays, RAVE booleans, CARMENES and CALIFA points/polygons/timestamps, unicodeChar names, a MIVOT-annotated answer, SCS, SIA 1, SIA 2, SSA, a DataLink links response, and a timeout error.
 - `arigaia-*` — ARI Gaia TAP, TAPLibrary (Java): Gaia DR3 in BINARY, TABLEDATA and BINARY2, and an ADQL error.
 - `esagaia-*` — ESA Gaia Archive TAP+ (Java): Gaia DR3 in BINARY2 and TABLEDATA, a gzip body served as a VOTable, and an error.

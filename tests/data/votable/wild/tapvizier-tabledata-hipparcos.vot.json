@@ -1,0 +1,242 @@
+{
+ "producer": "TAPVizieR, per INFO server_software 'TAPVizieR-Vollt/1.1.3'",
+ "source_url": "http://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync?REQUEST=doQuery&LANG=ADQL&FORMAT=votable%2ftd&QUERY=SELECT+TOP+10+HIP%2c+RAhms%2c+DEdms%2c+Vmag%2c+VarFlag%2c+RAICRS%2c+DEICRS%2c+Plx%2c+pmRA%2c+SpType+FROM+%22I%2f239%2fhip_main%22+ORDER+BY+HIP",
+ "fetched": "2026-09-29",
+ "serialization": "TABLEDATA",
+ "columns": [
+  {
+   "name": "HIP",
+   "datatype": "int",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.id;meta.main",
+   "utype": null,
+   "description": "Identifier (HIP number) (H1)",
+   "null": null
+  },
+  {
+   "name": "RAhms",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "pos.eq.ra",
+   "utype": null,
+   "description": "Right ascension in h m s, ICRS (J1991.25) (H3)",
+   "null": null
+  },
+  {
+   "name": "DEdms",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "pos.eq.dec",
+   "utype": null,
+   "description": "Declination in deg ' &quot;, ICRS (J1991.25) (H4)",
+   "null": null
+  },
+  {
+   "name": "Vmag",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mag",
+   "ucd": "phot.mag;em.opt.V",
+   "utype": null,
+   "description": "? Magnitude in Johnson V (H5)",
+   "null": null
+  },
+  {
+   "name": "VarFlag",
+   "datatype": "short",
+   "arraysize": null,
+   "xtype": null,
+   "unit": null,
+   "ucd": "meta.code;src.var",
+   "utype": null,
+   "description": "[1,3]? Coarse variability flag (H6)",
+   "null": null
+  },
+  {
+   "name": "RAICRS",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.ra;meta.main",
+   "utype": null,
+   "description": "? alpha, degrees (ICRS, Epoch=J1991.25) (H8)",
+   "null": null
+  },
+  {
+   "name": "DEICRS",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "deg",
+   "ucd": "pos.eq.dec;meta.main",
+   "utype": null,
+   "description": "? delta, degrees (ICRS, Epoch=J1991.25) (H9)",
+   "null": null
+  },
+  {
+   "name": "Plx",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas",
+   "ucd": "pos.parallax.trig",
+   "utype": null,
+   "description": "? Trigonometric parallax (H11)",
+   "null": null
+  },
+  {
+   "name": "pmRA",
+   "datatype": "double",
+   "arraysize": null,
+   "xtype": null,
+   "unit": "mas/yr",
+   "ucd": "pos.pm;pos.eq.ra",
+   "utype": null,
+   "description": "*? Proper motion mu_alpha.cos(delta), ICRS(H12)",
+   "null": null
+  },
+  {
+   "name": "SpType",
+   "datatype": "char",
+   "arraysize": "*",
+   "xtype": null,
+   "unit": null,
+   "ucd": "src.spType",
+   "utype": null,
+   "description": "Spectral type (H76)",
+   "null": null
+  }
+ ],
+ "rows": [
+  [
+   1,
+   "00 00 00.22",
+   "+01 05 20.4",
+   9.1,
+   null,
+   0.00091185,
+   1.08901332,
+   3.54,
+   -5.2,
+   "F5"
+  ],
+  [
+   2,
+   "00 00 00.91",
+   "-19 29 55.8",
+   9.27,
+   null,
+   0.00379737,
+   -19.49883745,
+   21.9,
+   181.21,
+   "K3V"
+  ],
+  [
+   3,
+   "00 00 01.20",
+   "+38 51 33.4",
+   6.61,
+   null,
+   0.00500795,
+   38.85928608,
+   2.81,
+   5.24,
+   "B9"
+  ],
+  [
+   4,
+   "00 00 02.01",
+   "-51 53 36.8",
+   8.06,
+   null,
+   0.0083817,
+   -51.89354612,
+   7.75,
+   62.85,
+   "F0V"
+  ],
+  [
+   5,
+   "00 00 02.39",
+   "-40 35 28.4",
+   8.55,
+   null,
+   0.00996534,
+   -40.5912244,
+   2.87,
+   2.53,
+   "G8III"
+  ],
+  [
+   6,
+   "00 00 04.35",
+   "+03 56 47.4",
+   12.31,
+   null,
+   0.01814144,
+   3.94648893,
+   18.8,
+   226.29,
+   "M0V:"
+  ],
+  [
+   7,
+   "00 00 05.41",
+   "+20 02 11.8",
+   9.64,
+   null,
+   0.02254891,
+   20.03660216,
+   17.74,
+   -208.12,
+   "G0"
+  ],
+  [
+   8,
+   "00 00 06.55",
+   "+25 53 11.3",
+   9.05,
+   3,
+   0.0272916,
+   25.88647445,
+   5.17,
+   19.09,
+   "M6e-M8.5e Tc"
+  ],
+  [
+   9,
+   "00 00 08.48",
+   "+36 35 09.4",
+   8.59,
+   null,
+   0.03534189,
+   36.58593777,
+   4.81,
+   -6.3,
+   "G5"
+  ],
+  [
+   10,
+   "00 00 08.70",
+   "-50 52 01.5",
+   8.59,
+   null,
+   0.03625309,
+   -50.8670736,
+   10.76,
+   42.23,
+   "F6V"
+  ]
+ ],
+ "refuse": null,
+ "notes": "TAPLibrary ignores RESPONSEFORMAT and answers BINARY whatever it names; this one was fetched with the TAP 1.0 FORMAT parameter."
+}

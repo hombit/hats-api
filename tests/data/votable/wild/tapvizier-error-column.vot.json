@@ -1,0 +1,10 @@
+{
+ "producer": "TAPVizieR, per INFO PROVIDER 'CDS'",
+ "source_url": "http://tapvizier.cds.unistra.fr/TAPVizieR/tap/sync?REQUEST=doQuery&LANG=ADQL&FORMAT=votable&QUERY=SELECT+TOP+10+no_such_column+FROM+%22I%2f239%2fhip_main%22",
+ "fetched": "2026-09-29",
+ "serialization": null,
+ "columns": [],
+ "rows": [],
+ "refuse": "QUERY_STATUS is ERROR",
+ "notes": "HTTP 400. The INFO USER value was the requester's address and is replaced by 192.0.2.1 (TEST-NET-1)."
+}
