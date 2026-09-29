@@ -21,6 +21,8 @@ Release dates are in the UTC time zone.
 - `votable` answers write a list of numbers or booleans as a VOTable array.
 - `votable` answers write a list of strings as fixed-width strings.
 - `votable` answers describe an uploaded VOTable's columns as its `FIELD`s did.
+- `votable` answers give a catalog's `ra` and `dec` the unit and UCD `TAP_SCHEMA` does.
+- `votable` answers write a dictionary column as its values and bytes as `unsignedByte`.
 
 ### Deprecated
 

@@ -58,6 +58,11 @@ fn partial(file: &str) -> String {
     format!("{file}.partial")
 }
 
+/// What an answer's [`Spool`] is called, beside it for the same two reasons.
+fn spooled(file: &str) -> String {
+    format!("{file}.spool")
+}
+
 /// One run's results directory.
 #[derive(Debug)]
 pub struct Results {
@@ -129,11 +134,9 @@ impl Results {
         let file = id.to_string();
         Writing {
             destination: self.directory.join(&file),
-            scratch: self.directory.join(partial(&file)),
+            sink: Sink::new(self.directory.join(partial(&file)), ceiling),
+            spool: self.directory.join(spooled(&file)),
             file,
-            handle: None,
-            bytes: 0,
-            ceiling,
         }
     }
 
@@ -143,7 +146,9 @@ impl Results {
     /// [`Writing`] to speak for them: an aborted task and a panicked one are gone with
     /// their sink, and the bytes they had written are still on the disk.
     pub async fn abandon(&self, id: &JobId) {
-        self.remove(&partial(&id.to_string())).await;
+        let file = id.to_string();
+        self.remove(&partial(&file)).await;
+        self.remove(&spooled(&file)).await;
     }
 
     /// Keep a table a job was sent inline until it runs.
@@ -329,6 +334,36 @@ mod tests {
         results.abandon(&JobId::new().unwrap()).await;
     }
 
+    /// A spool is read back where it was written, is held to the answer's ceiling, and is gone
+    /// once it is dropped — whether the answer was written from it, or the job gave up with
+    /// one half-written and the sweep of an abandoned job is what finds it.
+    #[tokio::test]
+    async fn a_spool_is_gone_once_the_answer_no_longer_needs_it() {
+        let root = tempfile::tempdir().unwrap();
+        let results = under(root.path());
+        let id = JobId::new().unwrap();
+        let mut writing = results.writing(&id, 10);
+        let mut spool = writing.spool();
+        spool.write(b"rows").await.unwrap();
+        let path = spool.finish().await.unwrap().to_path_buf();
+        assert_eq!(std::fs::read(&path).unwrap(), b"rows");
+        writing.write(b"document").await.unwrap();
+        drop(spool);
+        writing.finish().await.unwrap();
+        assert_eq!(std::fs::read_dir(&results.directory).unwrap().count(), 1);
+
+        let id = JobId::new().unwrap();
+        let mut spool = results.writing(&id, 10).spool();
+        spool.write(b"rows").await.unwrap();
+        let refused = spool.write(b"and more rows").await.unwrap_err();
+        assert!(refused.to_string().contains("10 bytes"), "{refused}");
+        // A task that is aborted drops its spool; one that dies never does, and the sweep of
+        // what it left finds the spool under the job's own name.
+        std::mem::forget(spool);
+        results.abandon(&id).await;
+        assert_eq!(std::fs::read_dir(&results.directory).unwrap().count(), 1);
+    }
+
     /// An answer of no bytes is still an answer: an empty table is a document with a header
     /// and no rows, and the record points at a file either way.
     #[tokio::test]
@@ -435,19 +470,108 @@ pub struct Writing {
     file: String,
     destination: PathBuf,
     /// Where the bytes go until they are all there.
-    scratch: PathBuf,
+    sink: Sink,
+    /// Where [`Self::spool`] keeps its rows.
+    spool: PathBuf,
+}
+
+impl Writing {
+    /// Add a piece of the document.
+    pub async fn write(&mut self, chunk: &[u8]) -> Result<(), ApiError> {
+        self.sink.write(chunk).await
+    }
+
+    /// Somewhere beside the answer to keep what it is written from, for a document that has
+    /// to see every row before it can write its head.
+    ///
+    /// Held to the answer's own ceiling, apart from it: what the spool holds is the rows the
+    /// document is about to be written from, so a spool over the ceiling is an answer that
+    /// would have been too. The disk is therefore held to twice the ceiling at most, for as
+    /// long as the document is being written from it.
+    pub fn spool(&self) -> Spool {
+        Spool {
+            sink: Sink::new(self.spool.clone(), self.sink.ceiling),
+        }
+    }
+
+    /// Put the finished answer under its own name.
+    ///
+    /// Taking `&mut self` rather than `self` so that the sink is still there to be swept
+    /// when this fails: the rename is the last thing that can go wrong, and what it leaves
+    /// behind when it does is the same partial file every other ending leaves.
+    pub async fn finish(&mut self) -> Result<Written, ApiError> {
+        self.sink.close().await?;
+        // Within the directory, so the rename cannot cross a filesystem and stop being
+        // atomic.
+        tokio::fs::rename(&self.sink.path, &self.destination)
+            .await
+            .map_err(|error| ApiError::internal(format!("cannot keep a job's result: {error}")))?;
+        Ok(Written {
+            file: self.file.clone(),
+            bytes: self.sink.bytes,
+        })
+    }
+}
+
+/// What a job's answer is written from, where the answer cannot be written as it is read.
+///
+/// Gone when it is dropped, whether the answer was written from it or not; a run that dies
+/// holding one leaves it where [`Results::abandon`] and the sweep of a dead run both find it.
+#[derive(Debug)]
+pub struct Spool {
+    sink: Sink,
+}
+
+impl Spool {
+    /// Keep a piece.
+    pub async fn write(&mut self, chunk: &[u8]) -> Result<(), ApiError> {
+        self.sink.write(chunk).await
+    }
+
+    /// Everything is written: where it can be read back from.
+    ///
+    /// The file stays while this does, so it is read before this is dropped.
+    pub async fn finish(&mut self) -> Result<&Path, ApiError> {
+        self.sink.close().await?;
+        Ok(&self.sink.path)
+    }
+}
+
+impl Drop for Spool {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.sink.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.sink.path.display(), %error, "a spool could not be removed");
+        }
+    }
+}
+
+/// One file being written, under a ceiling.
+///
+/// Opened lazily, which is what leaves no file behind a job that fails before its first byte.
+#[derive(Debug)]
+struct Sink {
+    path: PathBuf,
     handle: Option<tokio::fs::File>,
     bytes: u64,
     ceiling: u64,
 }
 
-impl Writing {
-    /// Add a piece of the document.
-    ///
+impl Sink {
+    fn new(path: PathBuf, ceiling: u64) -> Self {
+        Self {
+            path,
+            handle: None,
+            bytes: 0,
+            ceiling,
+        }
+    }
+
     /// The ceiling is checked before the bytes are written rather than after: what it
     /// bounds is what a job may leave on disk, and a file that went over it and was then
     /// deleted still cost the disk it was written to.
-    pub async fn write(&mut self, chunk: &[u8]) -> Result<(), ApiError> {
+    async fn write(&mut self, chunk: &[u8]) -> Result<(), ApiError> {
         if chunk.is_empty() {
             return Ok(());
         }
@@ -466,45 +590,27 @@ impl Writing {
             Some(handle) => handle,
             // Made on the first piece, which is why a job that fails before one leaves no
             // file at all rather than an empty one.
-            none => none.insert(
-                tokio::fs::File::create(&self.scratch)
-                    .await
-                    .map_err(failed)?,
-            ),
+            none => none.insert(tokio::fs::File::create(&self.path).await.map_err(failed)?),
         };
         handle.write_all(chunk).await.map_err(failed)?;
         self.bytes = would_be;
         Ok(())
     }
 
-    /// Put the finished answer under its own name.
+    /// Flush and close the file, making it where nothing was written.
     ///
-    /// Taking `&mut self` rather than `self` so that the sink is still there to be swept
-    /// when this fails: the rename is the last thing that can go wrong, and what it leaves
-    /// behind when it does is the same partial file every other ending leaves.
-    pub async fn finish(&mut self) -> Result<Written, ApiError> {
+    /// An answer of no bytes is still an answer — an empty table is a document with a header
+    /// and no rows, and for a format that writes nothing at all it is a file of no bytes
+    /// rather than no file.
+    async fn close(&mut self) -> Result<(), ApiError> {
         let failed = |error: std::io::Error| {
             ApiError::internal(format!("cannot keep a job's result: {error}"))
         };
-        // An answer of no bytes is still an answer — an empty table is a document with a
-        // header and no rows, and for a format that writes nothing at all it is a file of
-        // no bytes rather than no file.
         let mut handle = match self.handle.take() {
             Some(handle) => handle,
-            None => tokio::fs::File::create(&self.scratch)
-                .await
-                .map_err(failed)?,
+            None => tokio::fs::File::create(&self.path).await.map_err(failed)?,
         };
         handle.flush().await.map_err(failed)?;
-        drop(handle);
-        // Within the directory, so the rename cannot cross a filesystem and stop being
-        // atomic.
-        tokio::fs::rename(&self.scratch, &self.destination)
-            .await
-            .map_err(failed)?;
-        Ok(Written {
-            file: self.file.clone(),
-            bytes: self.bytes,
-        })
+        Ok(())
     }
 }

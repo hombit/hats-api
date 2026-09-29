@@ -443,8 +443,8 @@ function viaNestedPandas(route, body, got) {
    parquet file in front of it. A VOTable declares each column's type, so this is not the
    JSON answer with the types read back out of the values.
 
-   It takes flat columns only: a request naming a nested one is refused rather than
-   answered, which is the API's refusal and not this snippet's to work around. */
+   It takes no nested column: a request naming one is refused rather than answered, which
+   is the API's refusal and not this snippet's to work around. */
 function viaAstropy(route, body) {
   return (
     'import io\n\nimport requests\nfrom astropy.table import Table\n\n' +

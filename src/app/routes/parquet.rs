@@ -89,9 +89,9 @@ pub(in crate::app) struct ParquetQuery {
     filters: Option<String>,
     /// `json`, the default; `parquet` for the answer as a parquet file laid out like the file
     /// it came from; `votable` for a VOTable, `csv` for comma-separated text and `tsv` for
-    /// tab-separated. The last three take flat columns only and refuse a nested one by name.
-    /// Anything but `json` carries its counts in `x-hats-*` response headers, there being no
-    /// room in the body.
+    /// tab-separated. The last three refuse a nested column by name, and `csv` and `tsv` a list
+    /// as well, which a VOTable writes as an array. Anything but `json` carries its counts in
+    /// `x-hats-*` response headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the

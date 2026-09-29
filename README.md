@@ -424,8 +424,12 @@ reads the original. It carries the values above as themselves.
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
 `-Inf` written as themselves. Lists are VOTable arrays; structs are refused. A list of
 strings is padded to one width, so a streamed answer refuses it unless it came from an
-uploaded VOTable. A missing integer or string inside a list fails the request, and so does a
-listed string ending in a blank.
+uploaded VOTable; a TAP job, whose answer is a file, measures it first. A missing integer or
+string inside a list fails the request, and so does a listed string ending in a blank. A
+dictionary-encoded column (a `pandas` categorical) is written as its values, and bytes as an
+`unsignedByte` array. A catalog's `ra` and `dec` carry `unit="deg"` and the
+`pos.eq.ra;meta.main` and `pos.eq.dec;meta.main` UCDs, which is how TOPCAT finds the
+position.
 
 **`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
 `-inf` written as those three, which `float()` in Python reads back. Flat columns only.
@@ -929,9 +933,11 @@ with the query as [above](#uploading-a-table).
 
 TAP names the first three; `parquet` is an extension this service declares, as DALI §3.4.3
 provides for, and it appears in `capabilities` beside the rest. It is the only format here
-that carries a **nested column** — a light curve or a spectrum held as one column of one row. VOTable, `csv` and `tsv` each refuse such a column by name, so a query
-touching one is a query to ask for parquet back. Both resources answer it: `/sync` sends the
-whole file with its length, and a job writes one you can fetch by range.
+that carries a **nested column** — a light curve or a spectrum held as one column of one row.
+VOTable, `csv` and `tsv` each refuse such a column by name, so a query returning one is a
+query to ask for parquet back. One field of it, `lightcurve.mag`, is one row's list, which a
+VOTable does carry as an array. Both resources answer parquet: `/sync` sends the whole file
+with its length, and a job writes one you can fetch by range.
 
 ```sh
 curl -o rows.parquet --data-urlencode \

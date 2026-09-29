@@ -42,8 +42,10 @@ pub(in crate::app) struct AdqlQuery {
     lang: Option<String>,
     /// `json`, the default; `parquet` for the answer as a parquet file; `votable` for a
     /// VOTable, `csv` for comma-separated text and `tsv` for tab-separated. The last three
-    /// take flat columns only and refuse a nested one by name. Anything but `json` carries
-    /// its counts in `x-hats-*` response headers, there being no room in the body.
+    /// refuse a nested column by name, and `csv` and `tsv` a list as well, which a VOTable
+    /// writes as an array — a field of a nested column, `lc.mag`, among them. Anything but
+    /// `json` carries its counts in `x-hats-*` response headers, there being no room in the
+    /// body.
     #[schema(example = "json")]
     format: Option<String>,
     /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
@@ -1063,6 +1065,40 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
         dir
+    }
+
+    /// A field of a nested column is one row's list, which a VOTable writes as an array — so a
+    /// light curve's magnitudes come back in the format an IVOA client reads, beside a position
+    /// marked the way `TAP_SCHEMA` marks the catalog's own.
+    #[tokio::test]
+    async fn a_votable_answer_carries_a_field_of_a_nested_column() {
+        let dir = nested_catalog();
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": r#"SELECT id, ra, "lc"."mag" AS m FROM c WHERE id = 3"#,
+                "tables": {"c": {"type": "hats", "url": "file:///"}},
+                "format": "votable",
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(
+            body.contains("<FIELD name=\"m\" ID=\"m\" datatype=\"double\" arraysize=\"*\"/>"),
+            "{body}"
+        );
+        assert!(
+            body.contains("datatype=\"double\" unit=\"deg\" ucd=\"pos.eq.ra;meta.main\"/>"),
+            "{body}"
+        );
+        assert!(
+            body.contains(&format!(
+                "<TR><TD>3</TD><TD>45</TD><TD>{}</TD></TR>",
+                scattered(3 * 7919)
+            )),
+            "{body}"
+        );
     }
 
     /// A field of a nested column is read on its own, the way a parquet scan reads one: each

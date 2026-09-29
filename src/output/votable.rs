@@ -16,7 +16,11 @@
 //! is decided.
 //!
 //! A column a VOTable upload declared is described as that document described it, which is
-//! what `declaration` decides.
+//! what `declaration` decides; a catalog's own position columns are described with the unit
+//! and UCD `TAP_SCHEMA` publishes for them, off the mark [`crate::hats::table`] puts on them.
+//!
+//! How a file stores a column is not what the column is: a dictionary is written as its
+//! values, and bytes as VOTable's `unsignedByte` array.
 //!
 //! Three things the mapping decides, each because the alternative returns a wrong value
 //! rather than an error:
@@ -41,8 +45,10 @@
 
 use std::fmt;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use datafusion::arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
+use datafusion::arrow::compute::cast;
 use datafusion::arrow::datatypes::{
     ArrowPrimitiveType, DataType, Field, Float16Type, Float32Type, Float64Type, Int8Type,
     Int16Type, Int32Type, Int64Type, SchemaRef, UInt8Type, UInt16Type, UInt32Type,
@@ -52,6 +58,7 @@ use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
 use crate::output::{instant, stream};
+use crate::sky::geometry;
 use crate::votable::field as votable_field;
 
 /// The media type IVOA registers for a VOTable document.
@@ -84,23 +91,11 @@ pub fn encode_truncated(result: &QueryResult) -> Result<String, ApiError> {
 }
 
 fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
-    let mut encoder = Document::new(Some(result.num_rows()));
-    encoder.measured = result
-        .schema
-        .fields()
-        .iter()
-        .enumerate()
-        .map(|(at, field)| {
-            is_string_list(field.data_type()).then(|| {
-                result
-                    .batches
-                    .iter()
-                    .map(|batch| longest(batch.column(at)))
-                    .max()
-                    .unwrap_or_default()
-            })
-        })
-        .collect();
+    let mut measuring = Measuring::new(&result.schema);
+    for batch in &result.batches {
+        measuring.rows(batch);
+    }
+    let mut encoder = measuring.document(Some(result.num_rows()));
     let bytes = stream::collected(
         &mut encoder,
         result,
@@ -123,9 +118,9 @@ fn document(result: &QueryResult, overflow: bool) -> Result<String, ApiError> {
 /// because the `OK` at the top was written before the row count was known.
 ///
 /// **Neither does a string array's width, unless its upload declared one.** A list of strings is
-/// written as strings of one width, and the width is in the `FIELD`; a collected answer measures
-/// it over the rows first, which is what `measured` holds, and a streamed one has nothing to
-/// measure and refuses the column in `begin`.
+/// written as strings of one width, and the width is in the `FIELD`; a document [`Measuring`]
+/// made has seen the rows first, which is what `measured` holds, and one made with [`Self::new`]
+/// has nothing to measure and refuses the column in `begin`.
 #[derive(Debug)]
 pub struct Document {
     rows: Option<usize>,
@@ -140,6 +135,58 @@ impl Document {
         Self {
             rows,
             measured: Vec::new(),
+            declared: Vec::new(),
+        }
+    }
+}
+
+/// Whether a document over these columns has to see every row before it can write its head:
+/// it holds a list of strings whose width no upload declared.
+///
+/// Such a document is either measured over rows already in hand, which [`encode`] does, or
+/// over rows put somewhere on their way to it, which is what a job's answer — a file anyway —
+/// can afford and a streamed body cannot.
+pub fn measures(schema: &SchemaRef) -> bool {
+    schema
+        .fields()
+        .iter()
+        .any(|field| is_string_list(field.data_type()) && declared_width(field).is_none())
+}
+
+/// The widths a document declares ahead of its rows, measured over those rows.
+#[derive(Debug)]
+pub struct Measuring {
+    /// Per column, the longest string so far in a list-of-strings column.
+    longest: Vec<Option<usize>>,
+}
+
+impl Measuring {
+    pub fn new(schema: &SchemaRef) -> Self {
+        Self {
+            longest: schema
+                .fields()
+                .iter()
+                .map(|field| is_string_list(field.data_type()).then_some(0))
+                .collect(),
+        }
+    }
+
+    /// Take one batch's strings into the measure.
+    pub fn rows(&mut self, batch: &RecordBatch) {
+        for (at, longest_so_far) in self.longest.iter_mut().enumerate() {
+            if let (Some(so_far), Some(column)) = (longest_so_far.as_mut(), batch.columns().get(at))
+            {
+                *so_far = (*so_far).max(longest(column));
+            }
+        }
+    }
+
+    /// The document these rows are written into. `rows` is its `nrows`, which a document
+    /// measured over every row can know.
+    pub fn document(self, rows: Option<usize>) -> Document {
+        Document {
+            rows,
+            measured: self.longest,
             declared: Vec::new(),
         }
     }
@@ -328,6 +375,27 @@ impl Spelling {
 /// DALI §3.3.3's name for an instant, which is the one `xtype` this service writes.
 pub const TIMESTAMP: &str = "timestamp";
 
+/// Degrees, which is what HATS stores a position in.
+const DEGREES: &str = "deg";
+
+/// UCD1+ for a catalog's two coordinates. `meta.main` says this is *the* position of the row
+/// rather than one of several, which is how a client told nothing else finds it.
+const RA_UCD: &str = "pos.eq.ra;meta.main";
+const DEC_UCD: &str = "pos.eq.dec;meta.main";
+
+/// The unit and the UCD of a catalog's own position column, by the role
+/// [`geometry::COORDINATE`] gives it.
+///
+/// Public because `TAP_SCHEMA.columns` and VOSI's `/tables` publish the same two, and a client
+/// finding the position in one of those documents finds it in the answer the same way.
+pub fn position(role: &str) -> Option<(&'static str, &'static str)> {
+    match role {
+        geometry::RA => Some((DEGREES, RA_UCD)),
+        geometry::DEC => Some((DEGREES, DEC_UCD)),
+        _ => None,
+    }
+}
+
 /// What a column is declared as.
 ///
 /// This is the one list of what can be written, and `writer` covers what it admits. A
@@ -361,6 +429,20 @@ pub fn spelling(field: &Field) -> Result<Spelling, ApiError> {
             return Ok(Spelling::instant(Some("*")));
         }
         DataType::Date32 => return Ok(Spelling::instant(Some("10"))),
+        // A dictionary is how a file stores the values, not what they are — a categorical
+        // column out of `pandas` is its strings — so it is declared as what it holds, and
+        // `push_rows` writes the values out.
+        DataType::Dictionary(_, values) => {
+            return spelling(&Field::new(field.name(), values.as_ref().clone(), true));
+        }
+        // Bytes are VOTable's one unsigned type, one item apiece. A fixed width is declared
+        // as a variable one, which describes it as well and is what `TAP_SCHEMA` can say.
+        DataType::Binary
+        | DataType::LargeBinary
+        | DataType::BinaryView
+        | DataType::FixedSizeBinary(_) => {
+            return Ok(Spelling::plain("unsignedByte", Some("*")));
+        }
         nested @ (DataType::Struct(_)
         | DataType::List(_)
         | DataType::LargeList(_)
@@ -420,13 +502,7 @@ fn declaration(field: &Field, measured: Option<usize>) -> Result<Declaration, Ap
     let datatype = said(votable_field::DATATYPE);
     let arraysize = said(votable_field::ARRAYSIZE);
     let mut declared = match field.data_type() {
-        DataType::List(_) | DataType::LargeList(_) if is_string_list(field.data_type()) => {
-            strings(field, datatype.as_deref(), arraysize, measured, None)?
-        }
-        DataType::FixedSizeList(_, size) if is_string_list(field.data_type()) => {
-            let count = usize::try_from(*size).unwrap_or_default();
-            strings(field, datatype.as_deref(), arraysize, measured, Some(count))?
-        }
+        data_type if is_string_list(data_type) => strings(field, datatype.as_deref(), measured)?,
         DataType::List(item) | DataType::LargeList(item) => {
             let (datatype, _) = array_datatype(field, item, datatype.as_deref())?;
             Declaration {
@@ -495,8 +571,12 @@ fn declaration(field: &Field, measured: Option<usize>) -> Result<Declaration, Ap
     if let Some(xtype) = said(votable_field::XTYPE) {
         declared.xtype = Some(xtype);
     }
-    declared.unit = said(votable_field::UNIT);
-    declared.ucd = said(votable_field::UCD);
+    let position = field
+        .metadata()
+        .get(geometry::COORDINATE)
+        .and_then(|role| position(role));
+    declared.unit = said(votable_field::UNIT).or_else(|| position.map(|(unit, _)| unit.to_owned()));
+    declared.ucd = said(votable_field::UCD).or_else(|| position.map(|(_, ucd)| ucd.to_owned()));
     declared.utype = said(votable_field::UTYPE);
     declared.description = said(votable_field::DESCRIPTION);
     // A magic value only means something for an integer, and only a VOTable's own column
@@ -575,23 +655,16 @@ fn longest(array: &ArrayRef) -> usize {
 fn strings(
     field: &Field,
     said: Option<&str>,
-    arraysize: Option<String>,
     measured: Option<usize>,
-    count: Option<usize>,
 ) -> Result<Declaration, ApiError> {
     let character = match said {
         Some("char") => "char",
         _ => "unicodeChar",
     };
-    let declared = arraysize
-        .filter(|_| matches!(said, Some("char" | "unicodeChar")))
-        .and_then(|written| {
-            let (width, strings) = votable_field::string_array(&written)?;
-            (strings == count).then_some((width, written))
-        });
-    let (width, arraysize) = match declared {
+    let (width, arraysize) = match declared_width(field) {
         Some(declared) => declared,
         None => {
+            let count = strings_per_cell(field);
             let width = measured.ok_or_else(|| {
                 ApiError::bad_request(format!(
                     "column {:?} is a list of strings, whose width a VOTable declares ahead of \
@@ -611,6 +684,55 @@ fn strings(
         width: Some(width),
         ..Declaration::default()
     })
+}
+
+/// The width a list-of-strings column's upload declared for it, and the `arraysize` it wrote,
+/// where that still describes the column: a character type, two dimensions, and as many strings
+/// to a cell as the list holds.
+fn declared_width(field: &Field) -> Option<(usize, String)> {
+    let said = |key: &str| field.metadata().get(key).filter(|value| !value.is_empty());
+    if !matches!(
+        said(votable_field::DATATYPE).map(String::as_str),
+        Some("char" | "unicodeChar")
+    ) {
+        return None;
+    }
+    let written = said(votable_field::ARRAYSIZE)?;
+    let (width, strings) = votable_field::string_array(written)?;
+    (strings == strings_per_cell(field)).then(|| (width, written.clone()))
+}
+
+/// How many strings one cell of a list-of-strings column holds, where every cell holds as many.
+fn strings_per_cell(field: &Field) -> Option<usize> {
+    match field.data_type() {
+        DataType::FixedSizeList(_, size) => usize::try_from(*size).ok(),
+        _ => None,
+    }
+}
+
+/// Whether a list of this has a VOTable form: numbers and booleans, which `array_datatype`
+/// declares, and strings, which `strings` does.
+///
+/// Public because `TAP_SCHEMA` publishes a list column by what it holds, and one publishing a
+/// list the writer refuses would offer a name whose answer is a refusal.
+pub fn is_array_item(item: &DataType) -> bool {
+    matches!(
+        item,
+        DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::UInt8
+            | DataType::Int32
+            | DataType::UInt16
+            | DataType::Int64
+            | DataType::UInt32
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+    )
 }
 
 /// The primitive an array column's items are declared as, and how many Arrow values one of
@@ -667,8 +789,12 @@ fn push_rows(
     out: &mut String,
 ) -> Result<(), ApiError> {
     let schema = batch.schema();
-    let columns = batch
+    let decoded = batch
         .columns()
+        .iter()
+        .map(decoded)
+        .collect::<Result<Vec<_>, _>>()?;
+    let columns = decoded
         .iter()
         .zip(schema.fields())
         .zip(declared)
@@ -691,6 +817,17 @@ fn push_rows(
         out.push_str("</TR>\n");
     }
     Ok(())
+}
+
+/// A dictionary-encoded column as the values it holds, which is what [`spelling`] declared it
+/// as; any other column as it is.
+fn decoded(array: &ArrayRef) -> Result<ArrayRef, ApiError> {
+    match array.data_type() {
+        DataType::Dictionary(_, values) => cast(array, values).map_err(|error| {
+            ApiError::internal(format!("a dictionary column could not be written: {error}"))
+        }),
+        _ => Ok(Arc::clone(array)),
+    }
 }
 
 /// How to write one column's values, downcast once for the whole batch.
@@ -765,6 +902,22 @@ fn writer<'a>(
             Box::new(move |row, out| push_text(array.value(row), out))
         }
         DataType::Timestamp(_, _) | DataType::Date32 | DataType::Date64 => instants(array)?,
+        DataType::Binary => {
+            let array = array.as_binary::<i32>();
+            octets(move |row| array.value(row))
+        }
+        DataType::LargeBinary => {
+            let array = array.as_binary::<i64>();
+            octets(move |row| array.value(row))
+        }
+        DataType::BinaryView => {
+            let array = array.as_binary_view();
+            octets(move |row| array.value(row))
+        }
+        DataType::FixedSizeBinary(_) => {
+            let array = array.as_fixed_size_binary();
+            octets(move |row| array.value(row))
+        }
         other => {
             return Err(ApiError::internal(format!(
                 "a {other} column reached the VOTable writer"
@@ -772,6 +925,20 @@ fn writer<'a>(
         }
     };
     Ok(push)
+}
+
+/// One cell of bytes, as the `unsignedByte` array [`spelling`] declares it: each byte a number,
+/// whitespace between them.
+fn octets<'a>(value: impl Fn(usize) -> &'a [u8] + 'a) -> Push<'a> {
+    Box::new(move |row, out| {
+        for (at, byte) in value(row).iter().enumerate() {
+            if at > 0 {
+                out.push(' ');
+            }
+            let _ = write!(out, "{byte}");
+        }
+        Ok(())
+    })
 }
 
 /// Where one row's items start and end among a list's values. Arrow's offsets are
@@ -1542,8 +1709,8 @@ mod tests {
             DataType::LargeList(Arc::new(Field::new_list_field(DataType::LargeUtf8, true))),
             DataType::List(Arc::new(Field::new_list_field(DataType::Utf8View, true))),
         ] {
-            let cast = datafusion::arrow::compute::cast(&lists, &shape).unwrap();
-            assert_eq!(encode(&one("bands", cast)).unwrap(), document, "{shape}");
+            let recast = cast(&lists, &shape).unwrap();
+            assert_eq!(encode(&one("bands", recast)).unwrap(), document, "{shape}");
         }
         let expected = |rows: &[Option<Vec<Option<&str>>>]| {
             rows.iter()
@@ -1804,5 +1971,151 @@ mod tests {
             "{document}"
         );
         assert!(document.contains("<TABLEDATA>\n</TABLEDATA>"), "{document}");
+    }
+
+    /// A dictionary is how a file stores a column and not what the column holds, so a
+    /// categorical column out of `pandas` is written as its strings, and a dictionary of numbers
+    /// as its numbers.
+    #[test]
+    fn a_dictionary_column_is_written_as_its_values() {
+        use datafusion::arrow::array::{DictionaryArray, Int32Array};
+        use datafusion::arrow::datatypes::Int32Type;
+
+        let bands = [Some("g"), Some("r"), None, Some("g")]
+            .into_iter()
+            .collect::<DictionaryArray<Int32Type>>();
+        let document = encode(&one("band", Arc::new(bands))).unwrap();
+        assert!(
+            document.contains(
+                "<FIELD name=\"band\" ID=\"band\" datatype=\"unicodeChar\" arraysize=\"*\"/>"
+            ),
+            "{document}"
+        );
+        assert_eq!(cells(&document), ["g", "r", "<TD/>", "g"]);
+
+        let counts = DictionaryArray::<Int32Type>::try_new(
+            Int32Array::from(vec![1, 0, 1]),
+            Arc::new(Float32Array::from(vec![1.5, 2.25])),
+        )
+        .unwrap();
+        let document = encode(&one("mag", Arc::new(counts))).unwrap();
+        assert!(document.contains("datatype=\"float\"/>"), "{document}");
+        assert_eq!(cells(&document), ["2.25", "1.5", "2.25"]);
+    }
+
+    /// Bytes are VOTable's `unsignedByte`, one item apiece.
+    #[test]
+    fn bytes_are_an_array_of_unsigned_bytes() {
+        use datafusion::arrow::array::{BinaryArray, FixedSizeBinaryArray};
+
+        let blobs = BinaryArray::from_opt_vec(vec![Some(&[0, 7, 255][..]), None, Some(&[1])]);
+        let document = encode(&one("blob", Arc::new(blobs))).unwrap();
+        assert!(
+            document.contains("datatype=\"unsignedByte\" arraysize=\"*\"/>"),
+            "{document}"
+        );
+        assert_eq!(cells(&document), ["0 7 255", "<TD/>", "1"]);
+
+        let fixed = FixedSizeBinaryArray::try_from_iter([[1u8, 2], [3, 4]].into_iter()).unwrap();
+        let document = encode(&one("pair", Arc::new(fixed))).unwrap();
+        assert_eq!(cells(&document), ["1 2", "3 4"]);
+    }
+
+    /// A catalog's own position column is written with the unit and UCD `TAP_SCHEMA` publishes
+    /// for it, and a column an upload declared keeps what its document said.
+    #[test]
+    fn a_catalogs_position_carries_its_unit_and_ucd() {
+        let marked = |role: &str, declared: &[(&str, &str)]| {
+            let mut metadata = std::collections::HashMap::from([(
+                geometry::COORDINATE.to_owned(),
+                role.to_owned(),
+            )]);
+            metadata.extend(
+                declared
+                    .iter()
+                    .map(|(key, value)| ((*key).to_owned(), (*value).to_owned())),
+            );
+            Field::new(role, DataType::Float64, true).with_metadata(metadata)
+        };
+        let schema = Arc::new(Schema::new(vec![
+            marked(geometry::RA, &[]),
+            marked(
+                geometry::DEC,
+                &[
+                    (votable_field::UCD, "pos.eq.dec"),
+                    (votable_field::UNIT, "rad"),
+                ],
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Float64Array::from(vec![10.5])),
+                Arc::new(Float64Array::from(vec![-3.0])),
+            ],
+        )
+        .unwrap();
+        let document = encode(&result(batch)).unwrap();
+        assert!(
+            document.contains(
+                "<FIELD name=\"ra\" ID=\"ra\" datatype=\"double\" unit=\"deg\" \
+                 ucd=\"pos.eq.ra;meta.main\"/>"
+            ),
+            "{document}"
+        );
+        assert!(
+            document.contains(
+                "<FIELD name=\"dec\" ID=\"dec\" datatype=\"double\" unit=\"rad\" \
+                 ucd=\"pos.eq.dec\"/>"
+            ),
+            "{document}"
+        );
+    }
+
+    /// Measuring is the whole of what makes a list of strings writable, and it is the same
+    /// measure whether the rows were collected or went past one at a time.
+    #[test]
+    fn a_document_measured_a_batch_at_a_time_is_the_collected_one() {
+        let lists = ListArray::from_iter_primitive::<Int64Type, _, _>([Some(vec![Some(1)])]);
+        let flat = one("n", Arc::new(lists));
+        assert!(!measures(&flat.schema));
+
+        let strings = |rows: &[&[&str]]| {
+            let mut builder = datafusion::arrow::array::ListBuilder::new(
+                datafusion::arrow::array::StringBuilder::new(),
+            );
+            for row in rows {
+                for value in *row {
+                    builder.values().append_value(value);
+                }
+                builder.append(true);
+            }
+            Arc::new(builder.finish()) as ArrayRef
+        };
+        let first = RecordBatch::try_from_iter([("bands", strings(&[&["g", "r"]]))]).unwrap();
+        let second = RecordBatch::try_from_iter([("bands", strings(&[&["ztf_zr"]]))]).unwrap();
+        let schema = first.schema();
+        assert!(measures(&schema));
+        let collected = encode(&QueryResult {
+            schema: Arc::clone(&schema),
+            batches: vec![first.clone(), second.clone()],
+            data_bytes_read: 0,
+        })
+        .unwrap();
+
+        let mut measuring = Measuring::new(&schema);
+        measuring.rows(&first);
+        measuring.rows(&second);
+        let mut document = measuring.document(Some(2));
+        let mut written = stream::Encoder::begin(&mut document, &schema).unwrap();
+        written.extend(stream::Encoder::rows(&mut document, &first).unwrap());
+        written.extend(stream::Encoder::rows(&mut document, &second).unwrap());
+        written.extend(stream::Encoder::end(&mut document, stream::Ending::default()).unwrap());
+        assert_eq!(String::from_utf8(written).unwrap(), collected);
+        assert!(collected.contains("arraysize=\"6x*\""), "{collected}");
+
+        // Unmeasured, it is refused by name before a byte is written.
+        let refused = stream::Encoder::begin(&mut Document::new(None), &schema).unwrap_err();
+        assert!(refused.to_string().contains("\"bands\""), "{refused}");
     }
 }

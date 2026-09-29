@@ -1000,6 +1000,7 @@ async fn query_catalog(
         }
         let chosen = search.chosen().len();
         let partitions = search.partitions().len();
+        let position = hats::table::Position::of(search.catalog());
         let streamed = std::sync::Arc::new(hats::query::Streamed::default());
         let batches = search.stream(
             (&selection).into(),
@@ -1033,7 +1034,14 @@ async fn query_catalog(
             elapsed_ms = started.elapsed().as_millis(),
             "catalog query"
         );
-        return answer::streamed_rows(&schema, batches, streamed, &output, started);
+        return answer::streamed_rows(
+            &schema,
+            position.as_ref(),
+            batches,
+            streamed,
+            &output,
+            started,
+        );
     }
     let outcome = search
         .run(
@@ -1052,9 +1060,15 @@ async fn query_catalog(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, &output, started, Some(request))
-        .await
-        .map_err(hide_the_path)?;
+    let response = hats_answer(
+        &result,
+        hats::table::Position::of(search.catalog()).as_ref(),
+        &output,
+        started,
+        Some(request),
+    )
+    .await
+    .map_err(hide_the_path)?;
     tracing::info!(
         // The url path, not the mount's own: where the catalog really is is the
         // operator's business.

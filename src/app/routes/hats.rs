@@ -68,9 +68,9 @@ pub(in crate::app) struct CatalogQuery {
     filters: Option<String>,
     /// `json`, the default; `parquet` for the answer as a parquet file laid out like the
     /// partitions it came from; `votable` for a VOTable, `csv` for comma-separated text and
-    /// `tsv` for tab-separated. The last three take flat columns only and refuse a nested one
-    /// by name. Anything but `json` carries its counts in `x-hats-*` response headers, there
-    /// being no room in the body.
+    /// `tsv` for tab-separated. The last three refuse a nested column by name, and `csv` and
+    /// `tsv` a list as well, which a VOTable writes as an array. Anything but `json` carries
+    /// its counts in `x-hats-*` response headers, there being no room in the body.
     #[schema(example = "json")]
     format: Option<String>,
     /// What a null is written as in `csv` and `tsv`. Absent, a null is an empty field — the
@@ -387,6 +387,7 @@ pub(in crate::app) async fn query_hats(
         }
         let catalog_url = search.catalog().dir().url.clone();
         let chosen = search.chosen().len();
+        let position = hats::table::Position::of(search.catalog());
         let streamed = Arc::new(hats::query::Streamed::default());
         let batches = search.stream(
             (&selection).into(),
@@ -431,7 +432,14 @@ pub(in crate::app) async fn query_hats(
             elapsed_ms = started.elapsed().as_millis(),
             "catalog query"
         );
-        return streamed_rows(&schema, batches, streamed, &output, started);
+        return streamed_rows(
+            &schema,
+            position.as_ref(),
+            batches,
+            streamed,
+            &output,
+            started,
+        );
     }
     let outcome = search
         .run(
@@ -457,9 +465,15 @@ pub(in crate::app) async fn query_hats(
     let num_rows = result.rows.num_rows();
     let data_bytes_read = result.rows.data_bytes_read;
     let partitions_read = result.partitions_read;
-    let response = hats_answer(&result, &output, started, None)
-        .await
-        .map_err(&hide_the_path)?;
+    let response = hats_answer(
+        &result,
+        hats::table::Position::of(search.catalog()).as_ref(),
+        &output,
+        started,
+        None,
+    )
+    .await
+    .map_err(&hide_the_path)?;
     tracing::info!(
         // The catalog's url, not the parameter, which may carry credentials.
         url = %search.catalog().dir().url,
@@ -794,6 +808,43 @@ mod tests {
                 }
                 _ => assert_eq!(whole, streamed, "{format}"),
             }
+        }
+    }
+
+    /// A catalog's position columns come back in a VOTable with the unit and UCD `TAP_SCHEMA`
+    /// gives them, collected or streamed, so an IVOA client finds the position of a catalog
+    /// read here as it finds one read through TAP. Only the VOTable says it: every other format
+    /// writes the partitions' own columns.
+    #[tokio::test]
+    async fn a_votable_answer_marks_the_catalogs_position() {
+        let dir = hats::query::tests::fixture(true);
+        for streaming in [false, true] {
+            let (status, body) = ask_hats(
+                mounted(dir.path(), &ApiConfig::default()),
+                serde_json::json!({
+                    "url": "file:///",
+                    "columns": ["id", "ra", "dec"],
+                    "limit": 2,
+                    "format": "votable",
+                    "streaming": streaming,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            for (name, ucd) in [
+                ("ra", "pos.eq.ra;meta.main"),
+                ("dec", "pos.eq.dec;meta.main"),
+            ] {
+                let field = format!(
+                    "<FIELD name=\"{name}\" ID=\"{name}\" datatype=\"double\" unit=\"deg\" \
+                     ucd=\"{ucd}\"/>"
+                );
+                assert!(body.contains(&field), "{streaming}: {body}");
+            }
+            assert!(
+                body.contains("<FIELD name=\"id\" ID=\"id\" datatype=\"long\"/>"),
+                "{body}"
+            );
         }
     }
 

@@ -104,6 +104,7 @@ const NUM_PARTITIONS_HEADER: &str = "x-hats-num-partitions";
 /// writer's own defaults, there being no file to copy from.
 pub(in crate::app) async fn hats_answer(
     result: &hats::query::CatalogResult,
+    position: Option<&hats::table::Position>,
     output: &Output,
     started: Instant,
     parts: Option<&Parts>,
@@ -152,7 +153,11 @@ pub(in crate::app) async fn hats_answer(
         Format::Votable => (
             attachment(votable::CONTENT_TYPE, "selection.vot"),
             hats_counters(result, num_rows, started),
-            votable::encode(&result.rows)?,
+            votable::encode(&QueryResult {
+                schema: described(&result.rows.schema, position, output),
+                batches: result.rows.batches.clone(),
+                data_bytes_read: result.rows.data_bytes_read,
+            })?,
         )
             .into_response(),
         Format::Dsv(kind) => (
@@ -434,6 +439,7 @@ where
 /// headers have gone. That is what a collected catalog answer that read no file gets too.
 pub(in crate::app) fn streamed_rows<S>(
     schema: &datafusion::arrow::datatypes::SchemaRef,
+    position: Option<&hats::table::Position>,
     batches: S,
     streamed: Arc<hats::query::Streamed>,
     output: &Output,
@@ -459,7 +465,26 @@ where
     };
     // No layout and the collected catalog answer's own name: a catalog has no one source
     // file to take either from.
-    sending(schema, batches, ending, output, None, "selection.parquet")
+    let schema = described(schema, position, output);
+    sending(&schema, batches, ending, output, None, "selection.parquet")
+}
+
+/// A catalog's answer schema as its format describes it.
+///
+/// **A VOTable says what the catalog's position columns are**, with the unit and UCD
+/// `TAP_SCHEMA` publishes for them, off the mark a statement over the catalog already sees —
+/// so a catalog reached through here is described the way one reached through ADQL is. Only
+/// the schema is marked and only for that format: every other one writes the columns it read,
+/// and a parquet answer's are the partitions' own.
+fn described(
+    schema: &datafusion::arrow::datatypes::SchemaRef,
+    position: Option<&hats::table::Position>,
+    output: &Output,
+) -> datafusion::arrow::datatypes::SchemaRef {
+    match (output.format, position) {
+        (Format::Votable, Some(position)) => position.marked(schema),
+        _ => Arc::clone(schema),
+    }
 }
 
 /// One streamed body: the head written while a status can still be chosen, the rows as they
