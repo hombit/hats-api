@@ -13,6 +13,7 @@ use crate::adql;
 use crate::app::answer::{attachment, counters, json_response};
 use crate::app::request::{Format, Output, refuse_unknown, takes};
 use crate::app::service::{PARQUET_CONTENT_TYPE, Service};
+use crate::app::uploaded::{self, Budget};
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
 use crate::output::{dsv, parquet, votable};
@@ -65,7 +66,8 @@ pub(in crate::app) struct AdqlQuery {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 struct AdqlTable {
-    /// `parquet` for one file the url names outright, `hats` for a whole catalog.
+    /// `parquet` or `votable` for one file the url names outright, `hats` for a whole
+    /// catalog.
     r#type: TableKind,
     /// The object to read. Its scheme picks the backend — `s3`, `gs`, `az`, `https`, `webdav`, `hf`
     /// or `file` — and which of those a deployment answers for is the operator's to configure.
@@ -83,6 +85,9 @@ struct AdqlTable {
 enum TableKind {
     /// One parquet file.
     Parquet,
+    /// One VOTable, in `TABLEDATA`, `BINARY` or `BINARY2`. It is read whole, and the tables of
+    /// this kind one request names may come to no more than the server's upload limit.
+    Votable,
     /// A whole HATS catalog: the directory holding `hats.properties`, or a collection's, which
     /// is followed to its primary table. Only the partitions the query's region reaches are
     /// read, and a query reaching more than the server's partition limit is refused rather
@@ -146,9 +151,18 @@ pub(in crate::app) async fn query_adql(
     // here rather than in `adql::query::run` because it is every declared table's own
     // `storage` that has to agree, not only the ones the statement goes on to use.
     let mut authorities = Authorities::default();
+    let mut budget = Budget::new(service.max_upload_bytes);
     for (name, table) in &params.tables {
         let url = parse_url(table.url.as_str())?;
         let source = match table.r#type {
+            // Fetched whole and held for the request, so it is never registered as a store
+            // and shares nobody's authority; bounded, with every other one, by the upload cap.
+            TableKind::Votable => {
+                let file =
+                    storage::open(&url, &table.storage, &service.policy, &service.transfers)?;
+                let bytes = uploaded::fetch(&file, &url, &mut budget).await?;
+                adql::query::Source::Memory(uploaded::votable_table(bytes, name).await?)
+            }
             TableKind::Parquet => {
                 // The same question the single-file route asks: a url naming something this
                 // service does not read as data names nothing it serves, and answering it here
@@ -295,6 +309,52 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         std::fs::write(dir.path().join("part0.parquet"), query::tests::fixture()).unwrap();
         dir
+    }
+
+    /// A VOTable is a table type of its own, read whole and joined like any other.
+    #[tokio::test]
+    async fn a_votable_is_a_table_a_statement_reads() {
+        let dir = adql_fixture();
+        std::fs::write(
+            dir.path().join("wanted.xml"),
+            "<VOTABLE><RESOURCE><TABLE><FIELD name=\"Label\" datatype=\"char\" arraysize=\"*\"/>\
+             <FIELD name=\"n\" datatype=\"short\"/><DATA><TABLEDATA>\
+             <TR><TD>one</TD><TD>1</TD></TR><TR><TD>two</TD><TD>2</TD></TR>\
+             </TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>",
+        )
+        .unwrap();
+        let (status, body) = post_json(
+            mounted(dir.path(), &ApiConfig::default()),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT label, n FROM v WHERE n > 1",
+                "tables": {"v": {"type": "votable", "url": "file:///wanted.xml"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"two\""), "{body}");
+        assert!(!body.contains("\"one\""), "{body}");
+
+        // Bounded by the upload cap, which a fetched VOTable counts against.
+        let limits = LimitsConfig {
+            max_upload_bytes: bytesize::ByteSize::b(10),
+            ..LimitsConfig::default()
+        };
+        let (status, body) = post_json(
+            crate::app::testing::with_limits(
+                crate::app::testing::serving(dir.path()),
+                &ApiConfig::default(),
+                &limits,
+            ),
+            "/api/v1/adql",
+            serde_json::json!({
+                "query": "SELECT n FROM v",
+                "tables": {"v": {"type": "votable", "url": "file:///wanted.xml"}},
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     }
 
     /// The route end to end, and the point of it: what a statement asks for is the planner's

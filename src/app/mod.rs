@@ -11,6 +11,7 @@ mod routes;
 mod service;
 #[cfg(test)]
 mod testing;
+mod uploaded;
 mod warm;
 
 pub use routes::tap::Jobs;

@@ -422,8 +422,10 @@ statistics and bloom filters per column, so the answer round-trips through anyth
 reads the original. It carries the values above as themselves.
 
 **`votable`.** A VOTable 1.4 document, `TABLEDATA` serialized, with `NaN`, `+Inf` and
-`-Inf` written as themselves. Flat columns only: selection of a nested column fails
-the request.
+`-Inf` written as themselves. A list of numbers or booleans is a VOTable array; a list of
+strings and a struct fail the request, as does a list of integers with a missing item, which
+a VOTable has no way to write unless the column came from an uploaded VOTable that declared a
+`VALUES null`.
 
 **`csv` and `tsv`.** Comma- and tab-separated text with a header row, with `NaN`, `inf` and
 `-inf` written as those three, which `float()` in Python reads back. Flat columns only.
@@ -510,7 +512,9 @@ as written:
 A catalog reads only the partitions the query's region reaches, the same ones the
 [`hats` routes](#the-routes) would choose.
 
-`type` is `hats` for a whole catalog, or `parquet` for one file:
+`type` is `hats` for a whole catalog, `parquet` for one parquet file, or `votable` for one
+VOTable. A VOTable is read whole, and the ones one request names come to at most
+`[limits] max_upload_bytes`, 64 MiB by default:
 
 ```json
 {
@@ -748,21 +752,73 @@ WHERE phot_g_mean_mag < 15
 """
 ```
 
-### Querying a catalog the service does not publish
+### Uploading a table
 
-`UPLOAD` gives a name to a catalog URL, and the query reads that catalog as
-`TAP_UPLOAD.<name>`:
+`UPLOAD` gives a table a name, and the query reads it as `TAP_UPLOAD.<name>`. The table is
+one of three things:
+
+- **a VOTable**, sent in the request or named by URL. `TABLEDATA`, `BINARY` and `BINARY2`
+  are read; a VOTable whose rows are FITS, or are in a file its `STREAM` points to, is
+  refused.
+- **a parquet file**, sent in the request or named by URL.
+- **a HATS catalog**, named by URL.
+
+A table sent in the request is a file part of a `multipart/form-data` `POST`, and `UPLOAD`
+names that part with `param:`. TOPCAT, `stilts tapquery` and `pyvo` all send an upload this
+way:
+
+```python
+from astropy.table import Table
+
+mine = Table({"name": ["m31", "m32"], "ra": [10.6847, 10.6743], "dec": [41.2690, 40.8652]})
+rows = tap.search(
+    "SELECT u.name, g.source_id, "
+    "DISTANCE(POINT(u.ra, u.dec), POINT(g.ra, g.dec)) * 3600 AS sep_arcsec "
+    "FROM TAP_UPLOAD.mine AS u JOIN gaia_dr3.gaia_source AS g "
+    "ON 1 = CONTAINS(POINT(g.ra, g.dec), CIRCLE(u.ra, u.dec, 2.0 / 3600)) "
+    "WHERE 1 = CONTAINS(POINT(g.ra, g.dec), CIRCLE(10.68, 41.07, 0.5))",
+    uploads={"mine": mine},
+).to_table()
+```
+
+```sh
+curl https://example.com/api/v1/tap/sync \
+  -F LANG=ADQL -F 'QUERY=SELECT * FROM TAP_UPLOAD.mine' \
+  -F 'UPLOAD=mine,param:mine' -F 'mine=@mine.vot'
+```
+
+A crossmatch like the one above pairs every uploaded row with every catalog row the join
+reaches, so the published catalog also needs a region of its own in `WHERE`: a circle
+enclosing the whole uploaded list.
+
+A URL names a table on any backend the service reads:
 
 ```
 UPLOAD=mine,s3://bucket/gaia/hats
 QUERY=SELECT TOP 10 source_id, ra, dec FROM TAP_UPLOAD.mine
 ```
 
-`UPLOAD` is TAP's standard parameter for a table the request brings with it. What is
-implemented here is a URL naming a HATS catalog or a parquet file, and only that: sending a
-VOTable in the request, which is what the standard means by an upload, is not implemented.
-So a client cannot discover the feature from `/capabilities`, and no `uploadMethod` is
-declared there.
+An uploaded VOTable keeps its columns as its `FIELD`s declared them. A column is named by
+the `FIELD`'s `name` and is written quoted where ADQL needs it (`"my ra"`), and a VOTable
+answer describes it with the `datatype`, `arraysize`, `xtype`, `unit`, `ucd`, `utype` and
+description the upload gave it.
+
+VOTables and parquet files sent in the request, and VOTables named by URL, come to at most
+`[limits] max_upload_bytes` in one request, 64 MiB by default; a request over that is
+refused with a `413`. A parquet file or a catalog named by URL is read where it is and does
+not count against it. A job keeps the tables it was sent until it runs.
+
+`UPLOAD_TYPE=mine,votable`, `mine,parquet` or `mine,hats` says what the table is. It is
+optional. Without it:
+
+- a file part is a VOTable or a parquet file by its `Content-Type`, or by its contents where
+  the type says neither;
+- a URL whose last path segment matches one of the [data-file globs](#which-files-are-data),
+  `*.parquet` and the rest of `[data] filenames`, is a parquet file;
+- any other URL is a VOTable if the file there is one, and a catalog directory if there is no
+  file there. An `http(s)` URL answered with a web page is a catalog directory too.
+
+A parquet file named by a URL off the data-file list is refused rather than read.
 
 A private store needs `UPLOAD_STORAGE_OPTION`, one option per value, the parameter repeated
 for as many as the URL needs:
@@ -786,10 +842,7 @@ several:
 UPLOAD_STORAGE_OPTION=mine,header,Authorization,Bearer abc123
 ```
 
-`UPLOAD_TYPE=mine,hats` or `mine,parquet` says what the URL holds. It is optional: a URL
-whose last path segment matches one of the [data-file globs](#which-files-are-data),
-`*.parquet` and the rest of `[data] filenames`, is read as parquet, and any other URL as a
-catalog directory. `mine,parquet` over a URL off that list is refused rather than read.
+A table sent in the request takes no storage options.
 
 Credentials sent this way travel in the query string of a `GET`, where a proxy or a browser
 history may keep them; `POST` takes the same parameters in the body. This service logs the
@@ -849,10 +902,10 @@ curl https://example.com/api/v1/tap/sync \
   --data-urlencode 'UPLOAD_STORAGE_OPTION=mine,secret_access_key,VERYSECRETEXAMPLEKEY'
 ```
 
-TOPCAT's TAP window sends the parameters it knows, so a catalog reached this way arrives by
-one of two other routes: the operator publishes it as a [table](#publishing-catalogs), or you
-write the whole `/sync` URL and open it with *Load Table*, which reads the answer as a
-VOTable. `stilts tapquery` takes a fixed list of parameters and has no place for these.
+TOPCAT's TAP window uploads a table it has loaded, but has no place for
+`UPLOAD_STORAGE_OPTION`, so a catalog behind a credential arrives by one of two other routes:
+the operator publishes it as a [table](#publishing-catalogs), or you write the whole `/sync`
+URL and open it with *Load Table*, which reads the answer as a VOTable.
 
 ### Resources
 
@@ -871,8 +924,8 @@ The same metadata is also queryable, as `TAP_SCHEMA.schemas`, `TAP_SCHEMA.tables
 
 `sync` takes `QUERY` and `LANG=ADQL`, plus `RESPONSEFORMAT` (or `FORMAT`), `MAXREC`,
 `RUNID`, `REQUEST=doQuery` and `STREAMING`. Formats: `votable` (the default), `csv`, `tsv`
-and `parquet`. `UPLOAD`, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, gives a name to a
-catalog URL as [above](#querying-a-catalog-the-service-does-not-publish).
+and `parquet`. `UPLOAD`, with `UPLOAD_STORAGE_OPTION` and `UPLOAD_TYPE`, brings a table
+with the query as [above](#uploading-a-table).
 
 TAP names the first three; `parquet` is an extension this service declares, as DALI §3.4.3
 provides for, and it appears in `capabilities` beside the rest. It is the only format here
@@ -913,8 +966,6 @@ reads `COMPLETED`, and collect the rows from `…/results/result`. That is UWS, 
 `pyvo` drive it for you. A job holds its rows as a file, so a large answer can be fetched by
 range and resumed, and `[tap.async]` is where an operator lets one read more than a `/sync`
 request may.
-
-Uploading a table in the request itself is still to come.
 
 ## What a request may spend
 
@@ -959,7 +1010,8 @@ streams for as long as it takes.
 
 `max_request_body_bytes`, `2MiB` by default and `0` for no bound, is how large a request
 body may be. Over it the request is a `413` before any of it is parsed, so the answer names
-no field — there was nothing read to name.
+no field — there was nothing read to name. A multipart TAP request may be larger by the
+[tables it uploads](#uploading-a-table), which `max_upload_bytes` bounds.
 
 A body may be sent with `Content-Encoding: gzip`, `br` or `zstd` — anything else is a `415`,
 and the limit is measured on the expanded body.
@@ -1104,6 +1156,7 @@ max_rows = 1000000
 max_query_memory_bytes = "1GiB" # what one ADQL statement's joins and groups may hold
 max_request_seconds = 90        # how long one request has to answer; 0 is no bound
 max_request_body_bytes = "2MiB" # how large a body may be; 0 is no bound
+max_upload_bytes = "64MiB"      # the tables one TAP or /adql request brings; 0 refuses them
 max_concurrent_partitions = 4   # a performance setting, not a bound
 max_query_radius_arcsec = 600   # file-server mode only; 0 closes the circle surface
 max_materialize_bytes = "2GiB"  # copying an object off a server that ignores Range

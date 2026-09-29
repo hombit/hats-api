@@ -412,6 +412,13 @@ pub struct LimitsConfig {
     /// before any of its work begins — and, `region` having no count of its own, it is what
     /// decides how many shapes one request may carry into the covering and the predicate.
     pub max_request_body_bytes: ByteSize,
+    /// How many bytes of tables one request may bring with it: the files of a multipart TAP
+    /// request, and the VOTables its urls name, together. `0` refuses every one of them.
+    ///
+    /// An uploaded table is held in memory for the request, so this is what bounds that. A
+    /// parquet file or a catalog named by url is not counted: it is read where it is, under
+    /// the other bounds, the way a published catalog is.
+    pub max_upload_bytes: ByteSize,
     /// How deeply a `columns`, `filters` or ADQL `query` may nest. The parser enforces it, so
     /// a pathological one is refused while it is still text rather than after it has
     /// grown a stack of planner frames.
@@ -510,6 +517,9 @@ impl Default for LimitsConfig {
             // request can run: the cost of a `region` is linear in its shapes, so a few
             // thousand circles reach `max_request_seconds` before they reach this.
             max_request_body_bytes: ByteSize::mib(2),
+            // A crossmatch list of a million positions in BINARY2 is some tens of megabytes,
+            // and TABLEDATA about three times that.
+            max_upload_bytes: ByteSize::mib(64),
             // DataFusion's own default for the same limit.
             max_expression_depth: 50,
             // Generous, because a list of ten thousand object ids is a request this

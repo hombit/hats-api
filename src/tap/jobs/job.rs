@@ -148,9 +148,13 @@ pub enum Change {
     },
     Destruction(DateTime<Utc>),
     ExecutionDuration(TimeDelta),
+    /// One parameter posted to a pending job. `accumulate` is for the parameters that may be
+    /// given more than once — `UPLOAD` above all, TAP §2.7.6 having uploads accumulate — and
+    /// otherwise a name already there is replaced.
     Parameter {
         name: String,
         value: String,
+        accumulate: bool,
     },
 }
 
@@ -225,16 +229,23 @@ impl Job {
                 self.only_in(&[Phase::Pending, Phase::Queued], "reschedule")?;
                 self.execution_duration = duration;
             }
-            Change::Parameter { name, value } => {
+            Change::Parameter {
+                name,
+                value,
+                accumulate,
+            } => {
                 // DALI: "Job parameters may only be POSTed while the job is in the PENDING
                 // phase; once execution has been requested ... job parameters may not be
                 // modified."
                 self.only_in(&[Phase::Pending], "take another parameter")?;
-                match self
-                    .parameters
-                    .iter_mut()
-                    .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
-                {
+                let existing = match accumulate {
+                    true => None,
+                    false => self
+                        .parameters
+                        .iter_mut()
+                        .find(|(existing, _)| existing.eq_ignore_ascii_case(&name)),
+                };
+                match existing {
                     Some(slot) => slot.1 = value,
                     None => self.parameters.push((name, value)),
                 }
@@ -390,6 +401,7 @@ mod tests {
             Change::Parameter {
                 name: "MAXREC".to_owned(),
                 value: "10".to_owned(),
+                accumulate: false,
             },
             now,
         )
@@ -399,10 +411,30 @@ mod tests {
             Change::Parameter {
                 name: "maxrec".to_owned(),
                 value: "20".to_owned(),
+                accumulate: false,
             },
             now,
         )
         .unwrap();
+        // And one that accumulates is kept beside what was there.
+        for value in ["a,param:a", "b,param:b"] {
+            job.apply(
+                Change::Parameter {
+                    name: "UPLOAD".to_owned(),
+                    value: value.to_owned(),
+                    accumulate: true,
+                },
+                now,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            job.parameters
+                .iter()
+                .filter(|(name, _)| name == "UPLOAD")
+                .count(),
+            2
+        );
         assert_eq!(
             job.parameters
                 .iter()
@@ -418,6 +450,7 @@ mod tests {
                 Change::Parameter {
                     name: "MAXREC".to_owned(),
                     value: "30".to_owned(),
+                    accumulate: false,
                 },
                 now,
             )

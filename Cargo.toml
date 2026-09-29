@@ -73,6 +73,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 url = "2"
 # The OpenAPI document, derived from the same serde types the routes deserialize.
 utoipa = { version = "5", features = ["preserve_order"] }
+multer = "3.1"
 
 # `flock`, which the kernel releases however a process dies — so a lock a starting service
 # can take belongs to a dead run, and its leftover results can go. Already in the tree.

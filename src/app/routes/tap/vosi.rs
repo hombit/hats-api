@@ -96,9 +96,9 @@ pub(in crate::app) async fn availability() -> Response {
 /// What this service can do, and where.
 ///
 /// **Nothing optional is advertised that is not there.** A client picks what it may do out
-/// of this document and has no way back, so a `uploadMethod` is declared only where an
-/// upload works: told it may send a VOTable, a client fails at the point of sending rather
-/// than at the point of choosing, and this service reads no VOTable.
+/// of this document and has no way back, so an `uploadMethod` is declared only where an
+/// upload works: none where `[limits] max_upload_bytes` is `0`, and a fetch only for a
+/// scheme a caller may name.
 ///
 /// **`/async` is not one of those, and no wording here can withhold it.** The TAP capability
 /// declares one `<accessURL use="base">` and a client appends the resource names itself, so
@@ -181,6 +181,23 @@ pub(in crate::app) async fn capabilities(
             escape(mime)
         );
     }
+    // TAPRegExt §2.4's three that this service answers: a part of the request, and a url it
+    // fetches. The fetch is declared only for the schemes a caller may name here, since a
+    // client that is told it may and then is refused has no way back.
+    let uploads = service.max_upload_bytes > 0;
+    if uploads {
+        let allowed = service.policy.allowed_schemes();
+        let fetched = [("http", "upload-http"), ("https", "upload-https")]
+            .into_iter()
+            .filter(|(scheme, _)| allowed.contains(scheme))
+            .map(|(_, method)| method);
+        for method in std::iter::once("upload-inline").chain(fetched) {
+            let _ = writeln!(
+                out,
+                "<uploadMethod ivo-id=\"ivo://ivoa.net/std/TAPRegExt#{method}\"/>"
+            );
+        }
+    }
     // What a request may spend, as the two numbers a client reads MAXREC against. The
     // default is the hard limit: a request that names no MAXREC is bounded by the same
     // ceiling as one that names too large a number.
@@ -190,6 +207,14 @@ pub(in crate::app) async fn capabilities(
         "<outputLimit>\n<default unit=\"row\">{rows}</default>\n\
          <hard unit=\"row\">{rows}</hard>\n</outputLimit>\n"
     );
+    if uploads {
+        let bytes = service.max_upload_bytes;
+        let _ = write!(
+            out,
+            "<uploadLimit>\n<default unit=\"byte\">{bytes}</default>\n\
+             <hard unit=\"byte\">{bytes}</hard>\n</uploadLimit>\n"
+        );
+    }
     out.push_str("</capability>\n</vosi:capabilities>\n");
     document(out)
 }

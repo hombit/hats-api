@@ -9,10 +9,17 @@ Release dates are in the UTC time zone.
 ### Added
 
 - `/simple/hats` and a mounted catalog's query choose partitions by a collection's index catalogs.
+- TAP `UPLOAD` reads a VOTable — `TABLEDATA`, `BINARY` or `BINARY2` — sent inline or by URL.
+- TAP `UPLOAD` reads a parquet file sent inline as a multipart part.
+- `UPLOAD_TYPE` takes `votable`.
+- `/adql` tables take `"type": "votable"`.
+- `[limits] max_upload_bytes`, the tables one request may upload; 64 MiB by default.
+- `/tap/capabilities` declares the upload methods and an `uploadLimit`.
 
 ### Changed
 
---
+- `votable` answers write a list of numbers or booleans as a VOTable array.
+- `votable` answers describe an uploaded VOTable's columns as its `FIELD`s did.
 
 ### Deprecated
 

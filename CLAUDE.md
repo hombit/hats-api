@@ -54,11 +54,14 @@ adql/     the statement rewrite (translate), running one (query), the functions 
 tap/      what this service publishes over TAP: the operator's tables (tables), what is
           said about each (metadata), and TAP_SCHEMA's own five (schema)
 output/   an answer written out: json, dsv, votable, parquet
+votable/  a VOTable read in: the document (document), what a FIELD declares and the column
+          metadata that carries it (field), a cell's layout (datatype), and each
+          serialization (tabledata, binary) into one column builder (column)
 app/      the HTTP surface: the service and router (service), the file-server mode (files),
           what every body shares (request), what every answer carries (answer), one module
           per route under routes/ — with routes/tap/ for the IVOA resources — the directory
-          page (listing), the API description (openapi/), and reading the published
-          catalogs into the cache ahead of time (warm)
+          page (listing), the API description (openapi/), a table a request brings with it
+          (uploaded), and reading the published catalogs into the cache ahead of time (warm)
 ```
 
 `config`, `error` and `logging` stay at the top, being everyone's.
@@ -1611,9 +1614,9 @@ and the parameter rules are §3.
   is two rows and no overflow. `MAXREC=0` is the columns, no rows, and the marker whether or
   not anything matched — and the query need not be run at all.
 - **Nothing is advertised that is not there.** A client picks its interface out of the
-  capabilities document and has no way back, so there is no async interface in it while
-  `/tap/async` answers 404, and no `uploadMethod` while `UPLOAD` is refused. The output
-  formats come from the same list the query resource reads.
+  capabilities document and has no way back, so there is no `uploadMethod` where
+  `max_upload_bytes` is `0`, and no fetch method for a scheme a caller may not name. The
+  output formats come from the same list the query resource reads.
 - **A name nobody defines is ignored; a standard one this service has not got is refused.**
   `taplint` adds a parameter of its own to every query and reports a service that refuses as
   breaking it, which is also what every HTTP server does with a query string it has no use
@@ -1637,11 +1640,11 @@ and the parameter rules are §3.
   option's own name to say, the way DALI's `POS` reads three numbers after `CIRCLE` and four
   after `RANGE`: `header` names a header before its value, every other option does not. A new
   parameter here follows the same rule rather than growing a syntax of its own.
-- **A url as `UPLOAD` is not the upload `/capabilities` would be advertising.** The standard's
-  referenced upload fetches a VOTable; this fetches a HATS catalog or a parquet file, so no
-  `uploadMethod` is declared while that is all it does, and the feature is found by reading
-  the README. TAP's own answer for a url needing credentials is delegation, which this is
-  not.
+- **An upload is a VOTable, and a parquet file or a catalog beside it.** TAP §2.7.6 has a
+  service that uploads "accept tables in VOTable format", inline and by url, and that is what
+  `/capabilities` declares; a parquet file or a catalog by url is this service's own on top.
+  TAP's own answer for a url needing credentials is delegation, which
+  `UPLOAD_STORAGE_OPTION` is not.
 - **Every answer is a document a TAP client can read, refusals included.** `ApiError` renders
   JSON, which a client looking for `QUERY_STATUS` has nothing to say about — so the status is
   kept and the body is replaced, by `app::routes::tap::answer::answered`.
@@ -1666,6 +1669,44 @@ and the parameter rules are §3.
   crate checks that such a query still runs, and nothing should: it would mean planning a
   statement against a catalog at startup. What checks it is `tap-conformance`, which fetches
   the published document and sends every query in it.
+
+## An uploaded table
+
+`votable/` reads a VOTable into Arrow and `app/uploaded.rs` is how a request's own table —
+an inline part, or a VOTable at a url — becomes one the statement can read.
+
+- **The VOTable reader is this crate's own, and stays on the `quick-xml` already in the
+  tree.** `votable` on crates.io pins `quick-xml` 0.23, which carries RUSTSEC-2026-0194 and
+  RUSTSEC-2026-0195 — CPU and memory exhaustion from one crafted document, which is exactly
+  what an upload is. Do not swap it in while that is true.
+- **A document never chooses what this service reads.** A `STREAM` with an `href` is
+  refused, not fetched: followed, it is a caller's file naming `file:///etc/passwd` or an
+  address behind the network rules. No entity beyond XML's five is expanded, so a `DOCTYPE`
+  cannot grow a document. FITS inside a VOTable is refused rather than half-read.
+- **What a document may expand into is bounded by its own size.** An empty `TD` under a
+  `FIELD` of `arraysize="100000000"` is five bytes asking for a hundred million values, and a
+  fixed-size list holds them whether the cell is there or not. `ITEMS_PER_BYTE` is checked
+  before such a cell is allocated; anything that adds a way to make items without spending
+  bytes owes the same check.
+- **`votable::field`'s keys are the contract between the reader and `output::votable`.** A
+  column carrying them was declared by an uploaded document, and an answer describes it as
+  that document did. The writer takes a declaration only where it still fits the column's
+  Arrow type — a `bit` that is now a number is not called one — because a key can outlive
+  the type it described through anything DataFusion passes metadata along.
+- **Every table a request brings with it comes out of `[limits] max_upload_bytes`**: the
+  parts it sent, and the VOTables its urls name, counted as they arrive. A parquet file or a
+  catalog *named* by url is read where it is and is not counted — it is under the scan's
+  bounds already, the way a published catalog is.
+- **A VOTable is not held to the data-file globs, and a parquet file is.** The globs say
+  which files are queried in place. A VOTable never is: it is read whole, which is what
+  serving its bytes would hand over anyway. So a url's bytes may make it a VOTable, and never
+  a parquet file under a name off the list.
+- **A multipart TAP body is two bodies with two bounds.** The route's body limit is the sum
+  of `max_request_body_bytes` and `max_upload_bytes`, so the handler holds the parameters to
+  the first and the file parts to the second; neither may be allowed the whole of the sum.
+- **A job's inline tables wait on disk, in its run directory, and nowhere else.** They are
+  named by the runner beside the job's credentials, never on the record, and go when the job
+  has run or is destroyed.
 
 ## Measuring the TAP surface
 

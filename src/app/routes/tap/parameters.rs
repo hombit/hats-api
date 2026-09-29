@@ -17,11 +17,13 @@
 
 use std::collections::BTreeMap;
 
-use axum::extract::rejection::StringRejection;
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, StringRejection};
 use axum::http::{HeaderMap, StatusCode, header};
 
 use crate::adql::language;
-use crate::app::routes::tap::upload::Uploads;
+use crate::app::routes::tap::upload::{Part, Parts, Uploads};
+use crate::app::service::Service;
 use crate::error::ApiError;
 
 /// The pairs of a query string or a form body, which are the same encoding.
@@ -31,38 +33,149 @@ pub(super) fn pairs(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The pairs of a `POST`, whichever resource it arrived at.
+/// The pairs of a `POST` to a resource that takes no table.
 ///
-/// Both query resources take the same body in the same encoding and refuse the same things,
-/// so this is one function rather than a copy apiece: a rule that held on `/sync` and not on
-/// `/async` would be a difference no caller could have predicted.
+/// A job's phase, its destruction and the rest are one value each, so a multipart body there
+/// is refused by what it is rather than read as form-encoded and reported as holding
+/// nothing.
 pub(super) fn posted(
     headers: &HeaderMap,
     body: Result<String, StringRejection>,
 ) -> Result<Vec<(String, String)>, ApiError> {
-    // A `multipart/form-data` body is how TAP carries an inline `UPLOAD`, which this
-    // service does not implement — so saying that is more use than reading the bytes as
-    // form-encoded and reporting that they hold no QUERY.
-    let content_type = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if content_type.starts_with("multipart/") {
+    if is_multipart(headers) {
         return Err(ApiError::bad_request(
-            "this service takes a POST as application/x-www-form-urlencoded; multipart is \
-             for an inline UPLOAD, which it does not implement",
+            "this resource takes a POST as application/x-www-form-urlencoded; multipart is \
+             how an inline UPLOAD is sent, which goes to /sync, /async or a job's parameters",
         ));
     }
     // Asked of the rejection's status rather than by naming a variant: the body limit
     // surfaces through whichever buffering error the extractor wraps, and the status is the
     // part of that axum promises.
     let body = body.map_err(|rejection| match rejection.status() {
-        StatusCode::PAYLOAD_TOO_LARGE => ApiError::body_too_large(
-            "the request body is larger than this service accepts; send a shorter statement",
-        ),
+        StatusCode::PAYLOAD_TOO_LARGE => too_large(),
         _ => ApiError::bad_request("the request body is not text this service can read"),
     })?;
     Ok(pairs(&body))
+}
+
+/// What a `POST` carrying a query's parameters held: the pairs, and the tables sent beside
+/// them.
+#[derive(Debug, Default)]
+pub(super) struct Submitted {
+    pub pairs: Vec<(String, String)>,
+    pub parts: Parts,
+}
+
+/// The parameters of a `POST` to a resource that runs a query, in either encoding DALI
+/// allows it.
+///
+/// Every resource that runs one takes the same body and refuses the same things, so this is
+/// one function rather than a copy apiece: a rule that held on `/sync` and not on `/async`
+/// would be a difference no caller could have predicted.
+///
+/// **`multipart/form-data` is how an inline table arrives** (DALI §3.4.5): each table is a
+/// part named by the `param:` of an `UPLOAD`, and every other part is a parameter. The two
+/// halves are held to two bounds — the parameters to `max_request_body_bytes`, as a form
+/// body is, and the tables to `max_upload_bytes` — so the route's own limit, which is their
+/// sum, is never what decides.
+pub(super) async fn submitted(
+    service: &Service,
+    headers: &HeaderMap,
+    body: Result<Bytes, BytesRejection>,
+) -> Result<Submitted, ApiError> {
+    let body = body.map_err(|rejection| match rejection.status() {
+        StatusCode::PAYLOAD_TOO_LARGE => too_large(),
+        _ => ApiError::bad_request("the request body could not be read"),
+    })?;
+    let text_limit = service.request_body_limit.unwrap_or(usize::MAX);
+    if !is_multipart(headers) {
+        if body.len() > text_limit {
+            return Err(too_large());
+        }
+        let text = std::str::from_utf8(&body).map_err(|_| {
+            ApiError::bad_request("the request body is not text this service can read")
+        })?;
+        return Ok(Submitted {
+            pairs: pairs(text),
+            parts: Parts::default(),
+        });
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let boundary = multer::parse_boundary(content_type).map_err(|error| {
+        ApiError::bad_request(format!("this multipart body names no boundary: {error}"))
+    })?;
+    let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(body) });
+    let mut multipart = multer::Multipart::new(stream, boundary);
+    let mut submitted = Submitted::default();
+    let (mut text_bytes, mut table_bytes) = (0usize, 0u64);
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        ApiError::bad_request(format!("this multipart body is malformed: {error}"))
+    })? {
+        let name = field.name().unwrap_or_default().to_owned();
+        // A part with a file name is a file; one without is a parameter's value, which is
+        // what a browser form and `curl -F name=value` send.
+        let is_file = field.file_name().is_some();
+        let media_type = field
+            .content_type()
+            .map(|media| media.essence_str().to_owned());
+        let bytes = field.bytes().await.map_err(|error| {
+            ApiError::bad_request(format!("this multipart body is malformed: {error}"))
+        })?;
+        if is_file {
+            table_bytes = table_bytes.saturating_add(bytes.len() as u64);
+            if table_bytes > service.max_upload_bytes {
+                return Err(uploads_too_large(service.max_upload_bytes));
+            }
+            submitted.parts.push(Part {
+                name,
+                content_type: media_type,
+                bytes,
+            });
+            continue;
+        }
+        text_bytes = text_bytes.saturating_add(bytes.len());
+        if text_bytes > text_limit {
+            return Err(too_large());
+        }
+        let value = String::from_utf8(bytes.to_vec()).map_err(|_| {
+            ApiError::bad_request(format!(
+                "the multipart part {name:?} is not text, and a part with no file name is a \
+                 parameter; send a table as a file"
+            ))
+        })?;
+        submitted.pairs.push((name, value));
+    }
+    Ok(submitted)
+}
+
+fn is_multipart(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("multipart/")
+        })
+}
+
+fn too_large() -> ApiError {
+    ApiError::body_too_large(
+        "the request body is larger than this service accepts; send a shorter statement",
+    )
+}
+
+/// DALI §3.4.5: a service refusing an upload for its size answers with an error document.
+pub(super) fn uploads_too_large(limit: u64) -> ApiError {
+    ApiError::body_too_large(format!(
+        "the tables this request uploads come to more than the {} bytes this service accepts \
+         in one request",
+        limit
+    ))
 }
 
 /// Every name this service reads.
@@ -86,6 +199,13 @@ const TAKEN: [&str; 11] = [
 /// repeated; `UPLOAD_TYPE` is this service's own and follows it. Everything else is
 /// single-valued, and DALI §3.2 says a repeat is an error.
 const REPEATABLE: [&str; 3] = ["UPLOAD", "UPLOAD_TYPE", "UPLOAD_STORAGE_OPTION"];
+
+/// Whether a parameter may be given more than once, which a job's parameters accumulate.
+pub(super) fn is_repeatable(name: &str) -> bool {
+    REPEATABLE
+        .iter()
+        .any(|repeatable| repeatable.eq_ignore_ascii_case(name))
+}
 
 /// The one value `REQUEST` may take.
 const DO_QUERY: &str = "doQuery";
@@ -115,8 +235,8 @@ pub(super) struct Parameters {
 }
 
 impl Parameters {
-    /// Read one request's pairs.
-    pub fn read(pairs: &[(String, String)]) -> Result<Self, ApiError> {
+    /// Read one request's pairs, and the tables it sent beside them.
+    pub fn read(pairs: &[(String, String)], parts: &Parts) -> Result<Self, ApiError> {
         let mut given: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         for (name, value) in pairs {
             let upper = name.to_ascii_uppercase();
@@ -155,6 +275,7 @@ impl Parameters {
                 &every("UPLOAD"),
                 &every("UPLOAD_TYPE"),
                 &every("UPLOAD_STORAGE_OPTION"),
+                parts,
             )?,
             streaming: streaming(one("STREAMING"))?,
         })
@@ -280,7 +401,7 @@ mod tests {
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
             .collect::<Vec<_>>();
-        Parameters::read(&owned).map_err(|error| error.to_string())
+        Parameters::read(&owned, &Parts::default()).map_err(|error| error.to_string())
     }
 
     /// DALI §3.1: a service must treat upper-, lower- and mixed-case names as equal.
@@ -331,16 +452,16 @@ mod tests {
         // a reader can open at this url.
         assert!(!taken.streaming);
 
-        // The half of a standard parameter this service has not got says so, rather than
-        // being ignored into a refusal about a table nobody mentioned.
+        // An inline upload whose part the request did not carry says so, rather than being
+        // ignored into a refusal about a table nobody mentioned.
         let refused = read(&[
             ("QUERY", "SELECT 1"),
             ("LANG", "ADQL"),
             ("UPLOAD", "t,param:doc"),
         ])
         .unwrap_err();
-        assert!(refused.contains("inline"), "{refused}");
-        assert!(refused.contains("not implement"), "{refused}");
+        assert!(refused.contains("param:doc"), "{refused}");
+        assert!(refused.contains("multipart"), "{refused}");
     }
 
     /// TAP §2.5.2 has `UPLOAD` carry several tables and be repeatable, so a repeat is not
