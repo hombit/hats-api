@@ -93,6 +93,17 @@ accept(
     "A UTF-8 byte-order mark ahead of the XML declaration.",
 )
 accept(
+    "utf16-bom",
+    ('<?xml version="1.0" encoding="UTF-16"?>\n'
+     + f'<VOTABLE version="1.4" {NS}><RESOURCE><TABLE>'
+       '<FIELD name="s" datatype="unicodeChar" arraysize="*"/><FIELD name="n" datatype="int"/>'
+       "<DATA><TABLEDATA><TR><TD>Ω → ∞</TD><TD>3</TD></TR></TABLEDATA></DATA></TABLE>"
+       "</RESOURCE></VOTABLE>").encode("utf-16"),
+    [column("s", "unicodeChar", "*"), column("n", "int")],
+    [["Ω → ∞", 3]],
+    "UTF-16 with its byte-order mark, which is what decides the encoding.",
+)
+accept(
     "latin1-declared",
     '<?xml version="1.0" encoding="ISO-8859-1"?>\n'.encode()
     + f'<VOTABLE version="1.3" {NS}><RESOURCE><TABLE>'

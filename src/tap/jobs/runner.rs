@@ -707,6 +707,56 @@ mod tests {
         assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
     }
 
+    /// A job that never ran takes its kept tables with it, whether a caller destroyed it or
+    /// its destruction time came — the run being the other thing that removes them, and a
+    /// pending job being one that may never have one.
+    #[tokio::test]
+    async fn a_pending_job_destroyed_or_expired_leaves_no_table_behind() {
+        let harness = harness(Doing::Answer("x"), 2, 1 << 20);
+        let destroyed = submitted(&harness, 30).await;
+        let now = Utc::now();
+        let expiring = Job::new(
+            JobId::new().unwrap(),
+            vec![("QUERY".to_owned(), "SELECT 1".to_owned())],
+            None,
+            TimeDelta::seconds(30),
+            now - TimeDelta::seconds(1),
+            now - TimeDelta::seconds(2),
+        );
+        let expired = expiring.id.clone();
+        harness.store.create(expiring).await.unwrap();
+
+        let mut paths = Vec::new();
+        for id in [&destroyed, &expired] {
+            harness
+                .runner
+                .hold(
+                    id,
+                    Vec::new(),
+                    vec![("t".to_owned(), None, bytes::Bytes::from("table"))],
+                )
+                .await
+                .unwrap();
+            paths.extend(
+                locked(&harness.runner.held)[id]
+                    .files
+                    .iter()
+                    .map(|file| file.path.clone()),
+            );
+        }
+        assert!(paths.iter().all(|path| path.exists()), "{paths:?}");
+
+        harness.runner.stop(&destroyed);
+        harness.runner.expire().await;
+        assert!(harness.store.get(&expired).await.unwrap().is_none());
+        assert!(paths.iter().all(|path| !path.exists()), "{paths:?}");
+        assert!(locked(&harness.runner.held).is_empty());
+        assert_eq!(
+            std::fs::read_dir(harness.results.path("")).unwrap().count(),
+            0
+        );
+    }
+
     /// A job destroyed while it was finishing keeps no file: the transition is refused, a
     /// terminal phase never being left, and what it would have pointed at goes too.
     #[tokio::test]

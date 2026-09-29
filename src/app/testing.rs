@@ -96,13 +96,28 @@ pub(in crate::app) fn with_tap(
     server: &ServerConfig,
     tap: &TapConfig,
 ) -> Service {
-    let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
-    let policy = AccessPolicy::new(
+    with_access(
+        config,
+        api,
+        limits,
+        server,
+        tap,
         &crate::config::AccessConfig::default(),
-        Arc::clone(&mounts),
-        None,
     )
-    .unwrap();
+}
+
+/// And the same under access rules of the test's own — a server on the loopback interface
+/// being one no default rule lets a caller name.
+pub(in crate::app) fn with_access(
+    config: crate::config::MountConfig,
+    api: &ApiConfig,
+    limits: &LimitsConfig,
+    server: &ServerConfig,
+    tap: &TapConfig,
+    access: &crate::config::AccessConfig,
+) -> Service {
+    let mounts = Arc::new(Mounts::new(&[config], &DataConfig::default()).unwrap());
+    let policy = AccessPolicy::new(access, Arc::clone(&mounts), None).unwrap();
     Service::new(
         policy,
         limits,

@@ -1073,6 +1073,61 @@ mod tests {
         }
     }
 
+    /// A count as large as four bytes can say is refused at the end of the stream, not
+    /// allocated: the bytes it asks for are taken from the stream before anything is built.
+    #[test]
+    fn a_count_larger_than_the_stream_is_refused_before_it_is_allocated() {
+        for (datatype, arraysize) in [
+            ("double", "*"),
+            ("char", "*"),
+            ("bit", "*"),
+            ("short", "2x*"),
+        ] {
+            let mut stream = u32::MAX.to_be_bytes().to_vec();
+            stream.extend([0u8; 16]);
+            let document = format!(
+                "<VOTABLE><RESOURCE><TABLE><FIELD name=\"a\" datatype=\"{datatype}\" \
+                 arraysize=\"{arraysize}\"/><DATA><BINARY><STREAM encoding=\"base64\">{}\
+                 </STREAM></BINARY></DATA></TABLE></RESOURCE></VOTABLE>",
+                general_purpose::STANDARD.encode(stream)
+            );
+            // Whichever check says so first — the stream running out, or the count not being
+            // a whole number of slices — it says so about this cell.
+            let refused = read(document.as_bytes()).unwrap_err();
+            assert!(
+                refused.contains("row 1, column a"),
+                "{datatype} {arraysize}: {refused}"
+            );
+        }
+    }
+
+    /// The walk is a loop over a stack of names, so a document nested as deep as its size
+    /// allows is read without recursing into it.
+    #[test]
+    fn elements_nested_a_hundred_thousand_deep_are_walked_not_recursed() {
+        let depth = 100_000;
+        let document = format!(
+            "<VOTABLE><RESOURCE>{}{}<TABLE><FIELD name=\"a\" datatype=\"int\"/><DATA>\
+             <TABLEDATA><TR><TD>1</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>",
+            "<GROUP>".repeat(depth),
+            "</GROUP>".repeat(depth),
+        );
+        assert_eq!(one(&document).num_rows(), 1);
+    }
+
+    /// Bytes that are not what the document says it is written in are refused rather than
+    /// read with replacement characters standing in for them.
+    #[test]
+    fn a_document_that_is_not_the_encoding_it_declares_is_refused() {
+        let mut document = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><VOTABLE><RESOURCE>\
+            <TABLE><FIELD name=\"s\" datatype=\"char\" arraysize=\"*\"/><DATA><TABLEDATA><TR><TD>"
+            .to_vec();
+        document.extend([0xC3, 0x28]);
+        document.extend(b"</TD></TR></TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>");
+        let refused = read(&document).unwrap_err();
+        assert!(refused.contains("UTF-8"), "{refused}");
+    }
+
     #[test]
     fn a_stream_elsewhere_is_refused_rather_than_fetched() {
         let refused = read(

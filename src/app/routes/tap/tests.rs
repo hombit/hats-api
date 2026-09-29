@@ -17,7 +17,7 @@ use tower::ServiceExt;
 
 use crate::app::routes::tap::Jobs;
 use crate::app::service::{Service, router, router_with};
-use crate::app::testing::{serving, with_tap};
+use crate::app::testing::{serving, with_access, with_tap};
 use crate::config::{
     ApiConfig, AsyncConfig, LimitsConfig, ServerConfig, TapConfig, TapTableConfig,
 };
@@ -37,21 +37,48 @@ fn published_with(
     limits: &LimitsConfig,
     examples: Vec<crate::config::TapExampleConfig>,
 ) -> Service {
-    let tap = TapConfig {
+    with_tap(
+        serving(dir),
+        &ApiConfig::default(),
+        limits,
+        &ServerConfig::default(),
+        &objects(examples),
+    )
+}
+
+/// The same, under access rules that let a caller name a plain-`http` server on the
+/// loopback interface — which is where a test's own server is.
+fn published_reaching_loopback(dir: &std::path::Path, limits: &LimitsConfig) -> Service {
+    let access = crate::config::AccessConfig {
+        network: crate::config::NetworkConfig {
+            allow_loopback: true,
+            ..Default::default()
+        },
+        http: crate::config::HttpConfig {
+            endpoints: None,
+            allow_plain_http: true,
+        },
+        ..Default::default()
+    };
+    with_access(
+        serving(dir),
+        &ApiConfig::default(),
+        limits,
+        &ServerConfig::default(),
+        &objects(Vec::new()),
+        &access,
+    )
+}
+
+fn objects(examples: Vec<crate::config::TapExampleConfig>) -> TapConfig {
+    TapConfig {
         tables: vec![TapTableConfig {
             name: "sky.objects".to_owned(),
             path: "/".to_owned(),
             examples,
         }],
         jobs: Default::default(),
-    };
-    with_tap(
-        serving(dir),
-        &ApiConfig::default(),
-        limits,
-        &ServerConfig::default(),
-        &tap,
-    )
+    }
 }
 
 /// A `GET` to `/tap/sync` with these parameters.
@@ -694,6 +721,81 @@ async fn an_inline_votable_is_queried_and_comes_back_as_it_was_declared() {
     }
 }
 
+/// Every document of the VOTable corpus, uploaded and selected back whole, is answered with
+/// exactly the document the writer makes of the reader's own reading of it — and one the
+/// reader or the writer refuses is answered with an error document.
+///
+/// The corpus test holds the reader and the writer to each other; this holds the route
+/// between them to adding nothing: the multipart body, the sniffing, the in-memory table,
+/// DataFusion's `SELECT *` and the column metadata it has to carry through.
+#[tokio::test]
+async fn every_corpus_document_uploaded_comes_back_as_the_writer_writes_it() {
+    let dir = hats::query::tests::fixture(true);
+    let service = published(dir.path(), &LimitsConfig::default());
+    let corpus = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/votable");
+    let mut documents = Vec::new();
+    for set in ["generated", "handwritten", "wild"] {
+        for entry in std::fs::read_dir(corpus.join(set)).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|extension| extension == "vot") {
+                documents.push(path);
+            }
+        }
+    }
+    documents.sort();
+    assert!(documents.len() >= 150, "{}", documents.len());
+
+    let mut wrong = Vec::new();
+    for document in &documents {
+        let bytes = std::fs::read(document).unwrap();
+        let expected = crate::votable::read(&bytes).ok().and_then(|table| {
+            crate::output::votable::encode(&crate::engine::query::QueryResult {
+                schema: table.schema,
+                batches: table.batches,
+                data_bytes_read: 0,
+            })
+            .ok()
+        });
+        let (status, _, body) = send(
+            service.clone(),
+            multipart(
+                "/api/v1/tap/sync",
+                &[
+                    ("QUERY", "SELECT * FROM TAP_UPLOAD.t"),
+                    ("LANG", "ADQL"),
+                    ("UPLOAD", "t,param:t"),
+                    ("UPLOAD_TYPE", "t,votable"),
+                ],
+                &[("t", None, &bytes)],
+            ),
+        )
+        .await;
+        let name = document.file_name().unwrap().to_string_lossy().into_owned();
+        match expected {
+            Some(expected) if status != StatusCode::OK || body != expected => {
+                let at = body
+                    .chars()
+                    .zip(expected.chars())
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(body.len().min(expected.len()));
+                let from = at.saturating_sub(80);
+                wrong.push(format!(
+                    "{name}: {status}, differing at character {at}: {:?} where the writer has {:?}",
+                    body.chars().skip(from).take(160).collect::<String>(),
+                    expected.chars().skip(from).take(160).collect::<String>(),
+                ));
+            }
+            None if status == StatusCode::OK || !body.contains("value=\"ERROR\"") => {
+                wrong.push(format!(
+                    "{name}: {status}, and it should have been refused: {body}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// A column whose name ADQL cannot write unquoted is reached by quoting it, TAP §2.7.6 having
 /// the service "support delimited identifiers so that FIELD names that are not valid ADQL
 /// column names work correctly".
@@ -892,6 +994,193 @@ async fn a_votable_at_a_url_is_fetched_and_recognised() {
     );
 }
 
+/// A VOTable server on the loopback interface, for the `http://` uploads.
+///
+/// `/points.xml` is the document, `/private.xml` the same behind a bearer token, and
+/// `/moved.xml` a redirect to `/target.xml`, whose requests are counted — a redirect being
+/// refused is only shown by the server never being asked for where it pointed.
+struct VotableServer {
+    port: u16,
+    target_requests: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl VotableServer {
+    const TOKEN: &str = "Bearer upload-token";
+
+    async fn start() -> Self {
+        use axum::routing::get;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let target_requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&target_requests);
+        let document = points("BINARY2");
+        let app = axum::Router::new()
+            .route(
+                "/points.xml",
+                get({
+                    let document = document.clone();
+                    async move || document
+                }),
+            )
+            .route(
+                "/private.xml",
+                get({
+                    let document = document.clone();
+                    async move |headers: http::HeaderMap| {
+                        let authorized = headers
+                            .get(header::AUTHORIZATION)
+                            .is_some_and(|value| value == Self::TOKEN);
+                        if authorized {
+                            (StatusCode::OK, document)
+                        } else {
+                            (StatusCode::UNAUTHORIZED, String::new())
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/moved.xml",
+                get(async || {
+                    (
+                        StatusCode::FOUND,
+                        [(header::LOCATION, "/target.xml")],
+                        String::new(),
+                    )
+                }),
+            )
+            .route(
+                "/target.xml",
+                get(async move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    document
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        Self {
+            port,
+            target_requests,
+        }
+    }
+
+    fn upload(&self, name: &str, path: &str) -> String {
+        format!("{name},http://127.0.0.1:{}/{path}", self.port)
+    }
+
+    fn target_requests(&self) -> usize {
+        self.target_requests
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// A VOTable at an `http://` url is fetched, recognised by its bytes and read; a credential
+/// the caller sends as a header reaches the server; a redirect is refused rather than
+/// followed; and the bytes fetched are held to the upload cap like the bytes sent.
+#[tokio::test]
+async fn a_votable_over_http_is_fetched_with_what_the_caller_sent() {
+    let dir = hats::query::tests::fixture(true);
+    let server = VotableServer::start().await;
+    let query = (
+        "QUERY",
+        "SELECT id, ra FROM TAP_UPLOAD.p WHERE id IS NOT NULL",
+    );
+    let cleartext = ("UPLOAD_STORAGE_OPTION", "p,allow_http,true");
+
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "points.xml")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<TR><TD>7</TD><TD>10.5</TD></TR>"), "{body}");
+
+    // A server that wants a credential gets it from the header option and not otherwise —
+    // and over `http://` only once the caller has said the header may go in cleartext.
+    let authorization = format!("p,header,Authorization,{}", VotableServer::TOKEN);
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "private.xml")),
+            ("UPLOAD_STORAGE_OPTION", &authorization),
+            ("UPLOAD_TYPE", "p,votable"),
+        ],
+    )
+    .await;
+    assert!(status.is_client_error(), "{status} {body}");
+    assert!(body.contains("allow_http"), "{body}");
+    assert!(!body.contains("upload-token"), "leaked: {body}");
+
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "private.xml")),
+            cleartext,
+            ("UPLOAD_STORAGE_OPTION", &authorization),
+            ("UPLOAD_TYPE", "p,votable"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<TR><TD>7</TD><TD>10.5</TD></TR>"), "{body}");
+    assert!(!body.contains("upload-token"), "leaked: {body}");
+
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "private.xml")),
+            ("UPLOAD_TYPE", "p,votable"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("value=\"ERROR\""), "{body}");
+    assert!(body.contains("status: 401"), "{body}");
+
+    // The origin choosing the next destination is refused, and the destination never asked.
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "moved.xml")),
+            ("UPLOAD_TYPE", "p,votable"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert!(body.contains("value=\"ERROR\""), "{body}");
+    assert!(body.contains("status: 302"), "{body}");
+    assert_eq!(server.target_requests(), 0);
+
+    // The cap is on what was fetched, a url being no way around it.
+    let limits = LimitsConfig {
+        max_upload_bytes: ByteSize::b(100),
+        ..LimitsConfig::default()
+    };
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &limits),
+        &[
+            query,
+            ("LANG", "ADQL"),
+            ("UPLOAD", &server.upload("p", "points.xml")),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(body.contains("value=\"ERROR\""), "{body}");
+}
+
 /// A parquet file sent inline is read whole, and recognised by its first four bytes.
 #[tokio::test]
 async fn an_inline_parquet_file_is_a_table_too() {
@@ -953,6 +1242,64 @@ async fn an_upload_over_the_cap_is_refused_with_an_error_document() {
     )
     .await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+}
+
+/// A multipart body is two things held to two bounds: its tables to `max_upload_bytes` and
+/// its parameters to `max_request_body_bytes`, as a form body would be. A table larger than
+/// a form may be is still an upload, and a parameter is not made larger by arriving beside
+/// one.
+#[tokio::test]
+async fn a_multipart_bodys_tables_and_parameters_are_bounded_apart() {
+    let dir = hats::query::tests::fixture(true);
+    let limits = LimitsConfig {
+        max_request_body_bytes: ByteSize::kib(1),
+        max_upload_bytes: ByteSize::kib(64),
+        ..LimitsConfig::default()
+    };
+    let rows: String = (0..500)
+        .map(|at| format!("<TR><TD>{at}</TD></TR>"))
+        .collect();
+    let document = format!(
+        "<VOTABLE><RESOURCE><TABLE><FIELD name=\"n\" datatype=\"int\"/><DATA><TABLEDATA>\
+         {rows}</TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>"
+    );
+    assert!(document.len() > 4 * 1024, "{}", document.len());
+    let (status, _, body) = send(
+        published(dir.path(), &limits),
+        multipart(
+            "/api/v1/tap/sync",
+            &[
+                ("QUERY", "SELECT COUNT(*) AS rows FROM TAP_UPLOAD.t"),
+                ("LANG", "ADQL"),
+                ("UPLOAD", "t,param:t"),
+            ],
+            &[("t", None, document.as_bytes())],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("<TD>500</TD>"), "{body}");
+
+    let padded = format!(
+        "SELECT COUNT(*) AS rows FROM TAP_UPLOAD.t{}",
+        " ".repeat(2048)
+    );
+    let (status, content_type, body) = send(
+        published(dir.path(), &limits),
+        multipart(
+            "/api/v1/tap/sync",
+            &[
+                ("QUERY", &padded),
+                ("LANG", "ADQL"),
+                ("UPLOAD", "t,param:t"),
+            ],
+            &[("t", None, b"<VOTABLE/>")],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(content_type, "application/x-votable+xml");
+    assert!(body.contains("value=\"ERROR\""), "{body}");
 }
 
 /// A table that is not one says which of the two it is not.
