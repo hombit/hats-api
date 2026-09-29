@@ -1054,7 +1054,8 @@ impl VotableServer {
                     counted.fetch_add(1, Ordering::Relaxed);
                     document
                 }),
-            );
+            )
+            .route("/junk.parquet", get(async || "not a parquet file at all"));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await });
@@ -1072,6 +1073,44 @@ impl VotableServer {
         self.target_requests
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+}
+
+/// A url that is the caller's own keeps its own spelling in a refusal, which a mount's does
+/// not: a parquet url whose bytes are not parquet, and a catalog url with no catalog behind it.
+#[tokio::test]
+async fn a_remote_upload_that_cannot_be_read_is_refused_naming_its_url() {
+    let dir = hats::query::tests::fixture(true);
+    let server = VotableServer::start().await;
+    let junk = server.upload("t", "junk.parquet");
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT * FROM TAP_UPLOAD.t"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", &junk),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let url = junk.trim_start_matches("t,");
+    assert!(
+        body.contains(&format!("{url} could not be read as parquet")),
+        "{body}"
+    );
+
+    let missing = server.upload("t", "nothing/");
+    let (status, _, body) = ask(
+        published_reaching_loopback(dir.path(), &LimitsConfig::default()),
+        &[
+            ("QUERY", "SELECT * FROM TAP_UPLOAD.t"),
+            ("LANG", "ADQL"),
+            ("UPLOAD", &missing),
+            ("UPLOAD_TYPE", "t,hats"),
+        ],
+    )
+    .await;
+    assert!(status.is_client_error(), "{status}: {body}");
+    assert!(body.contains("properties"), "{body}");
 }
 
 /// A VOTable at an `http://` url is fetched, recognised by its bytes and read; a credential
