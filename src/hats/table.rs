@@ -437,12 +437,38 @@ fn conjunction(filters: &[Expr]) -> Option<Expr> {
     filters.iter().cloned().reduce(Expr::and)
 }
 
+/// A catalog's two position columns, by name, apart from the catalog: a streamed answer knows
+/// its schema only once the catalog's read has taken the catalog with it.
+#[derive(Debug, Clone)]
+pub struct Position {
+    ra: String,
+    dec: String,
+}
+
+impl Position {
+    /// The pair `catalog` names, where it names one.
+    pub fn of(catalog: &HatsCatalog) -> Option<Self> {
+        let columns = catalog.columns().ok()?;
+        Some(Self {
+            ra: columns.ra.to_owned(),
+            dec: columns.dec.to_owned(),
+        })
+    }
+
+    /// A schema read out of the catalog, with the pair marked as a statement over the catalog
+    /// sees it.
+    pub fn marked(&self, schema: &SchemaRef) -> SchemaRef {
+        marked(schema, &self.ra, &self.dec)
+    }
+}
+
 /// The two columns `hats_col_ra` and `hats_col_dec` name, marked in the schema the planner sees.
 ///
 /// What reads the mark is [`crate::sky::geometry`], which refuses a region over any other pair: the
 /// partitions here are chosen by an index over these two columns and describe no others. The
 /// catalog is the only thing that can say which they are, and the schema is the only thing that
-/// reaches the expression where the question is asked.
+/// reaches the expression where the question is asked. [`crate::output::votable`] reads it too,
+/// for the unit and UCD an answer carrying the column declares.
 fn marked(schema: &SchemaRef, ra: &str, dec: &str) -> SchemaRef {
     let fields = schema
         .fields()

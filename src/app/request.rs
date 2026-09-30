@@ -69,8 +69,8 @@ pub(in crate::app) fn refuse_unknown(
 pub(in crate::app) enum Format {
     Json,
     Parquet,
-    /// The XML table format IVOA tools read. Flat columns only — `output::votable` says which
-    /// ones are refused and why.
+    /// The XML table format IVOA tools read. Flat columns and lists — `output::votable` says
+    /// which columns are refused and why.
     Votable,
     /// Delimiter-separated values, one encoder and two delimiters — `output::dsv` says what
     /// neither of them can carry. One variant carrying which, rather than two beside each

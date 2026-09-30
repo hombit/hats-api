@@ -2705,6 +2705,146 @@ async fn a_job_writes_the_document_sync_would_have_built() {
     assert_eq!(written, synced.replace(&counted, "<TABLE>"));
 }
 
+/// A parquet file holding a list of strings, the one column a VOTable declares from its rows:
+/// the width of every string it holds goes in the `FIELD`, ahead of them.
+fn bands() -> Vec<u8> {
+    use datafusion::arrow::array::{Int64Array, ListBuilder, RecordBatch, StringBuilder};
+    use datafusion::parquet::arrow::ArrowWriter;
+
+    let mut bands = ListBuilder::new(StringBuilder::new());
+    for row in [&["g", "r"][..], &["i"], &["ztf_zr", "g", "r"]] {
+        for band in row {
+            bands.values().append_value(band);
+        }
+        bands.append(true);
+    }
+    let batch = RecordBatch::try_from_iter([
+        (
+            "id",
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as datafusion::arrow::array::ArrayRef,
+        ),
+        ("bands", Arc::new(bands.finish())),
+    ])
+    .unwrap();
+    let mut bytes = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut bytes, batch.schema(), None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    bytes
+}
+
+/// A list of strings is written at a width measured over every row, which a job can afford
+/// because its answer is a file: the rows wait in a spool beside it, and the document is the
+/// one `/sync` builds from rows it holds — `nrows` included, the count being known by then.
+///
+/// A streamed `/sync` answer has nowhere to keep them and refuses the column by name.
+#[tokio::test]
+async fn a_job_measures_a_list_of_strings_the_way_sync_does() {
+    let dir = hats::query::tests::fixture(true);
+    let harness = Jobbed::new(dir.path());
+    let file = bands();
+    let statement = [
+        ("QUERY", "SELECT id, bands FROM TAP_UPLOAD.t ORDER BY id"),
+        ("LANG", "ADQL"),
+        ("UPLOAD", "t,param:t"),
+    ];
+    let parts = [("t", Some("application/octet-stream"), file.as_slice())];
+
+    let synced = text_of(
+        harness
+            .send(multipart("/api/v1/tap/sync", &statement, &parts))
+            .await,
+    )
+    .await;
+    assert!(
+        synced.contains("datatype=\"unicodeChar\" arraysize=\"6x*\""),
+        "{synced}"
+    );
+    assert!(synced.contains("<TD>ztf_zrg     r     </TD>"), "{synced}");
+
+    let response = harness
+        .send(multipart(
+            "/api/v1/tap/async",
+            &[statement.as_slice(), &[("PHASE", "RUN")]].concat(),
+            &parts,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let location = response.headers()[header::LOCATION].to_str().unwrap();
+    let job = format!("/api/v1{}", location.split_once("/api/v1").unwrap().1);
+    let phase = harness.settled(&job).await;
+    let error = text_of(harness.get(&format!("{job}/error")).await).await;
+    assert_eq!(phase, "COMPLETED", "{error}");
+    let written = text_of(harness.get(&format!("{job}/results/result")).await).await;
+    assert_eq!(written, synced);
+
+    let streamed = text_of(
+        harness
+            .send(multipart(
+                "/api/v1/tap/sync",
+                &[statement.as_slice(), &[("STREAMING", "true")]].concat(),
+                &parts,
+            ))
+            .await,
+    )
+    .await;
+    assert!(streamed.contains("value=\"ERROR\""), "{streamed}");
+    assert!(streamed.contains("&quot;bands&quot;"), "{streamed}");
+}
+
+/// A catalog's own position is published in `TAP_SCHEMA` with a unit and a UCD, and an answer
+/// carrying those columns says the same of them — which is how TOPCAT finds the position of
+/// a table it was handed without being told.
+#[tokio::test]
+async fn an_answer_marks_the_catalogs_position_as_tap_schema_does() {
+    let dir = hats::query::tests::fixture(true);
+    let (status, _, body) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            (
+                "QUERY",
+                "SELECT TOP 1 id, ra, dec AS declination FROM sky.objects",
+            ),
+            ("LANG", "ADQL"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains(
+            "<FIELD name=\"ra\" ID=\"ra\" datatype=\"double\" unit=\"deg\" \
+             ucd=\"pos.eq.ra;meta.main\"/>"
+        ),
+        "{body}"
+    );
+    // Under an alias it is still the catalog's declination.
+    assert!(
+        body.contains("datatype=\"double\" unit=\"deg\" ucd=\"pos.eq.dec;meta.main\"/>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<FIELD name=\"id\" ID=\"id\" datatype=\"long\"/>"),
+        "{body}"
+    );
+
+    let (_, _, published) = ask(
+        published(dir.path(), &LimitsConfig::default()),
+        &[
+            (
+                "QUERY",
+                "SELECT column_name, unit, ucd FROM TAP_SCHEMA.columns \
+                 WHERE table_name = 'sky.objects' AND column_name = 'ra'",
+            ),
+            ("LANG", "ADQL"),
+        ],
+    )
+    .await;
+    assert!(
+        published.contains("<TD>ra</TD><TD>deg</TD><TD>pos.eq.ra;meta.main</TD>"),
+        "{published}"
+    );
+}
+
 /// An answer larger than a job may keep is that job's failure, and it is refused while the
 /// document is being written rather than once all of it is in memory.
 #[tokio::test]

@@ -1549,6 +1549,12 @@ and the parameter rules are §3.
   `/tables` are the same metadata twice, and a validator reads them against each other, so
   both are rendered from `tap::metadata` — the columns, the flags and the foreign keys
   alike. A second list is how the two come to disagree about a name.
+
+  **A VOTable answer is the third document, and says the same of a column.** The unit and UCD
+  of a catalog's position columns come from `output::votable::position`, which `TAP_SCHEMA`,
+  `/tables` and every VOTable answer read — the answer off the `geometry::COORDINATE` mark,
+  never off a column's name. What `TAP_SCHEMA` publishes of a list is what the writer can
+  write, `votable::is_array_item` being the one list of both.
 - **A published name is one a query can write.** `adql::names::as_written` delimits a name
   ADQL's grammar does not admit — `_healpix_29` is in every HATS catalog — and TAP §4.3 asks
   the published name to carry the quotes. Two things it deliberately does not do: it does
@@ -1573,6 +1579,13 @@ and the parameter rules are §3.
   **every resource answers it through one writer**: `output::parquet::Writing` driven
   collected for a `/sync` body, and driven a piece at a time for a job's file and for a
   streamed `/sync` body. Two writers per format is the thing that drifts.
+
+  **A job answers what `/sync` answers.** A VOTable holding a list of strings declares a width
+  measured over every row, so `run::write` spools the rows to Arrow IPC beside the job's file
+  and writes the document from there — the peak still one batch, the spool under the job's
+  ceiling and swept with it. Do not collect a job's rows in memory for the same effect, and
+  do not refuse on `/async` what `/sync` answers. A streamed `/sync` body has nowhere to
+  spool, and refuses the column by name before its status.
 - **`STREAMING` is `/sync`'s, it is off unless asked for, and `/async` ignores it.** Neither
   TAP nor DALI specifies it: it is an extension this service introduces, spelled and defaulted
   like the file-server mode's `streaming` so the two are one parameter. Off is the decision

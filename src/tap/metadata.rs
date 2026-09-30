@@ -12,6 +12,7 @@ use datafusion::arrow::datatypes::{DataType, Field, SchemaRef};
 
 use crate::adql::names;
 use crate::output::votable;
+use crate::sky::geometry;
 
 /// One published table.
 #[derive(Debug, Clone)]
@@ -81,14 +82,6 @@ pub struct Marks<'a> {
     pub healpix: Option<&'a str>,
 }
 
-/// Degrees, which is what HATS stores a position in.
-const DEGREES: &str = "deg";
-
-/// UCD1+ for the two coordinates. `meta.main` says this is *the* position of the row
-/// rather than one of several, which is how a client told nothing else finds it.
-const RA_UCD: &str = "pos.eq.ra;meta.main";
-const DEC_UCD: &str = "pos.eq.dec;meta.main";
-
 /// Describe one published table.
 pub fn describe(
     qualified: &str,
@@ -150,11 +143,13 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
     };
     let name = field.name();
     let is = |marked: Option<&str>| marked == Some(name.as_str());
+    // What an answer carrying the column says of it too, off the mark its table puts on it.
     let (unit, ucd) = match (is(marks.ra), is(marks.dec)) {
-        (true, _) => (Some(DEGREES), Some(RA_UCD)),
-        (_, true) => (Some(DEGREES), Some(DEC_UCD)),
-        _ => (None, None),
-    };
+        (true, _) => votable::position(geometry::RA),
+        (_, true) => votable::position(geometry::DEC),
+        _ => None,
+    }
+    .unzip();
     vec![ColumnMetadata {
         name: names::as_written(name),
         datatype: spelled.datatype,
@@ -170,9 +165,10 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
 
 /// How a field is declared, reading through a list to what it holds.
 ///
-/// A list of scalars is one value of no fixed length, which VOTable spells as the
-/// element's own datatype with `arraysize="*"` — the same spelling a string gets, a string
-/// being an array of characters. A list of anything else has no spelling and is `None`.
+/// A list of numbers, booleans or strings is one value of no fixed length, which VOTable
+/// spells as the element's own datatype with `arraysize="*"` — the same spelling a string
+/// gets, a string being an array of characters. A list of anything else is one the answer
+/// refuses, [`votable::is_array_item`] being the writer's own list, and is `None`.
 ///
 /// **A list of instants is one of those.** An `xtype` says what the characters of one value
 /// are, and a run of them is not that value: a client reading `xtype="timestamp"` would
@@ -181,8 +177,11 @@ fn declare(field: &Field, marks: Marks<'_>) -> Vec<ColumnMetadata> {
 fn element(field: &Field) -> Option<votable::Spelling> {
     match field.data_type() {
         DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
+            if !votable::is_array_item(item.data_type()) {
+                return None;
+            }
             let spelled = votable::spelling(item).ok()?;
-            spelled.xtype.is_none().then_some(votable::Spelling {
+            Some(votable::Spelling {
                 arraysize: Some("*"),
                 ..spelled
             })
@@ -231,16 +230,16 @@ mod tests {
                 .unwrap()
                 .clone()
         };
-        assert_eq!(by_name("ra").ucd, Some(RA_UCD));
-        assert_eq!(by_name("ra").unit, Some(DEGREES));
-        assert_eq!(by_name("dec").ucd, Some(DEC_UCD));
+        assert_eq!(by_name("ra").ucd, Some("pos.eq.ra;meta.main"));
+        assert_eq!(by_name("ra").unit, Some("deg"));
+        assert_eq!(by_name("dec").ucd, Some("pos.eq.dec;meta.main"));
         assert!(by_name("ra").indexed && by_name("dec").indexed);
         // The index is what a query prunes on and is not what a catalog is about — and
         // ADQL cannot write a leading underscore bare, so the published name has quotes.
         assert!(by_name("\"_healpix_29\"").indexed);
         assert!(!by_name("\"_healpix_29\"").principal);
         // `dec` is a reserved word and is published bare all the same.
-        assert_eq!(by_name("dec").ucd, Some(DEC_UCD));
+        assert_eq!(by_name("dec").ucd, Some("pos.eq.dec;meta.main"));
         // An ordinary column: content, no unit this service could know, nothing to prune.
         let ordinary = by_name("phot_g_mean_mag");
         assert!(ordinary.principal && !ordinary.indexed && !ordinary.std);
@@ -367,5 +366,34 @@ mod tests {
         );
         assert_eq!(columns[0].datatype, "unicodeChar");
         assert_eq!(columns[0].arraysize, Some("*"));
+    }
+
+    /// A dictionary is published as what it holds, the answer writing it out as its values; a
+    /// list of dictionaries is left out, the answer having no array form for one.
+    #[test]
+    fn a_dictionary_is_published_as_its_values_and_a_list_of_them_is_not() {
+        let dictionary = DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8));
+        let columns = described(
+            vec![
+                Field::new("band", dictionary.clone(), true),
+                Field::new(
+                    "bands",
+                    DataType::List(Arc::new(Field::new("element", dictionary, true))),
+                    true,
+                ),
+                Field::new("blob", DataType::Binary, true),
+            ],
+            Marks::default(),
+        );
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| (column.name.as_str(), column.datatype, column.arraysize))
+                .collect::<Vec<_>>(),
+            [
+                ("band", "unicodeChar", Some("*")),
+                ("blob", "unsignedByte", Some("*"))
+            ]
+        );
     }
 }

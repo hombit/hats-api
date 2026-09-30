@@ -15,7 +15,9 @@
 //!   rather than the rows and the whole document, and the ceiling on what a job may keep
 //!   refuses at the byte that passes it instead of once all of it is in memory. Parquet is
 //!   the one format whose chunk is a row group rather than a batch — the writer cannot emit
-//!   a group before it is full — which is bounded and is still not the answer.
+//!   a group before it is full — which is bounded and is still not the answer. A VOTable
+//!   whose head has to see every row first reads them into a spool beside the file and
+//!   writes the document from there, which [`measured`] says more about.
 //! - [`stream()`] sends each piece as the rows arrive, which is `STREAMING=true`. The same
 //!   peak as a job's, and nothing on disk.
 //!
@@ -29,6 +31,8 @@ use std::time::Instant;
 
 use axum::body::Body;
 use datafusion::arrow::array::RecordBatch;
+use datafusion::arrow::ipc::reader::StreamReader;
+use datafusion::arrow::ipc::writer::StreamWriter;
 use futures::{Stream, StreamExt as _};
 use url::Url;
 
@@ -116,7 +120,8 @@ pub(super) async fn run(
 ///
 /// **A streamed document has no `nrows`.** The count is known only once the rows have run
 /// out and the attribute sits at the head of the `TABLE`, so it is left out — which VOTable
-/// allows, it being optional, and which the job record answers anyway.
+/// allows, it being optional, and which the job record answers anyway. A document written
+/// from a spool by [`measured`] has counted its rows by then and carries it.
 pub(super) async fn write(
     service: &Service,
     parameters: &Parameters,
@@ -126,7 +131,6 @@ pub(super) async fn write(
 ) -> Result<Answered, ApiError> {
     let started = Instant::now();
     let prepared = prepare(service, parameters, ceiling).await?;
-    let mut encoder = encoder(answering)?;
     let mut execution = adql::query::plan(
         &prepared.translated,
         &prepared.tables,
@@ -135,10 +139,17 @@ pub(super) async fn write(
     )
     .await?;
 
-    into.write(&encoder.begin(&execution.schema)?).await?;
-    while let Some(batch) = execution.next().await {
-        into.write(&encoder.rows(&batch?)?).await?;
-    }
+    let mut encoder =
+        if matches!(answering.format, Format::Votable) && votable::measures(&execution.schema) {
+            measured(&mut execution, into).await?
+        } else {
+            let mut encoder = encoder(answering)?;
+            into.write(&encoder.begin(&execution.schema)?).await?;
+            while let Some(batch) = execution.next().await {
+                into.write(&encoder.rows(&batch?)?).await?;
+            }
+            encoder
+        };
     let ending = stream::Ending {
         rows: execution.num_rows(),
         data_bytes_read: execution.data_bytes_read(),
@@ -164,6 +175,70 @@ pub(super) async fn write(
             .map(|table| table.name.clone())
             .collect(),
     })
+}
+
+/// A job's VOTable that has to see every row before its head: every row is read into a spool
+/// beside the answer, measured on the way, and the document is then written from the spool.
+///
+/// **This is the one answer read twice, and it is the job's alone.** A list of strings is
+/// written at one width that the `FIELD` declares ahead of the rows, so a document written as
+/// they arrive refuses such a column; `/sync` measures the rows it has already collected. A
+/// job's answer is a file whichever way it is written, so it can afford the same answer with
+/// the peak still one batch — the rows wait on disk rather than in memory. A streamed `/sync`
+/// body has nowhere to put them and keeps the refusal.
+///
+/// The spool is Arrow IPC, the rows' own layout, so what is read back is the batches as the
+/// statement produced them. Reading it is blocking file I/O and goes on a blocking thread, a
+/// batch at a time.
+async fn measured(
+    execution: &mut Execution,
+    into: &mut Writing,
+) -> Result<Box<dyn stream::Encoder>, ApiError> {
+    let schema = Arc::clone(&execution.schema);
+    let spooling = |error: datafusion::arrow::error::ArrowError| {
+        ApiError::internal(format!("cannot spool a job's rows: {error}"))
+    };
+    let mut spool = into.spool();
+    let mut measuring = votable::Measuring::new(&schema);
+    // Written into memory a batch at a time and moved to the file from there, so the only
+    // blocking writer is one over a buffer.
+    let mut ipc = StreamWriter::try_new(Vec::new(), &schema).map_err(spooling)?;
+    spool.write(&std::mem::take(ipc.get_mut())).await?;
+    while let Some(batch) = execution.next().await {
+        let batch = batch?;
+        measuring.rows(&batch);
+        ipc.write(&batch).map_err(spooling)?;
+        spool.write(&std::mem::take(ipc.get_mut())).await?;
+    }
+    ipc.finish().map_err(spooling)?;
+    spool.write(&std::mem::take(ipc.get_mut())).await?;
+
+    let mut encoder: Box<dyn stream::Encoder> =
+        Box::new(measuring.document(Some(execution.num_rows())));
+    into.write(&encoder.begin(&schema)?).await?;
+    let path = spool.finish().await?.to_path_buf();
+    let (sender, mut batches) = tokio::sync::mpsc::channel(1);
+    let reading = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)
+            .map_err(|error| ApiError::internal(format!("cannot read a job's rows: {error}")))?;
+        let reader =
+            StreamReader::try_new(std::io::BufReader::new(file), None).map_err(spooling)?;
+        for batch in reader {
+            // A closed channel is the writer having stopped, whose error is its own.
+            if sender.blocking_send(batch.map_err(spooling)).is_err() {
+                break;
+            }
+        }
+        Ok::<_, ApiError>(())
+    });
+    while let Some(batch) = batches.recv().await {
+        into.write(&encoder.rows(&batch?)?).await?;
+    }
+    reading
+        .await
+        .map_err(|error| ApiError::internal(format!("a job's rows were not read: {error}")))??;
+    drop(spool);
+    Ok(encoder)
 }
 
 /// One statement, answered as its rows arrive.
