@@ -8,21 +8,11 @@ Release dates are in the UTC time zone.
 
 ### Added
 
-- `/simple/hats` and a mounted catalog's query choose partitions by a collection's index catalogs.
-- TAP `UPLOAD` takes a VOTable — `TABLEDATA`, `BINARY` or `BINARY2` — sent inline or by URL.
-- TAP `UPLOAD` reads a parquet file sent inline as a multipart part.
-- `UPLOAD_TYPE` takes `votable`.
-- `/adql` tables take `"type": "votable"`.
-- `[limits] max_upload_bytes`, the tables one request may upload; 64 MiB by default.
-- `/tap/capabilities` declares the upload methods and an `uploadLimit`.
+--
 
 ### Changed
 
-- `votable` answers write a list of numbers or booleans as a VOTable array.
-- `votable` answers write a list of strings as fixed-width strings.
-- `votable` answers describe an uploaded VOTable's columns as its `FIELD`s did.
-- `votable` answers give a catalog's `ra` and `dec` the unit and UCD `TAP_SCHEMA` does.
-- `votable` answers write a dictionary column as its values and bytes as `unsignedByte`.
+--
 
 ### Deprecated
 
@@ -39,6 +29,33 @@ Release dates are in the UTC time zone.
 ### Security
 
 --
+
+## [0.0.15] - 2026-10-01
+
+### Added
+
+- `/simple/hats` and a mounted catalog's query choose partitions by a collection's index catalogs. [#117](https://github.com/hombit/hats-api/pull/117)
+- TAP `UPLOAD` takes a VOTable — `TABLEDATA`, `BINARY` or `BINARY2` — sent inline or by URL. [#118](https://github.com/hombit/hats-api/pull/118)
+- TAP `UPLOAD` reads a parquet file sent inline as a multipart part. [#118](https://github.com/hombit/hats-api/pull/118)
+- `UPLOAD_TYPE` takes `votable`. [#118](https://github.com/hombit/hats-api/pull/118)
+- `/adql` tables take `"type": "votable"`. [#118](https://github.com/hombit/hats-api/pull/118)
+- `[limits] max_upload_bytes`, the tables one request may upload; 64 MiB by default. [#118](https://github.com/hombit/hats-api/pull/118)
+- `/tap/capabilities` declares the upload methods and an `uploadLimit`. [#118](https://github.com/hombit/hats-api/pull/118)
+
+### Changed
+
+- `votable` answers write a list of numbers or booleans as a VOTable array. [#118](https://github.com/hombit/hats-api/pull/118)
+- `votable` answers write a list of strings as fixed-width strings. [#121](https://github.com/hombit/hats-api/pull/121)
+- `votable` answers describe an uploaded VOTable's columns as its `FIELD`s did. [#118](https://github.com/hombit/hats-api/pull/118)
+- `votable` answers give a catalog's `ra` and `dec` the unit and UCD `TAP_SCHEMA` does. [#122](https://github.com/hombit/hats-api/pull/122)
+- `votable` answers write a dictionary column as its values and bytes as `unsignedByte`. [#122](https://github.com/hombit/hats-api/pull/122)
+
+### Fixed
+
+- A `UPLOAD_TYPE=votable` or `parquet` url into a mount, naming a file that is neither, no longer names the mount's local path in the refusal. [#118](https://github.com/hombit/hats-api/pull/118)
+- A `UPLOAD_TYPE=hats` url into a mount, naming a file that is not a catalog, no longer names the mount's local path in the refusal. [#120](https://github.com/hombit/hats-api/pull/120)
+- `UPLOAD` posted to a pending job's `/parameters` adds to the job's tables instead of replacing them. [#118](https://github.com/hombit/hats-api/pull/118)
+- A TAP job's VOTable answer no longer refuses a list of strings that `/tap/sync` writes. [#122](https://github.com/hombit/hats-api/pull/122)
 
 ## [0.0.14] - 2026-09-26
 
@@ -235,7 +252,8 @@ Release dates are in the UTC time zone.
 
 Initial release.
 
-[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.14...HEAD
+[Unreleased]: https://github.com/hombit/hats-api/compare/v0.0.15...HEAD
+[0.0.15]: https://github.com/hombit/hats-api/compare/v0.0.14...v0.0.15
 [0.0.14]: https://github.com/hombit/hats-api/compare/v0.0.13...v0.0.14
 [0.0.13]: https://github.com/hombit/hats-api/compare/v0.0.12...v0.0.13
 [0.0.12]: https://github.com/hombit/hats-api/compare/v0.0.11...v0.0.12
