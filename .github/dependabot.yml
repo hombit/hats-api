@@ -7,6 +7,10 @@ updates:
       interval: monthly
     open-pull-requests-limit: 5
     groups:
+      s3s:
+        patterns:
+          - "s3s"
+          - "s3s-fs"
       patch-updates:
         update-types: [patch]
       test-only:
