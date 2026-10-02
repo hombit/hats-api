@@ -38,7 +38,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 7.3 | serve the API description | done | |
 | 7.4 | compress JSON responses, never parquet | done | |
 | 8.4 | a clock on every request | done | `[limits] max_request_seconds`; the rest of §8.4 is not done |
-| 7.5 | VOTable output | in progress | flat columns answer; a nested one is refused by name until §7.5's four decisions are made |
+| 7.5 | VOTable output | in progress | flat columns answer; a nested one is refused by name; its shape is decided, a null inside an array and depth are not |
 | 6.5 | request cost benchmark | todo | ranks the layers after the first two, which are justified by what is already measured |
 | 6 | caching | in progress | |
 | 6.1a | HATS catalog metadata layer | done | `hats/cache.rs`; one entry per part of a catalog, keyed by url and a fingerprint of the options |
@@ -65,7 +65,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 11.9 | `/examples` | done | one cone per table, generated from the catalog's own columns and one of its partition cells, and replaced per table by `[[tap.table.example]]`. It never waited for §6.1: tuning by hand is what the cache was going to pay for |
 | 11.10 | what a caller gets told | todo | later. Its own page; TAP takes form parameters and `/docs` describes JSON bodies |
 | 11.11 | table upload | done | |
-| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half waits on §7.5 and nobody can be asked about it |
+| 11.12 | `json` over TAP, and a nested column in `TAP_SCHEMA` | in progress | DALI lists no JSON, so publishing the name fixes this crate's document shape as an interface; all four reference services publish one anyway, each a different shape. The nested half is decided: dotted leaves, `columns.group_name` and a `TAP_SCHEMA.groups` table |
 | 11.14 | a DALI parameter value, read once and typed | done | `tap::dali`, a `serde` data format; the upload parameters are read through it, and §11.7's shapes are written as types over the same reader |
 
 §2–§7, §10 and §11 are the phases in order, §8 the conditions every phase must keep, §9
@@ -304,22 +304,43 @@ tell from a different value.
 The shape to follow is
 [this notebook](https://github.com/lincc-frameworks/notebooks_lf/blob/main/lsdb/busy_week_2025/VOTable-example-for-hats.ipynb):
 a `GROUP` carrying the column's name and a `FIELDref` per subfield, beside flat `FIELD`s
-named `diaSource.band`, each holding one row's whole array. Three things it does not settle,
-and one the flat list of strings already has.
+named `diaSource.band`, each holding one row's whole array. What is decided about it:
+
+- **Every struct is a `GROUP`; a struct of lists is also marked nested.** The mark is the
+  notebook's `<PARAM name="is_nested_column" datatype="boolean" value="t"/>`, and nothing
+  else — no `utype` of our own for a reader to learn. It says the leaves are the rows of one
+  inner table, and it goes on every `List<Struct<…>>` and every `Struct<List<…>, …>` alike,
+  the second taken as nested-pandas writes it rather than checked. A struct of plain values
+  is a `GROUP` without the mark.
+- **Each `FIELD` carries a generated `ID`, and each `FIELDref` points at it.** `ref` is an
+  `IDREF`, so the notebook's refs to names point at nothing; and a column name is not always
+  an `NCName`.
+
+- **What a VOTable cannot say refuses the answer, by name.** No encoding of our own for it:
+  a caller who needs it asks for parquet.
+
+Beside those, the rules the flat lists already follow carry over.
 
 - **An array of strings is fixed-width strings.** `arraysize="Wx*"`, blank-padded, with `W`
   the upload's own where it declared one and measured over the answer otherwise — so a
   document written as its rows arrive refuses a field whose width it cannot measure, and a
   `GROUP`'s string fields inherit that. A string the padding would change — a trailing blank,
   a null, an empty one a trimmed cell would drop — refuses the answer.
-- **A null inside an array.** A float has `NaN` and a boolean has `?`. An integer has only
-  `VALUES`'s `null`, a magic value a real measurement can equal, so it needs a pass to find
-  one nothing uses and a refusal when there is none. A string has nothing, and is refused.
+- **A null inside an array** is written where VOTable spells one — `NaN` for a float, `?` for
+  a boolean, an integer's `VALUES` `null` where an upload declared it — and refuses the answer
+  everywhere else.
 - **Both arrow shapes are one VOTable.** `List<Struct<…>>` and `Struct<List<…>, …>` — which
   is what nested-pandas writes — produce the same `GROUP`. Writing them as two cases is how
   they come to disagree about a null at the struct level, which belongs to neither field.
 - **Depth is refused, not flattened.** A struct in a struct, or a list of lists, has no
   `GROUP` to become.
+- **pyvo cannot read an array of strings at all.** astropy 8.0.1's `Char` and `UnicodeChar`
+  converters take `arraysize` as one integer, so `Wx*` is `E01` before a row is read, and
+  that is every flat list of strings answered today as well. STILTS reads it. Which form a
+  list of strings takes — this one, or a refusal — is undecided.
+- **A leaf's `FIELD` is named by its path.** A leaf selected without an alias comes back
+  named `lsdb.nested.sources[mag]`, DataFusion's display name, and pyvo turns that into the
+  `ID` `lsdb.nested.sources_mag_`. It has to come back as `sources.mag`, inside the `GROUP`.
 
 Beside it, once that is settled: the same notebook's actual subject is **VOTable-in-Parquet**,
 a whole VOTable header in the file's key/value metadata under
@@ -772,16 +793,35 @@ MAST — declare `application/json` in `/capabilities` and answer in it, IRSA ad
 recorded. So there is practice, and it is four different shapes rather than one to follow.
 What is left to decide is ours, not whether anyone has gone first.
 
-The nested half is what neither format settles. A column reaching a light curve is answerable
-in `parquet` today and says nothing about itself in the metadata: `TAP_SCHEMA.columns` has one
-row per column with one `datatype`, and what that row should say about `lightcurve.mag` — one
-row per leaf, one row for the column, an `arraysize`, a `xtype` — is undecided. It waits on
-§7.5 deciding what a nested column is in a VOTable first, since a name published in
-`TAP_SCHEMA` is one a client may then write into a query and ask for in any format.
+The nested half is decided, as two extensions TAP 1.1 §4 allows ("additional tables … additional
+columns in the standard tables"), both `std = 0` and both described in `TAP_SCHEMA`'s own rows:
 
-The nested half is the one nobody can be asked about. None of the four publishes a nested
-column, so there is no practice to follow there and no check that can be calibrated against
-anybody.
+- **A leaf is a row, dotted; the struct is not.** `lightcurve.mag`, unquoted, the leaves
+  contiguous in `column_index`. `datatype` is required and a struct has none to give. Today
+  a `List<Struct<…>>` publishes nothing at all, and has to publish the same rows a
+  `Struct<List<…>>` does.
+- **`TAP_SCHEMA.columns.group_name`** names the struct a leaf belongs to, exactly the leaf
+  name's prefix, and is null for a flat column.
+- **`TAP_SCHEMA.groups`** — `table_name`, `group_name`, `nested`, `description` — one row per
+  struct, `nested` being §7.5's mark. A foreign key `columns_group` from `columns(table_name,
+  group_name)` to it goes in `keys` and `key_columns`.
+- **A list-of-strings leaf is `Wx*` where something declared `W`**, an upload or a
+  VOTable-Parquet header, and `*` otherwise.
+- **`/tables` carries the dotted leaves only.** VODataService has no group, and taplint
+  compares the two documents on the standard columns.
+
+A published leaf name needs no quoting in a query: `sources.mag`, `nested.sources.mag`,
+`lsdb.nested.sources.mag`, an alias's `n.sources.mag` and `"sources"."mag"` all reach the field
+through pyvo and STILTS alike, and a join where a table is named like the struct reads
+`sources.mag` as that table's column, as ADQL has it. `"sources.mag"` names no field, which is
+why the published name is not quoted. What is left:
+
+- **A path is case-sensitive, which ADQL 2.1 §2.1.3 does not allow.** `SOURCES.MAG` is
+  refused: `adql::query::resolve_identifiers` folds only the last segment, against top-level
+  fields, so neither the struct nor its field is folded.
+
+None of the four reference services publishes a nested column, so there is no practice to
+follow and no check that can be calibrated against anybody.
 
 ### 11.14 A DALI parameter value, read once and typed
 
