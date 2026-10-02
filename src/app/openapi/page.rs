@@ -11,6 +11,16 @@
 use utoipa::openapi::path::Operation;
 use utoipa::openapi::{OpenApi, RefOr, Schema};
 
+/// A reference this crate never writes, since every `RefOr` here comes from `Content::content`
+/// rather than `content_ref`. Reading one as absent is the same choice `render_operation`
+/// already makes for a response that is itself a `RefOr::Ref`.
+fn resolved<T>(item: &RefOr<T>) -> Option<&T> {
+    match item {
+        RefOr::T(value) => Some(value),
+        RefOr::Ref(_) => None,
+    }
+}
+
 /// The page that renders the document.
 ///
 /// Rendered here rather than fetched and drawn by a script, for the reason every page this
@@ -254,8 +264,8 @@ fn render_operation(method: &str, path: &str, operation: &Operation, document: &
         summary = escape(operation.summary.as_deref().unwrap_or("")),
     );
 
-    if let Some(body) = &operation.request_body
-        && let Some(content) = body.content.get("application/json")
+    if let Some(body) = operation.request_body.as_ref().and_then(resolved)
+        && let Some(content) = body.content.get("application/json").and_then(resolved)
         && let Some(schema) = &content.schema
     {
         html.push_str("<h4>request body</h4>\n");
@@ -274,6 +284,7 @@ fn render_operation(method: &str, path: &str, operation: &Operation, document: &
         let schema = response
             .content
             .get("application/json")
+            .and_then(resolved)
             .and_then(|content| content.schema.as_ref())
             .and_then(referenced);
         html.push_str(&format!(
@@ -315,7 +326,9 @@ fn render_runner(path: &str, operation: &Operation) -> String {
     let body = operation
         .request_body
         .as_ref()
+        .and_then(resolved)
         .and_then(|body| body.content.get("application/json"))
+        .and_then(resolved)
         .and_then(|content| content.example.as_ref())
         .map_or_else(
             || "{}".to_owned(),
