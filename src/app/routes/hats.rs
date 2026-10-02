@@ -401,7 +401,7 @@ pub(in crate::app) async fn query_hats(
         // the body would be a dropped connection instead. It goes back in front of the
         // rest, so the rows are all still there and in the catalog's order.
         let (first, rest) = Box::pin(batches).into_future().await;
-        let first = first.transpose().map_err(&hide_the_path)?;
+        let first = first.transpose().map_err(hide_the_path)?;
         // From the partition rather than from the batch: a partition says what its columns
         // are whether or not any of its rows matched, and a query that matched nothing
         // still has a schema to answer with — which is what says what was looked at.
@@ -449,7 +449,7 @@ pub(in crate::app) async fn query_hats(
             service.catalog_limits,
         )
         .await
-        .map_err(&hide_the_path)?;
+        .map_err(hide_the_path)?;
 
     let result = match outcome {
         Outcome::Rows(result) => result,
@@ -473,7 +473,7 @@ pub(in crate::app) async fn query_hats(
         None,
     )
     .await
-    .map_err(&hide_the_path)?;
+    .map_err(hide_the_path)?;
     tracing::info!(
         // The catalog's url, not the parameter, which may carry credentials.
         url = %search.catalog().dir().url,
