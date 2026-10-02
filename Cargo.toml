@@ -102,5 +102,5 @@ flate2 = "1"
 http-body-util = "0.1"
 hyper-util = "0.1"
 s3s = "0.15"
-s3s-fs = "0.15"
+s3s-fs = "0.17"
 tower ={ version = "0.5", features = ["util"] }
