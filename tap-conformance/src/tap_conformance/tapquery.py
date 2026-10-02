@@ -34,12 +34,17 @@ def query(
     maxrec: int | None = None,
     uploads: dict[str, Path] | None = None,
     upload_format: str | None = None,
+    ofmt: str = "votable",
 ) -> Table:
     """Run one ADQL statement through STILTS and read back what it got.
 
     The answer comes back as a VOTable written to a file and parsed by astropy, so what
     is compared afterwards is rows and column metadata rather than two clients' ideas of
     how to print a float.
+
+    `ofmt="ecsv"` has STILTS write what it read as ECSV instead, for an answer astropy's
+    VOTable reader refuses and STILTS does not: read as a VOTable, the failure would be
+    astropy's and be reported as STILTS'.
 
     `sync=true` because that is what this suite is about, and because a service without
     an async resource would otherwise be asked to submit a job.
@@ -49,14 +54,14 @@ def query(
     serialized as `upload_format` says, `TABLEDATA`, `BINARY` or `BINARY2`.
     """
     with tempfile.TemporaryDirectory() as scratch:
-        out = Path(scratch) / "answer.vot"
+        out = Path(scratch) / f"answer.{ofmt}"
         arguments = [
             *command,
             "tapquery",
             f"tapurl={base_url}",
             f"adql={adql}",
             "sync=true",
-            "ofmt=votable",
+            f"ofmt={ofmt}",
             f"out={out}",
         ]
         if maxrec is not None:
@@ -84,4 +89,4 @@ def query(
                 f"STILTS got no table back (exit {spoken.returncode}): "
                 f"{' / '.join(said[-3:]) or 'it said nothing'}"
             )
-        return Table.read(out, format="votable")
+        return Table.read(out, format={"votable": "votable", "ecsv": "ascii.ecsv"}[ofmt])

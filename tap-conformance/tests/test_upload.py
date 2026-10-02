@@ -242,6 +242,67 @@ def test_both_clients_get_the_same_rows_back(
     assert not wrong, "; ".join(wrong)
 
 
+#: A list of strings per row, written by hand because astropy writes no such column: VOTable
+#: spells one as a two-dimensional character array, a fixed width and a variable count, the
+#: blanks padding each string to the width.
+BANDS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<VOTABLE version="1.4" xmlns="http://www.ivoa.net/xml/VOTable/v1.3">
+<RESOURCE><TABLE name="bands">
+<FIELD name="id" datatype="int"/>
+<FIELD name="bands" datatype="char" arraysize="2x*"/>
+<DATA><TABLEDATA>
+<TR><TD>1</TD><TD>g r zi</TD></TR>
+<TR><TD>2</TD><TD>y </TD></TR>
+</TABLEDATA></DATA></TABLE></RESOURCE></VOTABLE>
+"""
+
+BANDS_QUERY = "SELECT * FROM TAP_UPLOAD.bands ORDER BY id"
+
+BANDS_SENT = [["g", "r", "zi"], ["y"]]
+
+
+def test_string_array_through_pyvo(tap, record_property):
+    """An array of strings comes back to `pyvo` as the lists that were uploaded.
+
+    The answer carries the column as it arrived, `arraysize="2x*"`, and astropy reads the
+    `arraysize` of a character field as a single number, so it refuses the document with
+    `E01` before a row is read — any character array of two dimensions, from any service.
+    That is astropy's bug, https://github.com/astropy/astropy/issues/17098, with a fix in
+    https://github.com/astropy/astropy/pull/19974. ESA's Gaia and Euclid archives write the
+    same arraysize.
+    """
+    back = tap.run_sync(BANDS_QUERY, uploads={"bands": BytesIO(BANDS)}).to_table()
+    got = cells(back, "bands")
+    record_property("detail", f"{got}")
+    assert got == BANDS_SENT, f"{got}, expected {BANDS_SENT}"
+
+
+def test_string_array_through_stilts(tap, stilts_command, record_property):
+    """The same array of strings, uploaded and read back by `stilts tapquery`.
+
+    Read back as STILTS' ECSV rather than its VOTable, which astropy would refuse for the
+    reason `test_string_array_through_pyvo` gives.
+    """
+    if stilts_command is None:
+        pytest.skip("STILTS is not installed")
+    with tempfile.TemporaryDirectory() as scratch:
+        source = Path(scratch) / "bands.vot"
+        source.write_bytes(BANDS)
+        try:
+            back = tapquery.query(
+                stilts_command,
+                tap.baseurl,
+                BANDS_QUERY,
+                uploads={"bands": source},
+                ofmt="ecsv",
+            )
+        except tapquery.Unavailable as missing:
+            pytest.skip(str(missing))
+    got = cells(back, "bands")
+    record_property("detail", f"{got}")
+    assert got == BANDS_SENT, f"{got}, expected {BANDS_SENT}"
+
+
 def declared(tap) -> list[str]:
     return [str(method) for method in (tap.upload_methods or [])]
 
