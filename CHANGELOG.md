@@ -12,6 +12,8 @@ Release dates are in the UTC time zone.
 
 ### Changed
 
+- **Breaking** ADQL: a struct field selected as `lc.mag` is named so; json and parquet repack `lc`. [#135](https://github.com/hombit/hats-api/pull/135)
+
 --
 
 ### Deprecated
