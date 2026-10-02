@@ -24,6 +24,8 @@ Release dates are in the UTC time zone.
 
 ### Fixed
 
+- ADQL: a path into a struct column, `LC.GMAG`, folds case like any other name. [#132](https://github.com/hombit/hats-api/pull/132)
+
 --
 
 ### Security
