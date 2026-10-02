@@ -230,8 +230,8 @@ impl Mounts {
         let mut mounts: Vec<Mount> = Vec::new();
         for config in configs {
             let invalid = |reason: String| ConfigError::Mount(config.path.clone(), reason);
-            let prefix = normalize_prefix(&config.path).map_err(&invalid)?;
-            let source = source_of(config).map_err(&invalid)?;
+            let prefix = normalize_prefix(&config.path).map_err(invalid)?;
+            let source = source_of(config).map_err(invalid)?;
             if let Some(other) = mounts.iter().find(|other| overlaps(&other.prefix, &prefix)) {
                 return Err(invalid(format!(
                     "claims urls the mount at {:?} already claims; mount prefixes must \

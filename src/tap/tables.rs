@@ -116,7 +116,7 @@ impl TapTableList {
         let mut tables: Vec<TapTable> = Vec::with_capacity(configured.len());
         for entry in configured {
             let refuse = |reason: String| ConfigError::Tap(entry.name.clone(), reason);
-            let (schema, table) = split(&entry.name).map_err(&refuse)?;
+            let (schema, table) = split(&entry.name).map_err(refuse)?;
             if let Some(reserved) = RESERVED_SCHEMAS
                 .iter()
                 .find(|reserved| reserved.eq_ignore_ascii_case(schema))
@@ -138,7 +138,7 @@ impl TapTableList {
                     clash.qualified
                 )));
             }
-            let url = mounted_url(&entry.path).map_err(&refuse)?;
+            let url = mounted_url(&entry.path).map_err(refuse)?;
             // No options: the mount the path lands in carries whatever reaching it takes,
             // and a second set written here would be a second answer to one question.
             storage::open_dir(&url, &StorageOptions::default(), policy, transfers)
@@ -148,7 +148,7 @@ impl TapTableList {
                 table: table.to_owned(),
                 qualified: entry.name.clone(),
                 url,
-                examples: examples(&entry.examples).map_err(&refuse)?,
+                examples: examples(&entry.examples).map_err(refuse)?,
             });
         }
         Ok(Self(tables))
