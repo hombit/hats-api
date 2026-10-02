@@ -38,7 +38,7 @@ behind are in `CLAUDE.md` and what it built is in the README.
 | 7.3 | serve the API description | done | |
 | 7.4 | compress JSON responses, never parquet | done | |
 | 8.4 | a clock on every request | done | `[limits] max_request_seconds`; the rest of §8.4 is not done |
-| 7.5 | VOTable output | in progress | flat columns answer; a nested one is refused by name; its shape is decided, a null inside an array and depth are not |
+| 7.5 | VOTable output | in progress | flat columns answer, and a struct's fields named by path come back under it, marked with their struct; the `GROUP` writer and the null inside an array are next |
 | 6.5 | request cost benchmark | todo | ranks the layers after the first two, which are justified by what is already measured |
 | 6 | caching | in progress | |
 | 6.1a | HATS catalog metadata layer | done | `hats/cache.rs`; one entry per part of a catalog, keyed by url and a fingerprint of the options |
@@ -326,21 +326,26 @@ Beside those, the rules the flat lists already follow carry over.
   document written as its rows arrive refuses a field whose width it cannot measure, and a
   `GROUP`'s string fields inherit that. A string the padding would change — a trailing blank,
   a null, an empty one a trimmed cell would drop — refuses the answer.
-- **A null inside an array** is written where VOTable spells one — `NaN` for a float, `?` for
-  a boolean, an integer's `VALUES` `null` where an upload declared it — and refuses the answer
-  everywhere else.
+- **A null inside an array is written**, by the one mechanism VOTable has for an element:
+  `NaN` for a float, `?` for a boolean, and for an integer a `VALUES` `null` — the upload's
+  where it declared one, and otherwise a value no row of the column holds, found by a pass
+  over it. A column with no such value left, and a string, which has no magic value at all,
+  refuse the answer.
 - **Both arrow shapes are one VOTable.** `List<Struct<…>>` and `Struct<List<…>, …>` — which
   is what nested-pandas writes — produce the same `GROUP`. Writing them as two cases is how
   they come to disagree about a null at the struct level, which belongs to neither field.
 - **Depth is refused, not flattened.** A struct in a struct, or a list of lists, has no
   `GROUP` to become.
-- **pyvo cannot read an array of strings at all.** astropy 8.0.1's `Char` and `UnicodeChar`
-  converters take `arraysize` as one integer, so `Wx*` is `E01` before a row is read, and
-  that is every flat list of strings answered today as well. STILTS reads it. Which form a
-  list of strings takes — this one, or a refusal — is undecided.
-- **A leaf's `FIELD` is named by its path.** A leaf selected without an alias comes back
-  named `lsdb.nested.sources[mag]`, DataFusion's display name, and pyvo turns that into the
-  `ID` `lsdb.nested.sources_mag_`. It has to come back as `sources.mag`, inside the `GROUP`.
+- **An array of strings stays `Wx*` although pyvo cannot read it.** astropy 8.0.1 takes a
+  character field's `arraysize` as one integer and refuses the document (astropy#17098, fix
+  in astropy#19974); STILTS reads it, and ESA's archives write the same. `TAP_SCHEMA` says `*`
+  where no width was declared, and the answer the width it measured.
+- **A `GROUP` comes from two places.** A struct column — `SELECT lc`, and `SELECT *` on a
+  nested table — is written as its fields, `lc.mag`, `lc.mjd`, under one `GROUP` where the
+  struct was. Columns `output::nested::PARENT` marks stay where the select list put them,
+  and one `GROUP` per parent refers to them by `ID` wherever they are. A column the query
+  changed — an alias, an expression — is neither: a list is an ordinary array column, and a
+  struct reaching a VOTable that way is refused.
 
 Beside it, once that is settled: the same notebook's actual subject is **VOTable-in-Parquet**,
 a whole VOTable header in the file's key/value metadata under

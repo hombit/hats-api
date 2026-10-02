@@ -47,7 +47,7 @@ use crate::app::routes::tap::upload::{Kind, Part, Source as UploadSource, UPLOAD
 use crate::app::service::Service;
 use crate::app::uploaded::{self, Budget, Sniffed};
 use crate::error::ApiError;
-use crate::output::{dsv, parquet, stream, votable};
+use crate::output::{dsv, nested, parquet, stream, votable};
 use crate::storage::{self, Authorities, StorageOptions};
 use crate::tap::jobs::Writing;
 use crate::tap::schema;
@@ -668,7 +668,9 @@ fn encoder(answering: Answering) -> Result<Box<dyn stream::Encoder>, ApiError> {
     Ok(match answering.format {
         Format::Votable => Box::new(votable::Document::new(None)),
         Format::Dsv(kind) => Box::new(dsv::Delimited::new(kind, DSV_NULL)),
-        Format::Parquet => Box::new(parquet::Writing::new(parquet::SourceLayout::default())),
+        Format::Parquet => Box::new(nested::Packed::new(Box::new(parquet::Writing::new(
+            parquet::SourceLayout::default(),
+        )))),
         // The spelling table is the only source of a format here, and it holds these three.
         other => {
             return Err(ApiError::internal(format!(
@@ -695,7 +697,10 @@ fn encode(answer: &Answer, answering: Answering) -> Result<Vec<u8>, ApiError> {
         (Format::Dsv(kind), _) => {
             dsv::encode(&answer.result, kind, DSV_NULL).map(String::into_bytes)
         }
-        (Format::Parquet, _) => parquet::encode(&answer.result, parquet::SourceLayout::default()),
+        (Format::Parquet, _) => parquet::encode(
+            &nested::packed(&answer.result)?,
+            parquet::SourceLayout::default(),
+        ),
         // The spelling table is the only source of a format here, and it holds these three.
         (other, _) => Err(ApiError::internal(format!(
             "{} is not a format this resource writes",

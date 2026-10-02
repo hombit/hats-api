@@ -14,21 +14,26 @@
 //! refuses one that is merely slow. The partition count is not one of them: a statement has no
 //! partition list of its own, so that bound belongs to each catalog table it names.
 
+use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
 use datafusion::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datafusion::catalog::{MemorySchemaProvider, TableProvider};
-use datafusion::common::TableReference;
+use datafusion::common::metadata::FieldMetadata;
+use datafusion::common::{Column, TableReference};
 use datafusion::error::DataFusionError;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::logical_expr::{Expr, LogicalPlan, LogicalPlanBuilder};
 use datafusion::physical_plan::execute_stream;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use datafusion::sql::parser::Statement as PlannerStatement;
-use datafusion::sql::sqlparser::ast::{Expr as SqlExpr, Ident, Statement, visit_expressions_mut};
+use datafusion::sql::sqlparser::ast::{
+    Expr as SqlExpr, Ident, Select, SelectItem, SetExpr, Statement, visit_expressions_mut,
+};
 use futures::StreamExt;
 use url::Url;
 
@@ -38,6 +43,7 @@ use crate::engine::query::{QueryResult, data_bytes_read, session_config};
 use crate::engine::sql;
 use crate::error::ApiError;
 use crate::hats::{self, CatalogCache};
+use crate::output::nested;
 use crate::sky::geometry;
 use crate::storage::{RemoteDir, RemoteFile};
 
@@ -321,6 +327,7 @@ pub async fn plan(
 
     let mut statement = translated.statement.clone();
     resolve_identifiers(&mut statement, &schemas);
+    let leaves = name_leaves(&mut statement, &schemas);
     let plan = ctx
         .state()
         .statement_to_plan(PlannerStatement::Statement(Box::new(statement)))
@@ -329,6 +336,7 @@ pub async fn plan(
     // After planning, so what is judged is every expression the statement really produced —
     // including the ones a `SELECT *` expanded into and the ones a subquery carries.
     sql::check_plan(&plan, limits.sql)?;
+    let plan = marked(plan, &leaves)?;
 
     let df = ctx
         .execute_logical_plan(plan)
@@ -522,14 +530,7 @@ fn resolve_identifiers(statement: &mut Statement, schemas: &[SchemaRef]) {
 /// and are left as written; from the column on, each part is folded against the names one step
 /// further into the struct.
 fn resolve_path(parts: &mut [Ident], schemas: &[SchemaRef]) {
-    let columns = schemas
-        .iter()
-        .flat_map(|schema| schema.fields().iter())
-        .collect::<Vec<_>>();
-    let found = (0..parts.len())
-        .rev()
-        .find_map(|start| Some((start, walk(parts.get(start..)?, columns.clone())?)));
-    let Some((start, spellings)) = found else {
+    let Some((start, spellings)) = column_at(parts, schemas) else {
         return;
     };
     for (part, spelling) in parts.iter_mut().skip(start).zip(spellings) {
@@ -540,6 +541,135 @@ fn resolve_path(parts: &mut [Ident], schemas: &[SchemaRef]) {
             part.quote_style = Some('"');
         }
     }
+}
+
+/// Which part of a dotted name is the column, and the file's spelling of it and of every part
+/// after it.
+fn column_at(parts: &[Ident], schemas: &[SchemaRef]) -> Option<(usize, Vec<String>)> {
+    let columns = schemas
+        .iter()
+        .flat_map(|schema| schema.fields().iter())
+        .collect::<Vec<_>>();
+    (0..parts.len())
+        .rev()
+        .find_map(|start| Some((start, walk(parts.get(start..)?, columns.clone())?)))
+}
+
+/// A field of a struct the select list names by its path, and the column it is answered as.
+#[derive(Debug, PartialEq)]
+struct Leaf {
+    name: String,
+    /// The struct it is a field of, where it is one level down; a field deeper than that is
+    /// named by its path and carries no parent, there being no struct for a format to pack
+    /// it into that the answer would not also have to invent.
+    parent: Option<String>,
+}
+
+/// Name each field of a struct that the outermost select list reaches by its path.
+///
+/// **By the path from the column**, `lc.mag`, which is the name `TAP_SCHEMA` publishes it
+/// under. DataFusion's own name for the access, `c.lc[mag]`, is a name no caller wrote and
+/// none could predict. Where two items would get one name — `a.lc.mag` and `b.lc.mag` in a
+/// join — each keeps its qualifiers instead, so the names stay unique.
+///
+/// Only an item written as the bare path is named: one with an alias was named by the
+/// caller, and one inside an expression is a value computed from the field rather than the
+/// field.
+fn name_leaves(statement: &mut Statement, schemas: &[SchemaRef]) -> Vec<Leaf> {
+    let Statement::Query(query) = statement else {
+        return Vec::new();
+    };
+    let Some(select) = outermost_select(&mut query.body) else {
+        return Vec::new();
+    };
+    // Each candidate's place in the select list, its path from the column, and the whole
+    // name as written.
+    let mut candidates = Vec::new();
+    for (at, item) in select.projection.iter().enumerate() {
+        let SelectItem::UnnamedExpr(SqlExpr::CompoundIdentifier(parts)) = item else {
+            continue;
+        };
+        let Some((start, path)) = column_at(parts, schemas) else {
+            continue;
+        };
+        if path.len() < 2 {
+            continue;
+        }
+        let written = parts
+            .iter()
+            .take(start)
+            .map(|part| part.value.clone())
+            .chain(path.iter().cloned())
+            .collect::<Vec<_>>();
+        candidates.push((at, path, written));
+    }
+    let short = |path: &[String]| path.join(".");
+    let mut leaves = Vec::new();
+    for (at, path, written) in &candidates {
+        let unique = candidates
+            .iter()
+            .filter(|(_, other, _)| short(other) == short(path))
+            .count()
+            == 1;
+        let parts = if unique { path } else { written };
+        let name = parts.join(".");
+        let parent = (path.len() == 2)
+            .then(|| parts.split_last().map(|(_, head)| head.join(".")))
+            .flatten();
+        if let Some(item) = select.projection.get_mut(*at)
+            && let SelectItem::UnnamedExpr(expr) = item
+        {
+            *item = SelectItem::ExprWithAlias {
+                expr: expr.clone(),
+                alias: Ident::with_quote('"', name.clone()),
+            };
+        }
+        leaves.push(Leaf { name, parent });
+    }
+    leaves
+}
+
+/// The select list whose items are the answer's columns: a union's are its first branch's.
+fn outermost_select(body: &mut SetExpr) -> Option<&mut Select> {
+    match body {
+        SetExpr::Select(select) => Some(select),
+        SetExpr::Query(query) => outermost_select(&mut query.body),
+        SetExpr::SetOperation { left, .. } => outermost_select(left),
+        _ => None,
+    }
+}
+
+/// The plan with each leaf's column marked with the struct it is a field of, which is what
+/// an answer's format reads to pack it back or to group it.
+fn marked(plan: LogicalPlan, leaves: &[Leaf]) -> Result<LogicalPlan, ApiError> {
+    let parents = leaves
+        .iter()
+        .filter_map(|leaf| Some((leaf.name.as_str(), leaf.parent.as_deref()?)))
+        .collect::<HashMap<_, _>>();
+    if parents.is_empty() {
+        return Ok(plan);
+    }
+    let columns = plan
+        .schema()
+        .iter()
+        .map(|(qualifier, field)| {
+            let column = Expr::Column(Column::new(qualifier.cloned(), field.name()));
+            match parents.get(field.name().as_str()) {
+                Some(parent) => column.alias_with_metadata(
+                    field.name(),
+                    Some(FieldMetadata::from(HashMap::from([(
+                        nested::PARENT.to_owned(),
+                        (*parent).to_owned(),
+                    )]))),
+                ),
+                None => column,
+            }
+        })
+        .collect::<Vec<_>>();
+    LogicalPlanBuilder::from(plan)
+        .project(columns)
+        .and_then(LogicalPlanBuilder::build)
+        .map_err(|error| refusal(&error))
 }
 
 /// The file's spelling of each part of a path, starting among `fields`, or `None` where a part

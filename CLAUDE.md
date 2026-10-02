@@ -53,7 +53,8 @@ adql/     the statement rewrite (translate), running one (query), the functions 
           language requires (functions), and how a name is written (names)
 tap/      what this service publishes over TAP: the operator's tables (tables), what is
           said about each (metadata), and TAP_SCHEMA's own five (schema)
-output/   an answer written out: json, dsv, votable, parquet
+output/   an answer written out: json, dsv, votable, parquet, and a struct's fields packed
+          back into it for the formats that hold one (nested)
 votable/  a VOTable read in: the document (document), what a FIELD declares and the column
           metadata that carries it (field), a cell's layout (datatype), and each
           serialization (tabledata, binary) into one column builder (column)
@@ -438,6 +439,15 @@ and everything about what SQL means here is decided there.
   - **The head of a path has to be one of the file's own fields.** A compound identifier
     whose head is not is a qualified column reference and stays the planner's; treating it as
     a path packs the column into a struct named after the table.
+
+  **A statement keeps its select list, and the packing moves to the format.** TAP has an
+  answer carry "the same number and order of columns as specified in the SELECT clause", so
+  on the ADQL route `lc.mag` is a column of its own, named by that path — the name
+  `TAP_SCHEMA` publishes — and marked with `output::nested::PARENT`. json and parquet pack
+  the marked columns back into their struct through `output::nested`, which is the light
+  curve rule above reached at the writer instead of in the plan; a VOTable keeps them
+  flat. Only a bare path is marked: an alias is the caller's name for a value, and so is
+  anything computed from a field.
 
 - **`columns` is names and `filters` is an expression.** A caller who wants a computed
   column or an alias writes ADQL. The predicate is the full expression language: a smaller

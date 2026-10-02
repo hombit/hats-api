@@ -1983,6 +1983,66 @@ async fn a_streamed_parquet_answer_is_the_file_a_collected_one_would_have_sent()
     assert_eq!(rows, hats::query::tests::fixture_rows());
 }
 
+/// A parquet answer packs a struct's fields named by path back into the struct, streamed or
+/// collected alike, the two being one writer.
+#[tokio::test]
+async fn a_parquet_answer_packs_the_fields_of_a_struct() {
+    use datafusion::arrow::array::{ArrayRef, Float64Array, Int64Array, RecordBatch, StructArray};
+    use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
+    use datafusion::parquet::arrow::ArrowWriter;
+
+    let fields = Fields::from(vec![
+        Field::new("mag", DataType::Float64, true),
+        Field::new("mjd", DataType::Float64, true),
+    ]);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("lc", DataType::Struct(fields.clone()), true),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+            Arc::new(StructArray::new(
+                fields,
+                vec![
+                    Arc::new(Float64Array::from(vec![17.5])) as ArrayRef,
+                    Arc::new(Float64Array::from(vec![60000.0])),
+                ],
+                None,
+            )),
+        ],
+    )
+    .unwrap();
+    let mut file = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut file, schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let dir = hats::query::tests::fixture(true);
+    for streaming in ["false", "true"] {
+        let (status, _, body) = send_bytes(
+            published(dir.path(), &LimitsConfig::default()),
+            multipart(
+                "/api/v1/tap/sync",
+                &[
+                    ("QUERY", "SELECT lc.mjd, id, lc.mag FROM TAP_UPLOAD.t"),
+                    ("LANG", "ADQL"),
+                    ("RESPONSEFORMAT", "parquet"),
+                    ("STREAMING", streaming),
+                    ("UPLOAD", "t,param:t"),
+                ],
+                &[("t", Some("application/octet-stream"), &file)],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let (columns, rows) = read_parquet(&body);
+        assert_eq!(columns, ["lc", "id"], "STREAMING={streaming}");
+        assert_eq!(rows, 1);
+    }
+}
+
 /// What a streamed answer gives up, said in the headers rather than left to be discovered.
 ///
 /// No `Content-Length`, because the rows had not been read when the headers went; therefore

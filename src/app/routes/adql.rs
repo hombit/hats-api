@@ -16,7 +16,7 @@ use crate::app::service::{PARQUET_CONTENT_TYPE, Service};
 use crate::app::uploaded::{self, Budget};
 use crate::engine::query::QueryResult;
 use crate::error::ApiError;
-use crate::output::{dsv, parquet, votable};
+use crate::output::{dsv, nested, parquet, votable};
 use crate::storage::{self, Authorities, SourceUrl, StorageOptions, parse_url};
 
 /// A query written in IVOA's ADQL, over tables this request declares.
@@ -234,11 +234,11 @@ fn adql_answer(
     started: Instant,
 ) -> Result<Response, ApiError> {
     match output.format {
-        Format::Json => json_response(result, started),
+        Format::Json => json_response(&nested::packed(result)?, started),
         Format::Parquet => Ok((
             attachment(PARQUET_CONTENT_TYPE, "query.parquet"),
             counters(result, result.num_rows(), started),
-            parquet::encode(result, parquet::SourceLayout::default())?,
+            parquet::encode(&nested::packed(result)?, parquet::SourceLayout::default())?,
         )
             .into_response()),
         Format::Votable => Ok((
@@ -1121,6 +1121,87 @@ mod tests {
         writer.write(&batch).unwrap();
         writer.close().unwrap();
         dir
+    }
+
+    /// **A field named by its path is answered under that path**, which is the name
+    /// `TAP_SCHEMA` publishes it by. A VOTable keeps the select list's columns and their
+    /// order; json packs a struct's fields back into it, where the first one was. An alias is
+    /// the caller's name and is kept flat, and two tables' fields of one struct keep the
+    /// qualifiers that tell them apart.
+    #[tokio::test]
+    async fn a_field_named_by_its_path_is_answered_under_it() {
+        let dir = nested_catalog();
+        let ask = async |query: &str, format: &str| -> String {
+            let (status, body) = post_json(
+                mounted(dir.path(), &ApiConfig::default()),
+                "/api/v1/adql",
+                serde_json::json!({
+                    "query": query,
+                    "tables": {"c": {"type": "hats", "url": "file:///"}},
+                    "format": format,
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            body
+        };
+        let schema = |body: &str| -> Vec<(String, Vec<String>)> {
+            let answer: serde_json::Value = serde_json::from_str(body).unwrap();
+            answer["schema"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|column| {
+                    let fields = column["fields"]
+                        .as_array()
+                        .map(|fields| {
+                            fields
+                                .iter()
+                                .map(|field| field["name"].as_str().unwrap().to_owned())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (column["name"].as_str().unwrap().to_owned(), fields)
+                })
+                .collect()
+        };
+        let named = |name: &str, fields: &[&str]| {
+            (
+                name.to_owned(),
+                fields.iter().map(|&f| f.to_owned()).collect::<Vec<_>>(),
+            )
+        };
+
+        let query = "SELECT lc.mjd, id, lc.mag FROM c WHERE id = 3";
+        assert_eq!(
+            schema(&ask(query, "json").await),
+            [named("lc", &["mjd", "mag"]), named("id", &[])]
+        );
+        let votable = ask(query, "votable").await;
+        let fields = votable
+            .match_indices("<FIELD name=\"")
+            .map(|(at, _)| {
+                let rest = &votable[at + 13..];
+                rest[..rest.find('"').unwrap()].to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fields, ["lc.mjd", "id", "lc.mag"], "{votable}");
+
+        assert_eq!(
+            schema(&ask("SELECT LC.MAG AS m FROM c WHERE id = 3", "json").await),
+            [named("m", &[])]
+        );
+        assert_eq!(
+            schema(
+                &ask(
+                    "SELECT a.lc.mag, b.lc.mag FROM c AS a JOIN c AS b ON a.id = b.id \
+                     WHERE a.id = 3",
+                    "json",
+                )
+                .await
+            ),
+            [named("a.lc", &["mag"]), named("b.lc", &["mag"])]
+        );
     }
 
     /// A field of a nested column is one row's list, which a VOTable writes as an array — so a
