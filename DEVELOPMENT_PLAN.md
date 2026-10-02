@@ -814,11 +814,7 @@ A published leaf name needs no quoting in a query: `sources.mag`, `nested.source
 `lsdb.nested.sources.mag`, an alias's `n.sources.mag` and `"sources"."mag"` all reach the field
 through pyvo and STILTS alike, and a join where a table is named like the struct reads
 `sources.mag` as that table's column, as ADQL has it. `"sources.mag"` names no field, which is
-why the published name is not quoted. What is left:
-
-- **A path is case-sensitive, which ADQL 2.1 §2.1.3 does not allow.** `SOURCES.MAG` is
-  refused: `adql::query::resolve_identifiers` folds only the last segment, against top-level
-  fields, so neither the struct nor its field is folded.
+why the published name is not quoted.
 
 None of the four reference services publishes a nested column, so there is no practice to
 follow and no check that can be calibrated against anybody.

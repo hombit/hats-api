@@ -481,6 +481,62 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 
+    /// **A path into a struct folds the same way, every part of it.** The struct and its field
+    /// are each matched to the file's own spelling, behind any qualifiers; a quoted part is
+    /// still exact.
+    #[tokio::test]
+    async fn a_path_into_a_struct_is_case_insensitive_unless_it_is_quoted() {
+        use std::sync::Arc;
+
+        use datafusion::arrow::array::{Float64Array, Int64Array, StructArray};
+        use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
+        use datafusion::arrow::record_batch::RecordBatch;
+        use datafusion::parquet::arrow::ArrowWriter;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let fields = Fields::from(vec![Field::new("gMag", DataType::Float64, true)]);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("objectId", DataType::Int64, false),
+            Field::new("Lc", DataType::Struct(fields.clone()), true),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2])),
+                Arc::new(StructArray::new(
+                    fields,
+                    vec![Arc::new(Float64Array::from(vec![17.5, 18.5]))],
+                    None,
+                )),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(dir.path().join("part0.parquet")).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        for query in [
+            "SELECT Lc.gMag AS m FROM t WHERE objectid = 2",
+            "SELECT lc.gmag AS m FROM t WHERE objectid = 2",
+            "SELECT LC.GMAG AS m FROM t WHERE objectid = 2",
+            "SELECT t.LC.GMAG AS m FROM t WHERE objectid = 2",
+            "SELECT a.lc.GMAG AS m FROM t AS a WHERE objectid = 2",
+            "SELECT \"Lc\".gmag AS m FROM t WHERE objectid = 2",
+            "SELECT objectid FROM t WHERE LC.GMAG > 18 AND objectid = 2",
+        ] {
+            let (status, body) = ask_adql(dir.path(), query).await;
+            assert_eq!(status, StatusCode::OK, "{query}: {body}");
+            let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(answer["num_rows"], 1, "{query}: {body}");
+        }
+
+        for query in ["SELECT \"LC\".gMag FROM t", "SELECT Lc.\"GMAG\" FROM t"] {
+            let (status, body) = ask_adql(dir.path(), query).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}: {body}");
+        }
+    }
+
     /// The volatility rule holds inside a statement. It is the one thing `engine::sql` checks that
     /// a planner will not: `random()` is an ordinary scalar function to DataFusion.
     ///

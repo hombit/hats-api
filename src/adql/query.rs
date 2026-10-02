@@ -18,7 +18,7 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use datafusion::arrow::array::RecordBatch;
-use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::datatypes::{DataType, FieldRef, SchemaRef};
 use datafusion::catalog::{MemorySchemaProvider, TableProvider};
 use datafusion::common::TableReference;
 use datafusion::error::DataFusionError;
@@ -505,33 +505,73 @@ fn context(limits: Limits) -> Result<SessionContext, ApiError> {
 fn resolve_identifiers(statement: &mut Statement, schemas: &[SchemaRef]) {
     let _ = visit_expressions_mut::<_, (), _>(statement, |node| {
         match node {
-            SqlExpr::Identifier(ident) => resolve(ident, schemas),
-            // The last segment and never one before it. Everything ahead of the column names
-            // the table it is in — `gaia.ra`, or an alias's `g.ra` — which is the planner's to
-            // resolve and not a spelling this knows anything about. A statement has no other
-            // reading of a dotted name: what the `simple` routes read as a step into a
-            // struct column is ADQL's table beside its column.
-            SqlExpr::CompoundIdentifier(parts) => {
-                if let Some(column) = parts.last_mut() {
-                    resolve(column, schemas);
-                }
-            }
+            SqlExpr::Identifier(ident) => resolve_path(std::slice::from_mut(ident), schemas),
+            SqlExpr::CompoundIdentifier(parts) => resolve_path(parts, schemas),
             _ => {}
         }
         ControlFlow::Continue(())
     });
 }
 
-/// One name, against the fields of every table.
-fn resolve(ident: &mut Ident, schemas: &[SchemaRef]) {
-    if ident.quote_style.is_some() {
+/// A dotted name: qualifiers, then a column, then the fields of a struct it holds.
+///
+/// **Which part is the column is the last one that can be.** `sources.mag` is a table's `mag`
+/// where a table in the statement has a column of that name, and a struct's field only where
+/// none has — ADQL's reading of a dotted name, and the one DataFusion's planner takes. The
+/// qualifiers ahead of the column — a schema, a table, an alias — are the planner's to resolve
+/// and are left as written; from the column on, each part is folded against the names one step
+/// further into the struct.
+fn resolve_path(parts: &mut [Ident], schemas: &[SchemaRef]) {
+    let columns = schemas
+        .iter()
+        .flat_map(|schema| schema.fields().iter())
+        .collect::<Vec<_>>();
+    let found = (0..parts.len())
+        .rev()
+        .find_map(|start| Some((start, walk(parts.get(start..)?, columns.clone())?)));
+    let Some((start, spellings)) = found else {
         return;
+    };
+    for (part, spelling) in parts.iter_mut().skip(start).zip(spellings) {
+        if part.value != spelling {
+            part.value = spelling;
+            // Quoted, so the resolved name is exact from here on whatever the planner is told
+            // to do with unquoted identifiers.
+            part.quote_style = Some('"');
+        }
     }
-    let fields = schemas.iter().flat_map(|schema| schema.fields().iter());
-    if fields.clone().any(|field| field.name() == &ident.value) {
-        return;
+}
+
+/// The file's spelling of each part of a path, starting among `fields`, or `None` where a part
+/// names nothing or names two things.
+fn walk(parts: &[Ident], mut fields: Vec<&FieldRef>) -> Option<Vec<String>> {
+    let mut spellings = Vec::with_capacity(parts.len());
+    for part in parts {
+        let spelling = spelled(part, &fields)?;
+        fields = fields
+            .iter()
+            .filter(|field| field.name() == &spelling)
+            .filter_map(|field| match field.data_type() {
+                DataType::Struct(inner) => Some(inner.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        spellings.push(spelling);
+    }
+    Some(spellings)
+}
+
+/// One name, among the fields it may be.
+fn spelled(ident: &Ident, fields: &[&FieldRef]) -> Option<String> {
+    if fields.iter().any(|field| field.name() == &ident.value) {
+        return Some(ident.value.clone());
+    }
+    if ident.quote_style.is_some() {
+        return None;
     }
     let mut spellings = fields
+        .iter()
         .map(|field| field.name())
         // ASCII folding only, so that Unicode case folding is never what decides which
         // column a request read.
@@ -539,13 +579,10 @@ fn resolve(ident: &mut Ident, schemas: &[SchemaRef]) {
         .collect::<Vec<_>>();
     spellings.sort_unstable();
     spellings.dedup();
-    let [spelling] = spellings.as_slice() else {
-        return;
-    };
-    ident.value = (*spelling).clone();
-    // Quoted, so the resolved name is exact from here on whatever the planner is told to do
-    // with unquoted identifiers.
-    ident.quote_style = Some('"');
+    match spellings.as_slice() {
+        [spelling] => Some((*spelling).clone()),
+        _ => None,
+    }
 }
 
 /// What the planner said, as a refusal naming the caller's own text.
