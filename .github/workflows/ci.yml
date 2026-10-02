@@ -211,7 +211,7 @@ jobs:
       - name: cargo llvm-cov
         run: cargo llvm-cov --all-targets --lcov --output-path lcov.info
 
-      - uses: codecov/codecov-action@v5
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
