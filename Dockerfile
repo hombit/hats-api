@@ -1,4 +1,4 @@
-FROM rust:1.98.1-slim-trixie AS build
+FROM rust:1.99.1-slim-trixie AS build
 
 RUN apt-get update \
     && apt-get install --no-install-recommends -y cmake \
