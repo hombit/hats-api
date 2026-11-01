@@ -35,7 +35,7 @@ getrandom = { version = "0.4", features = ["std"] }
 # Compiles the whole list of data-file patterns into one matcher.
 globset = "0.4"
 hmac = "0.13"
-html-escape = "0.2"
+html-escape = "0.3"
 http = "1"
 http-range-header = "0.4"
 httpdate = "1"
